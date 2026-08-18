@@ -99,7 +99,10 @@ def load_profile(name: str, models_dir: Path | None = None) -> Profile:
             return profile
     available = [p.name for p in profiles]
     hint = f"可用模型：{', '.join(available)}" if available else "models 目录下暂无可用 profile"
-    raise ProfileError(f"profile 不存在：{name}（{hint}；可运行 `modelctl list` 查看）")
+    raise ProfileError(
+        f"profile 不存在：{name}（{hint}；可运行 `modelctl list` 查看。"
+        "若对应 YAML 存在但未列出，多为 ${VAR} 插值失败，请检查 .env 环境变量）"
+    )
 
 
 def _load_profile_from_path(path: Path) -> Profile:
@@ -124,7 +127,8 @@ def list_profiles(models_dir: Path | None = None) -> list[Profile]:
     for p in root_files + sub_files:
         try:
             profile = _load_profile_from_path(p)
-        except ProfileError:
+        except ProfileError as e:
+            logger.warning(f"跳过 profile 文件 {p}：{e}")
             continue
         if profile.name in seen:
             logger.warning(f"忽略子目录中重复的 profile：{profile.name}（{p}）")

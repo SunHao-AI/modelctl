@@ -85,6 +85,26 @@ def test_missing_file(tmp_path):
         load_profile("ghost", tmp_path)
 
 
+def test_missing_file_hints_interpolation_failure(tmp_path):
+    with pytest.raises(ProfileError, match=r"\$\{VAR\} 插值失败"):
+        load_profile("ghost", tmp_path)
+
+
+def test_list_profiles_skips_interpolation_failure(tmp_path, monkeypatch):
+    """${VAR} 插值失败的 profile 被跳过，不阻塞其余 profile 的加载。"""
+    monkeypatch.delenv("NOPE_VAR2", raising=False)
+    (tmp_path / "llamacpp").mkdir()
+    (tmp_path / "llamacpp" / "bad.yaml").write_text(
+        "name: bad\nengine: llamacpp\nport: 8000\napi_key: ${NOPE_VAR2}\nllamacpp:\n  model: /x.gguf\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "ok.yaml").write_text(
+        "name: ok\nengine: llamacpp\nport: 8001\nllamacpp:\n  model: /x.gguf\n",
+        encoding="utf-8",
+    )
+    assert [p.name for p in list_profiles(tmp_path)] == ["ok"]
+
+
 def test_load_profile_from_engine_subdir(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_KEY", "secret")
     (tmp_path / "llamacpp").mkdir()
