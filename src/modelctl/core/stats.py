@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from modelctl.core.envfile import PROJECT_ROOT
+from modelctl.core.envfile import PROJECT_ROOT, load_env
 
 USAGE_PORT = 5002
 
@@ -183,6 +183,8 @@ class UsageCollector:
             return 0.0, 0.0
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return 0.0, 0.0
             return float(data.get("prompt_total", 0.0)), float(data.get("predicted_total", 0.0))
         except (OSError, ValueError, json.JSONDecodeError):
             return 0.0, 0.0
@@ -420,6 +422,7 @@ def run_server(targets: list[StatsTarget] | None = None) -> None:
     USAGE_MODE（poll/on-demand）、USAGE_POLL_INTERVAL（默认 5）、
     USAGE_DATA_DIR（默认 <PROJECT_ROOT>/data/cache）。
     """
+    load_env()  # 先加载 .env，确保 USAGE_DATA_DIR 等配置在 data_dir 计算前生效
     raw_data_dir = os.environ.get("USAGE_DATA_DIR", "")
     data_dir = Path(raw_data_dir) if raw_data_dir else PROJECT_ROOT / "data" / "cache"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -468,11 +471,9 @@ def run_server(targets: list[StatsTarget] | None = None) -> None:
 def _targets_from_profiles(data_dir: Path) -> list[StatsTarget]:
     """从 models/*.yaml 构造统计目标（供独立运行 / Task 9 后台化）。"""
     from modelctl.core.capabilities import Capabilities
-    from modelctl.core.envfile import load_env
     from modelctl.core.profile import list_profiles
     from modelctl.engines import get_adapter
 
-    load_env()
     targets: list[StatsTarget] = []
     for profile in list_profiles():
         # 统计服务仅调用 metrics_mapping()，无需真实硬件探测

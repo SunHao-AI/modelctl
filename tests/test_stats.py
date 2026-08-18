@@ -98,6 +98,26 @@ def test_usage_collector_loads_persisted_totals(tmp_path):
     assert snap["predicted_total"] == 200.0
 
 
+def test_usage_collector_falls_back_on_non_dict_cache(tmp_path):
+    # 损坏缓存：合法 JSON 但非 dict（如数组）——构造不应抛异常，累计基线回退为 0
+    data_dir = tmp_path / "cache"
+    data_dir.mkdir()
+    (data_dir / "demo.json").write_text("[1,2,3]", encoding="utf-8")
+    from modelctl.core.stats import UsageCollector
+    collector = UsageCollector(
+        name="demo",
+        base_url="http://127.0.0.1:8000",
+        poll_interval=5,
+        api_key=None,
+        data_dir=data_dir,
+        mode="poll",
+        mapping={},
+    )
+    snap = collector.snapshot()
+    assert snap["prompt_total"] == 0.0
+    assert snap["predicted_total"] == 0.0
+
+
 def test_usage_collector_persists_totals(tmp_path):
     data_dir = tmp_path / "cache"
     data_dir.mkdir()
