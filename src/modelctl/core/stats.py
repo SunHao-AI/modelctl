@@ -160,6 +160,41 @@ class UsageCollector:
         self._last = {"time": None, "predicted_total": 0.0}
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True) if mode == "poll" else None
+        persisted_prompt, persisted_predicted = self._load_persisted()
+        self._baseline = {
+            "prompt_total": persisted_prompt,
+            "predicted_total": persisted_predicted,
+        }
+        self._snapshot["prompt_total"] = persisted_prompt
+        self._snapshot["predicted_total"] = persisted_predicted
+
+    def _persist_path(self) -> Path:
+        return self.data_dir / f"{self.name}.json"
+
+    def _load_persisted(self) -> tuple[float, float]:
+        path = self._persist_path()
+        if not path.is_file():
+            return 0.0, 0.0
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return float(data.get("prompt_total", 0.0)), float(data.get("predicted_total", 0.0))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return 0.0, 0.0
+
+    def _persist(self, prompt_total: float, predicted_total: float) -> None:
+        path = self._persist_path()
+        tmp = path.with_suffix(".json.tmp")
+        data = {
+            "prompt_total": prompt_total,
+            "predicted_total": predicted_total,
+            "updated_at": time.time(),
+        }
+        try:
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            os.replace(str(tmp), str(path))
+        except OSError:
+            # 持久化失败不应中断轮询；错误信息仅通过日志/后续 snapshot 暴露
+            pass
 
     def start(self) -> None:
         if self._thread is not None:
@@ -203,15 +238,22 @@ class UsageCollector:
                 delta_tokens = metrics["predicted_total"] - last_total
                 if delta_t > 0:
                     rate = max(delta_tokens / delta_t, 0.0)
+            new_prompt = max(metrics["prompt_total"], self._baseline["prompt_total"])
+            new_predicted = max(metrics["predicted_total"], self._baseline["predicted_total"])
+            changed = new_prompt != self._baseline["prompt_total"] or new_predicted != self._baseline["predicted_total"]
+            self._baseline["prompt_total"] = new_prompt
+            self._baseline["predicted_total"] = new_predicted
             with self._lock:
                 self._snapshot = {
                     "ok": True,
                     "error": None,
-                    "prompt_total": metrics["prompt_total"],
-                    "predicted_total": metrics["predicted_total"],
+                    "prompt_total": new_prompt,
+                    "predicted_total": new_predicted,
                     "prompt_rate": metrics["prompt_rate"],
                     "predicted_rate": rate,
                 }
+            if changed:
+                self._persist(new_prompt, new_predicted)
             self._last = {"time": now, "predicted_total": metrics["predicted_total"]}
         except Exception as error:  # noqa: BLE001 —— 轮询失败仅记录，不中断服务
             with self._lock:

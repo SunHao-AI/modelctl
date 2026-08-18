@@ -1,5 +1,6 @@
 """modelctl.core.stats 单元测试（多引擎指标映射 + 用量折算）。"""
 
+import json
 import time
 
 from modelctl.core.stats import build_usage_payload, parse_metrics
@@ -61,3 +62,48 @@ def test_build_payload_no_budget():
     # 现版语义：无预算时 total/remaining 为 None（字段仍存在）
     assert payload["total"] is None
     assert payload["remaining"] is None
+
+
+def test_usage_collector_loads_persisted_totals(tmp_path):
+    data_dir = tmp_path / "cache"
+    data_dir.mkdir()
+    (data_dir / "demo.json").write_text(
+        '{"prompt_total": 100, "predicted_total": 200, "updated_at": 1.0}',
+        encoding="utf-8",
+    )
+    from modelctl.core.stats import UsageCollector
+    collector = UsageCollector(
+        name="demo",
+        base_url="http://127.0.0.1:8000",
+        poll_interval=5,
+        api_key=None,
+        data_dir=data_dir,
+        mode="poll",
+        mapping={},
+    )
+    snap = collector.snapshot()
+    assert snap["prompt_total"] == 100.0
+    assert snap["predicted_total"] == 200.0
+
+
+def test_usage_collector_persists_totals(tmp_path):
+    data_dir = tmp_path / "cache"
+    data_dir.mkdir()
+    from modelctl.core.stats import UsageCollector
+    collector = UsageCollector(
+        name="demo",
+        base_url="http://127.0.0.1:8000",
+        poll_interval=5,
+        api_key=None,
+        data_dir=data_dir,
+        mode="on-demand",
+        mapping={},
+    )
+    # 直接修改基线模拟轮询结果
+    collector._baseline = {"prompt_total": 300.0, "predicted_total": 500.0}
+    collector._persist(300.0, 500.0)
+    content = (data_dir / "demo.json").read_text(encoding="utf-8")
+    data = json.loads(content)
+    assert data["prompt_total"] == 300.0
+    assert data["predicted_total"] == 500.0
+    assert "updated_at" in data
