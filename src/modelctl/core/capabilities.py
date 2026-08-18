@@ -9,6 +9,13 @@ from dataclasses import dataclass, field
 
 ENGINE_BINARIES = ["ollama", "vllm", "sglang", "unsloth"]  # llamacpp 由源码编译，不在此列
 
+ENGINE_INSTALL_HINTS = {
+    "ollama": "，建议执行：curl -fsSL https://ollama.com/install.sh | sh",
+    "vllm": "，建议执行：pip install vllm",
+    "sglang": '，建议执行：pip install "sglang[all]"',
+    "unsloth": "，建议执行：pip install unsloth",
+}
+
 
 @dataclass
 class Capabilities:
@@ -21,11 +28,17 @@ class Capabilities:
     cuda_driver: str = ""
     compute_capability: str = ""
     binaries: dict[str, bool] = field(default_factory=dict)
+    binary_paths: dict[str, str | None] = field(default_factory=dict)
 
 
 def which_binaries(names: list[str]) -> dict[str, bool]:
     """探测给定可执行文件在 PATH 中是否可用。"""
     return {n: shutil.which(n) is not None for n in names}
+
+
+def binary_paths(names: list[str]) -> dict[str, str | None]:
+    """探测给定可执行文件在 PATH 中的完整路径；未找到时返回 None。"""
+    return {n: shutil.which(n) for n in names}
 
 
 def _run_nvidia_smi() -> str:
@@ -54,7 +67,10 @@ def _safe_smi() -> str:
 def probe(nvidia_smi_output: str | None = None) -> Capabilities:
     """探测硬件能力。传入 nvidia_smi_output 时仅解析，不实际调用命令（便于测试）。"""
     text = nvidia_smi_output if nvidia_smi_output is not None else _safe_smi()
-    caps = Capabilities(binaries=which_binaries(ENGINE_BINARIES))
+    caps = Capabilities(
+        binaries=which_binaries(ENGINE_BINARIES),
+        binary_paths=binary_paths(ENGINE_BINARIES),
+    )
     rows = [r.strip() for r in text.splitlines() if r.strip()]
     if not rows:
         return caps

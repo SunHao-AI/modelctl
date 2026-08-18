@@ -36,6 +36,13 @@ llamacpp:
   gpu_count: 2
   # fit：llama.cpp 显存适配策略（on/off）
   fit: off
+  # 采样参数（可选）：缓解重复输出/贪心采样。llama.cpp 默认 repeat-penalty=1.0（无重复惩罚），
+  # 缺省不传时保持引擎默认行为
+  repeat_penalty: 1.1      # 重复惩罚（1.0=关闭；1.05~1.15 可有效中断循环）
+  repeat_last_n: 256       # 对最后 N 个 token 施加重复惩罚
+  temperature: 0.6         # 采样温度（0=贪心，易重复；建议 0.6~0.8）
+  top_p: 0.95              # 核采样阈值
+  top_k: 40                # 候选 token 数
 
 usage:
   # price_in：每千输入 token 计价（元），供 cc-switch 用量统计

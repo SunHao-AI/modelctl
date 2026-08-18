@@ -23,7 +23,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from modelctl.core.capabilities import probe
+from modelctl.core.capabilities import ENGINE_BINARIES, ENGINE_INSTALL_HINTS, probe
 from modelctl.core.envfile import load_env
 from modelctl.core.logging import setup_logging
 from modelctl.core.process import (
@@ -79,6 +79,38 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("stats", help="用量统计服务控制")
     sp.add_argument("action", choices=["start", "stop"])
     return parser
+
+
+def _display_width(text: str) -> int:
+    """估算字符串在等宽终端中的显示宽度（CJK 字符计为 2）。"""
+    width = 0
+    for ch in text:
+        if "\u4e00" <= ch <= "\u9fff" or "\u3400" <= ch <= "\u4dbf" or "\uf900" <= ch <= "\ufaff":
+            width += 2
+        else:
+            width += 1
+    return width
+
+
+def _ljust_width(text: str, width: int) -> str:
+    """按显示宽度左对齐，不足部分补空格。"""
+    return text + " " * max(width - _display_width(text), 0)
+
+
+def _print_table(headers: list[str], rows: list[list]) -> None:
+    """按动态列宽打印类 Excel 对齐表格（表头 + 分隔线 + 数据行）。"""
+    if not rows:
+        print("  ".join(headers))
+        return
+    col_count = len(headers)
+    widths = [_display_width(h) for h in headers]
+    for row in rows:
+        for i in range(col_count):
+            widths[i] = max(widths[i], _display_width(str(row[i])))
+    print("  ".join(_ljust_width(headers[i], widths[i]) for i in range(col_count)))
+    print("  ".join("-" * w for w in widths))
+    for row in rows:
+        print("  ".join(_ljust_width(str(row[i]), widths[i]) for i in range(col_count)))
 
 
 def _instance_state(name: str) -> str:
@@ -160,7 +192,7 @@ def _cmd_status(args, models_dir: Path | None, caps) -> int:
         if not profiles:
             logger.warning(f"未找到 profile：{args.name}")
             return 0
-    print(f"{'名称':<12} {'引擎':<10} {'端口':<6} {'状态':<8} 健康")
+    rows = []
     for p in profiles:
         state = _instance_state(p.name)
         health = "-"
@@ -171,15 +203,15 @@ def _cmd_status(args, models_dir: Path | None, caps) -> int:
                 health = "正常" if ok else "无响应"
             except Exception:  # noqa: BLE001 —— 健康检查失败不阻塞表格输出
                 health = "未知"
-        print(f"{p.name:<12} {p.engine:<10} {p.port:<6} {state:<8} {health}")
+        rows.append([p.name, p.engine, p.port, state, health])
+    _print_table(["名称", "引擎", "端口", "状态", "健康"], rows)
     return 0
 
 
 def _cmd_list(args, models_dir: Path | None, caps) -> int:
     profiles = list_profiles(models_dir)
-    print(f"{'名称':<12} {'引擎':<10} {'端口':<6}")
-    for p in profiles:
-        print(f"{p.name:<12} {p.engine:<10} {p.port:<6}")
+    rows = [[p.name, p.engine, p.port] for p in profiles]
+    _print_table(["名称", "引擎", "端口"], rows)
     return 0
 
 
@@ -192,9 +224,13 @@ def _cmd_probe(args, models_dir: Path | None, caps) -> int:
     print(f"CUDA 驱动：{caps.cuda_driver or '未知'}")
     print(f"计算能力（CC）：{caps.compute_capability or '未知'}")
     print("引擎二进制可用性：")
-    for name in ("ollama", "vllm", "sglang", "unsloth"):
-        available = "可用" if caps.binaries.get(name) else "不可用"
-        print(f"  {name}: {available}")
+    for name in ENGINE_BINARIES:
+        path = caps.binary_paths.get(name)
+        if path:
+            print(f"  {name}: 可用（{path}）")
+        else:
+            hint = ENGINE_INSTALL_HINTS.get(name, "")
+            print(f"  {name}: 不可用（未在 PATH 中找到 {name} 可执行文件{hint}）")
     return 0
 
 
