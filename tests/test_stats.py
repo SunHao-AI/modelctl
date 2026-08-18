@@ -67,10 +67,17 @@ def test_build_payload_no_budget():
 
 
 def test_build_payload_includes_rate_fields():
-    from modelctl.core.stats import build_usage_payload
     import time
+
+    from modelctl.core.stats import build_usage_payload
+
     tokens = {"prompt_total": 1000, "predicted_total": 500, "prompt_rate": 10.0, "predicted_rate": 5.0}
-    payload = build_usage_payload(tokens, {"price_in": 1.0, "price_out": 2.0}, start_time=time.time() - 10, now=time.time())
+    payload = build_usage_payload(
+        tokens,
+        {"price_in": 1.0, "price_out": 2.0},
+        start_time=time.time() - 10,
+        now=time.time(),
+    )
     assert payload["prompt_rate"] == 10.0
     assert payload["predicted_rate"] == 5.0
     assert "生成速率 5.0 tok/s" in payload["extra"]

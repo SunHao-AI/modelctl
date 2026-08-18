@@ -1,7 +1,5 @@
 """tests/test_engines_persist.py — persist_model_path 写回测试。"""
 
-import pytest
-
 
 def test_persist_model_path_updates_yaml(tmp_path):
     yaml_path = tmp_path / "demo.yaml"

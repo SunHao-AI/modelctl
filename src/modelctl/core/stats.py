@@ -376,7 +376,15 @@ class UsageHandler(BaseHTTPRequestHandler):
                 all_valid = False
                 invalid_messages.append(f"{target.name}: {snap['error'] or '未知错误'}")
                 continue
-            used = round(calc_cost(snap["prompt_total"], snap["predicted_total"], float(target.usage_cfg.get("price_in", 1.0)), float(target.usage_cfg.get("price_out", 2.0))), 2)
+            used = round(
+                calc_cost(
+                    snap["prompt_total"],
+                    snap["predicted_total"],
+                    float(target.usage_cfg.get("price_in", 1.0)),
+                    float(target.usage_cfg.get("price_out", 2.0)),
+                ),
+                2,
+            )
             total_used += used
             budget_raw = target.usage_cfg.get("budget")
             if budget_raw is None:

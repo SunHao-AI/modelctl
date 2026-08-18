@@ -161,7 +161,8 @@ def test_download_gguf_no_draft(tmp_path, monkeypatch):
 
 def test_check_requirements_allows_empty_model_with_download(tmp_path):
     (tmp_path / "ds.yaml").write_text(
-        "name: ds\nengine: llamacpp\nport: 18888\nllamacpp:\n  model: ''\n  download:\n    modelscope_id: x/y\n    quant: Q4_K_M\n  gpu_count: 8\n",
+        "name: ds\nengine: llamacpp\nport: 18888\nllamacpp:\n"
+        "  model: ''\n  download:\n    modelscope_id: x/y\n    quant: Q4_K_M\n  gpu_count: 8\n",
         encoding="utf-8",
     )
     caps = probe(nvidia_smi_output=SMI)
@@ -173,7 +174,9 @@ def test_check_requirements_allows_empty_model_with_download(tmp_path):
 def test_check_requirements_dspark_intent_with_empty_model(tmp_path):
     # model 留空 + download 段 + dspark on（默认）：不应静默关闭，dspark 意图保留
     (tmp_path / "ds.yaml").write_text(
-        "name: ds\nengine: llamacpp\nport: 18888\nllamacpp:\n  model: ''\n  download:\n    modelscope_id: x/y\n    quant: Q4_K_M\n  gpu_count: 8\n  dspark: on\n",
+        "name: ds\nengine: llamacpp\nport: 18888\nllamacpp:\n"
+        "  model: ''\n  download:\n    modelscope_id: x/y\n    quant: Q4_K_M\n"
+        "  gpu_count: 8\n  dspark: on\n",
         encoding="utf-8",
     )
     caps = probe(nvidia_smi_output=SMI)
@@ -189,7 +192,9 @@ def test_pre_start_discovers_draft_after_download(tmp_path, monkeypatch):
     from modelctl.engines import llamacpp
 
     (tmp_path / "ds.yaml").write_text(
-        f"name: ds\nengine: llamacpp\nport: 18888\nllamacpp:\n  model: ''\n  download:\n    modelscope_id: x/y\n    quant: Q4_K_M\n  gpu_count: 8\n  dspark: on\n  source_dir: {tmp_path / 'llama.cpp'}\n",
+        f"name: ds\nengine: llamacpp\nport: 18888\nllamacpp:\n"
+        f"  model: ''\n  download:\n    modelscope_id: x/y\n    quant: Q4_K_M\n"
+        f"  gpu_count: 8\n  dspark: on\n  source_dir: {tmp_path / 'llama.cpp'}\n",
         encoding="utf-8",
     )
     caps = probe(nvidia_smi_output=SMI)
