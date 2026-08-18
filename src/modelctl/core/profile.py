@@ -79,7 +79,12 @@ def _to_profile(raw: dict[str, Any], path: Path) -> Profile:
 
 
 def load_profile(name: str, models_dir: Path | None = None) -> Profile:
-    """加载指定 name 的 YAML profile（根目录优先，其次 models/<engine>/*.yaml）。"""
+    """加载指定 name 的 YAML profile。
+
+    先按文件名匹配 models/<name>.yaml（根目录优先，其次递归子目录）；
+    未命中时回退按 YAML 内 name 字段匹配（兼容文件名与标识不一致，
+    如 <base>-<engine>.yaml 内 name 为 deepseek-v4-flash-llamacpp）。
+    """
     models_dir = models_dir or PROJECT_ROOT / "models"
     candidates = [
         models_dir / f"{name}.yaml",
@@ -88,6 +93,9 @@ def load_profile(name: str, models_dir: Path | None = None) -> Profile:
     for path in candidates:
         if path.is_file():
             return _load_profile_from_path(path)
+    for profile in list_profiles(models_dir):
+        if profile.name == name:
+            return profile
     raise ProfileError(f"profile 不存在：{models_dir / f'{name}.yaml'}")
 
 

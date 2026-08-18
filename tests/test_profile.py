@@ -65,6 +65,21 @@ def test_list_profiles_sorted(tmp_path):
     assert [p.name for p in list_profiles(tmp_path)] == ["a", "b"]
 
 
+def test_load_by_yaml_name_when_filename_differs(tmp_path, monkeypatch):
+    """文件名 <base>-<engine>.yaml 内 name 为 <base>-<engine> 时，可按 name 加载。"""
+    monkeypatch.setenv("TEST_KEY", "secret")
+    (tmp_path / "llamacpp").mkdir()
+    (tmp_path / "llamacpp" / "deepseek-v4-flash.yaml").write_text(
+        "name: deepseek-v4-flash-llamacpp\nengine: llamacpp\nport: 18888\n"
+        "api_key: ${TEST_KEY}\nllamacpp:\n  model: /x.gguf\n",
+        encoding="utf-8",
+    )
+    p = load_profile("deepseek-v4-flash-llamacpp", tmp_path)
+    assert p.name == "deepseek-v4-flash-llamacpp"
+    assert p.engine == "llamacpp"
+    assert p.path == tmp_path / "llamacpp" / "deepseek-v4-flash.yaml"
+
+
 def test_missing_file(tmp_path):
     with pytest.raises(ProfileError, match="不存在"):
         load_profile("ghost", tmp_path)
