@@ -80,7 +80,7 @@ def build_usage_payload(tokens: dict[str, float], usage_cfg: dict, start_time: f
 
     tokens 键：prompt_total / predicted_total / prompt_rate / predicted_rate。
     usage_cfg 键：price_in / price_out / budget（均可选，缺省 price_in=1.0、price_out=2.0、无预算）。
-    输出字段与现版 build_payload 完全一致：isValid/used/unit/planName/extra/total/remaining。
+    输出字段：isValid/used/unit/planName/extra/prompt_rate/predicted_rate/total/remaining。
     """
     price_in = float(usage_cfg.get("price_in", 1.0))
     price_out = float(usage_cfg.get("price_out", 2.0))
@@ -88,6 +88,7 @@ def build_usage_payload(tokens: dict[str, float], usage_cfg: dict, start_time: f
     budget = float(budget_raw) if budget_raw is not None else None
     prompt = tokens.get("prompt_total", 0.0)
     predicted = tokens.get("predicted_total", 0.0)
+    prompt_rate = tokens.get("prompt_rate", 0.0)
     predicted_rate = tokens.get("predicted_rate", 0.0)
     used = round(calc_cost(prompt, predicted, price_in, price_out), 2)
     runtime = max(now - start_time, 0.0)
@@ -99,9 +100,12 @@ def build_usage_payload(tokens: dict[str, float], usage_cfg: dict, start_time: f
         "extra": (
             f"累计 {_fmt_int(prompt + predicted)} tokens"
             f"（输入 {_fmt_int(prompt)} / 输出 {_fmt_int(predicted)}）"
+            f"| 输入速率 {prompt_rate:.1f} tok/s"
             f"| 生成速率 {predicted_rate:.1f} tok/s"
             f"| 运行 {int(runtime // 3600)}h{int((runtime % 3600) // 60)}m"
         ),
+        "prompt_rate": prompt_rate,
+        "predicted_rate": predicted_rate,
     }
     if budget is not None:
         payload["total"] = budget
