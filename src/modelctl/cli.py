@@ -72,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     for cmd in ("start", "stop", "restart", "status"):
         p = sub.add_parser(cmd)
         p.add_argument("name", nargs="?" if cmd == "status" else None)
-        if cmd == "start":
+        if cmd in ("start", "restart"):
             p.add_argument("--timeout", type=float, default=300, help="健康检查超时秒数（默认 300）")
     sub.add_parser("list", help="列出所有 profile")
     sub.add_parser("probe", help="探测硬件与引擎二进制")

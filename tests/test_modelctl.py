@@ -21,3 +21,11 @@ def test_status_output(tmp_path, monkeypatch, capsys):
     rc = cli.main(["status", "--models-dir", str(tmp_path)])
     out = capsys.readouterr().out
     assert rc == 0 and "a" in out and "vllm" in out and "8000" in out
+
+
+def test_restart_accepts_timeout():
+    """restart 转调 start，必须提供 --timeout 参数（默认 300）。"""
+    args = cli.build_parser().parse_args(["restart", "x"])
+    assert args.timeout == 300
+    args = cli.build_parser().parse_args(["restart", "x", "--timeout", "60"])
+    assert args.timeout == 60
