@@ -5,7 +5,7 @@
 ## 特性
 
 - **多引擎支持**：llamacpp（官方 llama.cpp + DSpark 投机解码）、ollama、vllm、sglang、unsloth（无头 API 服务，Unsloth 动态量化 GGUF）
-- **YAML profile**：每模型一个 YAML（`models/<engine>/<name>.yaml` 或兼容旧式 `models/<name>.yaml`），配置模型路径、端口、引擎参数、用量单价
+- **YAML profile**：每模型一个 YAML（`models/<engine>/<name>.yaml`），配置模型路径、端口、引擎参数、用量单价
 - **自动下载**：model 为空/不存在时从 ModelScope 自动下载，并把本地路径持久化写回 YAML（备份 .yaml.bak）
 - **能力探测与自动降级**：启动前探测 GPU/CC/显存/引擎二进制，硬性不满足拒绝启动并说明原因，可降级项自动降级并告警
 - **统一生命周期**：后台启动、PID 管理、健康检查、优雅停止
@@ -28,14 +28,9 @@ modelctl/
 ├── script/
 │   └── modelctl.sh                 # bash 薄封装（调用已安装的 modelctl 命令）
 ├── models/                         # 模型 profile（每模型一个 YAML，按引擎分目录）
-│   ├── deepseek-v4.yaml            # DeepSeek-V4-Flash（llamacpp + DSpark，根目录兼容旧式）
-│   ├── qwen3-llama.yaml            # Qwen3.8-27B（llamacpp，根目录兼容旧式）
-│   ├── qwen3-ollama.yaml           # Qwen3-32B（ollama，根目录兼容旧式）
-│   ├── qwen3-vllm.yaml             # Qwen3-32B（vllm，根目录兼容旧式）
 │   ├── llamacpp/                   # llamacpp 引擎 profile 子目录
 │   │   ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（llamacpp + DSpark）
-│   │   ├── qwen3.8.yaml            # Qwen3.8-27B GGUF（llamacpp）
-│   │   └── qwen3-llamacpp.yaml     # Qwen3.8-27B GGUF（llamacpp，旧式命名）
+│   │   └── qwen3.8.yaml            # Qwen3.8-27B GGUF（llamacpp）
 │   ├── ollama/                     # ollama 引擎 profile 子目录
 │   │   ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（ollama）
 │   │   └── qwen3.8.yaml            # Qwen3.8-27B（ollama）
@@ -47,8 +42,7 @@ modelctl/
 │   │   └── qwen3.8.yaml            # Qwen3.8-27B（sglang）
 │   └── unsloth/                    # unsloth 引擎 profile 子目录
 │       ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（unsloth）
-│       ├── qwen3.8.yaml            # Qwen3.8-27B（unsloth）
-│       └── deepseek-v4-unsloth.yaml # DeepSeek-V4-Flash（unsloth，旧式命名）
+│       └── qwen3.8.yaml            # Qwen3.8-27B（unsloth）
 ├── .env.example                    # 全局配置模板（复制为 .env 后修改）
 ├── .env                            # 本地配置（含密钥，不入库）
 ├── .gitignore
@@ -77,8 +71,7 @@ cp .env.example .env
 vi .env        # 修改 API 密钥、存储目录、日志目录等全局配置
 ```
 
-模型级配置（模型路径、端口、并行度、量化等）在 `models/*.yaml` 中修改。
-推荐按引擎放入子目录 `models/<engine>/<name>.yaml`；旧的根目录 `models/<name>.yaml` 仍兼容（同名时根目录优先）。
+模型级配置（模型路径、端口、并行度、量化等）在 `models/<engine>/<name>.yaml` 中修改。
 
 配置优先级：**profile YAML > 环境变量 > .env 文件 > 代码默认值**。
 
@@ -86,11 +79,11 @@ vi .env        # 修改 API 密钥、存储目录、日志目录等全局配置
 >
 > | 引擎 | 控制下载/缓存位置的环境变量 |
 > |---------|----------------------------|
-> | llamacpp（`deepseek-v4` / `qwen3-llama` / `qwen3-llamacpp` / `deepseek-v4-flash-llamacpp` / `qwen3.8-llamacpp`） | `MODEL_ROOT`（GGUF 保存父目录）、`MODELSCOPE_CACHE` |
-> | ollama（`qwen3-ollama` / `deepseek-v4-flash-ollama` / `qwen3.8-ollama`） | `OLLAMA_MODELS` |
-> | vllm（`qwen3-vllm` / `deepseek-v4-flash-vllm` / `qwen3.8-vllm`） | `MODEL_ROOT`（ModelScope 下载目录）、`HF_HOME`（vLLM 缓存） |
+> | llamacpp（`deepseek-v4-flash-llamacpp` / `qwen3.8-llamacpp`） | `MODEL_ROOT`（GGUF 保存父目录）、`MODELSCOPE_CACHE` |
+> | ollama（`deepseek-v4-flash-ollama` / `qwen3.8-ollama`） | `OLLAMA_MODELS` |
+> | vllm（`deepseek-v4-flash-vllm` / `qwen3.8-vllm`） | `MODEL_ROOT`（ModelScope 下载目录）、`HF_HOME`（vLLM 缓存） |
 > | sglang（`deepseek-v4-flash-sglang` / `qwen3.8-sglang`） | `MODEL_ROOT`（ModelScope 下载目录）、`HF_HOME`（SGLang 缓存） |
-> | unsloth（`deepseek-v4-unsloth` / `deepseek-v4-flash-unsloth` / `qwen3.8-unsloth`） | `UNSLOTH_API_KEY`（必填）、`HF_ENDPOINT`（HF 兜底镜像）、`MODEL_ROOT`（ModelScope 下载） |
+> | unsloth（`deepseek-v4-flash-unsloth` / `qwen3.8-unsloth`） | `UNSLOTH_API_KEY`（必填）、`HF_ENDPOINT`（HF 兜底镜像）、`MODEL_ROOT`（ModelScope 下载） |
 
 ### 2.5 模型自动下载
 
@@ -111,23 +104,23 @@ ModelScope 下载模型：
 ```bash
 # 启动 DeepSeek-V4-Flash（llamacpp，首次运行会自动编译 llama.cpp 并下载模型）
 # 模型会下载到 .env 中 MODEL_ROOT / MODELSCOPE_CACHE 指定的位置
-bash script/modelctl.sh start deepseek-v4
+bash script/modelctl.sh start deepseek-v4-flash-llamacpp
 
-# 启动 Qwen3（ollama）
+# 启动 Qwen3.8-27B（ollama）
 # 模型会下载到 .env 中 OLLAMA_MODELS 指定的位置
-bash script/modelctl.sh start qwen3-ollama
+bash script/modelctl.sh start qwen3.8-ollama
 
-# 启动 Qwen3（vllm）
+# 启动 Qwen3.8-27B（vllm）
 # 模型会下载到 .env 中 HF_HOME 指定的位置
-bash script/modelctl.sh start qwen3-vllm
+bash script/modelctl.sh start qwen3.8-vllm
 
 # 启动 Qwen3.8-27B GGUF（llamacpp，首次运行自动编译 llama.cpp + 从 ModelScope 下载模型）
 # 模型会下载到 .env 中 MODEL_ROOT 指定的位置，下载后路径自动写回 profile YAML
-bash script/modelctl.sh start qwen3-llamacpp
+bash script/modelctl.sh start qwen3.8-llamacpp
 
 # 启动 DeepSeek-V4-Flash（unsloth 无头 API，Unsloth 动态量化 GGUF）
 # 模型从 ModelScope 下载并写回 profile；api_key 取 .env 中 UNSLOTH_API_KEY
-bash script/modelctl.sh start deepseek-v4-unsloth
+bash script/modelctl.sh start deepseek-v4-flash-unsloth
 ```
 
 每个引擎子目录均提供 **deepseek-v4-flash** 与 **qwen3.8** 两份带注释的示例配置，便于学习各引擎参数。按引擎启动示例：
@@ -157,26 +150,26 @@ bash script/modelctl.sh start qwen3.8-unsloth
 也可直接调用已安装的 `modelctl` 命令：
 
 ```bash
-uv run modelctl start deepseek-v4
+uv run modelctl start deepseek-v4-flash-llamacpp
 ```
 
 ### 4. 验证
 
 ```bash
-curl http://127.0.0.1:18888/health   # deepseek-v4
-curl http://127.0.0.1:11434/         # qwen3-ollama
-curl http://127.0.0.1:8000/health    # qwen3-vllm
-curl http://127.0.0.1:8001/v1/models -H "Authorization: Bearer $UNSLOTH_API_KEY"   # deepseek-v4-unsloth
+curl http://127.0.0.1:18888/health   # deepseek-v4-flash-llamacpp
+curl http://127.0.0.1:11434/         # qwen3.8-ollama
+curl http://127.0.0.1:8000/health    # qwen3.8-vllm / deepseek-v4-flash-vllm
+curl http://127.0.0.1:8001/v1/models -H "Authorization: Bearer $UNSLOTH_API_KEY"   # deepseek-v4-flash-unsloth
 ```
 
 ### 5. 停止 / 重启 / 状态
 
 ```bash
 # 停止
-bash script/modelctl.sh stop deepseek-v4
+bash script/modelctl.sh stop deepseek-v4-flash-llamacpp
 
 # 重启（先停后启）
-bash script/modelctl.sh restart deepseek-v4
+bash script/modelctl.sh restart deepseek-v4-flash-llamacpp
 
 # 查看所有模型状态（含健康检查）
 bash script/modelctl.sh status
@@ -201,7 +194,7 @@ bash script/modelctl.sh stats stop
 查看日志（LOG_DIR 默认 = 项目根目录上级的 `../logs/`）：
 
 ```bash
-tail -f ../logs/launch-deepseek-v4-*.log   # 最近一次启动日志
+tail -f ../logs/launch-deepseek-v4-flash-llamacpp-*.log   # 最近一次启动日志
 ```
 
 ## 文档

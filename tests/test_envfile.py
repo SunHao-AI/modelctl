@@ -25,6 +25,6 @@ def test_load_env_no_override(tmp_path, monkeypatch):
 
 def test_project_root_points_at_repo_root():
     """回归测试：PROJECT_ROOT 必须解析到仓库根目录（而非 src/）。"""
-    assert PROJECT_ROOT.name == "deepseek-v4-flash-deploy"
+    assert PROJECT_ROOT.name == "modelctl"
     assert (PROJECT_ROOT / "models").is_dir()
     assert (PROJECT_ROOT / ".env").parent == PROJECT_ROOT

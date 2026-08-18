@@ -3,7 +3,7 @@
 在远程服务器（8× RTX 5880 Ada）上部署 DeepSeek-V4-Flash-0731（官方 llama.cpp + DSpark）的完整说明。工程化改造后，统一使用 `modelctl` CLI 管理生命周期，配置分层为：
 
 - **全局配置**：项目根 `.env`（API 密钥、模型存储目录、日志目录、llama.cpp 源码目录、用量统计服务）
-- **模型级配置**：`models/<engine>/<name>.yaml` 或兼容旧式 `models/<name>.yaml`（模型路径、端口、并行度、量化、DSpark 参数、下载配置、用量单价）
+- **模型级配置**：`models/<engine>/<name>.yaml`（模型路径、端口、并行度、量化、DSpark 参数、下载配置、用量单价）
 
 配置优先级：**profile YAML > 环境变量 > .env 文件 > 代码默认值**。
 
@@ -12,7 +12,7 @@
 - Python 3.12+，已安装项目依赖：`uv sync --extra dev`
 - `git`、`cmake`、CUDA 工具链、`nvidia-smi`
 - 官方 llama.cpp 源码目录（用于编译 `llama-server`），默认由 `.env` 的 `LLAMACPP_SOURCE_DIR` 指定
-- 如尚未下载模型，首次启动时会根据 `models/deepseek-v4.yaml` 的 `download` 段自动从 ModelScope 拉取
+- 如尚未下载模型，首次启动时会根据 `models/llamacpp/deepseek-v4-flash.yaml` 的 `download` 段自动从 ModelScope 拉取
 
 模型文件预期布局：
 
@@ -23,7 +23,7 @@ ${MODEL_ROOT}/DeepSeek-V4-Flash-0731-GGUF/
 └── dspark-DeepSeek-V4-Flash-0731-Q8_0.gguf
 ```
 
-> 默认使用 **UD-Q8_K_XL 无损量化**（162GB，与官方权重 bit-identical）。若需近无损的 Q4（155GB），修改 `models/deepseek-v4.yaml` 中的 `model` 路径为 `UD-Q4_K_XL/` 对应分片即可。
+> 默认使用 **UD-Q8_K_XL 无损量化**（162GB，与官方权重 bit-identical）。若需近无损的 Q4（155GB），修改 `models/llamacpp/deepseek-v4-flash.yaml` 中的 `model` 路径为 `UD-Q4_K_XL/` 对应分片即可。
 
 ## 配置管理
 
@@ -48,19 +48,13 @@ vi .env
 
 ### 1.5 models 目录布局
 
-profile 支持两种存放方式（按引擎分目录为推荐方式，旧的根目录方式仍兼容）。每个引擎子目录均提供
-**deepseek-v4-flash** 与 **qwen3.8** 两份带注释的示例配置，便于学习各引擎参数：
+profile 统一按引擎分目录存放。每个引擎子目录均提供 **deepseek-v4-flash** 与 **qwen3.8** 两份带注释的示例配置，便于学习各引擎参数：
 
 ```
 models/
-├── deepseek-v4.yaml            # llamacpp + DSpark（根目录，兼容旧式）
-├── qwen3-llama.yaml            # llamacpp（根目录）
-├── qwen3-ollama.yaml           # ollama（根目录）
-├── qwen3-vllm.yaml             # vllm（根目录）
 ├── llamacpp/                   # llamacpp 引擎 profile 子目录
 │   ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（llamacpp + DSpark）
-│   ├── qwen3.8.yaml            # Qwen3.8-27B GGUF（llamacpp）
-│   └── qwen3-llamacpp.yaml     # Qwen3.8-27B GGUF（llamacpp，旧式命名）
+│   └── qwen3.8.yaml            # Qwen3.8-27B GGUF（llamacpp）
 ├── ollama/                     # ollama 引擎 profile 子目录
 │   ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（ollama）
 │   └── qwen3.8.yaml            # Qwen3.8-27B（ollama）
@@ -72,17 +66,15 @@ models/
 │   └── qwen3.8.yaml            # Qwen3.8-27B（sglang）
 └── unsloth/                    # unsloth 引擎 profile 子目录
     ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（unsloth）
-    ├── qwen3.8.yaml            # Qwen3.8-27B（unsloth）
-    └── deepseek-v4-unsloth.yaml # DeepSeek-V4-Flash（unsloth，旧式命名）
+    └── qwen3.8.yaml            # Qwen3.8-27B（unsloth）
 ```
 
-同一 `name` 同时存在于根目录与子目录时，以根目录为准（`modelctl list` 会打印忽略警告）。
-各引擎 profile 的 `name` 全局唯一，示例配置统一采用 `<model>-<engine>` 命名（如 `deepseek-v4-flash-vllm`）。
+各引擎 profile 的 `name` 全局唯一，示例配置统一采用 `<model>-<engine>` 命名（如 `deepseek-v4-flash-llamacpp`、`deepseek-v4-flash-vllm`）。文件本身位于 `models/<engine>/` 下，因此文件名不再需要引擎后缀。
 
-### 2. 按需修改 `models/deepseek-v4.yaml`
+### 2. 按需修改 `models/llamacpp/deepseek-v4-flash.yaml`
 
 ```yaml
-name: deepseek-v4
+name: deepseek-v4-flash-llamacpp
 engine: llamacpp
 port: 18888
 api_key: ${API_KEY}
@@ -122,13 +114,13 @@ usage:
 
 ```bash
 # 启动（首次会自动编译 llama.cpp 并下载模型到 MODEL_ROOT / MODELSCOPE_CACHE 指定位置）
-bash script/modelctl.sh start deepseek-v4
+bash script/modelctl.sh start deepseek-v4-flash-llamacpp
 
 # 停止
-bash script/modelctl.sh stop deepseek-v4
+bash script/modelctl.sh stop deepseek-v4-flash-llamacpp
 
 # 重启
-bash script/modelctl.sh restart deepseek-v4
+bash script/modelctl.sh restart deepseek-v4-flash-llamacpp
 
 # 查看状态
 bash script/modelctl.sh status
@@ -143,7 +135,7 @@ bash script/modelctl.sh probe
 也可直接调用已安装的 `modelctl` 命令：
 
 ```bash
-uv run modelctl start deepseek-v4
+uv run modelctl start deepseek-v4-flash-llamacpp
 ```
 
 ## 验证服务
@@ -179,7 +171,7 @@ bash script/modelctl.sh stats stop
 
 ```bash
 # 启动过程日志
-tail -f ${LOG_DIR}/launch-deepseek-v4-*.log
+tail -f ${LOG_DIR}/launch-deepseek-v4-flash-llamacpp-*.log
 
 # 服务运行日志（llama-server 输出）
 tail -f ${LOG_DIR}/llama-server-18888-*.log
@@ -187,16 +179,16 @@ tail -f ${LOG_DIR}/llama-server-18888-*.log
 
 ## 重启 / 换量化
 
-1. 停止服务：`bash script/modelctl.sh stop deepseek-v4`
-2. 修改 `models/deepseek-v4.yaml` 中的 `model` 路径（例如换 `UD-Q4_K_XL/`）
-3. 重新启动：`bash script/modelctl.sh start deepseek-v4`
+1. 停止服务：`bash script/modelctl.sh stop deepseek-v4-flash-llamacpp`
+2. 修改 `models/llamacpp/deepseek-v4-flash.yaml` 中的 `model` 路径（例如换 `UD-Q4_K_XL/`）
+3. 重新启动：`bash script/modelctl.sh start deepseek-v4-flash-llamacpp`
 
 > 若首次启动时 `model` 留空、由 `download` 段自动下载并写回了路径，再次换量化时需同时修改
 > `model` 与 `download.quant`（或先删除已写回的 `model` 路径让其重新下载）。
 
 如需调整 `extra_args` 等额外参数，目前 llamacpp 引擎尚未支持该字段，请直接修改 `build_command()` 输出或提交 issue。
 
-## 参数速查（models/deepseek-v4.yaml）
+## 参数速查（models/llamacpp/deepseek-v4-flash.yaml）
 
 | YAML 字段 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -229,7 +221,7 @@ tail -f ${LOG_DIR}/llama-server-18888-*.log
     -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=89
   cmake --build ${LLAMACPP_SOURCE_DIR}/build --config Release -j
   ```
-- **换 Q4 近无损量化**：如果显存吃紧或想加快加载，把 `models/deepseek-v4.yaml` 的 `model` 改为 `UD-Q4_K_XL/` 路径，分片约小 7GB
+- **换 Q4 近无损量化**：如果显存吃紧或想加快加载，把 `models/llamacpp/deepseek-v4-flash.yaml` 的 `model` 改为 `UD-Q4_K_XL/` 路径，分片约小 7GB
 
 ## Unsloth 引擎（实验性）
 
@@ -244,7 +236,7 @@ tail -f ${LOG_DIR}/llama-server-18888-*.log
 ### 使用
 
 ```bash
-bash script/modelctl.sh start deepseek-v4-unsloth   # 首次自动从 ModelScope 下载并写回 profile
+bash script/modelctl.sh start deepseek-v4-flash-unsloth   # 首次自动从 ModelScope 下载并写回 profile
 curl http://127.0.0.1:8001/v1/models -H "Authorization: Bearer $UNSLOTH_API_KEY"
 bash script/modelctl.sh status
 ```
@@ -256,7 +248,7 @@ bash script/modelctl.sh status
 
 ## 采样参数与重复输出排查
 
-llamacpp 部署的 DeepSeek-V4 在推理/工具调用场景可能偶发**重复输出**（如 `<｜DSML｜tool_calls` 反复生成、整段文本循环复制）。主要原因：llama.cpp 默认 `repeat-penalty=1.0`（无重复惩罚），且采样参数未显式配置。本工具已在 `models/deepseek-v4.yaml` 提供采样配置：
+llamacpp 部署的 DeepSeek-V4 在推理/工具调用场景可能偶发**重复输出**（如 `<｜DSML｜tool_calls` 反复生成、整段文本循环复制）。主要原因：llama.cpp 默认 `repeat-penalty=1.0`（无重复惩罚），且采样参数未显式配置。本工具已在 `models/llamacpp/deepseek-v4-flash.yaml` 提供采样配置：
 
 ```yaml
 llamacpp:
@@ -272,7 +264,7 @@ llamacpp:
 - `temperature` 传 `0` 是合法值（贪心模式），会被正确传递
 - `stops` 为字符串列表，透传为 llama-server 的 `--stops` 参数；**谨慎使用**——若把 `<｜DSML｜tool_calls` 设为停止符，模型将无法完整输出工具调用，仅在确认截断不影响功能时使用
 - 调参建议：先只加 `repeat_penalty: 1.1` + `repeat_last_n: 256` 验证效果；仍循环再降 `temperature`；仍有问题再考虑 `top_p`/`top_k`
-- 其他 llama.cpp profile（如 `qwen3-llamacpp`）同样支持这些字段
+- 其他 llama.cpp profile（如 `qwen3.8-llamacpp`）同样支持这些字段
 
 ### 其他引擎的采样参数位置
 
