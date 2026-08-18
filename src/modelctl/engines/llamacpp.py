@@ -285,7 +285,8 @@ class LlamaCppAdapter(EngineAdapter):
                     "-DCMAKE_BUILD_TYPE=Release",
                 ]
             )
-            run(["cmake", "--build", str(source / "build"), "--config", "Release", "-j"])
+            # 限制编译并行度（-j 4），避免并发 nvcc 进程占用全部内存导致 OOM
+            run(["cmake", "--build", str(source / "build"), "--config", "Release", "-j", "4"])
 
     def metrics_mapping(self) -> dict[str, list[str]]:
         return {

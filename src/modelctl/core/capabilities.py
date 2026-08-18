@@ -3,17 +3,20 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 
-ENGINE_BINARIES = ["ollama", "vllm", "sglang", "unsloth"]  # llamacpp 由源码编译，不在此列
+ENGINE_BINARIES = ["ollama", "vllm", "sglang", "unsloth", "llamacpp"]
 
 ENGINE_INSTALL_HINTS = {
     "ollama": "，建议执行：curl -fsSL https://ollama.com/install.sh | sh",
-    "vllm": "，建议执行：pip install vllm",
-    "sglang": '，建议执行：pip install "sglang[all]"',
-    "unsloth": "，建议执行：pip install unsloth",
+    "vllm": "，建议执行：MAX_JOBS=4 pip install vllm",
+    "sglang": '，建议执行：MAX_JOBS=4 pip install "sglang[all]"',
+    "unsloth": "，建议执行：MAX_JOBS=4 pip install unsloth",
+    # llamacpp 提示较长（源码下载 + 编译命令），由 cli._cmd_probe 单独多行输出
 }
 
 
@@ -39,6 +42,24 @@ def which_binaries(names: list[str]) -> dict[str, bool]:
 def binary_paths(names: list[str]) -> dict[str, str | None]:
     """探测给定可执行文件在 PATH 中的完整路径；未找到时返回 None。"""
     return {n: shutil.which(n) for n in names}
+
+
+def find_llamacpp_binary() -> str | None:
+    """定位 llama.cpp 编译产物 llama-server。
+
+    依次检查 PATH、LLAMACPP_SOURCE_DIR/build/bin/llama-server、
+    LLAMACPP_SOURCE_DIR/llama-server；未找到返回 None（pre_start 会真正编译）。
+    """
+    in_path = shutil.which("llama-server")
+    if in_path:
+        return in_path
+    source = os.environ.get("LLAMACPP_SOURCE_DIR", "")
+    if source:
+        source_dir = Path(source)
+        for candidate in (source_dir / "build" / "bin" / "llama-server", source_dir / "llama-server"):
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+    return None
 
 
 def _run_nvidia_smi() -> str:
@@ -71,6 +92,12 @@ def probe(nvidia_smi_output: str | None = None) -> Capabilities:
         binaries=which_binaries(ENGINE_BINARIES),
         binary_paths=binary_paths(ENGINE_BINARIES),
     )
+    # llamacpp 不依赖 PATH 二进制，由源码编译；编译产物存在即视为可用
+    if not caps.binaries.get("llamacpp"):
+        llamacpp_bin = find_llamacpp_binary()
+        if llamacpp_bin:
+            caps.binaries["llamacpp"] = True
+            caps.binary_paths["llamacpp"] = llamacpp_bin
     rows = [r.strip() for r in text.splitlines() if r.strip()]
     if not rows:
         return caps

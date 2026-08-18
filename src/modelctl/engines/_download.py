@@ -18,10 +18,20 @@ except ImportError:  # pragma: no cover
 
 
 def ensure_modelscope() -> None:
-    """确保 modelscope 已安装，否则自动安装。"""
-    if importlib.util.find_spec("modelscope") is None:
-        logger.info("未安装 modelscope，正在安装...")
+    """确保 modelscope 已安装，否则自动安装。
+
+    优先使用 python -m pip；uv 创建的虚拟环境默认不含 pip，
+    此时回退到 uv pip install（--python 指定当前解释器所在环境）。
+    """
+    if importlib.util.find_spec("modelscope") is not None:
+        return
+    logger.info("未安装 modelscope，正在安装...")
+    pip_ok = subprocess.run([sys.executable, "-m", "pip", "--version"], capture_output=True).returncode == 0
+    if pip_ok:
         subprocess.run([sys.executable, "-m", "pip", "install", "-U", "modelscope"], check=True)
+        return
+    logger.info("当前解释器无 pip（uv 虚拟环境），改用 uv pip install...")
+    subprocess.run(["uv", "pip", "install", "--python", sys.executable, "-U", "modelscope"], check=True)
 
 
 def download_repo(modelscope_id: str, local_root: Path) -> Path:

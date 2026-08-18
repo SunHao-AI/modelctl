@@ -228,6 +228,12 @@ def _cmd_probe(args, models_dir: Path | None, caps) -> int:
         path = caps.binary_paths.get(name)
         if path:
             print(f"  {name}: 可用（{path}）")
+        elif name == "llamacpp":
+            print(
+                "  llamacpp: 不可用（未找到编译产物 llama-server）\n"
+                "    源码下载：git clone https://github.com/ggml-org/llama.cpp.git\n"
+                "    编译（保守并行度，避免 OOM）：cmake -B build -DGGML_CUDA=ON && cmake --build build -j 4"
+            )
         else:
             hint = ENGINE_INSTALL_HINTS.get(name, "")
             print(f"  {name}: 不可用（未在 PATH 中找到 {name} 可执行文件{hint}）")
