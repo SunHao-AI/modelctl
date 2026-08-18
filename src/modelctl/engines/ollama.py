@@ -34,8 +34,17 @@ class OllamaAdapter(EngineAdapter):
     def pre_start(self) -> None:
         model = str(self.profile.engine_config["model"])
         out = subprocess.run(["ollama", "list"], capture_output=True, text=True)
-        if model.split(":")[0] not in out.stdout:
-            subprocess.run(["ollama", "pull", model], check=True)
+        installed = {line.split()[0] for line in out.stdout.splitlines() if line.strip()}
+        if model not in installed:
+            try:
+                subprocess.run(["ollama", "pull", model], capture_output=True, text=True, check=True)
+            except subprocess.CalledProcessError as e:
+                detail = (e.stderr or "").strip() or str(e)
+                raise RequirementError(
+                    f"ollama pull {model} 失败：{detail}。"
+                    f"请确认模型名/tag 存在（可运行 `ollama search {model.split(':')[0]}` 查询），"
+                    "或检查网络与镜像配置（如 OLLAMA_MODELS / ollama 镜像地址）。"
+                ) from e
 
     def post_start(self) -> None:
         self._call_generate(self.profile.engine_config.get("keep_alive", -1))

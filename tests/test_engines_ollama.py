@@ -44,3 +44,64 @@ def test_health_url_root(tmp_path):
     caps = Capabilities(binaries={"ollama": True})
     a = get_adapter("ollama")(_profile(tmp_path), caps)
     assert a.health_url() == "http://127.0.0.1:11434/"
+
+
+def test_pre_start_pulls_when_tag_not_installed(tmp_path, monkeypatch):
+    """本地只有同名不同 tag（qwen3:8b）时，仍应 pull 目标 tag（qwen3:32b）。"""
+    import subprocess as sp
+
+    from modelctl.engines import ollama as ollama_mod
+
+    caps = Capabilities(binaries={"ollama": True})
+    a = get_adapter("ollama")(_profile(tmp_path), caps)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["ollama", "list"]:
+            return sp.CompletedProcess(cmd, 0, stdout="qwen3:8b\n", stderr="")
+        calls.append(cmd)
+        return sp.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(ollama_mod.subprocess, "run", fake_run)
+    a.pre_start()
+    assert calls == [["ollama", "pull", "qwen3:32b"]]
+
+
+def test_pre_start_skips_pull_when_installed(tmp_path, monkeypatch):
+    """目标 tag 已安装时跳过 pull。"""
+    import subprocess as sp
+
+    from modelctl.engines import ollama as ollama_mod
+
+    caps = Capabilities(binaries={"ollama": True})
+    a = get_adapter("ollama")(_profile(tmp_path), caps)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["ollama", "list"]:
+            return sp.CompletedProcess(cmd, 0, stdout="qwen3:32b\n", stderr="")
+        calls.append(cmd)
+        return sp.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(ollama_mod.subprocess, "run", fake_run)
+    a.pre_start()
+    assert calls == []
+
+
+def test_pre_start_pull_failure_raises_friendly_error(tmp_path, monkeypatch):
+    """pull 失败时抛出携带 stderr 的 RequirementError，而非裸 CalledProcessError。"""
+    import subprocess as sp
+
+    from modelctl.engines import ollama as ollama_mod
+
+    caps = Capabilities(binaries={"ollama": True})
+    a = get_adapter("ollama")(_profile(tmp_path), caps)
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["ollama", "list"]:
+            return sp.CompletedProcess(cmd, 0, stdout="", stderr="")
+        raise sp.CalledProcessError(1, cmd, output="", stderr="pull model manifest: file does not exist")
+
+    monkeypatch.setattr(ollama_mod.subprocess, "run", fake_run)
+    with pytest.raises(RequirementError, match="file does not exist"):
+        a.pre_start()
