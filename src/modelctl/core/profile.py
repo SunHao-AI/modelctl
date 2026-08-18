@@ -93,10 +93,13 @@ def load_profile(name: str, models_dir: Path | None = None) -> Profile:
     for path in candidates:
         if path.is_file():
             return _load_profile_from_path(path)
-    for profile in list_profiles(models_dir):
+    profiles = list_profiles(models_dir)
+    for profile in profiles:
         if profile.name == name:
             return profile
-    raise ProfileError(f"profile 不存在：{models_dir / f'{name}.yaml'}")
+    available = [p.name for p in profiles]
+    hint = f"可用模型：{', '.join(available)}" if available else "models 目录下暂无可用 profile"
+    raise ProfileError(f"profile 不存在：{name}（{hint}；可运行 `modelctl list` 查看）")
 
 
 def _load_profile_from_path(path: Path) -> Profile:
