@@ -326,7 +326,8 @@ class UsageHandler(BaseHTTPRequestHandler):
         return None
 
     def _resolve_payload(self, model: str | None) -> dict:
-        """按 model 选择目标并构造响应；缺省返回 targets 第一个。"""
+        if model == "all":
+            return self._aggregate_payload()
         if model:
             target = next((t for t in self.targets if t.name == model), None)
             if target is None:
@@ -335,6 +336,9 @@ class UsageHandler(BaseHTTPRequestHandler):
             target = self.targets[0] if self.targets else None
             if target is None:
                 return {"error": "无可用模型"}
+        return self._build_target_payload(target)
+
+    def _build_target_payload(self, target: StatsTarget) -> dict:
         if target.mapping is None:
             return {"error": "该引擎不支持精确统计"}
         collector = self.collectors.get(target.name)
@@ -345,6 +349,64 @@ class UsageHandler(BaseHTTPRequestHandler):
             return {"isValid": False, "invalidMessage": f"{target.name} 不可用：{snap['error'] or '未知错误'}"}
         payload = build_usage_payload(snap, target.usage_cfg, self.start_time, time.time())
         payload["model"] = target.name
+        return payload
+
+    def _aggregate_payload(self) -> dict:
+        targets = [t for t in self.targets if t.mapping is not None]
+        if not targets:
+            return {"error": "无支持精确统计的模型"}
+        total_used = 0.0
+        total_budget = 0.0
+        has_budget = True
+        all_valid = True
+        prompt_rate_total = 0.0
+        predicted_rate_total = 0.0
+        prompt_total_total = 0.0
+        predicted_total_total = 0.0
+        extra_parts: list[str] = []
+        invalid_messages: list[str] = []
+        for target in targets:
+            collector = self.collectors.get(target.name)
+            if collector is None:
+                continue
+            snap = collector.get_snapshot()
+            if not snap["ok"]:
+                all_valid = False
+                invalid_messages.append(f"{target.name}: {snap['error'] or '未知错误'}")
+                continue
+            used = round(calc_cost(snap["prompt_total"], snap["predicted_total"], float(target.usage_cfg.get("price_in", 1.0)), float(target.usage_cfg.get("price_out", 2.0))), 2)
+            total_used += used
+            budget_raw = target.usage_cfg.get("budget")
+            if budget_raw is None:
+                has_budget = False
+            else:
+                total_budget += float(budget_raw)
+            prompt_rate_total += snap.get("prompt_rate", 0.0)
+            predicted_rate_total += snap.get("predicted_rate", 0.0)
+            prompt_total_total += snap["prompt_total"]
+            predicted_total_total += snap["predicted_total"]
+            extra_parts.append(
+                f"{target.name}: 累计 {_fmt_int(snap['prompt_total'] + snap['predicted_total'])} tokens, "
+                f"生成 {snap.get('predicted_rate', 0.0):.1f} tok/s"
+            )
+        payload: dict[str, object] = {
+            "isValid": all_valid,
+            "used": round(total_used, 2),
+            "unit": "CNY",
+            "planName": "modelctl 聚合用量",
+            "extra": "; ".join(extra_parts),
+            "model": "all",
+            "prompt_rate": prompt_rate_total,
+            "predicted_rate": predicted_rate_total,
+        }
+        if not all_valid:
+            payload["invalidMessage"] = "; ".join(invalid_messages)
+        if has_budget:
+            payload["total"] = round(total_budget, 2)
+            payload["remaining"] = round(max(total_budget - total_used, 0.0), 2)
+        else:
+            payload["total"] = None
+            payload["remaining"] = None
         return payload
 
     def log_message(self, fmt: str, *args) -> None:  # noqa: A003 —— 抑制默认请求日志

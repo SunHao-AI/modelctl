@@ -192,3 +192,77 @@ def test_usage_collector_prefers_gauge_over_window(tmp_path):
     # gauge > 0 时优先使用 gauge，而不是窗口计算速率
     assert snap["prompt_rate"] == 12.0
     assert snap["predicted_rate"] == 42.0
+
+
+def test_resolve_payload_all_aggregates_targets():
+    import time
+    from unittest.mock import MagicMock
+
+    from modelctl.core.stats import StatsTarget, UsageHandler
+
+    t1 = StatsTarget(
+        name="a",
+        data_dir=None,
+        metrics_url="http://127.0.0.1:8000/metrics",
+        mapping={"predicted_total": ["x"]},
+        usage_cfg={"price_in": 1.0, "price_out": 2.0, "budget": 100},
+    )
+    t2 = StatsTarget(
+        name="b",
+        data_dir=None,
+        metrics_url="http://127.0.0.1:8001/metrics",
+        mapping={"predicted_total": ["x"]},
+        usage_cfg={"price_in": 1.0, "price_out": 2.0, "budget": 50},
+    )
+    UsageHandler.targets = [t1, t2]
+    mock_snap = {
+        "ok": True,
+        "error": None,
+        "prompt_total": 0.0,
+        "predicted_total": 0.0,
+        "prompt_rate": 0.0,
+        "predicted_rate": 0.0,
+    }
+    mock_a = MagicMock()
+    mock_a.get_snapshot.return_value = dict(mock_snap)
+    mock_b = MagicMock()
+    mock_b.get_snapshot.return_value = dict(mock_snap)
+    UsageHandler.collectors = {"a": mock_a, "b": mock_b}
+    UsageHandler.start_time = time.time()
+    # 类名调用会缺少 self 绑定，用未初始化实例调用（_resolve_payload 只依赖类属性）
+    handler = UsageHandler.__new__(UsageHandler)
+    payload = handler._resolve_payload("all")
+    assert payload["model"] == "all"
+    assert payload["planName"] == "modelctl 聚合用量"
+    assert payload["total"] == 150
+
+
+def test_resolve_payload_single_target_still_works():
+    import time
+    from unittest.mock import MagicMock
+
+    from modelctl.core.stats import StatsTarget, UsageHandler
+
+    target = StatsTarget(
+        name="a",
+        data_dir=None,
+        metrics_url="http://127.0.0.1:8000/metrics",
+        mapping={"predicted_total": ["x"]},
+        usage_cfg={"price_in": 1.0, "price_out": 2.0},
+    )
+    UsageHandler.targets = [target]
+    UsageHandler.start_time = time.time()
+    mock_collector = MagicMock()
+    mock_collector.get_snapshot.return_value = {
+        "ok": True,
+        "error": None,
+        "prompt_total": 100.0,
+        "predicted_total": 50.0,
+        "prompt_rate": 10.0,
+        "predicted_rate": 5.0,
+    }
+    UsageHandler.collectors = {"a": mock_collector}
+    handler = UsageHandler.__new__(UsageHandler)
+    payload = handler._resolve_payload("a")
+    assert payload["model"] == "a"
+    assert payload["prompt_rate"] == 10.0
