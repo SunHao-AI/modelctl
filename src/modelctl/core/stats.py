@@ -292,7 +292,8 @@ def run_server(targets: list[StatsTarget] | None = None) -> None:
     USAGE_MODE（poll/on-demand）、USAGE_POLL_INTERVAL（默认 5）、
     USAGE_DATA_DIR（默认 <PROJECT_ROOT>/data/cache）。
     """
-    data_dir = Path(os.environ.get("USAGE_DATA_DIR", PROJECT_ROOT / "data" / "cache"))
+    raw_data_dir = os.environ.get("USAGE_DATA_DIR", "")
+    data_dir = Path(raw_data_dir) if raw_data_dir else PROJECT_ROOT / "data" / "cache"
     data_dir.mkdir(parents=True, exist_ok=True)
     if targets is None:
         targets = _targets_from_profiles(data_dir)
