@@ -27,6 +27,9 @@ import time
 import urllib.request
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+from modelctl.core.envfile import PROJECT_ROOT
 
 USAGE_PORT = 5002
 
@@ -114,6 +117,7 @@ class StatsTarget:
     """单个模型的用量统计目标。mapping 为 None 表示该引擎不支持精确统计。"""
 
     name: str
+    data_dir: Path
     metrics_url: str
     mapping: dict[str, list[str]] | None
     usage_cfg: dict = field(default_factory=dict)
@@ -129,12 +133,16 @@ class UsageCollector:
 
     def __init__(
         self,
+        name: str,
         base_url: str,
         poll_interval: float,
         api_key: str | None,
+        data_dir: Path,
         mode: str = "poll",
         mapping: dict[str, list[str]] | None = None,
     ) -> None:
+        self.name = name
+        self.data_dir = data_dir
         self.base_url = base_url.rstrip("/")
         self.poll_interval = poll_interval
         self.api_key = api_key
@@ -277,12 +285,18 @@ class UsageHandler(BaseHTTPRequestHandler):
         pass
 
 
-def run_server(targets: list[StatsTarget]) -> None:
+def run_server(targets: list[StatsTarget] | None = None) -> None:
     """启动用量统计 HTTP 服务（阻塞运行，Ctrl-C 退出）。
 
     环境变量：USAGE_HOST（默认 0.0.0.0）、USAGE_PORT（默认 5002）、
-    USAGE_MODE（poll/on-demand）、USAGE_POLL_INTERVAL（默认 5）。
+    USAGE_MODE（poll/on-demand）、USAGE_POLL_INTERVAL（默认 5）、
+    USAGE_DATA_DIR（默认 <PROJECT_ROOT>/data/cache）。
     """
+    data_dir = Path(os.environ.get("USAGE_DATA_DIR", PROJECT_ROOT / "data" / "cache"))
+    data_dir.mkdir(parents=True, exist_ok=True)
+    if targets is None:
+        targets = _targets_from_profiles(data_dir)
+
     host = os.environ.get("USAGE_HOST", "0.0.0.0")
     port = int(os.environ.get("USAGE_PORT", str(USAGE_PORT)))
     mode = os.environ.get("USAGE_MODE", "poll")
@@ -292,7 +306,13 @@ def run_server(targets: list[StatsTarget]) -> None:
     for target in targets:
         if target.mapping is not None:
             collector = UsageCollector(
-                target.metrics_url, poll_interval, target.api_key, mode=mode, mapping=target.mapping
+                target.name,
+                target.metrics_url,
+                poll_interval,
+                target.api_key,
+                target.data_dir,
+                mode=mode,
+                mapping=target.mapping,
             )
             collector.start()
             collectors[target.name] = collector
@@ -316,7 +336,7 @@ def run_server(targets: list[StatsTarget]) -> None:
         server.server_close()
 
 
-def _targets_from_profiles() -> list[StatsTarget]:
+def _targets_from_profiles(data_dir: Path) -> list[StatsTarget]:
     """从 models/*.yaml 构造统计目标（供独立运行 / Task 9 后台化）。"""
     from modelctl.core.capabilities import Capabilities
     from modelctl.core.envfile import load_env
@@ -331,6 +351,7 @@ def _targets_from_profiles() -> list[StatsTarget]:
         targets.append(
             StatsTarget(
                 name=profile.name,
+                data_dir=data_dir,
                 metrics_url=f"http://127.0.0.1:{profile.port}/metrics",
                 mapping=adapter.metrics_mapping(),
                 usage_cfg=profile.usage,
@@ -342,7 +363,7 @@ def _targets_from_profiles() -> list[StatsTarget]:
 
 def main() -> None:
     """独立运行入口：加载全部 profile 并启动统计服务。"""
-    run_server(_targets_from_profiles())
+    run_server()
 
 
 if __name__ == "__main__":
