@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from modelctl.core.capabilities import probe
@@ -108,7 +110,8 @@ def test_unknown_engine():
         get_adapter("tensorrt")
 
 
-def test_download_gguf(tmp_path, monkeypatch):
+def test_download_gguf_skips_when_local_exists(tmp_path, monkeypatch):
+    """本地已有匹配分片与草稿：跳过 modelscope 安装与下载，直接复用。"""
     from modelctl.engines import llamacpp
 
     dest = tmp_path / "Qwen3.8-27B-GGUF"
@@ -122,19 +125,21 @@ def test_download_gguf(tmp_path, monkeypatch):
         captured.update(kwargs)
         return local_dir
 
-    # 模块级 monkeypatch（方案 D），避免依赖真实 modelscope 安装。
-    monkeypatch.setattr(llamacpp, "ensure_modelscope", lambda: None)
+    def fake_ensure():
+        raise AssertionError("本地已存在模型分片，不应安装 modelscope")
+
+    monkeypatch.setattr(llamacpp, "ensure_modelscope", fake_ensure)
     monkeypatch.setattr(llamacpp, "snapshot_download", fake_snapshot_download)
 
     model, draft = llamacpp.download_gguf("unsloth/Qwen3.8-27B-GGUF", tmp_path, "Q4_K_M", True)
     assert model.name == "qwen3-Q4_K_M-00001-of-00002.gguf"
     assert draft is not None
     assert draft.name == "dspark-DeepSeek-V4-Flash-0731-Q8_0.gguf"
-    assert "allow_file_pattern" in captured
-    assert "*Q4_K_M*" in "|".join(captured["allow_file_pattern"])
+    assert captured == {}  # 未调用 snapshot_download
 
 
-def test_download_gguf_no_draft(tmp_path, monkeypatch):
+def test_download_gguf_skips_when_local_exists_no_draft(tmp_path, monkeypatch):
+    """本地已有分片但 want_dspark=False：跳过下载，草稿为 None。"""
     from modelctl.engines import llamacpp
 
     dest = tmp_path / "Qwen3.8-27B-GGUF"
@@ -147,16 +152,44 @@ def test_download_gguf_no_draft(tmp_path, monkeypatch):
         captured.update(kwargs)
         return local_dir
 
-    monkeypatch.setattr(llamacpp, "ensure_modelscope", lambda: None)
+    def fake_ensure():
+        raise AssertionError("本地已存在模型分片，不应安装 modelscope")
+
+    monkeypatch.setattr(llamacpp, "ensure_modelscope", fake_ensure)
     monkeypatch.setattr(llamacpp, "snapshot_download", fake_snapshot_download)
 
     model, draft = llamacpp.download_gguf("unsloth/Qwen3.8-27B-GGUF", tmp_path, "Q4_K_M", False)
     assert model.name == "qwen3-Q4_K_M-00001-of-00002.gguf"
     assert draft is None
+    assert captured == {}
+
+
+def test_download_gguf_downloads_when_missing(tmp_path, monkeypatch):
+    """本地无匹配分片：安装 modelscope 并调用 snapshot_download。"""
+    from modelctl.engines import llamacpp
+
+    dest = tmp_path / "Qwen3.8-27B-GGUF"
+    dest.mkdir(parents=True)
+
+    captured = {}
+
+    def fake_snapshot_download(model_id, local_dir, **kwargs):
+        captured.update(kwargs)
+        # 模拟下载产物：首个分片 + 草稿
+        Path(local_dir, "qwen3-Q4_K_M-00001-of-00002.gguf").write_bytes(b"x")
+        Path(local_dir, "dspark-DeepSeek-V4-Flash-0731-Q8_0.gguf").write_bytes(b"x")
+        return local_dir
+
+    monkeypatch.setattr(llamacpp, "ensure_modelscope", lambda: None)
+    monkeypatch.setattr(llamacpp, "snapshot_download", fake_snapshot_download)
+
+    model, draft = llamacpp.download_gguf("unsloth/Qwen3.8-27B-GGUF", tmp_path, "Q4_K_M", True)
+    assert model.name == "qwen3-Q4_K_M-00001-of-00002.gguf"
+    assert draft is not None
+    assert draft.name == "dspark-DeepSeek-V4-Flash-0731-Q8_0.gguf"
     assert "allow_file_pattern" in captured
-    patterns = "|".join(captured["allow_file_pattern"])
-    assert "*Q4_K_M*" in patterns
-    assert "dspark" not in patterns
+    assert "*Q4_K_M*" in "|".join(captured["allow_file_pattern"])
+    assert "dspark" in "|".join(captured["allow_file_pattern"])
 
 
 def test_check_requirements_allows_empty_model_with_download(tmp_path):

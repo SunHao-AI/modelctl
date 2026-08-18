@@ -57,16 +57,31 @@ def _find_first(destination: Path, patterns: list[str]) -> Path | None:
 def download_gguf(modelscope_id: str, model_root: Path, quant: str, want_dspark: bool) -> tuple[Path, Path | None]:
     """只下载指定量化版本的分片（需要时附带 DSpark 草稿）。
 
+    本地已存在匹配 quant 的分片时直接复用，不触发 modelscope 安装与下载。
     返回 (模型首分片, 草稿路径或 None)。不会下载整个仓库。
     """
-    ensure_modelscope()
-
     destination = model_root / modelscope_id.rsplit("/", 1)[-1]
+    model_patterns = [f"*{quant}*-00001-of-*.gguf", f"*{quant}*.gguf"]
+
+    # 本地已有匹配分片：跳过安装与下载，直接复用
+    model_match = _find_first(destination, model_patterns)
+    if model_match is not None:
+        logger.info(f"本地已存在模型分片，跳过下载：{model_match}")
+        draft_match = None
+        if want_dspark:
+            draft_match = _find_first(destination, DSPARK_PATTERNS)
+            if draft_match is None:
+                logger.warning(
+                    f"未在 {destination} 下找到 DSpark 草稿文件（{'、'.join(DSPARK_PATTERNS)}），DSpark 将不会启用。"
+                )
+            else:
+                logger.info(f"找到 DSpark 草稿：{draft_match}")
+        return model_match, draft_match
+
+    ensure_modelscope()
     destination.mkdir(parents=True, exist_ok=True)
 
-    patterns = [f"*{quant}*-00001-of-*.gguf", f"*{quant}*.gguf"]
-    if want_dspark:
-        patterns.extend(DSPARK_PATTERNS)
+    patterns = model_patterns + (DSPARK_PATTERNS if want_dspark else [])
 
     logger.info(f"从 ModelScope 下载 {modelscope_id} 的 {quant} 分片（{', '.join(patterns)}）：{destination}")
     try:
@@ -86,7 +101,7 @@ def download_gguf(modelscope_id: str, model_root: Path, quant: str, want_dspark:
         ) from error
 
     # ModelScope 保留仓库的 <quant>/ 子目录，分片不一定直接位于 destination 下。
-    model_match = _find_first(destination, [f"*{quant}*-00001-of-*.gguf", f"*{quant}*.gguf"])
+    model_match = _find_first(destination, model_patterns)
     if model_match is None:
         raise RequirementError(
             f"下载结束，但未找到 {quant} 的首分片：{destination}\n"
