@@ -33,6 +33,21 @@ def require(name: str) -> None:
         raise RequirementError(f"缺少 {name}。请安装后再运行脚本。")
 
 
+def _on_off(value: object) -> str:
+    """把 YAML 值规范化为 llama.cpp CLI 期望的 on/off（'auto' 透传）。
+
+    PyYAML 会把 on/off/true/false/yes/no 解析为布尔，str(True) 得到
+    'True' 而非 llama.cpp 接受的 'on'，此处统一转换后再透传给参数。
+    """
+    if isinstance(value, str) and value.strip().lower() == "auto":
+        return "auto"
+    if value is True:
+        return "on"
+    if value is False:
+        return "off"
+    return "on" if str(value).strip().lower() in ("on", "true", "1", "yes") else "off"
+
+
 def find_server(source: Path) -> Path:
     """定位编译产物 llama-server。
 
@@ -218,7 +233,7 @@ class LlamaCppAdapter(EngineAdapter):
             gpu_split,
             "--jinja",
             "--reasoning",
-            str(cfg.get("reasoning", "on")),
+            _on_off(cfg.get("reasoning", "on")),
             "--reasoning-format",
             str(cfg.get("reasoning_format", "deepseek")),
             "--flash-attn",
@@ -251,7 +266,7 @@ class LlamaCppAdapter(EngineAdapter):
                 "--n-gpu-layers-draft",
                 str(cfg.get("n_gpu_layers_draft", 999)),
             ]
-        cmd += ["--fit", str(cfg.get("fit", "off"))]
+        cmd += ["--fit", _on_off(cfg.get("fit", "off"))]
         if cfg.get("cache_type_k", "q8_0"):
             cmd += ["--cache-type-k", str(cfg.get("cache_type_k", "q8_0"))]
         if cfg.get("cache_type_v", "q8_0"):

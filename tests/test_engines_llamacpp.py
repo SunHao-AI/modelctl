@@ -38,6 +38,18 @@ def test_build_command(tmp_path):
     assert "--metrics" in cmd
 
 
+def test_build_command_on_off_from_yaml_bool(tmp_path):
+    """PyYAML 将 reasoning: on / fit: off 解析为布尔，应透传 on/off 而非 True/False。"""
+    caps = probe(nvidia_smi_output=SMI)
+    adapter = get_adapter("llamacpp")(
+        _profile(tmp_path, "  reasoning: on\n  fit: off\n"), caps
+    )
+    adapter.check_requirements()
+    cmd, _ = adapter.build_command()
+    assert cmd[cmd.index("--reasoning") + 1] == "on"
+    assert cmd[cmd.index("--fit") + 1] == "off"
+
+
 def test_dspark_disabled_when_no_draft(tmp_path):
     (tmp_path / "m.gguf").write_bytes(b"0" * 1024)
     (tmp_path / "ds.yaml").write_text(
