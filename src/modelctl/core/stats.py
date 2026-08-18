@@ -158,6 +158,8 @@ class UsageCollector:
             "predicted_rate": 0.0,
         }
         self._last = {"time": None, "predicted_total": 0.0}
+        self._rate_window: list[tuple[float, float, float]] = []
+        self._window_size = 10
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True) if mode == "poll" else None
         persisted_prompt, persisted_predicted = self._load_persisted()
@@ -196,6 +198,23 @@ class UsageCollector:
             # 持久化失败不应中断轮询；错误信息仅通过日志/后续 snapshot 暴露
             pass
 
+    def _record_window(self, now: float, prompt_total: float, predicted_total: float) -> None:
+        self._rate_window.append((now, prompt_total, predicted_total))
+        if len(self._rate_window) > self._window_size:
+            self._rate_window.pop(0)
+
+    def _compute_window_rate(self) -> tuple[float, float]:
+        if len(self._rate_window) < 2:
+            return 0.0, 0.0
+        oldest = self._rate_window[0]
+        latest = self._rate_window[-1]
+        dt = latest[0] - oldest[0]
+        if dt <= 0:
+            return 0.0, 0.0
+        prompt_rate = max((latest[1] - oldest[1]) / dt, 0.0)
+        predicted_rate = max((latest[2] - oldest[2]) / dt, 0.0)
+        return prompt_rate, predicted_rate
+
     def start(self) -> None:
         if self._thread is not None:
             self._thread.start()
@@ -229,20 +248,21 @@ class UsageCollector:
                 body = resp.read().decode("utf-8", errors="replace")
             metrics = parse_metrics(body, self.mapping)
             now = time.monotonic()
-            rate = metrics["predicted_rate"]
-            # 无速率 gauge 时，用轮询差值计算速率（保留现版回退逻辑）
-            last_time = self._last["time"]
-            last_total = self._last["predicted_total"]
-            if rate <= 0.0 and last_time is not None and last_total is not None:
-                delta_t = now - last_time
-                delta_tokens = metrics["predicted_total"] - last_total
-                if delta_t > 0:
-                    rate = max(delta_tokens / delta_t, 0.0)
             new_prompt = max(metrics["prompt_total"], self._baseline["prompt_total"])
             new_predicted = max(metrics["predicted_total"], self._baseline["predicted_total"])
             changed = new_prompt != self._baseline["prompt_total"] or new_predicted != self._baseline["predicted_total"]
             self._baseline["prompt_total"] = new_prompt
             self._baseline["predicted_total"] = new_predicted
+
+            # 滑动窗口回填速率：gauge > 0 用 gauge；gauge <= 0 时用窗口内累计差值计算速率
+            self._record_window(now, new_prompt, new_predicted)
+            if metrics["prompt_rate"] <= 0.0 or metrics["predicted_rate"] <= 0.0:
+                prompt_rate, predicted_rate = self._compute_window_rate()
+                if metrics["prompt_rate"] <= 0.0:
+                    metrics["prompt_rate"] = prompt_rate
+                if metrics["predicted_rate"] <= 0.0:
+                    metrics["predicted_rate"] = predicted_rate
+
             with self._lock:
                 self._snapshot = {
                     "ok": True,
@@ -250,7 +270,7 @@ class UsageCollector:
                     "prompt_total": new_prompt,
                     "predicted_total": new_predicted,
                     "prompt_rate": metrics["prompt_rate"],
-                    "predicted_rate": rate,
+                    "predicted_rate": metrics["predicted_rate"],
                 }
             if changed:
                 self._persist(new_prompt, new_predicted)

@@ -2,6 +2,8 @@
 
 import json
 import time
+import urllib.request
+from unittest.mock import patch
 
 from modelctl.core.stats import build_usage_payload, parse_metrics
 
@@ -107,3 +109,76 @@ def test_usage_collector_persists_totals(tmp_path):
     assert data["prompt_total"] == 300.0
     assert data["predicted_total"] == 500.0
     assert "updated_at" in data
+
+
+def test_usage_collector_sliding_window_rate(tmp_path):
+    data_dir = tmp_path / "cache"
+    data_dir.mkdir()
+    from modelctl.core.stats import UsageCollector
+    collector = UsageCollector(
+        name="demo",
+        base_url="http://127.0.0.1:8000",
+        poll_interval=5,
+        api_key=None,
+        data_dir=data_dir,
+        mode="on-demand",
+        mapping={},
+    )
+    now = 1000.0
+    collector._record_window(now, 0.0, 0.0)
+    collector._record_window(now + 1.0, 100.0, 50.0)
+    pr, rr = collector._compute_window_rate()
+    assert pr == 100.0
+    assert rr == 50.0
+
+
+def test_usage_collector_prefers_gauge_over_window(tmp_path):
+    data_dir = tmp_path / "cache"
+    data_dir.mkdir()
+    from modelctl.core.stats import UsageCollector
+    collector = UsageCollector(
+        name="demo",
+        base_url="http://127.0.0.1:8000",
+        poll_interval=5,
+        api_key=None,
+        data_dir=data_dir,
+        mode="on-demand",
+        mapping={
+            "prompt_total": ["prompt_tokens_total"],
+            "predicted_total": ["tokens_predicted_total"],
+            "prompt_rate": ["prompt_tokens_seconds"],
+            "predicted_rate": ["predicted_tokens_seconds"],
+        },
+    )
+    # 预填窗口制造确定性的窗口速率：若回填错误覆盖 gauge，会得到 400/600 tok/s
+    collector._record_window(1000.0, 0.0, 0.0)
+    collector._record_window(1001.0, 60.0, 30.0)
+
+    class FakeResp:
+        def __init__(self, body: str) -> None:
+            self._body = body.encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return self._body
+
+    metrics_text = (
+        "prompt_tokens_total 2000\n"
+        "tokens_predicted_total 3000\n"
+        "prompt_tokens_seconds 12.0\n"
+        "predicted_tokens_seconds 42.0\n"
+    )
+    with patch("modelctl.core.stats.time.monotonic", return_value=1005.0), patch.object(
+        urllib.request, "urlopen", return_value=FakeResp(metrics_text)
+    ):
+        collector._poll_once()
+
+    snap = collector.snapshot()
+    # gauge > 0 时优先使用 gauge，而不是窗口计算速率
+    assert snap["prompt_rate"] == 12.0
+    assert snap["predicted_rate"] == 42.0
