@@ -197,6 +197,43 @@ bash script/modelctl.sh stats stop
 tail -f ../logs/launch-deepseek-v4-flash-llamacpp-*.log   # 最近一次启动日志
 ```
 
+### 7. 多模型路由与统一网关
+
+B 机 nginx 通过 URL 路径把请求路由到不同模型；同时提供按 `model` 参数的统一网关。
+
+**访问地址**
+
+| 方式 | baseUrl / URL | 说明 |
+|---|---|---|
+| 路径式直连 | `https://xxx:5000/210/llm/deepseek-v4-flash/v1` | cc-switch 每模型一张卡片 |
+| 路径式直连 | `https://xxx:5000/210/llm/qwen3.8/v1` | 同上 |
+| 统一网关 | `https://xxx:5000/210/llm/v1` | body 里 `model=模型名` 切换；缺省/未知回退默认模型 |
+| 用量查询 | `https://xxx:5000/210/llm/<模型名>/v1/api/usage` | cc-switch 用量卡片 |
+
+**生成 nginx 注册表**
+
+```bash
+modelctl nginx-snippet --node 200 --host 192.168.77.220
+```
+
+输出 `map $uri $llm_model_target` 片段，上传到 B 机 `/etc/nginx/llm-routes/` 并 include（完整示例见 `docs/nginx/llm-routing.example.conf`）。新增模型只需新增一条 profile，重新生成即可。
+
+**启动/停止网关**
+
+```bash
+bash script/modelctl.sh gateway start    # 或 modelctl gateway start
+modelctl gateway status
+modelctl gateway stop
+```
+
+网关依赖 `fastapi/uvicorn/httpx`（optional extra）：
+
+```bash
+uv sync --extra dev --extra gateway
+```
+
+`.env` 中新增 `NODE_ID`、`NODE_HOST`、`GATEWAY_HOST`、`GATEWAY_PORT`、`GATEWAY_DEFAULT_MODEL`、`GATEWAY_READ_TIMEOUT`（见 `.env.example`）。
+
 ## 文档
 
 部署前置条件、目录布局、日志/停止/重启、参数速查等详见 [docs/DeepSeek-V4-Flash后台启动指南.md](docs/DeepSeek-V4-Flash后台启动指南.md)。
