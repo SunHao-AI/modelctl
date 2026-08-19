@@ -21,6 +21,7 @@ vllm:
   # tensor_parallel_size：张量并行 GPU 数（不得超过实际 GPU 数）
   tensor_parallel_size: 8
   # max_model_len：最大上下文长度（token）
+  # 注意：单序列完整可用（与并发无关）；KV 显存按 max_num_seqs × max_model_len 估算
   max_model_len: 131072
   # gpu_memory_utilization：显存利用率上限（0~1）
   gpu_memory_utilization: 0.9

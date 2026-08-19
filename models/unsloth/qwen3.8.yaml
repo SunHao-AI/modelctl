@@ -15,7 +15,8 @@ unsloth:
   # gguf_variant：Unsloth 动态量化后缀；model 为本地路径时忽略
   gguf_variant: Q4_K_M
   # context_length：请求的上下文长度
-  context_length: 65536
+  # 注意：单请求完整可用（与并发无关）；KV 显存 ≈ 并发 × context_length
+  context_length: 32768
   # tensor_parallel：多卡 GGUF tensor-parallel 加载（需至少 2 块 GPU）
   tensor_parallel: false
   # load_in_4bit：非 GGUF HF 模型的 4bit 加载

@@ -17,4 +17,5 @@ ollama:
   # num_parallel：并发请求数（OLLAMA_NUM_PARALLEL）
   num_parallel: 2
   # context_length：上下文长度（OLLAMA_CONTEXT_LENGTH）
+  # 注意：单请求完整可用（与并发无关）；KV 显存 ≈ 并发 × context_length
   context_length: 32768
