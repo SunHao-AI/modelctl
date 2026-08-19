@@ -19,7 +19,6 @@ def build_llm_map(profiles: list[Profile], node_id: str, host: str) -> str:
             raise ProfileError(f"模型名 {p.name} 含 nginx 正则不安全字符（仅允许 [A-Za-z0-9._-]）")
     lines = ["map $uri $llm_model_target {", '    default "";']
     for p in sorted(profiles, key=lambda x: x.name):
-        # brief Step 1 测试期望行首无缩进空格
-        lines.append(f"~^/{node_id}/llm/{p.name}/  http://{host}:{p.port};")
+        lines.append(f"    ~^/{node_id}/llm/{p.name}/  http://{host}:{p.port};")
     lines.append("}")
     return "\n".join(lines) + "\n"

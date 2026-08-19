@@ -17,8 +17,8 @@ def test_build_llm_map():
     lines = out.splitlines()
     assert lines[0] == "map $uri $llm_model_target {"
     assert '    default "";' in lines
-    assert "~^/210/llm/deepseek-v4-flash/  http://192.168.77.210:18888;" in lines
-    assert "~^/210/llm/qwen3.8/  http://192.168.77.210:11434;" in lines
+    assert '    ~^/210/llm/deepseek-v4-flash/  http://192.168.77.210:18888;' in lines
+    assert '    ~^/210/llm/qwen3.8/  http://192.168.77.210:11434;' in lines
     assert lines[-1] == "}"
 
 
