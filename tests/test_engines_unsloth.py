@@ -82,6 +82,32 @@ def test_unsloth_build_command_local_path_ignores_variant(tmp_path):
     assert cmd[cmd.index("--model") + 1] == str(tmp_path / "model.gguf")
 
 
+def test_unsloth_ui_spec_defaults_and_overrides(tmp_path):
+    p = _write(
+        tmp_path,
+        "name: u\nengine: unsloth\nport: 30000\n"
+        "unsloth:\n  model: m\n  ui:\n    port: 8888\n    allow_from: [192.168.77.202]\n",
+    )
+    a = get_adapter("unsloth")(p, CAPS8)
+    spec = a.ui_spec()
+    assert spec["cmd"][:4] == ["unsloth", "studio", "-H", "0.0.0.0"]
+    assert spec["cmd"][spec["cmd"].index("-p") + 1] == "8888"
+    assert spec["allow_from"] == ["192.168.77.202"]
+    # CLI 参数优先于 yaml
+    spec2 = a.ui_spec(port=9999, host="127.0.0.1")
+    assert spec2["cmd"][spec2["cmd"].index("-p") + 1] == "9999"
+    assert spec2["host"] == "127.0.0.1"
+
+
+def test_unsloth_ui_spec_without_yaml_config(tmp_path):
+    p = _write(tmp_path, "name: u\nengine: unsloth\nport: 30000\nunsloth:\n  model: m\n")
+    a = get_adapter("unsloth")(p, CAPS8)
+    spec = a.ui_spec()
+    assert spec is not None
+    assert spec["cmd"][spec["cmd"].index("-p") + 1] == "8888"  # 默认端口
+    assert spec["allow_from"] == []
+
+
 def test_unsloth_upstream_api_key_prefers_runtime_log(tmp_path, monkeypatch):
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     p = _write(

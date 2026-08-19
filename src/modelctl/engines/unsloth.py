@@ -30,6 +30,9 @@ from modelctl.engines.llamacpp import download_gguf
 UNSLOTH_BIN = "unsloth"
 STUDIO_RUN_ARGS = ["studio", "run", "--api-only"]
 
+# Web 管理控制台默认端口（非 api-only 的 `unsloth studio`）
+UI_DEFAULT_PORT = 8888
+
 # 启动日志中的运行时 API key 行（横幅与静默模式两种格式均可匹配）。
 _API_KEY_RE = re.compile(r"^\s*API Key:\s*(\S+)", re.MULTILINE)
 
@@ -117,6 +120,26 @@ class UnslothAdapter(EngineAdapter):
             cmd += shlex.split(str(cfg["extra_args"]))
         env = {"HF_HOME": os.environ["HF_HOME"]} if os.environ.get("HF_HOME") else {}
         return cmd, env
+
+    def ui_spec(self, port: int | None = None, host: str | None = None) -> dict | None:
+        """Web 管理控制台：`unsloth studio -H <host> -p <port>`（带前端，非 api-only）。
+
+        yaml `unsloth.ui.{port,host,allow_from}` 可配置，CLI 参数优先；
+        allow_from 为允许直连该端口的来源 IP（modelctl 启动时加 ufw 规则）。
+        """
+        cfg = self.profile.engine_config.get("ui") or {}
+        p = int(port or cfg.get("port") or UI_DEFAULT_PORT)
+        h = str(host or cfg.get("host") or "0.0.0.0")
+        raw_allow = cfg.get("allow_from") or []
+        if isinstance(raw_allow, str):
+            raw_allow = [raw_allow]
+        return {
+            "cmd": [UNSLOTH_BIN, "studio", "-H", h, "-p", str(p)],
+            "env": {},
+            "port": p,
+            "host": h,
+            "allow_from": [str(x) for x in raw_allow],
+        }
 
     def health_url(self) -> str:
         return f"http://127.0.0.1:{self.profile.port}/v1/models"

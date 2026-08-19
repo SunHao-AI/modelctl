@@ -67,3 +67,10 @@ class EngineAdapter(ABC):
     def wait_ready(self, timeout: float) -> bool:
         """等待后端就绪（默认：以上游 API key 探测 health_url）。"""
         return wait_health(self.health_url(), timeout, self.upstream_api_key())
+
+    def ui_spec(self, port: int | None = None, host: str | None = None) -> dict | None:
+        """Web 管理控制台规格 {cmd, env, port, host, allow_from}；引擎不提供时返回 None。
+
+        port/host/allow_from 可经 yaml 与 CLI 参数覆盖，优先级由实现方保证。
+        """
+        return None

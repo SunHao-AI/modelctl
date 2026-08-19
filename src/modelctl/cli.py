@@ -2,7 +2,7 @@
 """modelctl.py — 多模型部署启动器 CLI 入口。
 
 子命令：start <name> [--timeout 300] / stop <name> / restart <name> /
-        status [name] / list / probe / stats start|stop
+        status [name] / list / probe / stats start|stop / ui start|stop <name>
 
 流程约定：
 - 所有子命令先 load_env()（注入 .env），再 probe() 探测硬件能力。
@@ -39,6 +39,7 @@ from modelctl.core.process import (
 )
 from modelctl.core.profile import ProfileError, list_profiles, load_profile
 from modelctl.core.stats import USAGE_PORT
+from modelctl.core.ufw import ensure_ufw_allow
 from modelctl.engines import get_adapter
 from modelctl.engines.base import RequirementError
 
@@ -82,6 +83,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("action", choices=["start", "stop"])
     gp = sub.add_parser("gateway", help="统一网关（model 参数路由）控制")
     gp.add_argument("action", choices=["start", "stop", "status"])
+    up = sub.add_parser("ui", help="Web 管理控制台控制（unsloth studio UI）")
+    up.add_argument("action", choices=["start", "stop"])
+    up.add_argument("name", help="profile 名称（实例记为 ui-<name>，与推理服务独立）")
+    up.add_argument("--port", type=int, default=None, help="控制台监听端口（默认 yaml unsloth.ui.port 或 8888）")
+    up.add_argument("--host", default=None, help="控制台绑定地址（默认 yaml unsloth.ui.host 或 0.0.0.0）")
+    up.add_argument(
+        "--allow-from",
+        dest="allow_from",
+        action="append",
+        default=[],
+        metavar="IP",
+        help="允许直连端口的来源 IP，启动时添加对应 ufw 规则；可重复（默认 yaml unsloth.ui.allow_from）",
+    )
     ns = sub.add_parser("nginx-snippet", help="生成 nginx 多模型路由 map 片段")
     ns.add_argument("--node", required=True, help="节点编号（URL 前缀，如 210）")
     ns.add_argument("--host", required=True, help="节点 IP（如 192.168.77.210）")
@@ -303,6 +317,52 @@ def _cmd_gateway_status() -> int:
     return 0
 
 
+def _cmd_ui_start(args, models_dir: Path | None, caps) -> int:
+    profile = load_profile(args.name, models_dir)
+    adapter = get_adapter(profile.engine)(profile, caps)
+    spec = adapter.ui_spec(port=args.port, host=args.host)
+    if spec is None:
+        logger.error(f"{profile.name}：引擎 {profile.engine} 不提供 Web 管理控制台（当前仅 unsloth 支持）")
+        return 2
+    instance = f"ui-{profile.name}"
+    if is_running(instance):
+        logger.info(
+            f"Web 控制台已在运行（{instance}, http://{spec['host']}:{spec['port']}）；重启请先 `modelctl ui stop {args.name}`"
+        )
+        return 0
+    # ufw 入站白名单：只放行指定来源 IP 直连 UI 端口，避免控制台裸奔
+    allow_from = args.allow_from or spec["allow_from"]
+    for src in allow_from:
+        if not ensure_ufw_allow(src, spec["port"]):
+            logger.warning(
+                f"添加 ufw 规则失败（{src} → :{spec['port']}），请手动执行："
+                f"ufw allow from {src} to any port {spec['port']} proto tcp"
+            )
+    if not allow_from:
+        logger.warning(f"未配置 --allow-from / yaml allow_from，端口 {spec['port']} 在局域网无访问限制，注意安全")
+    pid = start_detached(instance, spec["cmd"], spec["env"])
+    log = launch_log(instance)
+    logger.info(f"Web 控制台已启动（{instance}, PID {pid}），监听 http://{spec['host']}:{spec['port']}")
+    if allow_from:
+        logger.info("允许的来源 IP（ufw 白名单）：" + ", ".join(allow_from))
+    if log is not None:
+        logger.info(f"日志：{log}")
+    return 0
+
+
+def _cmd_ui_stop(args, models_dir: Path | None, caps) -> int:
+    profile = load_profile(args.name, models_dir)
+    adapter = get_adapter(profile.engine)(profile, caps)
+    instance = f"ui-{profile.name}"
+    if not is_running(instance) and not pid_file(instance).is_file():
+        logger.info(f"Web 控制台未在运行（{instance}）")
+        return 0
+    # 仅按 PID/端口终止；不按进程名 pkill，避免误杀 `unsloth studio run` 推理实例
+    stop_instance(instance, (adapter.ui_spec() or {}).get("port", 0), [])
+    logger.info(f"已停止 Web 控制台（{instance}）")
+    return 0
+
+
 def _cmd_nginx_snippet(args, models_dir) -> int:
     print(build_llm_map(list_profiles(models_dir), args.node, args.host), end="")
     return 0
@@ -338,6 +398,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.action == "stop":
                 return _cmd_gateway_stop()
             return _cmd_gateway_status()
+        if args.command == "ui":
+            return _cmd_ui_start(args, models_dir, caps) if args.action == "start" else _cmd_ui_stop(args, models_dir, caps)
         if args.command == "nginx-snippet":
             return _cmd_nginx_snippet(args, models_dir)
     except (ProfileError, RequirementError) as error:

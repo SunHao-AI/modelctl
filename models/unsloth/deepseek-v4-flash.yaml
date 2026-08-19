@@ -21,6 +21,11 @@ unsloth:
   tensor_parallel: false
   # load_in_4bit：非 GGUF HF 模型的 4bit 加载
   load_in_4bit: false
+  # Web 管理控制台（modelctl ui start）：监听 LAN 地址供 nginx/SSH 隧道转发访问；
+  # allow_from 为允许直连 UI 端口的来源 IP（启动时自动添加对应 ufw 规则）
+  ui:
+    port: 8888
+    allow_from: [192.168.77.202]
   # download：ModelScope 自动下载配置（model 不存在本地路径时触发）
   download:
     # modelscope_id：ModelScope 仓库 ID（GGUF 格式）
