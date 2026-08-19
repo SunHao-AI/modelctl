@@ -217,7 +217,7 @@ B 机 nginx 通过 URL 路径把请求路由到不同模型；同时提供按 `m
 modelctl nginx-snippet --node 210 --host 192.168.77.210
 ```
 
-输出 `map $uri $llm_model_target` 片段，上传到 B 机 `/etc/nginx/llm-routes/` 并 include（完整示例见 `docs/nginx/llm-routing.example.conf`）。新增模型只需新增一条 profile，重新生成即可。
+输出 `map $uri $llm_model_target` 片段，上传到 B 机 `/etc/nginx/conf.d/` 并 `nginx -t && systemctl reload nginx`（`conf.d/*.conf` 已被 nginx.conf 默认 include，无需改主配置；完整示例见 `docs/nginx/llm-routing.example.conf`）。新增模型只需新增一条 profile，重新生成即可。
 
 **启动/停止网关**
 
