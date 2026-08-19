@@ -49,5 +49,12 @@ class EngineAdapter(ABC):
     def stop_patterns(self) -> list[str]:
         return []
 
+    def upstream_model_name(self) -> str:
+        """后端 API 期望的模型名（网关改写请求体 model 字段的目标）。
+
+        默认 = profile.name（llama-server 等忽略 model 名，无需改写）。
+        """
+        return self.profile.name
+
     def api_key_args(self) -> list[str]:
         return ["--api-key", self.profile.api_key] if self.profile.api_key else []

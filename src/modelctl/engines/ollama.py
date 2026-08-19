@@ -67,3 +67,7 @@ class OllamaAdapter(EngineAdapter):
 
     def metrics_mapping(self) -> None:
         return None
+
+    def upstream_model_name(self) -> str:
+        # ollama 严格校验 body.model，必须改写为 ollama.model（如 qwen3.8:27b）
+        return str(self.profile.engine_config["model"])

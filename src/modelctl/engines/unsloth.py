@@ -106,6 +106,9 @@ class UnslothAdapter(EngineAdapter):
     def metrics_mapping(self) -> None:
         return None
 
+    def upstream_model_name(self) -> str:
+        return str(self.profile.engine_config.get("model") or self.profile.name)
+
     def post_start(self) -> None:
         """预热：向 OpenAI 兼容端点发一个最小请求，降低首个请求冷启动延迟；失败不阻塞启动。"""
         body = json.dumps({"model": "default", "messages": [{"role": "user", "content": "ping"}]}).encode()

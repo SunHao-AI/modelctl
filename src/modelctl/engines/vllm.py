@@ -72,5 +72,8 @@ class VllmAdapter(EngineAdapter):
             "predicted_rate": [],
         }
 
+    def upstream_model_name(self) -> str:
+        return str(self.profile.engine_config.get("model") or self.profile.name)
+
     def stop_patterns(self) -> list[str]:
         return ["vllm"]
