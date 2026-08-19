@@ -9,7 +9,6 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
 from pathlib import Path
 
 from modelctl.core.envfile import PROJECT_ROOT
@@ -21,20 +20,30 @@ def log_dir() -> Path:
     return d
 
 
+def cache_dir() -> Path:
+    """进程元数据目录（PID 文件），默认项目根 data/cache（与用量统计缓存一致）。"""
+    d = Path(os.environ.get("CACHE_DIR") or PROJECT_ROOT / "data" / "cache")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def pid_file(name: str) -> Path:
-    return log_dir() / f"{name}.pid"
+    return cache_dir() / f"{name}.pid"
 
 
 def launch_log(name: str) -> Path | None:
-    logs = sorted(log_dir().glob(f"launch-{name}-*.log"))
-    return logs[-1] if logs else None
+    """当前实例的启动日志（固定文件名 launch-<name>.log；未启动过则为 None）。
+
+    固定文件名 + 每次启动覆盖，避免多份时间戳日志堆积。
+    """
+    path = log_dir() / f"launch-{name}.log"
+    return path if path.is_file() else None
 
 
 def start_detached(name: str, command: list[str], extra_env: dict[str, str]) -> int:
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    log_path = log_dir() / f"launch-{name}-{stamp}.log"
+    log_path = log_dir() / f"launch-{name}.log"
     env = {**os.environ, **extra_env}
-    fp = open(log_path, "a", encoding="utf-8")
+    fp = open(log_path, "w", encoding="utf-8")  # "w"：每次启动覆盖旧日志
     kwargs: dict = {"stdout": fp, "stderr": subprocess.STDOUT, "env": env, "stdin": subprocess.DEVNULL}
     kwargs["start_new_session"] = True  # nohup 语义：SSH 断开不影响
     proc = subprocess.Popen(command, **kwargs)
