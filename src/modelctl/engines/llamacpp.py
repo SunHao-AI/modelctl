@@ -215,7 +215,10 @@ class LlamaCppAdapter(EngineAdapter):
         )
         server = str(find_server(source))
         parallel = int(cfg.get("parallel", 2))
-        ctx = int(cfg["ctx_size"]) if cfg.get("ctx_size") else parallel * CTX_PER_SLOT
+        # ctx_size 语义 = 单槽（每并发请求）完整可用的上下文，与其他引擎一致；
+        # llama-server 的 --ctx-size 是总量（槽位共享），故总量 = 单槽 × parallel。
+        per_slot = int(cfg["ctx_size"]) if cfg.get("ctx_size") else CTX_PER_SLOT
+        ctx = per_slot * parallel
         gpu_split = ",".join(["1"] * int(cfg.get("gpu_count", 8)))
         cmd = [
             server,

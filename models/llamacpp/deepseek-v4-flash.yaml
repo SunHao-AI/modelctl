@@ -19,8 +19,9 @@ llamacpp:
   draft: ""
   # parallel：并发槽位数（同时处理多少请求），显存占用随其增长
   parallel: 2
-  # ctx_size：上下文长度；留空 = parallel × 1,048,576（1M）
-  # 注意：单槽上下文 = ctx_size / parallel（总量分摊）；要让单请求达 N，需 ctx_size ≥ N × parallel
+  # ctx_size：单槽（每并发请求）完整可用的上下文；留空 = 1,048,576（1M）
+  # 注意：llama-server 的 --ctx-size 是总量，实际启动总量 = ctx_size × parallel
+  #（留空时每槽 1M；与其他引擎的 context_length/max_model_len 语义一致）
   ctx_size: ""
   # reasoning：是否输出推理过程内容（on/off）
   reasoning: on

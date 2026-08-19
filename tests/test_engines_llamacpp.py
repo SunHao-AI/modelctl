@@ -39,6 +39,15 @@ def test_build_command(tmp_path):
     assert "--metrics" in cmd
 
 
+def test_build_command_ctx_size_is_per_slot(tmp_path):
+    """ctx_size 语义 = 每并发请求完整可用（与其他引擎一致）；--ctx-size 总量 = ctx_size × parallel。"""
+    caps = probe(nvidia_smi_output=SMI)
+    adapter = get_adapter("llamacpp")(_profile(tmp_path, "  ctx_size: 32768\n"), caps)
+    adapter.check_requirements()
+    cmd, _ = adapter.build_command()
+    assert cmd[cmd.index("--ctx-size") + 1] == str(32768 * 2)  # parallel=2
+
+
 def test_build_command_on_off_from_yaml_bool(tmp_path):
     """PyYAML 将 reasoning: on / fit: off 解析为布尔，应透传 on/off 而非 True/False。"""
     caps = probe(nvidia_smi_output=SMI)
