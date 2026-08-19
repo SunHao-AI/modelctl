@@ -26,7 +26,7 @@ llamacpp:
   # ctx_size：单槽（每并发请求）完整可用的上下文；留空 = 1,048,576（1M）
   # 注意：llama-server 的 --ctx-size 是总量，实际启动总量 = ctx_size × parallel
   #（本配置 32768 × 2 = 65536，每个并发请求都能用满 32768，与其他引擎语义一致）
-  ctx_size: 32768
+  ctx_size: 262144
   # reasoning：是否输出推理过程内容（on/off）
   reasoning: on
   # reasoning_format：推理内容格式（deepseek / none 等）

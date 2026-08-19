@@ -21,7 +21,7 @@ sglang:
   tensor_parallel_size: 2
   # context_length：最大上下文长度（token）
   # 注意：单序列完整可用（与并发无关）；KV 显存 ≈ 并发 × context_length
-  context_length: 32768
+  context_length: 262144
   # mem_fraction_static：静态显存分配比例（0~1），预留 KV cache 空间
   mem_fraction_static: 0.9
   # extra_args：透传给 `sglang.launch_server` 的额外参数（空格分隔，按 shlex 拆分）

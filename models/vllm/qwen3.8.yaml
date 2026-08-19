@@ -21,7 +21,7 @@ vllm:
   tensor_parallel_size: 2
   # max_model_len：最大上下文长度（token）
   # 注意：单序列完整可用（与并发无关）；KV 显存按 max_num_seqs × max_model_len 估算
-  max_model_len: 32768
+  max_model_len: 262144
   # gpu_memory_utilization：显存利用率上限（0~1）
   gpu_memory_utilization: 0.9
   # quantization：量化方式（可选，如 fp8；FP8 需要 CC ≥ 8.9）
