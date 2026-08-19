@@ -122,33 +122,43 @@ def create_app(
         if auth:
             headers["Authorization"] = auth
         url = f"{target.backend_url}/v1/{path}"
-        async with httpx.AsyncClient(timeout=read_timeout, transport=transport) as client:
-            try:
-                if body.get("stream"):
-                    req = client.build_request("POST", url, json=body, headers=headers)
-                    upstream = await client.send(req, stream=True)  # stream=True：连接保持打开，逐块读 SSE
-                    ctype = upstream.headers.get("content-type")
-                    if upstream.status_code >= 400:
-                        content = await upstream.aread()
-                        return Response(status_code=upstream.status_code, content=content, media_type=ctype)
-                    return StreamingResponse(_iter_stream(upstream), status_code=upstream.status_code, media_type=ctype)
-                upstream = await client.post(url, json=body, headers=headers)
-                return Response(
-                    status_code=upstream.status_code,
-                    content=upstream.content,
-                    media_type=upstream.headers.get("content-type"),
-                )
-            except httpx.HTTPError as error:
-                err_msg = f"后端不可达：{error}"
-                return JSONResponse(status_code=502, content={"error": {"message": err_msg, "type": "upstream_error"}})
+        # 注意：不能用 `async with` 包裹后返回 StreamingResponse——客户端会在端点
+        # 返回时立即关闭，而 SSE 是惰性迭代的，真实 uvicorn 下连接会被提前切断。
+        # 因此手动管理生命周期：非流式读完即关；流式由生成器在迭代结束后关闭。
+        client = httpx.AsyncClient(timeout=read_timeout, transport=transport)
+        try:
+            if body.get("stream"):
+                req = client.build_request("POST", url, json=body, headers=headers)
+                upstream = await client.send(req, stream=True)  # stream=True：连接保持打开，逐块读 SSE
+                ctype = upstream.headers.get("content-type")
+                if upstream.status_code >= 400:
+                    content = await upstream.aread()
+                    await client.aclose()
+                    return Response(status_code=upstream.status_code, content=content, media_type=ctype)
+
+                async def _sse_stream(upstream=upstream, client=client):
+                    """透传后端 SSE 响应体，迭代结束（含异常）后关闭上游连接。"""
+                    try:
+                        async for chunk in upstream.aiter_bytes():
+                            yield chunk
+                    finally:
+                        await client.aclose()
+
+                return StreamingResponse(_sse_stream(), status_code=upstream.status_code, media_type=ctype)
+            upstream = await client.post(url, json=body, headers=headers)
+            resp = Response(
+                status_code=upstream.status_code,
+                content=upstream.content,
+                media_type=upstream.headers.get("content-type"),
+            )
+            await client.aclose()
+            return resp
+        except httpx.HTTPError as error:
+            await client.aclose()
+            err_msg = f"后端不可达：{error}"
+            return JSONResponse(status_code=502, content={"error": {"message": err_msg, "type": "upstream_error"}})
 
     return app
-
-
-async def _iter_stream(upstream):
-    """逐块透传后端响应体（SSE 流式）。"""
-    async for chunk in upstream.aiter_bytes():
-        yield chunk
 
 
 def main() -> None:
