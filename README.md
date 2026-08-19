@@ -238,6 +238,8 @@ uv sync --extra dev --extra gateway
 
 部署前置条件、目录布局、日志/停止/重启、参数速查等详见 [docs/DeepSeek-V4-Flash后台启动指南.md](docs/DeepSeek-V4-Flash后台启动指南.md)。
 
+多模型 nginx 路由的部署与测试步骤详见 [docs/nginx/测试指南.md](docs/nginx/测试指南.md)（nginx 参考配置见 [docs/nginx/llm-routing.example.conf](docs/nginx/llm-routing.example.conf)）。
+
 ## 说明
 
 - 模型级配置（模型路径、端口、并行度、量化、用量单价）在 `models/*.yaml` 中管理，全局配置（API 密钥、存储目录、日志目录、统计服务）在 `.env` 中管理
