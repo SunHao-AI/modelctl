@@ -160,7 +160,11 @@ def _cmd_start(args, models_dir: Path | None, caps) -> int:
     cmd, env = adapter.build_command()
     pid = start_detached(name, cmd, env)
     logger.info(f"已启动 {name}（PID {pid}），等待健康检查（超时 {args.timeout:g}s）...")
-    if wait_health(adapter.health_url(), args.timeout, profile.api_key):
+    if adapter.wait_ready(args.timeout):
+        upstream_key = adapter.upstream_api_key()
+        if upstream_key and upstream_key != profile.api_key:
+            # unsloth 等自管认证引擎的运行时 key，客户端需以此调用后端
+            logger.info(f"上游 API Key（本次启动自动生成）：{upstream_key}")
         adapter.post_start()
         log = launch_log(name)
         logger.info(f"启动成功：{name} 运行于 http://127.0.0.1:{profile.port}")
@@ -206,7 +210,7 @@ def _cmd_status(args, models_dir: Path | None, caps) -> int:
         if state == "运行中":
             try:
                 adapter = get_adapter(p.engine)(p, caps)
-                ok = wait_health(adapter.health_url(), 3.0, p.api_key)
+                ok = adapter.wait_ready(3.0)
                 health = "正常" if ok else "无响应"
             except Exception:  # noqa: BLE001 —— 健康检查失败不阻塞表格输出
                 health = "未知"

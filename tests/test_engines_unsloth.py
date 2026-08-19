@@ -29,19 +29,17 @@ def test_unsloth_requirements_rejects_without_binary(tmp_path):
         a.check_requirements()
 
 
-def test_unsloth_requirements_requires_api_key(tmp_path):
+def test_unsloth_requirements_no_api_key_needed(tmp_path):
+    # API key 由 unsloth 运行时自动生成并打印到启动日志，profile 无需配置
     p = _write(tmp_path, "name: u\nengine: unsloth\nport: 30000\nunsloth:\n  model: m\n")
     a = get_adapter("unsloth")(p, CAPS8)
-    with pytest.raises(RequirementError, match="api_key"):
-        a.check_requirements()
+    a.check_requirements()
 
 
 def test_unsloth_requirements_allow_download_only(tmp_path):
     p = _write(
         tmp_path,
-        "name: u\nengine: unsloth\nport: 30000\napi_key: k\n"
-        "unsloth:\n  model: ''\n  download:\n    modelscope_id: unsloth/DeepSeek-V4-Flash-0731-GGUF\n"
-        "    quant: UD-Q8_K_XL\n",
+        "name: u\nengine: unsloth\nport: 30000\napi_key: k\n" "unsloth:\n  model: ''\n  download:\n    modelscope_id: unsloth/DeepSeek-V4-Flash-0731-GGUF\n" "    quant: UD-Q8_K_XL\n",
     )
     a = get_adapter("unsloth")(p, CAPS8)
     a.check_requirements()  # model 为空但有 download 段时不应报错
@@ -50,40 +48,83 @@ def test_unsloth_requirements_allow_download_only(tmp_path):
 def test_unsloth_tensor_parallel_requires_2_gpus(tmp_path):
     p = _write(
         tmp_path,
-        "name: u\nengine: unsloth\nport: 30000\napi_key: k\n"
-        "unsloth:\n  model: m\n  tensor_parallel: true\n",
+        "name: u\nengine: unsloth\nport: 30000\napi_key: k\n" "unsloth:\n  model: m\n  tensor_parallel: true\n",
     )
     a = get_adapter("unsloth")(p, Capabilities(gpu_count=1, binaries={"unsloth": True}))
     with pytest.raises(RequirementError, match="2 块 GPU"):
         a.check_requirements()
 
 
-def test_unsloth_build_command(tmp_path, monkeypatch):
-    monkeypatch.setenv("UNSLOTH_API_KEY", "sk-test")
+def test_unsloth_build_command(tmp_path):
     p = _write(
         tmp_path,
-        "name: u\nengine: unsloth\nport: 30000\napi_key: ${UNSLOTH_API_KEY}\n"
-        "unsloth:\n  model: unsloth/Test-GGUF\n  gguf_variant: UD-Q4_K_XL\n  context_length: 32768\n",
+        "name: u\nengine: unsloth\nport: 30000\n" "unsloth:\n  model: unsloth/Test-GGUF\n  gguf_variant: UD-Q4_K_XL\n  context_length: 32768\n",
     )
     a = get_adapter("unsloth")(p, CAPS8)
     cmd, _env = a.build_command()
-    assert cmd[:3] == ["unsloth", "studio", "--api-only"]
+    # studio 是命令组，run 子命令承载模型/网络 flag；不传 --api-key（运行时自动生成）
+    assert cmd[:4] == ["unsloth", "studio", "run", "--api-only"]
+    assert cmd[cmd.index("-H") + 1] == "0.0.0.0"
     assert cmd[cmd.index("-p") + 1] == "30000"
     assert cmd[cmd.index("--model") + 1] == "unsloth/Test-GGUF:UD-Q4_K_XL"
     assert cmd[cmd.index("--context-length") + 1] == "32768"
-    assert cmd[cmd.index("--api-key") + 1] == "sk-test"
+    assert "--api-key" not in cmd
 
 
 def test_unsloth_build_command_local_path_ignores_variant(tmp_path):
     p = _write(
         tmp_path,
-        f"name: u\nengine: unsloth\nport: 30000\nunsloth:\n  model: {tmp_path}/model.gguf\n"
-        f"  gguf_variant: UD-Q4_K_XL\n",
+        f"name: u\nengine: unsloth\nport: 30000\nunsloth:\n  model: {tmp_path}/model.gguf\n" f"  gguf_variant: UD-Q4_K_XL\n",
     )
     (tmp_path / "model.gguf").write_text("x", encoding="utf-8")
     a = get_adapter("unsloth")(p, CAPS8)
     cmd, _env = a.build_command()
     assert cmd[cmd.index("--model") + 1] == str(tmp_path / "model.gguf")
+
+
+def test_unsloth_upstream_api_key_prefers_runtime_log(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+    p = _write(
+        tmp_path,
+        "name: u\nengine: unsloth\nport: 30000\napi_key: static-key\nunsloth:\n  model: m\n",
+    )
+    a = get_adapter("unsloth")(p, CAPS8)
+    assert a.upstream_api_key() == "static-key"  # 无启动日志时兜底 profile.api_key
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)  # launch_log() 可能已创建该目录
+    (log_dir / "launch-u.log").write_text(
+        "Loading model: ...\nAPI Key:      sk-unsloth-abc123\ncurl ... Bearer sk-unsloth-abc123 ...\n",
+        encoding="utf-8",
+    )
+    assert a.upstream_api_key() == "sk-unsloth-abc123"
+
+
+def test_unsloth_wait_ready_uses_runtime_key(tmp_path, monkeypatch):
+    import modelctl.engines.unsloth as mod
+
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+    p = _write(tmp_path, "name: u\nengine: unsloth\nport: 30000\nunsloth:\n  model: m\n")
+    a = get_adapter("unsloth")(p, CAPS8)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "launch-u.log").write_text("API Key: sk-unsloth-xyz\n", encoding="utf-8")
+    seen = {}
+
+    def fake_wait(url, timeout, api_key=None):
+        seen.update(url=url, key=api_key)
+        return True
+
+    monkeypatch.setattr(mod, "wait_health", fake_wait)
+    assert a.wait_ready(5.0) is True
+    assert seen["url"] == "http://127.0.0.1:30000/v1/models"
+    assert seen["key"] == "sk-unsloth-xyz"
+
+
+def test_unsloth_wait_ready_times_out_without_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+    p = _write(tmp_path, "name: u\nengine: unsloth\nport: 30000\nunsloth:\n  model: m\n")
+    a = get_adapter("unsloth")(p, CAPS8)
+    assert a.wait_ready(1.0) is False  # 启动日志无 API Key 行 → 等到超时返回 False
 
 
 def test_unsloth_health_url_and_metrics(tmp_path):
@@ -98,9 +139,7 @@ def test_unsloth_pre_start_downloads_and_persists(tmp_path, monkeypatch):
     monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "model-gguf"))
     p = _write(
         tmp_path,
-        "name: u\nengine: unsloth\nport: 30000\n"
-        "unsloth:\n  model: ''\n  download:\n"
-        "    modelscope_id: unsloth/DeepSeek-V4-Flash-0731-GGUF\n    quant: UD-Q8_K_XL\n",
+        "name: u\nengine: unsloth\nport: 30000\n" "unsloth:\n  model: ''\n  download:\n" "    modelscope_id: unsloth/DeepSeek-V4-Flash-0731-GGUF\n    quant: UD-Q8_K_XL\n",
     )
     a = get_adapter("unsloth")(p, CAPS8)
 
@@ -141,9 +180,7 @@ def test_unsloth_pre_start_download_failure_hints_hf(tmp_path, monkeypatch):
     monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "model-gguf"))
     p = _write(
         tmp_path,
-        "name: u\nengine: unsloth\nport: 30000\n"
-        "unsloth:\n  model: ''\n  download:\n"
-        "    modelscope_id: unsloth/DeepSeek-V4-Flash-0731-GGUF\n    quant: UD-Q8_K_XL\n",
+        "name: u\nengine: unsloth\nport: 30000\n" "unsloth:\n  model: ''\n  download:\n" "    modelscope_id: unsloth/DeepSeek-V4-Flash-0731-GGUF\n    quant: UD-Q8_K_XL\n",
     )
     a = get_adapter("unsloth")(p, CAPS8)
 
@@ -156,6 +193,7 @@ def test_unsloth_pre_start_download_failure_hints_hf(tmp_path, monkeypatch):
 
 
 def test_unsloth_post_start_sends_chat_request(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))  # 隔离：无启动日志时兜底 profile.api_key
     p = _write(tmp_path, "name: u\nengine: unsloth\nport: 30000\napi_key: k\nunsloth:\n  model: m\n")
     a = get_adapter("unsloth")(p, CAPS8)
     seen = {}

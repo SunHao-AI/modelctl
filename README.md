@@ -30,19 +30,27 @@ modelctl/
 ├── models/                         # 模型 profile（每模型一个 YAML，按引擎分目录）
 │   ├── llamacpp/                   # llamacpp 引擎 profile 子目录
 │   │   ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（llamacpp + DSpark）
-│   │   └── qwen3.8.yaml            # Qwen3.8-27B GGUF（llamacpp）
+│   │   ├── qwen3.8.yaml            # Qwen3.8-27B GGUF（llamacpp）
+│   │   ├── qwen3-coder.yaml        # Qwen3-Coder-480B MoE GGUF（llamacpp，8 卡全量）
+│   │   └── kimi-k2.5.yaml          # Kimi-K2.5 120B dense GGUF（llamacpp）
 │   ├── ollama/                     # ollama 引擎 profile 子目录
 │   │   ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（ollama）
-│   │   └── qwen3.8.yaml            # Qwen3.8-27B（ollama）
+│   │   ├── qwen3.8.yaml            # Qwen3.8-27B（ollama）
+│   │   ├── qwen3-coder.yaml        # Qwen3-Coder-480B（ollama）
+│   │   └── kimi-k2.5.yaml          # Kimi-K2.5（ollama）
 │   ├── vllm/                       # vllm 引擎 profile 子目录
 │   │   ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（vllm）
-│   │   └── qwen3.8.yaml            # Qwen3.8-27B（vllm）
+│   │   ├── qwen3.8.yaml            # Qwen3.8-27B（vllm）
+│   │   └── kimi-k2.5.yaml          # Kimi-K2.5（vllm；qwen3-coder 无此变体：HF 权重超总显存）
 │   ├── sglang/                     # sglang 引擎 profile 子目录
 │   │   ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（sglang）
-│   │   └── qwen3.8.yaml            # Qwen3.8-27B（sglang）
+│   │   ├── qwen3.8.yaml            # Qwen3.8-27B（sglang）
+│   │   └── kimi-k2.5.yaml          # Kimi-K2.5（sglang；qwen3-coder 同上）
 │   └── unsloth/                    # unsloth 引擎 profile 子目录
 │       ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（unsloth）
-│       └── qwen3.8.yaml            # Qwen3.8-27B（unsloth）
+│       ├── qwen3.8.yaml            # Qwen3.8-27B（unsloth）
+│       ├── qwen3-coder.yaml        # Qwen3-Coder-480B（unsloth，多卡 GGUF 分片）
+│       └── kimi-k2.5.yaml          # Kimi-K2.5（unsloth）
 ├── .env.example                    # 全局配置模板（复制为 .env 后修改）
 ├── .env                            # 本地配置（含密钥，不入库）
 ├── .gitignore
@@ -79,11 +87,11 @@ vi .env        # 修改 API 密钥、存储目录、日志目录等全局配置
 >
 > | 引擎 | 控制下载/缓存位置的环境变量 |
 > |---------|----------------------------|
-> | llamacpp（`deepseek-v4-flash-llamacpp` / `qwen3.8-llamacpp`） | `MODEL_ROOT`（GGUF 保存父目录）、`MODELSCOPE_CACHE` |
-> | ollama（`deepseek-v4-flash-ollama` / `qwen3.8-ollama`） | `OLLAMA_MODELS` |
-> | vllm（`deepseek-v4-flash-vllm` / `qwen3.8-vllm`） | `MODEL_ROOT`（ModelScope 下载目录）、`HF_HOME`（vLLM 缓存） |
-> | sglang（`deepseek-v4-flash-sglang` / `qwen3.8-sglang`） | `MODEL_ROOT`（ModelScope 下载目录）、`HF_HOME`（SGLang 缓存） |
-> | unsloth（`deepseek-v4-flash-unsloth` / `qwen3.8-unsloth`） | `UNSLOTH_API_KEY`（必填）、`HF_ENDPOINT`（HF 兜底镜像）、`MODEL_ROOT`（ModelScope 下载） |
+> | llamacpp（全部 `-llamacpp` profile：deepseek-v4-flash / qwen3.8 / qwen3-coder / kimi-k2.5） | `MODEL_ROOT`（GGUF 保存父目录）、`MODELSCOPE_CACHE` |
+> | ollama（全部 `-ollama` profile） | `OLLAMA_MODELS` |
+> | vllm（全部 `-vllm` profile） | `MODEL_ROOT`（ModelScope 下载目录）、`HF_HOME`（vLLM 缓存） |
+> | sglang（全部 `-sglang` profile） | `MODEL_ROOT`（ModelScope 下载目录）、`HF_HOME`（SGLang 缓存） |
+> | unsloth（全部 `-unsloth` profile） | `UNSLOTH_API_KEY`（必填）、`HF_ENDPOINT`（HF 兜底镜像）、`MODEL_ROOT`（ModelScope 下载） |
 
 ### 2.5 模型自动下载
 
@@ -123,28 +131,36 @@ bash script/modelctl.sh start qwen3.8-llamacpp
 bash script/modelctl.sh start deepseek-v4-flash-unsloth
 ```
 
-每个引擎子目录均提供 **deepseek-v4-flash** 与 **qwen3.8** 两份带注释的示例配置，便于学习各引擎参数。按引擎启动示例：
+每个引擎子目录均提供 **deepseek-v4-flash**、**qwen3.8**、**qwen3-coder**、**kimi-k2.5** 带注释的示例配置，便于学习各引擎参数（qwen3-coder 因 HF 权重超出本机总显存，无 vllm/sglang 变体）。按引擎启动示例：
 
 ```bash
-# llamacpp：DeepSeek-V4-Flash（DSpark 投机解码）/ Qwen3.8-27B GGUF
+# llamacpp：DeepSeek-V4-Flash（DSpark 投机解码）/ Qwen3.8-27B GGUF / Qwen3-Coder-480B / Kimi-K2.5
 bash script/modelctl.sh start deepseek-v4-flash-llamacpp
 bash script/modelctl.sh start qwen3.8-llamacpp
+bash script/modelctl.sh start qwen3-coder-llamacpp
+bash script/modelctl.sh start kimi-k2.5-llamacpp
 
-# ollama：DeepSeek-V4-Flash / Qwen3.8-27B（ollama pull 自动拉取）
+# ollama：DeepSeek-V4-Flash / Qwen3.8-27B / Qwen3-Coder-480B / Kimi-K2.5（ollama pull 自动拉取）
 bash script/modelctl.sh start deepseek-v4-flash-ollama
 bash script/modelctl.sh start qwen3.8-ollama
+bash script/modelctl.sh start qwen3-coder-ollama
+bash script/modelctl.sh start kimi-k2.5-ollama
 
-# vllm：DeepSeek-V4-Flash / Qwen3.8-27B（HF 原始权重）
+# vllm：DeepSeek-V4-Flash / Qwen3.8-27B / Kimi-K2.5（HF 原始权重）
 bash script/modelctl.sh start deepseek-v4-flash-vllm
 bash script/modelctl.sh start qwen3.8-vllm
+bash script/modelctl.sh start kimi-k2.5-vllm
 
-# sglang：DeepSeek-V4-Flash / Qwen3.8-27B（HF 原始权重）
+# sglang：DeepSeek-V4-Flash / Qwen3.8-27B / Kimi-K2.5（HF 原始权重）
 bash script/modelctl.sh start deepseek-v4-flash-sglang
 bash script/modelctl.sh start qwen3.8-sglang
+bash script/modelctl.sh start kimi-k2.5-sglang
 
-# unsloth：DeepSeek-V4-Flash / Qwen3.8-27B（无头 API，动态量化 GGUF）
+# unsloth：DeepSeek-V4-Flash / Qwen3.8-27B / Qwen3-Coder-480B / Kimi-K2.5（无头 API，动态量化 GGUF）
 bash script/modelctl.sh start deepseek-v4-flash-unsloth
 bash script/modelctl.sh start qwen3.8-unsloth
+bash script/modelctl.sh start qwen3-coder-unsloth
+bash script/modelctl.sh start kimi-k2.5-unsloth
 ```
 
 也可直接调用已安装的 `modelctl` 命令：
@@ -157,10 +173,14 @@ uv run modelctl start deepseek-v4-flash-llamacpp
 
 ```bash
 curl http://127.0.0.1:18888/health   # deepseek-v4-flash-llamacpp
-curl http://127.0.0.1:11434/         # qwen3.8-ollama
+curl http://127.0.0.1:18890/health   # qwen3-coder-llamacpp
+curl http://127.0.0.1:18891/health   # kimi-k2.5-llamacpp
+curl http://127.0.0.1:11434/         # ollama 常驻服务（qwen3.8 / qwen3-coder / kimi-k2.5）
 curl http://127.0.0.1:8100/health    # deepseek-v4-flash-vllm
 curl http://127.0.0.1:8101/health    # qwen3.8-vllm
-curl http://127.0.0.1:8001/v1/models -H "Authorization: Bearer $UNSLOTH_API_KEY"   # deepseek-v4-flash-unsloth
+curl http://127.0.0.1:8102/health    # kimi-k2.5-vllm
+curl http://127.0.0.1:8202/health    # kimi-k2.5-sglang
+curl http://127.0.0.1:8001/v1/models -H "Authorization: Bearer $UNSLOTH_API_KEY"   # unsloth 无头 API（deepseek-v4-flash / qwen3-coder / kimi-k2.5）
 ```
 
 ### 5. 停止 / 重启 / 状态
@@ -208,6 +228,8 @@ B 机 nginx 通过 URL 路径把请求路由到不同模型；同时提供按 `m
 |---|---|---|
 | 路径式直连 | `https://xxx:5000/210/llm/deepseek-v4-flash/v1` | cc-switch 每模型一张卡片 |
 | 路径式直连 | `https://xxx:5000/210/llm/qwen3.8/v1` | 同上 |
+| 路径式直连 | `https://xxx:5000/210/llm/qwen3-coder/v1` | 同上 |
+| 路径式直连 | `https://xxx:5000/210/llm/kimi-k2.5/v1` | 同上 |
 | 统一网关 | `https://xxx:5000/210/llm/v1` | body 里 `model=模型名` 切换；缺省/未知回退默认模型 |
 | 用量查询 | `https://xxx:5000/210/llm/<模型名>/v1/api/usage` | cc-switch 用量卡片 |
 

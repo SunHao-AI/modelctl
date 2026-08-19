@@ -26,6 +26,7 @@ from modelctl.core.envfile import load_env
 from modelctl.core.process import is_running
 from modelctl.core.profile import list_profiles
 from modelctl.engines import get_adapter
+from modelctl.engines.base import EngineAdapter
 
 GATEWAY_PORT = 5003
 
@@ -40,6 +41,14 @@ class GatewayModel:
     health_url: str
     # 对外模型标识（/v1/models 返回的 id），缺省用 name
     aliases: list[str] = field(default_factory=list)
+    adapter: EngineAdapter | None = None
+
+    def upstream_api_key(self) -> str | None:
+        """上游 Bearer key：unsloth 等自管认证引擎的 key 每次启动自动生成，
+        需经适配器实时解析；其余引擎即 profile.api_key。"""
+        if self.adapter is not None:
+            return self.adapter.upstream_api_key()
+        return self.api_key
 
 
 def build_registry(models_dir: Path | None = None, host: str = "127.0.0.1") -> dict[str, GatewayModel]:
@@ -59,6 +68,7 @@ def build_registry(models_dir: Path | None = None, host: str = "127.0.0.1") -> d
             api_key=profile.api_key,
             health_url=adapter.health_url(),
             aliases=profile.aliases,
+            adapter=adapter,
         )
         for key in [profile.name, *profile.aliases]:
             if key in registry:
@@ -68,9 +78,7 @@ def build_registry(models_dir: Path | None = None, host: str = "127.0.0.1") -> d
     return registry
 
 
-def resolve_model(
-    registry: dict[str, GatewayModel], body_model: str | None, default_model: str | None
-) -> GatewayModel | None:
+def resolve_model(registry: dict[str, GatewayModel], body_model: str | None, default_model: str | None) -> GatewayModel | None:
     """按 body.model 解析目标模型；未知或省略均回退 default_model，都不可用时返回 None。"""
     if body_model and body_model in registry:
         return registry[body_model]
@@ -85,7 +93,8 @@ def is_model_healthy(model: GatewayModel, timeout: float = 2.0) -> bool:
     不再复用 process.wait_health（其内部 sleep 重试会让未运行模型各耗时约 2s，
     /v1/models 对注册表全部模型串行探测时会累积到十几秒）。
     """
-    headers = {"Authorization": f"Bearer {model.api_key}"} if model.api_key else {}
+    api_key = model.upstream_api_key()
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     try:
         req = urllib.request.Request(model.health_url, headers=headers)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -121,6 +130,7 @@ def create_app(
             if m.name not in seen:
                 seen.add(m.name)
                 models.append(m)
+
         # 并发健康探测：串行会让未运行模型各耗 timeout 秒，10 个模型累积到十几秒。
         # 过滤条件：modelctl 判定运行中（PID 文件 + 进程存活）且端口健康——
         # 仅端口响应不够（如遗留进程占用端口会被误判为"已停止"模型可用）。
@@ -167,7 +177,12 @@ def create_app(
         # 改写为后端期望的模型名（ollama 严格校验，llamacpp 忽略）
         body["model"] = target.upstream_model
         headers = {"Content-Type": "application/json"}
-        auth = request.headers.get("Authorization") or (f"Bearer {target.api_key}" if target.api_key else None)
+        up_key = target.upstream_api_key()
+        if up_key and up_key != target.api_key:
+            # 运行时自动生成的 key（unsloth），客户端无从得知，必须覆盖请求头
+            auth = f"Bearer {up_key}"
+        else:
+            auth = request.headers.get("Authorization") or (f"Bearer {target.api_key}" if target.api_key else None)
         if auth:
             headers["Authorization"] = auth
         url = f"{target.backend_url}/v1/{path}"

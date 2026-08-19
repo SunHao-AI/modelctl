@@ -6,6 +6,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from modelctl.core.capabilities import Capabilities
+from modelctl.core.process import wait_health
 from modelctl.core.profile import Profile
 
 
@@ -58,3 +59,11 @@ class EngineAdapter(ABC):
 
     def api_key_args(self) -> list[str]:
         return ["--api-key", self.profile.api_key] if self.profile.api_key else []
+
+    def upstream_api_key(self) -> str | None:
+        """健康检查 / 预热 / 网关转发使用的上游 Bearer key；默认 profile.api_key。"""
+        return self.profile.api_key
+
+    def wait_ready(self, timeout: float) -> bool:
+        """等待后端就绪（默认：以上游 API key 探测 health_url）。"""
+        return wait_health(self.health_url(), timeout, self.upstream_api_key())

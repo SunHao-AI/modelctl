@@ -48,25 +48,33 @@ vi .env
 
 ### 1.5 models 目录布局
 
-profile 统一按引擎分目录存放。每个引擎子目录均提供 **deepseek-v4-flash** 与 **qwen3.8** 两份带注释的示例配置，便于学习各引擎参数：
+profile 统一按引擎分目录存放。每个引擎子目录均提供 **deepseek-v4-flash / qwen3.8 / qwen3-coder / kimi-k2.5** 带注释的示例配置（qwen3-coder 因 HF 权重超出本机总显存，无 vllm/sglang 变体），便于学习各引擎参数：
 
 ```
 models/
 ├── llamacpp/                   # llamacpp 引擎 profile 子目录
 │   ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（llamacpp + DSpark）
-│   └── qwen3.8.yaml            # Qwen3.8-27B GGUF（llamacpp）
+│   ├── qwen3.8.yaml            # Qwen3.8-27B GGUF（llamacpp）
+│   ├── qwen3-coder.yaml        # Qwen3-Coder-480B MoE GGUF（llamacpp，8 卡全量）
+│   └── kimi-k2.5.yaml          # Kimi-K2.5 120B dense GGUF（llamacpp）
 ├── ollama/                     # ollama 引擎 profile 子目录
 │   ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（ollama）
-│   └── qwen3.8.yaml            # Qwen3.8-27B（ollama）
+│   ├── qwen3.8.yaml            # Qwen3.8-27B（ollama）
+│   ├── qwen3-coder.yaml        # Qwen3-Coder-480B（ollama）
+│   └── kimi-k2.5.yaml          # Kimi-K2.5（ollama）
 ├── vllm/                       # vllm 引擎 profile 子目录
 │   ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（vllm）
-│   └── qwen3.8.yaml            # Qwen3.8-27B（vllm）
+│   ├── qwen3.8.yaml            # Qwen3.8-27B（vllm）
+│   └── kimi-k2.5.yaml          # Kimi-K2.5（vllm；qwen3-coder 无此变体：HF 权重超总显存）
 ├── sglang/                     # sglang 引擎 profile 子目录
 │   ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（sglang）
-│   └── qwen3.8.yaml            # Qwen3.8-27B（sglang）
+│   ├── qwen3.8.yaml            # Qwen3.8-27B（sglang）
+│   └── kimi-k2.5.yaml          # Kimi-K2.5（sglang；qwen3-coder 同上）
 └── unsloth/                    # unsloth 引擎 profile 子目录
     ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（unsloth）
-    └── qwen3.8.yaml            # Qwen3.8-27B（unsloth）
+    ├── qwen3.8.yaml            # Qwen3.8-27B（unsloth）
+    ├── qwen3-coder.yaml        # Qwen3-Coder-480B（unsloth，多卡 GGUF 分片）
+    └── kimi-k2.5.yaml          # Kimi-K2.5（unsloth）
 ```
 
 各引擎 profile 的 `name` 全局唯一，示例配置统一采用 `<model>-<engine>` 命名（如 `deepseek-v4-flash-llamacpp`、`deepseek-v4-flash-vllm`）。文件本身位于 `models/<engine>/` 下，因此文件名不再需要引擎后缀。

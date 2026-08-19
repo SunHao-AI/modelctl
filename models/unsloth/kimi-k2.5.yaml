@@ -1,5 +1,5 @@
 # unsloth/kimi-k2.5.yaml —— Kimi-K2.5（120B dense，Unsloth 引擎，无头 API）
-# 学习要点：Unsloth 无头服务（unsloth studio --api-only）支持 GGUF 动态量化，api_key 必填。
+# 学习要点：Unsloth 无头推理（unsloth studio run --api-only）支持 GGUF 动态量化；API key 运行时自动生成并打印到启动日志。
 # 注意：Q4_K_M 权重约 72GB，超出单卡 48GB，tensor_parallel 必须为 true 多卡分片加载。
 # name：CLI 标识符，`modelctl start kimi-k2.5-unsloth` 使用；全局唯一
 name: kimi-k2.5-unsloth
@@ -7,7 +7,7 @@ name: kimi-k2.5-unsloth
 engine: unsloth
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/v1/models）
 port: 8001
-# api_key：必填：健康检查 /v1/models 依赖 Bearer 认证
+# api_key：仅兜底（上游实际使用 unsloth 每次启动自动生成的 key，见启动成功后打印的提示）
 api_key: ${UNSLOTH_API_KEY}
 
 unsloth:
