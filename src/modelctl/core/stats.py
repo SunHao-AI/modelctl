@@ -126,6 +126,7 @@ class StatsTarget:
     mapping: dict[str, list[str]] | None
     usage_cfg: dict = field(default_factory=dict)
     api_key: str | None = None
+    aliases: list[str] = field(default_factory=list)
 
 
 class UsageCollector:
@@ -331,7 +332,7 @@ class UsageHandler(BaseHTTPRequestHandler):
         if model == "all":
             return self._aggregate_payload()
         if model:
-            target = next((t for t in self.targets if t.name == model), None)
+            target = next((t for t in self.targets if t.name == model or model in t.aliases), None)
             if target is None:
                 return {"error": f"未知模型：{model}"}
         else:
@@ -494,6 +495,7 @@ def _targets_from_profiles(data_dir: Path) -> list[StatsTarget]:
                 mapping=adapter.metrics_mapping(),
                 usage_cfg=profile.usage,
                 api_key=profile.api_key,
+                aliases=profile.aliases,
             )
         )
     return targets

@@ -25,3 +25,17 @@ def test_build_llm_map():
 def test_build_llm_map_rejects_unsafe_name():
     with pytest.raises(ProfileError):
         build_llm_map([Profile(name="a b", engine="vllm", port=8000)], "210", "x")
+
+
+def test_build_llm_map_includes_aliases():
+    profiles = [
+        Profile(name="deepseek-v4-flash-llamacpp", engine="llamacpp", port=18888, aliases=["deepseek-v4-flash"])
+    ]
+    out = build_llm_map(profiles, "210", "192.168.77.210")
+    assert "    ~^/210/llm/deepseek-v4-flash-llamacpp/  http://192.168.77.210:18888;" in out
+    assert "    ~^/210/llm/deepseek-v4-flash/  http://192.168.77.210:18888;" in out
+
+
+def test_build_llm_map_rejects_unsafe_alias():
+    with pytest.raises(ProfileError):
+        build_llm_map([Profile(name="a", engine="vllm", port=8000, aliases=["bad alias"])], "210", "x")

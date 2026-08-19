@@ -139,3 +139,13 @@ def test_proxy_passthrough_upstream_status():
     resp = _run(_post(app, "/v1/chat/completions", json={"model": "ds", "messages": []}))
     assert resp.status_code == 429
     assert resp.json()["error"]["message"] == "rate limited"
+
+
+def test_build_registry_registers_aliases(tmp_path):
+    (tmp_path / "ds.yaml").write_text(
+        "name: deepseek-v4-flash-llamacpp\nalias: deepseek-v4-flash\nengine: llamacpp\nport: 18888\n",
+        encoding="utf-8",
+    )
+    reg = build_registry(models_dir=tmp_path)
+    assert set(reg) == {"deepseek-v4-flash-llamacpp", "deepseek-v4-flash"}
+    assert reg["deepseek-v4-flash"] is reg["deepseek-v4-flash-llamacpp"]

@@ -59,6 +59,30 @@ def test_nested_interpolation(tmp_path, monkeypatch):
     assert p.engine_config["model"] == "/raid5/sh/model/x"
 
 
+def test_alias_str(tmp_path):
+    d = _write(tmp_path, "name: demo\nengine: vllm\nport: 8000\nalias: short\n")
+    p = load_profile("demo", d)
+    assert p.aliases == ["short"]
+
+
+def test_aliases_list(tmp_path):
+    d = _write(tmp_path, "name: demo\nengine: vllm\nport: 8000\naliases:\n  - a\n  - b\n")
+    p = load_profile("demo", d)
+    assert p.aliases == ["a", "b"]
+
+
+def test_aliases_default_empty(tmp_path):
+    d = _write(tmp_path, "name: demo\nengine: vllm\nport: 8000\n")
+    p = load_profile("demo", d)
+    assert p.aliases == []
+
+
+def test_alias_equals_name_rejected(tmp_path):
+    d = _write(tmp_path, "name: demo\nengine: vllm\nport: 8000\nalias: demo\n")
+    with pytest.raises(ProfileError):
+        load_profile("demo", d)
+
+
 def test_list_profiles_sorted(tmp_path):
     _write(tmp_path, "name: b\nengine: vllm\nport: 1\n", "b.yaml")
     _write(tmp_path, "name: a\nengine: vllm\nport: 2\n", "a.yaml")

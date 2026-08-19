@@ -2,6 +2,8 @@
 # 学习要点：llama.cpp 引擎通过 GGUF 分片 + DSpark 投机解码运行，适合单机多卡。
 # name：CLI 标识符，`modelctl start deepseek-v4-flash-llamacpp` 使用；全局唯一
 name: deepseek-v4-flash-llamacpp
+# alias：短名别名，网关/nginx 路由可用 `deepseek-v4-flash` 指代本模型（如 URL /210/llm/deepseek-v4-flash/v1）
+alias: deepseek-v4-flash
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
 engine: llamacpp
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）

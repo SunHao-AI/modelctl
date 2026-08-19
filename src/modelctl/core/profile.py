@@ -30,6 +30,7 @@ class Profile:
     api_key: str | None = None
     engine_config: dict[str, Any] = field(default_factory=dict)
     usage: dict[str, Any] = field(default_factory=dict)
+    aliases: list[str] = field(default_factory=list)
     path: Path | None = None
 
 
@@ -67,6 +68,7 @@ def _to_profile(raw: dict[str, Any], path: Path) -> Profile:
     engine_config = raw.get(engine) or {}
     if not isinstance(engine_config, dict):
         raise ProfileError(f"{src}：{engine} 段必须是映射")
+    aliases = _parse_aliases(raw, src)
     return Profile(
         name=str(raw["name"]),
         engine=engine,
@@ -74,8 +76,31 @@ def _to_profile(raw: dict[str, Any], path: Path) -> Profile:
         api_key=raw.get("api_key") or None,
         engine_config=engine_config,
         usage=raw.get("usage") or {},
+        aliases=aliases,
         path=path,
     )
+
+
+def _parse_aliases(raw: dict[str, Any], src: str) -> list[str]:
+    """解析顶层 alias / aliases 字段为别名列表（供网关/nginx 短名路由使用）。
+
+    支持 `alias: short` 或 `aliases: [a, b]` 两种写法；别名须为非空字符串，
+    且不得与 name 相同。缺省返回空列表。
+    """
+    value = raw.get("aliases", raw.get("alias", []))
+    if isinstance(value, str):
+        candidates = [value]
+    elif isinstance(value, list):
+        candidates = [str(v) for v in value]
+    else:
+        return []
+    aliases: list[str] = []
+    for alias in candidates:
+        if not alias or alias == raw.get("name"):
+            raise ProfileError(f"{src}：alias 必须是非空字符串且不能与 name 相同（当前：{alias!r}）")
+        if alias not in aliases:
+            aliases.append(alias)
+    return aliases
 
 
 def load_profile(name: str, models_dir: Path | None = None) -> Profile:

@@ -293,3 +293,22 @@ def test_resolve_payload_single_target_still_works():
     payload = handler._resolve_payload("a")
     assert payload["model"] == "a"
     assert payload["prompt_rate"] == 10.0
+
+
+def test_resolve_payload_matches_alias():
+    from modelctl.core.stats import StatsTarget, UsageHandler
+
+    target = StatsTarget(
+        name="deepseek-v4-flash-llamacpp",
+        data_dir=None,
+        metrics_url="http://127.0.0.1:18888/metrics",
+        mapping=None,
+        aliases=["deepseek-v4-flash"],
+    )
+    UsageHandler.targets = [target]
+    UsageHandler.collectors = {}
+    handler = UsageHandler.__new__(UsageHandler)
+    # alias 命中 target（mapping=None → 该引擎不支持精确统计）
+    assert handler._resolve_payload("deepseek-v4-flash") == {"error": "该引擎不支持精确统计"}
+    # 未知名字 → 未知模型
+    assert "未知模型" in handler._resolve_payload("ghost")["error"]

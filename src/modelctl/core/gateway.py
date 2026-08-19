@@ -16,6 +16,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from loguru import logger
+
 from modelctl.core.capabilities import Capabilities
 from modelctl.core.envfile import load_env
 from modelctl.core.process import wait_health
@@ -36,11 +38,15 @@ class GatewayModel:
 
 
 def build_registry(models_dir: Path | None = None, host: str = "127.0.0.1") -> dict[str, GatewayModel]:
-    """从 models/*.yaml 构建 模型名 -> 后端信息 注册表（单一来源）。"""
+    """从 models/*.yaml 构建 模型名/别名 -> 后端信息 注册表（单一来源）。
+
+    profile 的 name 与其 alias 都注册为 key，指向同一 GatewayModel；
+    冲突（如不同 profile 声明相同别名）时保留先注册者并告警。
+    """
     registry: dict[str, GatewayModel] = {}
     for profile in list_profiles(models_dir):
         adapter = get_adapter(profile.engine)(profile, Capabilities())
-        registry[profile.name] = GatewayModel(
+        model = GatewayModel(
             name=profile.name,
             engine=profile.engine,
             backend_url=f"http://{host}:{profile.port}",
@@ -48,6 +54,11 @@ def build_registry(models_dir: Path | None = None, host: str = "127.0.0.1") -> d
             api_key=profile.api_key,
             health_url=adapter.health_url(),
         )
+        for key in [profile.name, *profile.aliases]:
+            if key in registry:
+                logger.warning(f"模型标识 {key} 冲突，已保留 {registry[key].name}，忽略 {profile.name}")
+                continue
+            registry[key] = model
     return registry
 
 
