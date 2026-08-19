@@ -16,7 +16,7 @@ import asyncio
 import os
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from loguru import logger
@@ -37,6 +37,8 @@ class GatewayModel:
     upstream_model: str
     api_key: str | None
     health_url: str
+    # 对外模型标识（/v1/models 返回的 id），缺省用 name
+    aliases: list[str] = field(default_factory=list)
 
 
 def build_registry(models_dir: Path | None = None, host: str = "127.0.0.1") -> dict[str, GatewayModel]:
@@ -55,6 +57,7 @@ def build_registry(models_dir: Path | None = None, host: str = "127.0.0.1") -> d
             upstream_model=adapter.upstream_model_name(),
             api_key=profile.api_key,
             health_url=adapter.health_url(),
+            aliases=profile.aliases,
         )
         for key in [profile.name, *profile.aliases]:
             if key in registry:
@@ -122,7 +125,13 @@ def create_app(
         return {
             "object": "list",
             "data": [
-                {"id": m.name, "object": "model", "created": 0, "owned_by": "modelctl"}
+                {
+                    # 对外 id 优先用 alias（如 deepseek-v4-flash），无 alias 时回退 profile name
+                    "id": m.aliases[0] if m.aliases else m.name,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "modelctl",
+                }
                 for m, ok in zip(models, results, strict=False)
                 if ok
             ],

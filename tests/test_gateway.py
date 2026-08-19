@@ -152,6 +152,26 @@ def test_is_model_healthy_fails_fast_on_connection_error(monkeypatch):
     assert is_model_healthy(model, timeout=0.5) is False
 
 
+def test_list_models_uses_alias_as_id():
+    """/v1/models 的 id 应优先用 alias（cc-switch 可直接识别短名，而非带引擎后缀的 profile name）。"""
+    reg = {
+        "deepseek-v4-flash-llamacpp": GatewayModel(
+            "deepseek-v4-flash-llamacpp",
+            "llamacpp",
+            "http://upstream",
+            "deepseek-v4-flash-llamacpp",
+            None,
+            "http://upstream/",
+            aliases=["deepseek-v4-flash"],
+        )
+    }
+    app = create_app(reg, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    with patch("modelctl.core.gateway.is_model_healthy", return_value=True):
+        resp = _run(_get(app, "/v1/models"))
+    assert resp.status_code == 200
+    assert [m["id"] for m in resp.json()["data"]] == ["deepseek-v4-flash"]
+
+
 def test_list_models_dedups_alias_and_name():
     """回归：name 与 alias 指向同一对象时 /v1/models 不得重复列出。"""
     gm = GatewayModel("ds-llamacpp", "llamacpp", "http://upstream", "ds-llamacpp", None, "http://upstream/")
