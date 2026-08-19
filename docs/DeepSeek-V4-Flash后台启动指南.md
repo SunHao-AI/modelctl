@@ -83,7 +83,7 @@ llamacpp:
   model: /raid5/sh/model/model-gguf/DeepSeek-V4-Flash-0731-GGUF/UD-Q8_K_XL/DeepSeek-V4-Flash-0731-UD-Q8_K_XL-00001-of-00005.gguf
   draft: ""                # 留空自动发现 dspark*.gguf
   parallel: 2
-  ctx_size: ""             # 留空 = parallel × 1M
+  ctx_size: ""             # 留空 = 每槽 1M（单槽 = 每并发请求可用上下文）
   reasoning: on
   reasoning_format: deepseek
   dspark: on
@@ -195,7 +195,7 @@ tail -f ${LOG_DIR}/llama-server-18888-*.log
 | `model` | `UD-Q8_K_XL/...-00001-of-00005.gguf` | GGUF 模型第一个分片；留空 + `download` 段时自动下载并写回本地路径 |
 | `draft` | 空（自动发现） | DSpark 草稿路径 |
 | `port` | `18888` | 服务端口 |
-| `ctx_size` | 空（自动） | 总上下文长度。留空自动计算：`parallel × 1048576`（每并发 1M），可手动覆盖 |
+| `ctx_size` | 空（自动） | **单槽上下文**（每个并发请求完整可用的上下文）。留空自动计算每槽 `1048576`（1M）；启动时总量自动取 `ctx_size × parallel`（llama-server 的 `--ctx-size` 为槽位共享总量） |
 | `parallel` | `2` | 并发序列数 |
 | `gpu_count` | `8` | GPU 数量 |
 | `dspark` | `on` | DSpark 投机解码开关 |
