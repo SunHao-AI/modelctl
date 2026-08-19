@@ -6,6 +6,7 @@ from modelctl.core.capabilities import probe
 from modelctl.core.profile import ProfileError, load_profile
 from modelctl.engines import get_adapter
 from modelctl.engines.base import RequirementError
+from modelctl.engines.llamacpp import _find_first
 
 SMI = "\n".join(["RTX 5880 Ada Generation, 49140, 48000, 580.65.05, 8.9"] * 8)
 
@@ -264,3 +265,21 @@ def test_pre_start_discovers_draft_after_download(tmp_path, monkeypatch):
     assert adapter._draft is not None
     assert adapter._draft.name == "dspark-x.gguf"
     assert adapter._dspark is True
+
+
+def test_find_first_skips_directory_named_dspark(tmp_path):
+    """回归：仓库内 dspark 为目录时不得被当作草稿文件（rglob 会命中目录）。"""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "dspark").mkdir()  # 旧逻辑会误匹配此目录
+    real_draft = repo / "dspark" / "dspark-DeepSeek-V4-Flash-0731-Q8_0.gguf"
+    real_draft.write_bytes(b"gguf")
+
+    got = _find_first(repo, ["*dspark*.gguf"])
+    assert got is not None
+    assert got == real_draft
+    assert got.is_file()
+
+    # 即使 pattern 更宽泛（如 *dspark*），也必须跳过目录
+    got_wide = _find_first(repo, ["*dspark*"])
+    assert got_wide is not None and got_wide.is_file()

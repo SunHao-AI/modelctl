@@ -16,7 +16,7 @@ from modelctl.engines._download import ensure_modelscope, snapshot_download
 from modelctl.engines.base import EngineAdapter, RequirementError
 
 OFFICIAL_URL = "https://github.com/ggml-org/llama.cpp.git"
-DSPARK_PATTERNS = ["*dspark*"]
+DSPARK_PATTERNS = ["*dspark*.gguf"]
 CTX_PER_SLOT = 1_048_576
 
 
@@ -61,9 +61,13 @@ def find_server(source: Path) -> Path:
 
 
 def _find_first(destination: Path, patterns: list[str]) -> Path | None:
-    """在 destination 下按 patterns 递归查找第一个匹配文件。"""
+    """在 destination 下按 patterns 递归查找第一个匹配文件（仅文件，跳过目录）。
+
+    注意：rglob 会命中目录本身（如仓库里的 dspark/ 子目录），必须过滤 is_file()，
+    否则会把目录当作草稿/模型路径传给 llama-server 导致 "failed to read magic"。
+    """
     for pattern in patterns:
-        matches = sorted(destination.rglob(pattern))
+        matches = sorted(p for p in destination.rglob(pattern) if p.is_file())
         if matches:
             return matches[0]
     return None
