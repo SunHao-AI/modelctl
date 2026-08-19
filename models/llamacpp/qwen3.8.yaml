@@ -7,7 +7,7 @@ alias: qwen3.8
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
 engine: llamacpp
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
-port: 8000
+port: 18889
 # api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值
 api_key: ${API_KEY}
 

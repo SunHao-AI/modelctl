@@ -158,7 +158,8 @@ uv run modelctl start deepseek-v4-flash-llamacpp
 ```bash
 curl http://127.0.0.1:18888/health   # deepseek-v4-flash-llamacpp
 curl http://127.0.0.1:11434/         # qwen3.8-ollama
-curl http://127.0.0.1:8000/health    # qwen3.8-vllm / deepseek-v4-flash-vllm
+curl http://127.0.0.1:8100/health    # deepseek-v4-flash-vllm
+curl http://127.0.0.1:8101/health    # qwen3.8-vllm
 curl http://127.0.0.1:8001/v1/models -H "Authorization: Bearer $UNSLOTH_API_KEY"   # deepseek-v4-flash-unsloth
 ```
 
