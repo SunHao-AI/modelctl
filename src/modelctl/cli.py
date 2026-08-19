@@ -25,7 +25,9 @@ from loguru import logger
 
 from modelctl.core.capabilities import ENGINE_BINARIES, ENGINE_INSTALL_HINTS, probe
 from modelctl.core.envfile import load_env
+from modelctl.core.gateway import GATEWAY_PORT
 from modelctl.core.logging import setup_logging
+from modelctl.core.nginx_snippet import build_llm_map
 from modelctl.core.process import (
     is_running,
     launch_log,
@@ -78,6 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("probe", help="探测硬件与引擎二进制")
     sp = sub.add_parser("stats", help="用量统计服务控制")
     sp.add_argument("action", choices=["start", "stop"])
+    gp = sub.add_parser("gateway", help="统一网关（model 参数路由）控制")
+    gp.add_argument("action", choices=["start", "stop", "status"])
+    ns = sub.add_parser("nginx-snippet", help="生成 nginx 多模型路由 map 片段")
+    ns.add_argument("--node", required=True, help="节点编号（URL 前缀，如 210）")
+    ns.add_argument("--host", required=True, help="节点 IP（如 192.168.77.210）")
     return parser
 
 
@@ -263,6 +270,40 @@ def _cmd_stats_stop() -> int:
     return 0
 
 
+def _cmd_gateway_start() -> int:
+    if is_running("llm-gateway"):
+        logger.info("网关已在运行")
+        return 0
+    script_dir = str(Path(__file__).resolve().parents[1])
+    extra_env = {"PYTHONPATH": script_dir + os.pathsep + os.environ.get("PYTHONPATH", "")}
+    pid = start_detached("llm-gateway", [sys.executable, "-m", "modelctl.core.gateway"], extra_env)
+    port = int(os.environ.get("GATEWAY_PORT", str(GATEWAY_PORT)))
+    logger.info(f"网关已启动（PID {pid}），监听端口 {port}")
+    return 0
+
+
+def _cmd_gateway_stop() -> int:
+    port = int(os.environ.get("GATEWAY_PORT", str(GATEWAY_PORT)))
+    stop_instance("llm-gateway", port, ["modelctl.core.gateway"])
+    logger.info("网关已停止")
+    return 0
+
+
+def _cmd_gateway_status() -> int:
+    if is_running("llm-gateway"):
+        port = int(os.environ.get("GATEWAY_PORT", str(GATEWAY_PORT)))
+        ok = wait_health(f"http://127.0.0.1:{port}/v1/models", 3.0)
+        print("网关：运行中，/v1/models " + ("正常" if ok else "无响应"))
+        return 0
+    print("网关：已停止")
+    return 0
+
+
+def _cmd_nginx_snippet(args, models_dir) -> int:
+    print(build_llm_map(list_profiles(models_dir), args.node, args.host), end="")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     setup_logging()
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -287,6 +328,14 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_probe(args, models_dir, caps)
         if args.command == "stats":
             return _cmd_stats_start() if args.action == "start" else _cmd_stats_stop()
+        if args.command == "gateway":
+            if args.action == "start":
+                return _cmd_gateway_start()
+            if args.action == "stop":
+                return _cmd_gateway_stop()
+            return _cmd_gateway_status()
+        if args.command == "nginx-snippet":
+            return _cmd_nginx_snippet(args, models_dir)
     except (ProfileError, RequirementError) as error:
         logger.error(str(error))
         return 2

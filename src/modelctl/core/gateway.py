@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from modelctl.core.capabilities import Capabilities
+from modelctl.core.envfile import load_env
 from modelctl.core.process import wait_health
 from modelctl.core.profile import list_profiles
 from modelctl.engines import get_adapter
@@ -148,3 +149,22 @@ async def _iter_stream(upstream):
     """逐块透传后端响应体（SSE 流式）。"""
     async for chunk in upstream.aiter_bytes():
         yield chunk
+
+
+def main() -> None:
+    """独立运行入口：python -m modelctl.core.gateway。"""
+    load_env()
+    host = os.environ.get("GATEWAY_HOST", "0.0.0.0")
+    port = int(os.environ.get("GATEWAY_PORT", str(GATEWAY_PORT)))
+    read_timeout = float(os.environ.get("GATEWAY_READ_TIMEOUT", "600"))
+    default_model = os.environ.get("GATEWAY_DEFAULT_MODEL")
+
+    import uvicorn
+
+    app = create_app(default_model=default_model, read_timeout=read_timeout)
+    print(f"modelctl 网关运行于 http://{host}:{port}/v1（默认模型：{default_model or '未配置'}）", flush=True)
+    uvicorn.run(app, host=host, port=port, log_level="info")
+
+
+if __name__ == "__main__":
+    main()
