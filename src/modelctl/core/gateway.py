@@ -12,7 +12,10 @@
 被 FastAPI 解析为依赖注入对象；关闭后注解即时求值，可在 create_app 局部作用域解析。
 """
 
+import asyncio
 import os
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,7 +23,6 @@ from loguru import logger
 
 from modelctl.core.capabilities import Capabilities
 from modelctl.core.envfile import load_env
-from modelctl.core.process import wait_health
 from modelctl.core.profile import list_profiles
 from modelctl.engines import get_adapter
 
@@ -74,8 +76,18 @@ def resolve_model(
 
 
 def is_model_healthy(model: GatewayModel, timeout: float = 2.0) -> bool:
-    """后端存活探测（复用 process.wait_health，失败不抛异常）。"""
-    return wait_health(model.health_url, timeout, model.api_key)
+    """后端存活探测（单次探测，连接失败立即返回 False，不重试等待）。
+
+    不再复用 process.wait_health（其内部 sleep 重试会让未运行模型各耗时约 2s，
+    /v1/models 对注册表全部模型串行探测时会累积到十几秒）。
+    """
+    headers = {"Authorization": f"Bearer {model.api_key}"} if model.api_key else {}
+    try:
+        req = urllib.request.Request(model.health_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return 200 <= resp.status < 300
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
 
 
 def create_app(
@@ -100,14 +112,21 @@ def create_app(
     async def list_models() -> dict:
         # 注册表同时含 name 与 alias 两个 key（指向同一 GatewayModel），须按 name 去重
         seen: set[str] = set()
-        data = []
+        models = []
         for m in registry.values():
-            if m.name in seen:
-                continue
-            seen.add(m.name)
-            if is_model_healthy(m):
-                data.append({"id": m.name, "object": "model", "created": 0, "owned_by": "modelctl"})
-        return {"object": "list", "data": data}
+            if m.name not in seen:
+                seen.add(m.name)
+                models.append(m)
+        # 并发健康探测：串行会让未运行模型各耗 timeout 秒，10 个模型累积到十几秒
+        results = await asyncio.gather(*(asyncio.to_thread(is_model_healthy, m) for m in models))
+        return {
+            "object": "list",
+            "data": [
+                {"id": m.name, "object": "model", "created": 0, "owned_by": "modelctl"}
+                for m, ok in zip(models, results, strict=False)
+                if ok
+            ],
+        }
 
     @app.post("/v1/{path:path}")
     async def proxy(path: str, request: Request):

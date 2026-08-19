@@ -21,12 +21,9 @@ async def _post(app, path: str, json: dict | None = None):
 
 
 def test_build_registry(tmp_path):
-    (tmp_path / "qwen.yaml").write_text(
-        "name: qwen3.8\nengine: ollama\nport: 11434\n\nollama:\n  model: qwen3.8:27b\n", encoding="utf-8"
-    )
-    (tmp_path / "ds.yaml").write_text(
-        "name: deepseek-v4-flash\nengine: llamacpp\nport: 18888\n", encoding="utf-8"
-    )
+    qwen_yaml = "name: qwen3.8\nengine: ollama\nport: 11434\n\nollama:\n  model: qwen3.8:27b\n"
+    (tmp_path / "qwen.yaml").write_text(qwen_yaml, encoding="utf-8")
+    (tmp_path / "ds.yaml").write_text("name: deepseek-v4-flash\nengine: llamacpp\nport: 18888\n", encoding="utf-8")
     reg = build_registry(models_dir=tmp_path)
     assert set(reg) == {"qwen3.8", "deepseek-v4-flash"}
     assert reg["qwen3.8"].backend_url == "http://127.0.0.1:11434"
@@ -39,9 +36,9 @@ def test_resolve_model():
         "a": GatewayModel("a", "ollama", "http://127.0.0.1:1", "a:1", None, "http://127.0.0.1:1/"),
         "b": GatewayModel("b", "llamacpp", "http://127.0.0.1:2", "b", None, "http://127.0.0.1:2/"),
     }
-    assert resolve_model(reg, "a", "b") is reg["a"]        # 显式命中
+    assert resolve_model(reg, "a", "b") is reg["a"]  # 显式命中
     assert resolve_model(reg, "unknown", "a") is reg["a"]  # 未知 → 回退默认
-    assert resolve_model(reg, None, "b") is reg["b"]       # 省略 → 默认
+    assert resolve_model(reg, None, "b") is reg["b"]  # 省略 → 默认
     assert resolve_model(reg, "unknown", None) is None
 
 
@@ -68,11 +65,10 @@ def test_proxy_rewrites_model_to_upstream():
 
     reg = {"qwen3.8": GatewayModel("qwen3.8", "ollama", "http://upstream", "qwen3.8:27b", None, "http://upstream/")}
     app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
-    resp = _run(
-        _post(app, "/v1/chat/completions", json={"model": "qwen3.8", "messages": [{"role": "user", "content": "hi"}]})
-    )
+    body = {"model": "qwen3.8", "messages": [{"role": "user", "content": "hi"}]}
+    resp = _run(_post(app, "/v1/chat/completions", json=body))
     assert resp.status_code == 200
-    assert captured["body"]["model"] == "qwen3.8:27b"   # 已改写为 ollama 期望名
+    assert captured["body"]["model"] == "qwen3.8:27b"  # 已改写为 ollama 期望名
     assert resp.json()["model"] == "qwen3.8:27b"
 
 
@@ -80,9 +76,7 @@ def test_proxy_unknown_model_falls_back_to_default():
     def upstream(request):
         return httpx.Response(200, json={"id": "1", "model": json.loads(request.content)["model"]})
 
-    reg = {
-        "ds": GatewayModel("deepseek-v4-flash", "llamacpp", "http://upstream", "deepseek-v4-flash", None, "http://upstream/")
-    }
+    reg = {"ds": GatewayModel("deepseek-v4-flash", "llamacpp", "http://upstream", "deepseek-v4-flash", None, "http://upstream/")}
     app = create_app(reg, default_model="ds", transport=httpx.MockTransport(upstream))
     resp = _run(_post(app, "/v1/chat/completions", json={"model": "ghost-model", "messages": []}))
     assert resp.status_code == 200
@@ -90,9 +84,7 @@ def test_proxy_unknown_model_falls_back_to_default():
 
 
 def test_proxy_404_when_no_default_matches():
-    reg = {
-        "ds": GatewayModel("deepseek-v4-flash", "llamacpp", "http://upstream", "deepseek-v4-flash", None, "http://upstream/")
-    }
+    reg = {"ds": GatewayModel("deepseek-v4-flash", "llamacpp", "http://upstream", "deepseek-v4-flash", None, "http://upstream/")}
     app = create_app(reg, default_model=None, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
     resp = _run(_post(app, "/v1/chat/completions", json={"model": "ghost-model", "messages": []}))
     assert resp.status_code == 404
@@ -106,9 +98,7 @@ def test_proxy_streaming_sse_passthrough():
             headers={"content-type": "text/event-stream"},
         )
 
-    reg = {
-        "ds": GatewayModel("deepseek-v4-flash", "llamacpp", "http://upstream", "deepseek-v4-flash", None, "http://upstream/")
-    }
+    reg = {"ds": GatewayModel("deepseek-v4-flash", "llamacpp", "http://upstream", "deepseek-v4-flash", None, "http://upstream/")}
     app = create_app(reg, default_model="ds", transport=httpx.MockTransport(upstream))
     resp = _run(_post(app, "/v1/chat/completions", json={"model": "ds", "stream": True, "messages": []}))
     assert resp.status_code == 200
@@ -120,9 +110,7 @@ def test_proxy_502_on_upstream_unreachable():
     def upstream(request):
         raise httpx.ConnectError("connection refused")
 
-    reg = {
-        "ds": GatewayModel("deepseek-v4-flash", "llamacpp", "http://upstream", "deepseek-v4-flash", None, "http://upstream/")
-    }
+    reg = {"ds": GatewayModel("deepseek-v4-flash", "llamacpp", "http://upstream", "deepseek-v4-flash", None, "http://upstream/")}
     app = create_app(reg, default_model="ds", transport=httpx.MockTransport(upstream))
     resp = _run(_post(app, "/v1/chat/completions", json={"model": "ds", "messages": []}))
     assert resp.status_code == 502
@@ -132,9 +120,7 @@ def test_proxy_passthrough_upstream_status():
     def upstream(request):
         return httpx.Response(429, json={"error": {"message": "rate limited"}})
 
-    reg = {
-        "ds": GatewayModel("deepseek-v4-flash", "llamacpp", "http://upstream", "deepseek-v4-flash", None, "http://upstream/")
-    }
+    reg = {"ds": GatewayModel("deepseek-v4-flash", "llamacpp", "http://upstream", "deepseek-v4-flash", None, "http://upstream/")}
     app = create_app(reg, default_model="ds", transport=httpx.MockTransport(upstream))
     resp = _run(_post(app, "/v1/chat/completions", json={"model": "ds", "messages": []}))
     assert resp.status_code == 429
@@ -149,6 +135,21 @@ def test_build_registry_registers_aliases(tmp_path):
     reg = build_registry(models_dir=tmp_path)
     assert set(reg) == {"deepseek-v4-flash-llamacpp", "deepseek-v4-flash"}
     assert reg["deepseek-v4-flash"] is reg["deepseek-v4-flash-llamacpp"]
+
+
+def test_is_model_healthy_fails_fast_on_connection_error(monkeypatch):
+    """回归：连接失败应立即返回 False（旧实现经 wait_health 的 sleep 重试会拖慢 /v1/models）。"""
+    import urllib.error
+
+    from modelctl.core.gateway import GatewayModel, is_model_healthy
+
+    model = GatewayModel("x", "llamacpp", "http://127.0.0.1:1", "x", None, "http://127.0.0.1:1/health")
+
+    def fake_urlopen(req, timeout):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    assert is_model_healthy(model, timeout=0.5) is False
 
 
 def test_list_models_dedups_alias_and_name():
