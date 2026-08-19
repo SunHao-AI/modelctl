@@ -50,7 +50,10 @@ async def _get(app, path: str):
 def test_list_models_health_filtered():
     reg = {"qwen3.8": GatewayModel("qwen3.8", "ollama", "http://upstream", "qwen3.8:27b", None, "http://upstream/")}
     app = create_app(reg, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
-    with patch("modelctl.core.gateway.is_model_healthy", return_value=True):
+    with (
+        patch("modelctl.core.gateway.is_model_healthy", return_value=True),
+        patch("modelctl.core.gateway.is_running", return_value=True),
+    ):
         resp = _run(_get(app, "/v1/models"))
     assert resp.status_code == 200
     assert [m["id"] for m in resp.json()["data"]] == ["qwen3.8"]
@@ -166,10 +169,31 @@ def test_list_models_uses_alias_as_id():
         )
     }
     app = create_app(reg, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
-    with patch("modelctl.core.gateway.is_model_healthy", return_value=True):
+    with (
+        patch("modelctl.core.gateway.is_model_healthy", return_value=True),
+        patch("modelctl.core.gateway.is_running", return_value=True),
+    ):
         resp = _run(_get(app, "/v1/models"))
     assert resp.status_code == 200
     assert [m["id"] for m in resp.json()["data"]] == ["deepseek-v4-flash"]
+
+
+def test_list_models_excludes_unmanaged_but_alive():
+    """回归：modelctl 未管理（is_running False）但端口有响应（如遗留 ollama serve 占用 11434）
+    的模型不得出现在 /v1/models——仅健康探测会将其误判为可用。"""
+    reg = {
+        "deepseek-v4-flash-ollama": GatewayModel(
+            "deepseek-v4-flash-ollama", "ollama", "http://upstream", "x", None, "http://upstream/"
+        )
+    }
+    app = create_app(reg, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    with (
+        patch("modelctl.core.gateway.is_model_healthy", return_value=True),
+        patch("modelctl.core.gateway.is_running", return_value=False),
+    ):
+        resp = _run(_get(app, "/v1/models"))
+    assert resp.status_code == 200
+    assert resp.json()["data"] == []
 
 
 def test_list_models_dedups_alias_and_name():
@@ -177,7 +201,10 @@ def test_list_models_dedups_alias_and_name():
     gm = GatewayModel("ds-llamacpp", "llamacpp", "http://upstream", "ds-llamacpp", None, "http://upstream/")
     reg = {"ds-llamacpp": gm, "ds": gm}
     app = create_app(reg, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
-    with patch("modelctl.core.gateway.is_model_healthy", return_value=True):
+    with (
+        patch("modelctl.core.gateway.is_model_healthy", return_value=True),
+        patch("modelctl.core.gateway.is_running", return_value=True),
+    ):
         resp = _run(_get(app, "/v1/models"))
     assert resp.status_code == 200
     assert [m["id"] for m in resp.json()["data"]] == ["ds-llamacpp"]

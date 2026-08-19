@@ -23,6 +23,7 @@ from loguru import logger
 
 from modelctl.core.capabilities import Capabilities
 from modelctl.core.envfile import load_env
+from modelctl.core.process import is_running
 from modelctl.core.profile import list_profiles
 from modelctl.engines import get_adapter
 
@@ -120,8 +121,13 @@ def create_app(
             if m.name not in seen:
                 seen.add(m.name)
                 models.append(m)
-        # 并发健康探测：串行会让未运行模型各耗 timeout 秒，10 个模型累积到十几秒
-        results = await asyncio.gather(*(asyncio.to_thread(is_model_healthy, m) for m in models))
+        # 并发健康探测：串行会让未运行模型各耗 timeout 秒，10 个模型累积到十几秒。
+        # 过滤条件：modelctl 判定运行中（PID 文件 + 进程存活）且端口健康——
+        # 仅端口响应不够（如遗留进程占用端口会被误判为"已停止"模型可用）。
+        def _available(m: GatewayModel) -> bool:
+            return is_running(m.name) and is_model_healthy(m)
+
+        results = await asyncio.gather(*(asyncio.to_thread(_available, m) for m in models))
         return {
             "object": "list",
             "data": [
