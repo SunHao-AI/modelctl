@@ -276,6 +276,145 @@ def test_pre_start_discovers_draft_after_download(tmp_path, monkeypatch):
     assert adapter._dspark is True
 
 
+def test_vision_mmproj_in_command(tmp_path):
+    """vision: on + 模型同目录存在 mmproj：启动命令应包含 --mmproj。"""
+    (tmp_path / "m.gguf").write_bytes(b"0" * 1024)
+    (tmp_path / "mmproj-F16.gguf").write_bytes(b"0" * 512)
+    caps = probe(nvidia_smi_output=SMI)
+    adapter = get_adapter("llamacpp")(_profile(tmp_path, "  vision: on\n"), caps)
+    adapter.check_requirements()
+    cmd, _ = adapter.build_command()
+    assert "--mmproj" in cmd
+    assert cmd[cmd.index("--mmproj") + 1] == str((tmp_path / "mmproj-F16.gguf").resolve())
+    assert not any("mmproj" in w for w in adapter.warnings)
+
+
+def test_vision_off_by_default_no_flag(tmp_path):
+    """默认 vision off：不传 --mmproj，也不产生 mmproj 警告（文本模型不受影响）。"""
+    caps = probe(nvidia_smi_output=SMI)
+    adapter = get_adapter("llamacpp")(_profile(tmp_path), caps)
+    adapter.check_requirements()
+    cmd, _ = adapter.build_command()
+    assert "--mmproj" not in cmd
+    assert not any("mmproj" in w.lower() for w in adapter.warnings)
+
+
+def test_vision_warns_without_download(tmp_path):
+    """vision: on 但无 mmproj、无 download 段：降级为警告且不传 --mmproj。"""
+    (tmp_path / "m.gguf").write_bytes(b"0" * 1024)
+    (tmp_path / "ds.yaml").write_text(
+        f"name: ds\nengine: llamacpp\nport: 18888\nllamacpp:\n"
+        f"  model: {tmp_path}/m.gguf\n  gpu_count: 8\n  vision: on\n",
+        encoding="utf-8",
+    )
+    caps = probe(nvidia_smi_output=SMI)
+    adapter = get_adapter("llamacpp")(load_profile("ds", tmp_path), caps)
+    adapter.check_requirements()
+    cmd, _ = adapter.build_command()
+    assert "--mmproj" not in cmd
+    assert any("mmproj" in w for w in adapter.warnings)
+
+
+def test_pre_start_downloads_missing_mmproj(tmp_path, monkeypatch):
+    """模型已持久化本地但缺 mmproj：pre_start 应补下并传入 --mmproj（用户实际场景）。"""
+    from modelctl.engines import llamacpp
+
+    (tmp_path / "repo").mkdir()
+    model_shard = tmp_path / "repo" / "Qwen3.8-27B-Q4_K_M.gguf"
+    model_shard.write_bytes(b"x")
+    (tmp_path / "ds.yaml").write_text(
+        f"name: ds\nengine: llamacpp\nport: 18888\nllamacpp:\n"
+        f"  model: {model_shard}\n  gpu_count: 8\n  vision: on\n"
+        f"  download:\n    modelscope_id: unsloth/Qwen3.8-27B-GGUF\n    quant: Q4_K_M\n"
+        f"  source_dir: {tmp_path / 'llama.cpp'}\n",
+        encoding="utf-8",
+    )
+    caps = probe(nvidia_smi_output=SMI)
+    adapter = get_adapter("llamacpp")(load_profile("ds", tmp_path), caps)
+    adapter.check_requirements()
+    assert adapter._want_mmproj is True and adapter._mmproj is None
+
+    def fake_ensure(mid, root):
+        p = Path(root, "Qwen3.8-27B-GGUF", "mmproj-F16.gguf")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+        return p
+
+    monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "model-gguf"))
+    monkeypatch.setattr(llamacpp, "ensure_mmproj", fake_ensure)
+    monkeypatch.setattr(llamacpp, "require", lambda *a, **k: None)
+    monkeypatch.setattr(llamacpp, "run", lambda *a, **k: None)
+
+    adapter.pre_start()
+    assert adapter._mmproj is not None
+    assert adapter._mmproj.name == "mmproj-F16.gguf"
+    cmd, _ = adapter.build_command()
+    assert "--mmproj" in cmd
+
+
+def test_pre_start_no_download_section_keeps_warning(tmp_path, monkeypatch):
+    """vision: on 但无 download 段：check_requirements 即告警，pre_start 不尝试下载。"""
+    from modelctl.engines import llamacpp
+
+    (tmp_path / "m.gguf").write_bytes(b"0" * 1024)
+    (tmp_path / "ds.yaml").write_text(
+        f"name: ds\nengine: llamacpp\nport: 18888\nllamacpp:\n"
+        f"  model: {tmp_path}/m.gguf\n  gpu_count: 8\n  vision: on\n"
+        f"  source_dir: {tmp_path / 'llama.cpp'}\n",
+        encoding="utf-8",
+    )
+    caps = probe(nvidia_smi_output=SMI)
+    adapter = get_adapter("llamacpp")(load_profile("ds", tmp_path), caps)
+    adapter.check_requirements()
+    assert adapter._want_mmproj is False
+    assert any("mmproj" in w for w in adapter.warnings)
+
+    def fake_ensure(*a, **k):
+        raise AssertionError("无 download 段不应触发 mmproj 下载")
+
+    monkeypatch.setattr(llamacpp, "ensure_mmproj", fake_ensure)
+    monkeypatch.setattr(llamacpp, "require", lambda *a, **k: None)
+    monkeypatch.setattr(llamacpp, "run", lambda *a, **k: None)
+    adapter.pre_start()
+    cmd, _ = adapter.build_command()
+    assert "--mmproj" not in cmd
+
+
+def test_ensure_mmproj_local_hit_skips_network(tmp_path, monkeypatch):
+    """本地已有 mmproj：跳过 modelscope 安装与下载，直接复用。"""
+    from modelctl.engines import llamacpp
+
+    dest = tmp_path / "Qwen3.8-27B-GGUF"
+    dest.mkdir(parents=True)
+    (dest / "mmproj-F16.gguf").write_bytes(b"x")
+
+    monkeypatch.setattr(llamacpp, "ensure_modelscope", lambda: (_ for _ in ()).throw(AssertionError("不应安装")))
+    monkeypatch.setattr(
+        llamacpp, "snapshot_download", lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应下载"))
+    )
+    got = llamacpp.ensure_mmproj("unsloth/Qwen3.8-27B-GGUF", tmp_path)
+    assert got is not None and got.name == "mmproj-F16.gguf"
+
+
+def test_ensure_mmproj_downloads_when_missing(tmp_path, monkeypatch):
+    """本地无 mmproj：仅以 *mmproj*.gguf 模式补下。"""
+    from modelctl.engines import llamacpp
+
+    captured = {}
+
+    def fake_snapshot_download(model_id, local_dir, **kwargs):
+        captured.update(kwargs)
+        Path(local_dir, "mmproj-BF16.gguf").write_bytes(b"x")
+        return local_dir
+
+    monkeypatch.setattr(llamacpp, "ensure_modelscope", lambda: None)
+    monkeypatch.setattr(llamacpp, "snapshot_download", fake_snapshot_download)
+
+    got = llamacpp.ensure_mmproj("unsloth/Qwen3.8-27B-GGUF", tmp_path)
+    assert got is not None and got.name == "mmproj-BF16.gguf"
+    assert captured["allow_file_pattern"] == ["*mmproj*.gguf"]
+
+
 def test_find_first_skips_directory_named_dspark(tmp_path):
     """回归：仓库内 dspark 为目录时不得被当作草稿文件（rglob 会命中目录）。"""
     repo = tmp_path / "repo"

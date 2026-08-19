@@ -18,7 +18,7 @@ vllm:
     # modelscope_id：ModelScope 仓库 ID（HF 格式）
     modelscope_id: Qwen/Qwen3.8-27B
   # tensor_parallel_size：张量并行 GPU 数（不得超过实际 GPU 数）
-  tensor_parallel_size: 2
+  tensor_parallel_size: 4
   # max_model_len：最大上下文长度（token）
   # 注意：单序列完整可用（与并发无关）；KV 显存按 max_num_seqs × max_model_len 估算
   max_model_len: 262144

@@ -15,7 +15,7 @@ ollama:
   # keep_alive：模型驻留内存时长（秒）；-1 = 永久驻留，0 = 用完即卸载
   keep_alive: -1
   # num_parallel：并发请求数（OLLAMA_NUM_PARALLEL）
-  num_parallel: 2
+  num_parallel: 4
   # context_length：上下文长度（OLLAMA_CONTEXT_LENGTH）
   # 注意：单请求完整可用（与并发无关）；KV 显存 ≈ 并发 × context_length
   context_length: 262144

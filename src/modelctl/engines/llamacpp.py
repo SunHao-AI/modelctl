@@ -161,10 +161,11 @@ def ensure_mmproj(modelscope_id: str, model_root: Path) -> Path | None:
     destination.mkdir(parents=True, exist_ok=True)
     logger.info(f"从 ModelScope 下载 {modelscope_id} 的 mmproj（{'、'.join(MMPROJ_PATTERNS)}）：{destination}")
     try:
-        snap = snapshot_download
-        if snap is None:  # 模块导入时 modelscope 未安装，ensure_modelscope() 之后重导入
-            from modelscope import snapshot_download as snap  # type: ignore[import-not-found]
-        snap(
+        if snapshot_download is None:  # 模块导入时 modelscope 未安装，ensure_modelscope() 之后重导入
+            from modelscope import snapshot_download as _snap  # type: ignore[import-not-found]
+        else:
+            _snap = snapshot_download
+        _snap(
             model_id=modelscope_id,
             local_dir=str(destination),
             allow_file_pattern=MMPROJ_PATTERNS,
@@ -221,6 +222,25 @@ class LlamaCppAdapter(EngineAdapter):
                     self.warnings.append("剩余显存不足 ~11GB，已自动关闭 DSpark")
                 else:
                     self._dspark = True
+        # 视觉（mmproj）：VLM（如 Qwen3.8）需 --mmproj 才支持图片输入；
+        # 未找到且配置了 download 段时保留意图，由 pre_start 本地查找/补下。
+        if str(cfg.get("vision", "off")).lower() in ("on", "true", "1"):
+            if cfg.get("mmproj"):
+                p = Path(str(cfg["mmproj"])).expanduser()
+                if p.is_file():
+                    self._mmproj = p
+                else:
+                    logger.warning(f"指定的 mmproj 不存在：{p}，将尝试从 download 仓库自动获取")
+            elif self._model is not None and self._model.is_file():
+                self._mmproj = self._find_mmproj(self._model)
+            if self._mmproj is None:
+                if cfg.get("download"):
+                    self._want_mmproj = True
+                else:
+                    self.warnings.append(
+                        "未找到 mmproj（*mmproj*.gguf），图片输入不可用。"
+                        "可配置 llamacpp.mmproj 指定已有文件，或配置 download 段自动下载。"
+                    )
         # 显存预检：模型文件大小 × 1.1
         if self._model and self._model.is_file():
             need_mb = self._model.stat().st_size / 1024 / 1024 * 1.1
@@ -242,6 +262,16 @@ class LlamaCppAdapter(EngineAdapter):
                 if (base / name).is_file():
                     return base / name
             found = sorted(p for p in base.glob("*dspark*.gguf") if p.is_file())
+            if found:
+                return found[0]
+        return None
+
+    def _find_mmproj(self, model_path: Path) -> Path | None:
+        """在模型所在目录及各级父目录下查找 mmproj 文件。"""
+        for base in (model_path.parent, *model_path.parents):
+            if not base.exists():
+                continue
+            found = sorted(p for p in base.glob("*mmproj*.gguf") if p.is_file())
             if found:
                 return found[0]
         return None
@@ -303,6 +333,9 @@ class LlamaCppAdapter(EngineAdapter):
             cmd += ["--top-k", str(cfg["top_k"])]
         for stop in cfg.get("stops") or []:
             cmd += ["--stops", str(stop)]
+        # 视觉投影：VLM（如 Qwen3.8）缺少 --mmproj 时，含图请求会被 server 拒绝（500）
+        if self._mmproj is not None:
+            cmd += ["--mmproj", str(self._mmproj.resolve())]
         if self._dspark and self._draft is not None:
             cmd += [
                 "--model-draft",
@@ -346,6 +379,18 @@ class LlamaCppAdapter(EngineAdapter):
                 if self._draft is None:
                     self.warnings.append("下载完成，但未找到 DSpark 草稿模型，已自动关闭 DSpark")
                     self._dspark = False
+        # 视觉投影：本地查找/补下（覆盖"模型已存在但缺 mmproj"与"全新下载"两种场景）
+        if self._want_mmproj and self._mmproj is None:
+            if self._model is not None and self._model.is_file():
+                self._mmproj = self._find_mmproj(self._model)
+            mid = (cfg.get("download") or {}).get("modelscope_id")
+            if self._mmproj is None and mid:
+                model_root = Path(os.environ.get("MODEL_ROOT") or PROJECT_ROOT.parent / "model-gguf")
+                self._mmproj = ensure_mmproj(str(mid), model_root)
+            elif self._mmproj is None:
+                logger.warning("vision: on 但 download 段未配置 modelscope_id，无法自动获取 mmproj")
+            if self._mmproj is None:
+                self.warnings.append("未获取到 mmproj 文件（*mmproj*.gguf），图片输入不可用（文本功能不受影响）")
         require("git")
         require("cmake")
         if not source.exists():
