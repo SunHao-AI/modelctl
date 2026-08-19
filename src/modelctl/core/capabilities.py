@@ -15,7 +15,8 @@ ENGINE_INSTALL_HINTS = {
     "ollama": "，建议执行：curl -fsSL https://ollama.com/install.sh | sh",
     "vllm": "，建议执行：MAX_JOBS=4 uv pip install vllm",
     "sglang": '，建议执行：MAX_JOBS=4 uv pip install "sglang[all]"',
-    "unsloth": "，建议执行：MAX_JOBS=4 uv pip install unsloth",
+    # 无头推理（studio run）依赖官方安装器搭建的运行时，仅 pip install 不够
+    "unsloth": "，建议执行：curl -fsSL https://unsloth.ai/install.sh | sh",
     # llamacpp 提示较长（源码下载 + 编译命令），由 cli._cmd_probe 单独多行输出
 }
 
