@@ -213,7 +213,7 @@ B 机 nginx 通过 URL 路径把请求路由到不同模型；同时提供按 `m
 **生成 nginx 注册表**
 
 ```bash
-modelctl nginx-snippet --node 200 --host 192.168.77.220
+modelctl nginx-snippet --node 210 --host 192.168.77.210
 ```
 
 输出 `map $uri $llm_model_target` 片段，上传到 B 机 `/etc/nginx/llm-routes/` 并 include（完整示例见 `docs/nginx/llm-routing.example.conf`）。新增模型只需新增一条 profile，重新生成即可。
