@@ -17,6 +17,7 @@ from modelctl.engines.base import EngineAdapter, RequirementError
 
 OFFICIAL_URL = "https://github.com/ggml-org/llama.cpp.git"
 DSPARK_PATTERNS = ["*dspark*.gguf"]
+MMPROJ_PATTERNS = ["*mmproj*.gguf"]
 CTX_PER_SLOT = 1_048_576
 
 
@@ -142,12 +143,52 @@ def download_gguf(modelscope_id: str, model_root: Path, quant: str, want_dspark:
     return model_match, draft_match
 
 
+def ensure_mmproj(modelscope_id: str, model_root: Path) -> Path | None:
+    """查找/补下 mmproj（视觉投影）文件；失败返回 None（仅降级，不阻断启动）。
+
+    llama.cpp 的 VLM（如 Qwen3.8）必须加载 --mmproj 才接受图片输入，否则
+    server 对含图请求直接报 500 "image input is not supported"。
+    本地已存在 *mmproj*.gguf 时直接复用，不触发 modelscope 安装与下载。
+    """
+    destination = model_root / modelscope_id.rsplit("/", 1)[-1]
+    if destination.exists():
+        local = _find_first(destination, MMPROJ_PATTERNS)
+        if local is not None:
+            logger.info(f"本地已存在 mmproj：{local}")
+            return local
+
+    ensure_modelscope()
+    destination.mkdir(parents=True, exist_ok=True)
+    logger.info(f"从 ModelScope 下载 {modelscope_id} 的 mmproj（{'、'.join(MMPROJ_PATTERNS)}）：{destination}")
+    try:
+        snap = snapshot_download
+        if snap is None:  # 模块导入时 modelscope 未安装，ensure_modelscope() 之后重导入
+            from modelscope import snapshot_download as snap  # type: ignore[import-not-found]
+        snap(
+            model_id=modelscope_id,
+            local_dir=str(destination),
+            allow_file_pattern=MMPROJ_PATTERNS,
+        )
+    except Exception as error:
+        logger.warning(f"mmproj 下载失败：{error}")
+        return None
+
+    found = _find_first(destination, MMPROJ_PATTERNS)
+    if found is None:
+        logger.warning("下载结束，但未找到 mmproj 文件（仓库可能不含 *mmproj*.gguf）")
+        return None
+    logger.info(f"找到 mmproj：{found}")
+    return found
+
+
 class LlamaCppAdapter(EngineAdapter):
     def __init__(self, profile, caps):
         super().__init__(profile, caps)
         self._dspark = False
         self._draft: Path | None = None
         self._model: Path | None = None
+        self._mmproj: Path | None = None
+        self._want_mmproj = False
 
     def check_requirements(self) -> None:
         cfg = self.profile.engine_config
