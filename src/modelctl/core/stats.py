@@ -446,9 +446,11 @@ def run_server(targets: list[StatsTarget] | None = None) -> None:
     collectors: dict[str, UsageCollector] = {}
     for target in targets:
         if target.mapping is not None:
+            # UsageCollector 的 base_url 语义是"指标服务根地址"（_poll_once 内部拼 /metrics），
+            # 而 metrics_url 已含 /metrics 后缀，此处需去掉避免拼出 /metrics/metrics。
             collector = UsageCollector(
                 target.name,
-                target.metrics_url,
+                target.metrics_url.removesuffix("/metrics"),
                 poll_interval,
                 target.api_key,
                 target.data_dir,

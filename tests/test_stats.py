@@ -312,3 +312,45 @@ def test_resolve_payload_matches_alias():
     assert handler._resolve_payload("deepseek-v4-flash") == {"error": "该引擎不支持精确统计"}
     # 未知名字 → 未知模型
     assert "未知模型" in handler._resolve_payload("ghost")["error"]
+
+
+def test_run_server_passes_base_url_without_metrics_suffix(tmp_path, monkeypatch):
+    """回归：UsageCollector 的 base_url 必须是根地址，否则 _poll_once 会拼出 /metrics/metrics。"""
+    from modelctl.core import stats as stats_mod
+    from modelctl.core.stats import StatsTarget
+
+    captured: dict = {}
+
+    class FakeCollector:
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    class FakeServer:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def serve_forever(self) -> None:
+            raise KeyboardInterrupt
+
+        def server_close(self) -> None:
+            pass
+
+    def fake_collector(*args, **kwargs):
+        captured["base_url"] = args[1]
+        return FakeCollector()
+
+    monkeypatch.setenv("USAGE_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(stats_mod, "UsageCollector", fake_collector)
+    monkeypatch.setattr(stats_mod, "ThreadingHTTPServer", FakeServer)
+
+    target = StatsTarget(
+        name="x",
+        data_dir=tmp_path,
+        metrics_url="http://127.0.0.1:18888/metrics",
+        mapping={"prompt_total": ["m"]},
+    )
+    stats_mod.run_server(targets=[target])
+    assert captured["base_url"] == "http://127.0.0.1:18888"
