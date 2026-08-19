@@ -98,11 +98,15 @@ def create_app(
 
     @app.get("/v1/models")
     async def list_models() -> dict:
-        data = [
-            {"id": m.name, "object": "model", "created": 0, "owned_by": "modelctl"}
-            for m in registry.values()
-            if is_model_healthy(m)
-        ]
+        # 注册表同时含 name 与 alias 两个 key（指向同一 GatewayModel），须按 name 去重
+        seen: set[str] = set()
+        data = []
+        for m in registry.values():
+            if m.name in seen:
+                continue
+            seen.add(m.name)
+            if is_model_healthy(m):
+                data.append({"id": m.name, "object": "model", "created": 0, "owned_by": "modelctl"})
         return {"object": "list", "data": data}
 
     @app.post("/v1/{path:path}")

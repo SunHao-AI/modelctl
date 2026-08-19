@@ -149,3 +149,14 @@ def test_build_registry_registers_aliases(tmp_path):
     reg = build_registry(models_dir=tmp_path)
     assert set(reg) == {"deepseek-v4-flash-llamacpp", "deepseek-v4-flash"}
     assert reg["deepseek-v4-flash"] is reg["deepseek-v4-flash-llamacpp"]
+
+
+def test_list_models_dedups_alias_and_name():
+    """回归：name 与 alias 指向同一对象时 /v1/models 不得重复列出。"""
+    gm = GatewayModel("ds-llamacpp", "llamacpp", "http://upstream", "ds-llamacpp", None, "http://upstream/")
+    reg = {"ds-llamacpp": gm, "ds": gm}
+    app = create_app(reg, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    with patch("modelctl.core.gateway.is_model_healthy", return_value=True):
+        resp = _run(_get(app, "/v1/models"))
+    assert resp.status_code == 200
+    assert [m["id"] for m in resp.json()["data"]] == ["ds-llamacpp"]
