@@ -1,0 +1,36 @@
+# sglang/kimi-k2.5.yaml —— Kimi-K2.5（120B dense，SGLang 引擎，HuggingFace 原始权重）
+# 学习要点：SGLang 与 vLLM 类似使用 HF 格式权重，通过 --tp 张量并行，适合高吞吐在线服务。
+# 注意：BF16 权重约 240GB，需 8×RTX 5880（共 384GB）全量张量并行；若官方提供 FP8 检查点可配合量化参数降低占用。
+# name：CLI 标识符，`modelctl start kimi-k2.5-sglang` 使用；全局唯一
+name: kimi-k2.5-sglang
+# engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
+engine: sglang
+# port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
+port: 8202
+# api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值
+api_key: ${API_KEY}
+
+sglang:
+  # model：HuggingFace 模型 ID 或本地模型目录。
+  # 为空/不存在时通过 download 段从 ModelScope 下载并写回本地路径。
+  # 请替换为实际可用的 HF 模型 ID，如 moonshotai/Kimi-K2.5-Instruct
+  model: moonshotai/Kimi-K2.5-Instruct
+  # download：模型不存在时的自动下载配置（ModelScope，HF 格式仓库）
+  download:
+    # modelscope_id：ModelScope 仓库 ID（HF 格式）
+    modelscope_id: moonshotai/Kimi-K2.5-Instruct
+  # tensor_parallel_size：张量并行 GPU 数（--tp，不得超过实际 GPU 数）
+  tensor_parallel_size: 8
+  # context_length：最大上下文长度（token）
+  # 注意：单序列完整可用（与并发无关）；KV 显存 ≈ 并发 × context_length
+  context_length: 65536
+  # mem_fraction_static：静态显存分配比例（0~1），预留 KV cache 空间
+  mem_fraction_static: 0.9
+  # extra_args：透传给 `sglang.launch_server` 的额外参数（空格分隔，按 shlex 拆分）
+  extra_args: ""
+
+usage:
+  # price_in：每千输入 token 计价（元），供 cc-switch 用量统计
+  price_in: 1.0
+  # price_out：每千输出 token 计价（元）
+  price_out: 2.0

@@ -13,9 +13,9 @@ ENGINE_BINARIES = ["ollama", "vllm", "sglang", "unsloth", "llamacpp"]
 
 ENGINE_INSTALL_HINTS = {
     "ollama": "，建议执行：curl -fsSL https://ollama.com/install.sh | sh",
-    "vllm": "，建议执行：MAX_JOBS=4 pip install vllm",
-    "sglang": '，建议执行：MAX_JOBS=4 pip install "sglang[all]"',
-    "unsloth": "，建议执行：MAX_JOBS=4 pip install unsloth",
+    "vllm": "，建议执行：MAX_JOBS=4 uv pip install vllm",
+    "sglang": '，建议执行：MAX_JOBS=4 uv pip install "sglang[all]"',
+    "unsloth": "，建议执行：MAX_JOBS=4 uv pip install unsloth",
     # llamacpp 提示较长（源码下载 + 编译命令），由 cli._cmd_probe 单独多行输出
 }
 

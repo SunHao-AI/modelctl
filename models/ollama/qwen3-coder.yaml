@@ -1,0 +1,23 @@
+# ollama/qwen3-coder.yaml —— Qwen3-Coder-480B-A35B（ollama 引擎）
+# 学习要点：ollama 引擎是常驻 serve 进程，模型按需加载/卸载，无需 download 段（由 ollama pull 处理）。
+# 注意：本机总显存 384GB，480b Q4（约 290GB）可全量驻留 GPU；若上下文过大 OOM，
+# 下调 context_length / num_parallel，或临时换小一档的 tag。
+# name：CLI 标识符，`modelctl start qwen3-coder-ollama` 使用；全局唯一
+name: qwen3-coder-ollama
+# engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
+engine: ollama
+# port：服务监听端口（ollama serve 常驻端口）
+port: 11434
+# 注意：ollama 引擎无需 api_key（本地服务，无 OpenAI 兼容鉴权）
+
+ollama:
+  # model：ollama 模型名（<name>:<tag>），不存在时 pre_start 自动 `ollama pull`
+  # 注意：请核对 qwen3-coder 库实际可用 tag（如 480b / 30b）后再启用
+  model: qwen3-coder:480b
+  # keep_alive：模型驻留内存时长（秒）；-1 = 永久驻留，0 = 用完即卸载
+  keep_alive: -1
+  # num_parallel：并发请求数（OLLAMA_NUM_PARALLEL）
+  num_parallel: 2
+  # context_length：上下文长度（OLLAMA_CONTEXT_LENGTH）
+  # 注意：单请求完整可用（与并发无关）；KV 显存 ≈ 并发 × context_length
+  context_length: 65536

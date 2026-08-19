@@ -1,0 +1,40 @@
+# unsloth/qwen3-coder.yaml —— Qwen3-Coder-480B-A35B（Unsloth 引擎，无头 API）
+# 学习要点：Unsloth 无头服务（unsloth studio --api-only）支持 GGUF 动态量化，api_key 必填。
+# 注意：Q4_K_M 权重约 290GB，远超单卡 48GB，tensor_parallel 必须为 true 多卡分片加载。
+# name：CLI 标识符，`modelctl start qwen3-coder-unsloth` 使用；全局唯一
+name: qwen3-coder-unsloth
+# engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
+engine: unsloth
+# port：服务监听端口（健康检查 http://127.0.0.1:<port>/v1/models）
+port: 8001
+# api_key：必填：健康检查 /v1/models 依赖 Bearer 认证
+api_key: ${UNSLOTH_API_KEY}
+
+unsloth:
+  # model：HF 模型 ID 或本地 GGUF 路径；留空则通过 download 段自动下载
+  # 注意：仓库 ID 以 ModelScope 实际可用为准，启动前请核对
+  model: unsloth/Qwen3-Coder-480B-A35B-GGUF
+  # gguf_variant：Unsloth 动态量化后缀；model 为本地路径时忽略
+  gguf_variant: Q4_K_M
+  # context_length：请求的上下文长度
+  # 注意：单请求完整可用（与并发无关）；KV 显存 ≈ 并发 × context_length
+  # 权重占约 290GB，KV 预算有限，建议不超过 64K
+  context_length: 32768
+  # tensor_parallel：多卡 GGUF tensor-parallel 加载（需至少 2 块 GPU）
+  tensor_parallel: true
+  # load_in_4bit：非 GGUF HF 模型的 4bit 加载
+  load_in_4bit: false
+  # download：ModelScope 自动下载配置（model 不存在本地路径时触发）
+  download:
+    # modelscope_id：ModelScope 仓库 ID（GGUF 格式）
+    modelscope_id: unsloth/Qwen3-Coder-480B-A35B-GGUF
+    # quant：仓库内实际量化名
+    quant: Q4_K_M
+  # extra_args：透传其他 unsloth 参数
+  extra_args: ""
+
+usage:
+  # price_in：每千输入 token 计价（元），供 cc-switch 用量统计
+  price_in: 1.0
+  # price_out：每千输出 token 计价（元）
+  price_out: 2.0
