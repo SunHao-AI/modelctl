@@ -24,7 +24,8 @@ llamacpp:
   # parallel：并发槽位数（同时处理多少请求），显存占用随其增长
   parallel: 2
   # ctx_size：上下文长度；留空 = parallel × 1,048,576（1M）
-  ctx_size: 32768
+  # 注意：单槽上下文 = ctx_size / parallel（本配置 65536/2 = 每槽 32768）
+  ctx_size: 65536
   # reasoning：是否输出推理过程内容（on/off）
   reasoning: on
   # reasoning_format：推理内容格式（deepseek / none 等）
