@@ -45,6 +45,51 @@ def test_vllm_tp_exceeds(tmp_path):
         a.check_requirements()
 
 
+def test_vllm_deepseek_v4_unsupported_on_ada(tmp_path):
+    # Ada（CC 8.9）不支持 DeepSeek-V4：mHC 层依赖仅 Hopper/Blackwell DC 提供的 DeepGEMM 内核
+    p = _write(
+        tmp_path,
+        "name: ds4\nengine: vllm\nport: 8000\nvllm:\n  model: deepseek-ai/DeepSeek-V4-Flash\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    with pytest.raises(RequirementError, match="不支持 vllm 引擎部署 ds4 模型"):
+        a.check_requirements()
+
+
+def test_vllm_deepseek_v4_local_config_detection(tmp_path):
+    # 本地目录：通过 config.json 的 architectures / model_type 判定
+    model_dir = tmp_path / "DeepSeek-V4-Flash"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(
+        '{"architectures": ["DeepseekV4ForCausalLM"], "model_type": "deepseek_v4"}',
+        encoding="utf-8",
+    )
+    p = _write(tmp_path, f"name: ds4\nengine: vllm\nport: 8000\nvllm:\n  model: {model_dir}\n")
+    a = get_adapter("vllm")(p, CAPS8)
+    with pytest.raises(RequirementError, match="不支持 vllm 引擎部署 ds4 模型"):
+        a.check_requirements()
+
+
+def test_vllm_deepseek_v4_allowed_on_hopper(tmp_path):
+    # Hopper（CC 9.0）应放行
+    p = _write(
+        tmp_path,
+        "name: ds4\nengine: vllm\nport: 8000\nvllm:\n  model: deepseek-ai/DeepSeek-V4-Flash\n",
+    )
+    a = get_adapter("vllm")(p, Capabilities(gpu_count=8, compute_capability="9.0", binaries={"vllm": True}))
+    a.check_requirements()
+
+
+def test_vllm_deepseek_v4_skips_when_cc_unknown(tmp_path):
+    # 无法探测到 CC 时不拦截（避免误伤无 GPU 的纯配置检查场景）
+    p = _write(
+        tmp_path,
+        "name: ds4\nengine: vllm\nport: 8000\nvllm:\n  model: deepseek-ai/DeepSeek-V4-Flash\n",
+    )
+    a = get_adapter("vllm")(p, Capabilities(gpu_count=0, compute_capability="", binaries={"vllm": True}))
+    a.check_requirements()
+
+
 def test_sglang_command(tmp_path):
     p = _write(
         tmp_path, "name: s\nengine: sglang\nport: 30000\nsglang:\n  model: Qwen/Qwen3-32B\n  tensor_parallel_size: 4\n"

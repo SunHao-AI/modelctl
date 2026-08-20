@@ -58,11 +58,15 @@ def is_running(name: str) -> bool:
     try:
         pid = int(pf.read_text(encoding="utf-8").strip())
     except ValueError:
+        # 无法解析的 PID 文件直接删除，视为异常
+        pf.unlink(missing_ok=True)
         return False
     try:
         os.kill(pid, 0)
         return True
     except OSError:
+        # 进程已不存在，清理残留的 PID 文件
+        pf.unlink(missing_ok=True)
         return False
 
 
