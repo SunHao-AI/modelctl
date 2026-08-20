@@ -26,7 +26,10 @@ vllm:
   # gpu_memory_utilization：显存利用率上限（0~1）
   gpu_memory_utilization: 0.9
   # quantization：量化方式（可选，如 fp8；FP8 需要 CC ≥ 8.9）
+  # DeepSeek-V4 权重自带 fp8 量化（deepseek_v4_fp8），vLLM 会自动识别，此项留空即可
   quantization: ""
+  # kv_cache_dtype：KV 缓存精度；DeepSeek-V4 的 fp8_ds_mla 布局强制要求 fp8（vLLM 0.27+ 断言）
+  kv_cache_dtype: fp8
   # extra_args：透传给 `vllm serve` 的额外参数（空格分隔，按 shlex 拆分）
   extra_args: ""
 

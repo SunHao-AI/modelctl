@@ -58,6 +58,8 @@ class VllmAdapter(EngineAdapter):
             cmd += ["--max-model-len", str(cfg["max_model_len"])]
         if cfg.get("quantization"):
             cmd += ["--quantization", str(cfg["quantization"])]
+        if cfg.get("kv_cache_dtype"):
+            cmd += ["--kv-cache-dtype", str(cfg["kv_cache_dtype"])]
         cmd += self.api_key_args()
         if cfg.get("extra_args"):
             cmd += shlex.split(str(cfg["extra_args"]))
