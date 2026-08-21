@@ -113,7 +113,7 @@ def apply_compat(adapter, issues) -> None:
 | `vllm_torch_abi` | vllm | vllm wheel `Requires-Dist: torch==x` vs 已装 torch | block（提示安装命令） |
 | `nvidia_pkg_complete` | vllm, sglang | nvidia 各包 wheel 元数据声明的 .so vs 磁盘实际文件（拦截空壳包） | block |
 | `cuda_lib_resolvable` | vllm, sglang | 按驱动 CUDA 版本推断关键库（libcudart/libcudnn/libnccl…），检查可解析性 | block |
-| `engine_dep_missing` | vllm, sglang | vllm METADATA 关键硬依赖（如 xgrammar）版本匹配 | block |
+| `engine_dep_missing` | vllm（追认：第一阶段仅 vllm，sglang 依赖体系不同留待后续） | vllm METADATA 关键硬依赖（如 xgrammar）版本匹配 | block |
 | `env_var_missing` | 全部 | HF_HOME / MODEL_ROOT 等缺失 | degrade |
 
 ## 5. 两段式调用流程

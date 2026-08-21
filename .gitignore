@@ -5,6 +5,10 @@
 logs/
 *.log
 
+# 本地临时调试产物（Agent/调试导出）
+temp.log
+temp.json
+
 # Python
 __pycache__/
 *.py[cod]
