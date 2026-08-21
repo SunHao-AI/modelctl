@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from modelctl.core.capabilities import Capabilities
-from modelctl.core.compat import GpuSpec, ModelSpec, cc_major
+from modelctl.core.compat import EnvSpec, GpuSpec, ModelSpec, cc_major
 
 
 def test_cc_major_parsing():
@@ -71,3 +73,50 @@ def test_model_spec_from_id_download_id():
 def test_model_spec_from_id_quantization():
     m = ModelSpec.from_id("vllm", "Qwen/Qwen3-32B", quantization="fp8")
     assert "fp8" in m.quantization
+
+
+def _fake_site_packages(tmp_path) -> Path:
+    """构造虚拟 site-packages：vllm METADATA（含 torch 约束）、nvidia cudnn 包与假 .so。"""
+    sp = tmp_path / "site-packages"
+    vllm_dist = sp / "vllm-0.27.1.dist-info"
+    vllm_dist.mkdir(parents=True)
+    (vllm_dist / "METADATA").write_text(
+        "Name: vllm\nVersion: 0.27.1\nRequires-Dist: torch==2.13.0\nRequires-Dist: xgrammar>=0.2.3\n",
+        encoding="utf-8",
+    )
+    torch_dist = sp / "torch-2.9.1.dist-info"
+    torch_dist.mkdir(parents=True)
+    (torch_dist / "METADATA").write_text("Name: torch\nVersion: 2.9.1\n", encoding="utf-8")
+    cudnn = sp / "nvidia" / "cudnn" / "lib"
+    cudnn.mkdir(parents=True)
+    (cudnn / "libcudnn.so.9").write_bytes(b"")
+    return sp
+
+
+def test_env_spec_metadata(tmp_path):
+    env = EnvSpec.from_env(site_packages=_fake_site_packages(tmp_path))
+    assert env.packages["torch"] == "2.9.1"
+    assert env.packages["vllm"] == "0.27.1"
+    assert env.wheel_requires["vllm"]["torch"] == "==2.13.0"
+    assert env.wheel_requires["vllm"]["xgrammar"] == ">=0.2.3"
+
+
+def test_env_spec_nvidia_so(tmp_path):
+    env = EnvSpec.from_env(site_packages=_fake_site_packages(tmp_path))
+    assert "nvidia/cudnn/lib/libcudnn.so.9" in env.nvidia_so
+    assert "libcudnn.so.9" in env.cuda_libs_resolvable  # venv 内 nvidia 库并入可解析集
+
+
+def test_env_spec_empty_site_packages(tmp_path):
+    env = EnvSpec.from_env(site_packages=tmp_path / "nonexistent")
+    assert env.packages == {}
+    assert env.wheel_requires == {}
+    assert env.nvidia_so == set()
+
+
+def test_env_spec_env_vars(monkeypatch, tmp_path):
+    monkeypatch.setenv("HF_HOME", "/data/hf")
+    monkeypatch.setenv("MODEL_ROOT", "")
+    env = EnvSpec.from_env(site_packages=tmp_path)
+    assert env.env_vars["HF_HOME"] == "/data/hf"
+    assert env.env_vars["MODEL_ROOT"] == ""

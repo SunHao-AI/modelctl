@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -97,6 +100,8 @@ class ModelSpec:
                 data = json.loads(config.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 data = {}
+        if not isinstance(data, dict):
+            data = {}
         quant = str((data.get("quantization_config") or {}).get("quant_method") or "").lower()
         return cls(
             engine=engine,
@@ -115,3 +120,124 @@ class ModelSpec:
             quantization=quantization.lower(),
             name_hint=f"{model_id} {download_id}".strip(),
         )
+
+
+@dataclass
+class EnvSpec:
+    """软件/环境能力快照（静态元数据 + 文件检查，不导入引擎）。"""
+
+    site_packages: Path | None = None
+    packages: dict[str, str] = field(default_factory=dict)
+    wheel_requires: dict[str, dict[str, str]] = field(default_factory=dict)
+    nvidia_so: set[str] = field(default_factory=set)
+    cuda_libs_resolvable: set[str] = field(default_factory=set)
+    libs_resolvable_known: bool = True
+    env_vars: dict[str, str | None] = field(default_factory=dict)
+    disk_free_mb: int = 0
+
+    @classmethod
+    def from_env(cls, site_packages: Path | None = None) -> EnvSpec:
+        sp = site_packages if site_packages is not None else _current_site_packages()
+        env = cls(site_packages=sp)
+        if sp is not None and sp.is_dir():
+            env.packages = _read_installed_packages(sp)
+            env.wheel_requires = _read_wheel_requires(sp)
+            env.nvidia_so = _scan_nvidia_so(sp)
+        env.env_vars = {k: os.environ.get(k) for k in ("HF_HOME", "MODEL_ROOT", "MODELSCOPE_CACHE", "LD_LIBRARY_PATH")}
+        env.disk_free_mb = _disk_free_mb()
+        env.cuda_libs_resolvable, env.libs_resolvable_known = _resolvable_cuda_libs()
+        # venv 内 nvidia 库目录通常由启动方加入链接路径，并入可解析集
+        env.cuda_libs_resolvable.update(Path(rel).name for rel in env.nvidia_so)
+        return env
+
+
+def _current_site_packages() -> Path | None:
+    """定位当前解释器的 site-packages（纯标准库）。"""
+    import site
+
+    paths = site.getsitepackages()
+    return Path(paths[0]) if paths else None
+
+
+def _read_installed_packages(sp: Path) -> dict[str, str]:
+    """读取 sp 下所有 *.dist-info/METADATA 的 Name/Version。"""
+    result: dict[str, str] = {}
+    for meta in sp.glob("*.dist-info/METADATA"):
+        name = version = ""
+        for line in meta.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("Name:") and not name:
+                name = line.split(":", 1)[1].strip()
+            elif line.startswith("Version:") and not version:
+                version = line.split(":", 1)[1].strip()
+            if name and version:
+                break
+        if name:
+            result[name.lower()] = version
+    return result
+
+
+def _read_wheel_requires(sp: Path) -> dict[str, dict[str, str]]:
+    """解析各 wheel METADATA 的 Requires-Dist，保留单条目约束串（如 "==2.13.0"）。"""
+    result: dict[str, dict[str, str]] = {}
+    for meta in sp.glob("*.dist-info/METADATA"):
+        name = ""
+        reqs: dict[str, str] = {}
+        for line in meta.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("Name:"):
+                name = line.split(":", 1)[1].strip()
+            elif line.startswith("Requires-Dist:"):
+                spec = line.split(":", 1)[1].strip()
+                marker_pos = spec.find(";")
+                if marker_pos != -1:
+                    spec = spec[:marker_pos].strip()
+                parts = spec.split()
+                if parts:
+                    dep = parts[0].lower()
+                    if len(parts) > 1:
+                        reqs[dep] = "".join(parts[1:])
+                    else:
+                        # PEP 508 无空格形式（如 torch==2.13.0）：拆出包名与约束串
+                        token = parts[0]
+                        cut = next((i for i, ch in enumerate(token) if ch in "=<>!~"), -1)
+                        if cut > 0:
+                            reqs[token[:cut].lower()] = token[cut:]
+        if name:
+            result[name.lower()] = reqs
+    return result
+
+
+def _scan_nvidia_so(sp: Path) -> set[str]:
+    """扫描 site-packages/nvidia 下实际存在的 .so 文件（相对路径，/ 分隔）。"""
+    nv = sp / "nvidia"
+    if not nv.is_dir():
+        return set()
+    return {str(p.relative_to(sp)).replace("\\", "/") for p in nv.rglob("*.so*") if p.is_file()}
+
+
+def _resolvable_cuda_libs() -> tuple[set[str], bool]:
+    """探测动态链接器可解析的 .so 文件名集合。ldconfig 不可用时返回 (空集, False)。"""
+    names: set[str] = set()
+    try:
+        out = subprocess.run(["ldconfig", "-p"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return names, False
+    if out.returncode != 0:
+        return names, False
+    for line in out.stdout.splitlines():
+        parts = line.split("=>")
+        if len(parts) == 2:
+            names.add(parts[0].strip().split()[-1])
+    for d in os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep):
+        if not d:
+            continue
+        p = Path(d)
+        if p.is_dir():
+            names.update(f.name for f in p.glob("*.so*") if f.is_file())
+    return names, True
+
+
+def _disk_free_mb() -> int:
+    try:
+        return int(shutil.disk_usage(os.getcwd()).free / 1024 / 1024)
+    except OSError:
+        return 0
