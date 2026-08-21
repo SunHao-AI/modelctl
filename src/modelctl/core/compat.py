@@ -299,7 +299,7 @@ def _spec_matches(requirement: str, version: str) -> bool:
         if req.startswith(op):
             target = req[len(op):].strip()
             if op == "!=":
-                return version != target
+                return not _cmp_versions(version, target, "==")
             return _cmp_versions(version, target, op)
     return True
 
@@ -307,6 +307,7 @@ def _spec_matches(requirement: str, version: str) -> bool:
 def _cmp_versions(a: str, b: str, op: str) -> bool:
     def _t(v: str) -> tuple:
         parts: list = []
+        v = v.split("+", 1)[0]  # 剥离 PEP 440 local 标签（2.13.0+cu128 -> 2.13.0）
         for x in v.replace("-", ".").split("."):
             try:
                 parts.append(int(x))
@@ -316,7 +317,16 @@ def _cmp_versions(a: str, b: str, op: str) -> bool:
 
     try:
         ta, tb = _t(a), _t(b)
-    except Exception:  # noqa: BLE001 —— 解析失败不误报
+        if op == "==":
+            return ta == tb
+        if op == ">=":
+            return ta >= tb
+        if op == "<=":
+            return ta <= tb
+        if op == ">":
+            return ta > tb
+        if op == "<":
+            return ta < tb
         return True
-    ops = {"==": ta == tb, ">=": ta >= tb, "<=": ta <= tb, ">": ta > tb, "<": ta < tb}
-    return ops.get(op, True)
+    except Exception:  # noqa: BLE001 —— 版本比较异常视为匹配（不误报）
+        return True

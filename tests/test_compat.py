@@ -234,6 +234,18 @@ def test_spec_matches():
     assert _spec_matches("garbage", "1.0")  # 无法解析不误报
 
 
+def test_spec_matches_pep440_local_label():
+    """PEP 440 local 标签（2.13.0+cu128）应与基础版本分段比较视为匹配，且不崩溃。"""
+    assert _spec_matches("==2.13.0", "2.13.0+cu128")
+    assert _spec_matches(">=0.2.3", "0.2.3+cu130")
+
+
+def test_spec_matches_not_equal_uses_segmented_compare():
+    """!= 分支应与 == 一致采用版本分段比较，而非字符串比较。"""
+    assert _spec_matches("!=1.0.0", "1.0.1")
+    assert not _spec_matches("!=1.0.0", "1.0.0")
+
+
 def _run(engine: str, cc: str, model: ModelSpec | None):
     return run_compat(engine, GpuSpec(cc=cc), EnvSpec(), model)
 
