@@ -272,7 +272,7 @@ modelctl all stop
 # 重启：仅默认模型停后启，gateway / stats 重启
 modelctl all restart
 
-# 状态汇总：三件套逐项 [ok/skipped/error]
+# 状态汇总：三件套逐项 [ok]
 modelctl all status
 ```
 
@@ -296,7 +296,7 @@ bash script/modelctl-all.sh start
 bash script/modelctl-all.sh status
 ```
 
-**失败语义**：逐组件尝试并汇总（某组件失败仍继续后续组件），任一组件 `[error]` 使 start / restart 返回 exit 2、stop 返回 exit 1（status 恒 exit 0）；可再 `modelctl status` 细查各组件状态。
+**失败语义**：逐组件尝试并汇总（某组件失败仍继续后续组件），任一组件 `[error]` 使 start / restart 返回 exit 2、stop 返回 exit 1（status 恒 exit 0）；可再 `modelctl status` 细查模型状态（网关/统计用 `modelctl gateway status` / `modelctl stats status`）。
 
 ## 文档
 

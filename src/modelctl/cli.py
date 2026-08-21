@@ -2,7 +2,9 @@
 """modelctl.py — 多模型部署启动器 CLI 入口。
 
 子命令：start <name> [--timeout 300] / stop <name> / restart <name> /
-        status [name] / list / probe / stats start|stop / ui start|stop <name>
+        status [name] / list / probe /
+        stats start|stop|restart|status / gateway start|stop|restart|status /
+        all start|stop|restart|status / ui start|stop <name>
 
 流程约定：
 - 所有子命令先 load_env()（注入 .env），再 probe() 探测硬件能力。
@@ -303,7 +305,10 @@ def _cmd_all(args, models_dir: Path | None, caps) -> int:
         else:
             logger.info(line)
     if any(r.status == "error" for r in results):
-        logger.info("提示：可执行 `modelctl status` 细查各组件状态")
+        logger.info(
+            "提示：可执行 `modelctl status` 细查模型状态"
+            "（网关/统计用 `modelctl gateway status` / `modelctl stats status`）"
+        )
         return exit_code
     return 0
 
