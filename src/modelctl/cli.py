@@ -342,7 +342,8 @@ def _cmd_ui_start(args, models_dir: Path | None, caps) -> int:
     instance = f"ui-{profile.name}"
     if is_running(instance):
         logger.info(
-            f"Web 控制台已在运行（{instance}, http://{spec['host']}:{spec['port']}）；重启请先 `modelctl ui stop {args.name}`"
+            f"Web 控制台已在运行（{instance}, "
+            f"http://{spec['host']}:{spec['port']}）；重启请先 `modelctl ui stop {args.name}`"
         )
         return 0
     # ufw 入站白名单：只放行指定来源 IP 直连 UI 端口，避免控制台裸奔
@@ -414,7 +415,9 @@ def main(argv: list[str] | None = None) -> int:
                 return _cmd_gateway_stop()
             return _cmd_gateway_status()
         if args.command == "ui":
-            return _cmd_ui_start(args, models_dir, caps) if args.action == "start" else _cmd_ui_stop(args, models_dir, caps)
+            if args.action == "start":
+                return _cmd_ui_start(args, models_dir, caps)
+            return _cmd_ui_stop(args, models_dir, caps)
         if args.command == "nginx-snippet":
             return _cmd_nginx_snippet(args, models_dir)
     except (ProfileError, RequirementError) as error:

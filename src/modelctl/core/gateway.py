@@ -78,7 +78,9 @@ def build_registry(models_dir: Path | None = None, host: str = "127.0.0.1") -> d
     return registry
 
 
-def resolve_model(registry: dict[str, GatewayModel], body_model: str | None, default_model: str | None) -> GatewayModel | None:
+def resolve_model(
+    registry: dict[str, GatewayModel], body_model: str | None, default_model: str | None
+) -> GatewayModel | None:
     """按 body.model 解析目标模型；未知或省略均回退 default_model，都不可用时返回 None。"""
     if body_model and body_model in registry:
         return registry[body_model]
@@ -178,6 +180,7 @@ def create_app(
         body["model"] = target.upstream_model
         headers = {"Content-Type": "application/json"}
         up_key = target.upstream_api_key()
+        auth: str | None
         if up_key and up_key != target.api_key:
             # 运行时自动生成的 key（unsloth），客户端无从得知，必须覆盖请求头
             auth = f"Bearer {up_key}"

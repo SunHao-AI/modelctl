@@ -97,10 +97,14 @@ class UnslothAdapter(EngineAdapter):
         dl = cfg["download"]
         model_root = Path(os.environ.get("MODEL_ROOT") or PROJECT_ROOT.parent / "model-gguf")
         try:
-            model_match, _draft = download_gguf(dl["modelscope_id"], model_root, dl.get("quant", "UD-Q8_K_XL"), want_dspark=False)
+            model_match, _draft = download_gguf(
+                dl["modelscope_id"], model_root, dl.get("quant", "UD-Q8_K_XL"), want_dspark=False
+            )
         except RequirementError as error:
             raise RequirementError(
-                f"{self.profile.name}：ModelScope 下载失败。\n{error}\n" "可配置 HF_ENDPOINT=https://hf-mirror.com 后从 Hugging Face 手动下载 " "unsloth GGUF 仓库，并将本地路径填入 unsloth.model。"
+                f"{self.profile.name}：ModelScope 下载失败。\n{error}\n"
+                "可配置 HF_ENDPOINT=https://hf-mirror.com 后从 Hugging Face 手动下载 "
+                "unsloth GGUF 仓库，并将本地路径填入 unsloth.model。"
             ) from error
         assert self.profile.path is not None  # 加载的 profile 必有真实文件路径
         persist_model_path(self.profile.path, "unsloth", str(model_match.resolve()))

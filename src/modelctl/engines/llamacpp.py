@@ -105,9 +105,12 @@ def download_gguf(modelscope_id: str, model_root: Path, quant: str, want_dspark:
 
     logger.info(f"从 ModelScope 下载 {modelscope_id} 的 {quant} 分片（{', '.join(patterns)}）：{destination}")
     try:
-        _snapshot = snapshot_download
-        if _snapshot is None:  # 模块导入时 modelscope 未安装，ensure_modelscope() 之后重导入
-            from modelscope import snapshot_download as _snapshot  # type: ignore[import-not-found]
+        if snapshot_download is None:  # 模块导入时 modelscope 未安装，ensure_modelscope() 之后重导入
+            import modelscope  # type: ignore[import-untyped]
+
+            _snapshot = modelscope.snapshot_download
+        else:
+            _snapshot = snapshot_download
         _snapshot(
             model_id=modelscope_id,
             local_dir=str(destination),
@@ -373,6 +376,7 @@ class LlamaCppAdapter(EngineAdapter):
                 self._draft = auto_draft
             from modelctl.engines._persist import persist_model_path
 
+            assert self.profile.path is not None  # 加载的 profile 必有真实文件路径
             persist_model_path(self.profile.path, "llamacpp", str(self._model.resolve()))
             # model 留空时下载前无法发现草稿，下载后按意图重新发现
             if self._dspark and self._draft is None:

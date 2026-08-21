@@ -104,7 +104,9 @@ def test_ui_stop(tmp_path, monkeypatch):
     _write_unsloth_ui_profile(tmp_path)
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     called: dict = {}
-    monkeypatch.setattr(cli, "stop_instance", lambda name, port, patterns: called.update(name=name, port=port, patterns=patterns))
+    monkeypatch.setattr(
+        cli, "stop_instance", lambda name, port, patterns: called.update(name=name, port=port, patterns=patterns)
+    )
     monkeypatch.setattr(cli, "is_running", lambda name: True)
     rc = cli.main(["ui", "stop", "u", "--models-dir", str(tmp_path)])
     assert rc == 0

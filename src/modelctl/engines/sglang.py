@@ -34,6 +34,8 @@ class SglangAdapter(EngineAdapter):
                 modelscope_id = cfg["download"]["modelscope_id"]
                 model_root = Path(os.environ.get("MODEL_ROOT") or PROJECT_ROOT.parent / "model-hf")
                 local_dir = download_repo(modelscope_id, model_root)
+                if self.profile.path is None:
+                    raise RequirementError(f"{self.profile.name}：profile 文件路径缺失，无法写回模型路径")
                 persist_model_path(self.profile.path, "sglang", str(local_dir.resolve()))
                 cfg["model"] = str(local_dir.resolve())
         # 精检：模型文件就位后，以 config.json 判定更精确的模型特征

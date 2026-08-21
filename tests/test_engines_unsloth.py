@@ -50,7 +50,9 @@ def test_unsloth_env_var_degrade_warning(tmp_path, monkeypatch):
 def test_unsloth_requirements_allow_download_only(tmp_path):
     p = _write(
         tmp_path,
-        "name: u\nengine: unsloth\nport: 30000\napi_key: k\n" "unsloth:\n  model: ''\n  download:\n    modelscope_id: unsloth/DeepSeek-V4-Flash-0731-GGUF\n" "    quant: UD-Q8_K_XL\n",
+        "name: u\nengine: unsloth\nport: 30000\napi_key: k\n"
+        "unsloth:\n  model: ''\n  download:\n"
+        "    modelscope_id: unsloth/DeepSeek-V4-Flash-0731-GGUF\n    quant: UD-Q8_K_XL\n",
     )
     a = get_adapter("unsloth")(p, CAPS8)
     a.check_requirements()  # model 为空但有 download 段时不应报错
@@ -59,7 +61,8 @@ def test_unsloth_requirements_allow_download_only(tmp_path):
 def test_unsloth_tensor_parallel_requires_2_gpus(tmp_path):
     p = _write(
         tmp_path,
-        "name: u\nengine: unsloth\nport: 30000\napi_key: k\n" "unsloth:\n  model: m\n  tensor_parallel: true\n",
+        "name: u\nengine: unsloth\nport: 30000\napi_key: k\n"
+        "unsloth:\n  model: m\n  tensor_parallel: true\n",
     )
     a = get_adapter("unsloth")(p, Capabilities(gpu_count=1, binaries={"unsloth": True}))
     with pytest.raises(RequirementError, match="2 块 GPU"):
@@ -69,7 +72,8 @@ def test_unsloth_tensor_parallel_requires_2_gpus(tmp_path):
 def test_unsloth_build_command(tmp_path):
     p = _write(
         tmp_path,
-        "name: u\nengine: unsloth\nport: 30000\n" "unsloth:\n  model: unsloth/Test-GGUF\n  gguf_variant: UD-Q4_K_XL\n  context_length: 32768\n",
+        "name: u\nengine: unsloth\nport: 30000\n"
+        "unsloth:\n  model: unsloth/Test-GGUF\n  gguf_variant: UD-Q4_K_XL\n  context_length: 32768\n",
     )
     a = get_adapter("unsloth")(p, CAPS8)
     cmd, _env = a.build_command()
@@ -85,7 +89,8 @@ def test_unsloth_build_command(tmp_path):
 def test_unsloth_build_command_local_path_ignores_variant(tmp_path):
     p = _write(
         tmp_path,
-        f"name: u\nengine: unsloth\nport: 30000\nunsloth:\n  model: {tmp_path}/model.gguf\n" f"  gguf_variant: UD-Q4_K_XL\n",
+        f"name: u\nengine: unsloth\nport: 30000\nunsloth:\n  model: {tmp_path}/model.gguf\n"
+        f"  gguf_variant: UD-Q4_K_XL\n",
     )
     (tmp_path / "model.gguf").write_text("x", encoding="utf-8")
     a = get_adapter("unsloth")(p, CAPS8)
@@ -176,7 +181,9 @@ def test_unsloth_pre_start_downloads_and_persists(tmp_path, monkeypatch):
     monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "model-gguf"))
     p = _write(
         tmp_path,
-        "name: u\nengine: unsloth\nport: 30000\n" "unsloth:\n  model: ''\n  download:\n" "    modelscope_id: unsloth/DeepSeek-V4-Flash-0731-GGUF\n    quant: UD-Q8_K_XL\n",
+        "name: u\nengine: unsloth\nport: 30000\n"
+        "unsloth:\n  model: ''\n  download:\n"
+        "    modelscope_id: unsloth/DeepSeek-V4-Flash-0731-GGUF\n    quant: UD-Q8_K_XL\n",
     )
     a = get_adapter("unsloth")(p, CAPS8)
 
@@ -217,7 +224,9 @@ def test_unsloth_pre_start_download_failure_hints_hf(tmp_path, monkeypatch):
     monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "model-gguf"))
     p = _write(
         tmp_path,
-        "name: u\nengine: unsloth\nport: 30000\n" "unsloth:\n  model: ''\n  download:\n" "    modelscope_id: unsloth/DeepSeek-V4-Flash-0731-GGUF\n    quant: UD-Q8_K_XL\n",
+        "name: u\nengine: unsloth\nport: 30000\n"
+        "unsloth:\n  model: ''\n  download:\n"
+        "    modelscope_id: unsloth/DeepSeek-V4-Flash-0731-GGUF\n    quant: UD-Q8_K_XL\n",
     )
     a = get_adapter("unsloth")(p, CAPS8)
 
