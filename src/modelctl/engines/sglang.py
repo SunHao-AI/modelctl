@@ -24,18 +24,25 @@ class SglangAdapter(EngineAdapter):
         tp = int(cfg.get("tensor_parallel_size", 1))
         if self.caps.gpu_count and tp > self.caps.gpu_count:
             raise RequirementError(f"tensor_parallel_size={tp} 超过实际 GPU 数 {self.caps.gpu_count}")
+        self.run_compat_checks()  # 预检：软件规则 + 模型 id 特征
 
     def pre_start(self) -> None:
         cfg = self.profile.engine_config
         model = str(cfg.get("model") or "")
-        if model and (Path(model).expanduser().is_dir() or Path(model).expanduser().is_file()):
-            return
-        if cfg.get("download"):
-            modelscope_id = cfg["download"]["modelscope_id"]
-            model_root = Path(os.environ.get("MODEL_ROOT") or PROJECT_ROOT.parent / "model-hf")
-            local_dir = download_repo(modelscope_id, model_root)
-            persist_model_path(self.profile.path, "sglang", str(local_dir.resolve()))
-            cfg["model"] = str(local_dir.resolve())
+        if not (model and (Path(model).expanduser().is_dir() or Path(model).expanduser().is_file())):
+            if cfg.get("download"):
+                modelscope_id = cfg["download"]["modelscope_id"]
+                model_root = Path(os.environ.get("MODEL_ROOT") or PROJECT_ROOT.parent / "model-hf")
+                local_dir = download_repo(modelscope_id, model_root)
+                persist_model_path(self.profile.path, "sglang", str(local_dir.resolve()))
+                cfg["model"] = str(local_dir.resolve())
+        # 精检：模型文件就位后，以 config.json 判定更精确的模型特征
+        # 延迟导入 ModelSpec，避免 compat 部分初始化时经 engines/__init__ 回环
+        from modelctl.core.compat import ModelSpec
+
+        local = Path(str(cfg.get("model") or "")).expanduser()
+        if local.is_dir():
+            self.run_compat_checks(ModelSpec.from_local(self.profile.engine, local))
 
     def build_command(self) -> tuple[list[str], dict[str, str]]:
         cfg = self.profile.engine_config

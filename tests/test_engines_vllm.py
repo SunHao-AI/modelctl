@@ -1,5 +1,6 @@
 import pytest
 
+import modelctl.core.compat_rules  # noqa: F401 —— 导入即注册
 from modelctl.core.capabilities import Capabilities
 from modelctl.core.profile import load_profile
 from modelctl.engines import get_adapter

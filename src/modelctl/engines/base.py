@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 from modelctl.core.capabilities import Capabilities
 from modelctl.core.process import wait_health
 from modelctl.core.profile import Profile
+
+if TYPE_CHECKING:
+    from modelctl.core.compat import ModelSpec
 
 
 class RequirementError(RuntimeError):
@@ -63,6 +67,29 @@ class EngineAdapter(ABC):
     def upstream_api_key(self) -> str | None:
         """健康检查 / 预热 / 网关转发使用的上游 Bearer key；默认 profile.api_key。"""
         return self.profile.api_key
+
+    def run_compat_checks(self, model: ModelSpec | None = None) -> None:
+        """能力检测入口：block 抛 RequirementError，degrade 写 self.warnings。
+
+        model 缺省时按 profile 的 model 字段构造 id 特征 ModelSpec（预检）。
+        函数内延迟 import 避免 core.compat 与 engines.base 的循环依赖。
+        """
+        from modelctl.core.compat import EnvSpec, GpuSpec, ModelSpec, apply_compat, run_compat
+
+        if model is None:
+            model = ModelSpec.from_id(
+                self.profile.engine,
+                str(self.profile.engine_config.get("model") or ""),
+                str((self.profile.engine_config.get("download") or {}).get("modelscope_id") or ""),
+                quantization=str(self.profile.engine_config.get("quantization") or ""),
+            )
+        # EnvSpec 单次进程内缓存：check_requirements 探测一次，pre_start 精检复用（spec 第 5 节）
+        env = getattr(self, "_compat_env", None)
+        if env is None:
+            env = EnvSpec.from_env()
+            self._compat_env = env
+        issues = run_compat(self.profile.engine, GpuSpec.from_caps(self.caps), env, model)
+        apply_compat(self.profile.name, self.profile.engine, self.warnings, issues)
 
     def wait_ready(self, timeout: float) -> bool:
         """等待后端就绪（默认：以上游 API key 探测 health_url）。"""
