@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 
 import pytest
 
+import modelctl.core.compat_rules  # noqa: F401 —— 导入即注册
 from modelctl.core import compat as _compat_module
 from modelctl.core.capabilities import Capabilities
 from modelctl.core.compat import (
@@ -26,8 +28,9 @@ from modelctl.engines.base import RequirementError
 
 @pytest.fixture(autouse=True)
 def _reset_rules() -> None:
-    """每个测试前清空规则注册表，避免规则注册在测试间共享状态。"""
+    """每个测试前重置规则注册表：清空测试内注册的规则，并重新导入内置规则（导入即注册）。"""
     _compat_module._RULES.clear()
+    importlib.reload(modelctl.core.compat_rules)
 
 
 def test_cc_major_parsing():
@@ -221,3 +224,49 @@ def test_spec_matches():
     assert _spec_matches(">=0.2.3", "0.2.3")
     assert _spec_matches(">=0.2.3", "0.3.0")
     assert _spec_matches("garbage", "1.0")  # 无法解析不误报
+
+
+def _run(engine: str, cc: str, model: ModelSpec | None):
+    return run_compat(engine, GpuSpec(cc=cc), EnvSpec(), model)
+
+
+def _ds4(engine: str = "vllm") -> ModelSpec:
+    return ModelSpec(engine=engine, source="id", name_hint="deepseek-ai/DeepSeek-V4-Flash")
+
+
+def test_deepseek_v4_mhc_block_on_ada():
+    issues = _run("vllm", "8.9", _ds4())
+    assert any(i.rule_id == "deepseek_v4_mhc" and i.level == "block" for i in issues)
+
+
+def test_deepseek_v4_mhc_block_on_sm120():
+    issues = _run("sglang", "12.0", _ds4("sglang"))
+    assert any(i.rule_id == "deepseek_v4_mhc" for i in issues)
+
+
+def test_deepseek_v4_mhc_allowed_on_hopper_blackwell_dc():
+    assert _run("vllm", "9.0", _ds4()) == []
+    assert _run("vllm", "10.0", _ds4()) == []
+
+
+def test_deepseek_v4_mhc_skips_when_cc_unknown():
+    assert _run("vllm", "", _ds4()) == []
+
+
+def test_deepseek_v4_mhc_not_applicable_to_other_model():
+    assert _run("vllm", "8.9", ModelSpec(engine="vllm", name_hint="Qwen/Qwen3-32B")) == []
+
+
+def test_fp8_quant_cc():
+    m = ModelSpec(engine="vllm", name_hint="Qwen/Qwen3-32B", quantization="fp8")
+    assert any(i.rule_id == "fp8_quant_cc" for i in _run("vllm", "7.5", m))
+    assert _run("vllm", "8.9", m) == []
+    assert _run("vllm", "", m) == []  # CC 未知跳过
+    assert _run("vllm", "7.5", ModelSpec(engine="vllm", name_hint="m", quantization="awq")) == []
+
+
+def test_fp4_quant_blackwell():
+    m = ModelSpec(engine="vllm", name_hint="m", quantization="fp4")
+    assert any(i.rule_id == "fp4_quant_blackwell" for i in _run("vllm", "8.9", m))
+    assert _run("vllm", "10.0", m) == []
+    assert _run("vllm", "12.0", m) == []
