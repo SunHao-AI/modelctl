@@ -1,5 +1,6 @@
 import pytest
 
+import modelctl.core.compat_rules  # noqa: F401 —— 导入即注册
 from modelctl.core.capabilities import Capabilities
 from modelctl.core.profile import load_profile
 from modelctl.engines import get_adapter
@@ -13,6 +14,20 @@ def _profile(tmp_path):
         encoding="utf-8",
     )
     return load_profile("qwen3-ollama", tmp_path)
+
+
+def _write(tmp_path, text, name="o.yaml"):
+    (tmp_path / name).write_text(text, encoding="utf-8")
+    return load_profile(name[:-5], tmp_path)
+
+
+def test_ollama_env_var_degrade_warning(tmp_path, monkeypatch):
+    monkeypatch.delenv("HF_HOME", raising=False)
+    monkeypatch.delenv("MODELSCOPE_CACHE", raising=False)
+    p = _write(tmp_path, "name: o\nengine: ollama\nport: 11434\nollama:\n  model: qwen3:8b\n")
+    adapter = get_adapter("ollama")(p, Capabilities(binaries={"ollama": True}))
+    adapter.check_requirements()
+    assert any("[env_var_missing]" in w for w in adapter.warnings)
 
 
 def test_build_command(tmp_path, monkeypatch):

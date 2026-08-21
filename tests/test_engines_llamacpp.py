@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+import modelctl.core.compat_rules  # noqa: F401 —— 导入即注册
 from modelctl.core.capabilities import probe
 from modelctl.core.profile import ProfileError, load_profile
 from modelctl.engines import get_adapter
@@ -240,6 +241,16 @@ def test_check_requirements_dspark_intent_with_empty_model(tmp_path):
     assert adapter._model is None
     assert adapter._dspark is True  # 意图保留，下载后重新发现草稿
     assert not any("未找到" in w for w in adapter.warnings)
+
+
+def test_check_requirements_env_var_degrade_warning(tmp_path, monkeypatch):
+    """HF_HOME / MODELSCOPE_CACHE 缺失：check_requirements 产生 env_var_missing 降级警告。"""
+    monkeypatch.delenv("HF_HOME", raising=False)
+    monkeypatch.delenv("MODELSCOPE_CACHE", raising=False)
+    caps = probe(nvidia_smi_output=SMI)
+    adapter = get_adapter("llamacpp")(_profile(tmp_path), caps)
+    adapter.check_requirements()
+    assert any("[env_var_missing]" in w for w in adapter.warnings)
 
 
 def test_pre_start_discovers_draft_after_download(tmp_path, monkeypatch):

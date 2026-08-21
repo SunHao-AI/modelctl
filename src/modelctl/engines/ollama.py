@@ -27,6 +27,7 @@ class OllamaAdapter(EngineAdapter):
             raise RequirementError("未安装 ollama（PATH 中找不到 ollama 命令）")
         if not self.profile.engine_config.get("model"):
             raise RequirementError(f"{self.profile.name}：ollama.model 必填（如 qwen3:32b）")
+        self.run_compat_checks()  # 预检：软件规则 + 模型 id 特征
 
     def health_url(self) -> str:
         return f"http://127.0.0.1:{self.profile.port}/"

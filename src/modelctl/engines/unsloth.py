@@ -63,6 +63,7 @@ class UnslothAdapter(EngineAdapter):
         self._check_vram(cfg)
         # 用量统计降级提示：无头 API 模式的 /metrics 端点尚未验证
         self.warnings.append("unsloth 引擎暂未验证 /metrics 端点，用量统计降级为'不支持精确统计'")
+        self.run_compat_checks()  # 预检：软件规则 + 模型 id 特征
 
     def _check_vram(self, cfg: dict) -> None:
         """GGUF 本地文件存在时按文件大小做显存预检。"""

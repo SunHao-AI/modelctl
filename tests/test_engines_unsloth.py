@@ -4,6 +4,7 @@ import json as _json
 
 import pytest
 
+import modelctl.core.compat_rules  # noqa: F401 —— 导入即注册
 from modelctl.core.capabilities import Capabilities
 from modelctl.core.profile import load_profile
 from modelctl.engines import get_adapter
@@ -34,6 +35,16 @@ def test_unsloth_requirements_no_api_key_needed(tmp_path):
     p = _write(tmp_path, "name: u\nengine: unsloth\nport: 30000\nunsloth:\n  model: m\n")
     a = get_adapter("unsloth")(p, CAPS8)
     a.check_requirements()
+
+
+def test_unsloth_env_var_degrade_warning(tmp_path, monkeypatch):
+    """HF_HOME / MODELSCOPE_CACHE 缺失：check_requirements 产生 env_var_missing 降级警告。"""
+    monkeypatch.delenv("HF_HOME", raising=False)
+    monkeypatch.delenv("MODELSCOPE_CACHE", raising=False)
+    p = _write(tmp_path, "name: u\nengine: unsloth\nport: 30000\nunsloth:\n  model: m\n")
+    a = get_adapter("unsloth")(p, CAPS8)
+    a.check_requirements()
+    assert any("[env_var_missing]" in w for w in a.warnings)
 
 
 def test_unsloth_requirements_allow_download_only(tmp_path):
