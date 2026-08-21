@@ -26,7 +26,8 @@ modelctl/
 │   ├── engines/                    # 引擎适配器：base / llamacpp / ollama / vllm / sglang / unsloth
 │   └── py.typed                    # PEP 561 类型标记
 ├── script/
-│   └── modelctl.sh                 # bash 薄封装（调用已安装的 modelctl 命令）
+│   ├── modelctl.sh                 # bash 薄封装（调用已安装的 modelctl 命令）
+│   └── modelctl-all.sh             # bash 薄封装（modelctl all 一键启停）
 ├── models/                         # 模型 profile（每模型一个 YAML，按引擎分目录）
 │   ├── llamacpp/                   # llamacpp 引擎 profile 子目录
 │   │   ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（llamacpp + DSpark）
@@ -256,6 +257,46 @@ uv sync --extra dev --extra gateway
 ```
 
 `.env` 中新增 `NODE_ID`、`NODE_HOST`、`GATEWAY_HOST`、`GATEWAY_PORT`、`GATEWAY_DEFAULT_MODEL`、`GATEWAY_READ_TIMEOUT`（见 `.env.example`）。
+
+### 8. 一键启停（modelctl all）
+
+`modelctl all` 把**默认模型 + 统一网关（gateway）+ 用量统计（stats）**三件套作为一个整体管理：
+
+```bash
+# 启动：默认模型 → gateway → stats
+modelctl all start
+
+# 停止：stats → gateway → 全部运行中模型（含非默认）
+modelctl all stop
+
+# 重启：仅默认模型停后启，gateway / stats 重启
+modelctl all restart
+
+# 状态汇总：三件套逐项 [ok/skipped/error]
+modelctl all status
+```
+
+**四动作语义**
+
+- **start / restart** 仅操作默认模型：默认模型取 `GATEWAY_DEFAULT_MODEL`（profile 的 name 或其 alias），未设置回退 `deepseek-v4-flash`，也可用 `--model <name>` 临时指定；`--timeout` 控制模型健康检查超时（默认 300s）
+- **stop** 除 gateway / stats 外，会停止**全部运行中**的模型（包括经 `modelctl start <name>` 启动的非默认模型），避免遗留进程
+- **status** 汇总三件套状态，恒 exit 0
+
+单组件同样支持四动作：
+
+```bash
+modelctl gateway start|stop|restart|status
+modelctl stats start|stop|restart|status
+```
+
+bash 薄脚本（等价于 `uv run modelctl all <动作>`）：
+
+```bash
+bash script/modelctl-all.sh start
+bash script/modelctl-all.sh status
+```
+
+**失败语义**：逐组件尝试并汇总（某组件失败仍继续后续组件），任一组件 `[error]` 使 start / restart 返回 exit 2、stop 返回 exit 1（status 恒 exit 0）；可再 `modelctl status` 细查各组件状态。
 
 ## 文档
 
