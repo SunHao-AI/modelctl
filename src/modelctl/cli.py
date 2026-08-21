@@ -17,16 +17,15 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
 from loguru import logger
 
 import modelctl.core.compat_rules  # noqa: F401 —— 导入即注册内置规则
+from modelctl.core import all_service
 from modelctl.core.capabilities import ENGINE_BINARIES, ENGINE_INSTALL_HINTS, probe
 from modelctl.core.envfile import load_env
-from modelctl.core.gateway import GATEWAY_PORT
 from modelctl.core.logging import setup_logging
 from modelctl.core.nginx_snippet import build_llm_map
 from modelctl.core.process import (
@@ -35,11 +34,8 @@ from modelctl.core.process import (
     pid_file,
     start_detached,
     stop_instance,
-    tail_file,
-    wait_health,
 )
 from modelctl.core.profile import ProfileError, list_profiles, load_profile
-from modelctl.core.stats import USAGE_PORT
 from modelctl.core.ufw import ensure_ufw_allow
 from modelctl.engines import get_adapter
 from modelctl.engines.base import RequirementError
@@ -81,9 +77,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("list", help="列出所有 profile")
     sub.add_parser("probe", help="探测硬件与引擎二进制")
     sp = sub.add_parser("stats", help="用量统计服务控制")
-    sp.add_argument("action", choices=["start", "stop"])
+    sp.add_argument("action", choices=["start", "stop", "restart", "status"])
     gp = sub.add_parser("gateway", help="统一网关（model 参数路由）控制")
-    gp.add_argument("action", choices=["start", "stop", "status"])
+    gp.add_argument("action", choices=["start", "stop", "restart", "status"])
+    ap = sub.add_parser("all", help="一键启停（默认模型 + 网关 + 统计）")
+    ap.add_argument("action", choices=["start", "stop", "restart", "status"])
+    ap.add_argument("--model", default=None, help="默认模型 profile（缺省解析 GATEWAY_DEFAULT_MODEL）")
+    ap.add_argument("--timeout", type=float, default=300, help="模型健康检查超时秒数（默认 300）")
     up = sub.add_parser("ui", help="Web 管理控制台控制（unsloth studio UI）")
     up.add_argument("action", choices=["start", "stop"])
     up.add_argument("name", help="profile 名称（实例记为 ui-<name>，与推理服务独立）")
@@ -145,70 +145,22 @@ def _instance_state(name: str) -> str:
     return "PID 异常"
 
 
-def _stop_profile(profile, caps, models_dir: Path | None) -> None:
-    """按引擎语义停止单个 profile 实例。"""
-    adapter = get_adapter(profile.engine)(profile, caps)
-    if profile.engine == "ollama":
-        # 特判：serve 为共享常驻服务，仅当由本工具拉起且无其他 ollama
-        # profile 在运行时才停 serve；否则只卸载模型并清理 PID 记录。
-        pf = pid_file(profile.name)
-        other_ollama_running = any(
-            is_running(o.name) for o in list_profiles(models_dir) if o.engine == "ollama" and o.name != profile.name
-        )
-        if pf.is_file() and not other_ollama_running:
-            stop_instance(profile.name, profile.port, [])
-        else:
-            adapter.unload_model()
-            pid_file(profile.name).unlink(missing_ok=True)
-    else:
-        stop_instance(profile.name, profile.port, adapter.stop_patterns())
-
-
 def _cmd_start(args, models_dir: Path | None, caps) -> int:
-    name = args.name
-    profile = load_profile(name, models_dir)
-    adapter = get_adapter(profile.engine)(profile, caps)
-    adapter.check_requirements()
-    for warning in adapter.warnings:
-        logger.warning(warning)
-    adapter.pre_start()
-    cmd, env = adapter.build_command()
-    pid = start_detached(name, cmd, env)
-    logger.info(f"已启动 {name}（PID {pid}），等待健康检查（超时 {args.timeout:g}s）...")
-    if adapter.wait_ready(args.timeout):
-        upstream_key = adapter.upstream_api_key()
-        if upstream_key and upstream_key != profile.api_key:
-            # unsloth 等自管认证引擎的运行时 key，客户端需以此调用后端
-            logger.info(f"上游 API Key（本次启动自动生成）：{upstream_key}")
-        adapter.post_start()
-        log = launch_log(name)
-        logger.info(f"启动成功：{name} 运行于 http://127.0.0.1:{profile.port}")
-        if log is not None:
-            logger.info(f"日志：{log}")
-        if profile.usage or adapter.metrics_mapping() is not None:
-            logger.info("提示：用量统计可通过 `modelctl stats start` 启动")
-        return 0
-    log = launch_log(name)
-    if log is not None:
-        logger.warning(f"健康检查超时，日志尾部 50 行（{log}）：")
-        logger.warning(tail_file(log, 50))
-    else:
-        logger.warning("健康检查超时，且未找到启动日志")
-    return 1
+    profile = load_profile(args.name, models_dir)
+    r = all_service.start_profile(profile, caps, args.timeout)
+    return 0 if r.status in ("ok", "skipped") else 1
 
 
 def _cmd_stop(args, models_dir: Path | None, caps) -> int:
     profile = load_profile(args.name, models_dir)
-    _stop_profile(profile, caps, models_dir)
-    logger.info(f"已停止：{profile.name}")
+    all_service.stop_profile(profile, caps, models_dir)
     return 0
 
 
 def _cmd_restart(args, models_dir: Path | None, caps) -> int:
     profile = load_profile(args.name, models_dir)
-    _stop_profile(profile, caps, models_dir)
-    logger.info(f"已停止：{profile.name}，正在重新启动...")
-    return _cmd_start(args, models_dir, caps)
+    r = all_service.restart_profile(profile, caps, args.timeout)
+    return 0 if r.status in ("ok", "skipped") else 1
 
 
 def _cmd_status(args, models_dir: Path | None, caps) -> int:
@@ -281,54 +233,72 @@ def _cmd_probe(args, models_dir: Path | None, caps) -> int:
 
 
 def _cmd_stats_start() -> int:
-    if is_running("usage-stats"):
-        logger.info("用量统计服务已在运行")
-        return 0
-    # 后台独立进程：python -m modelctl.core.stats。统计目标由
-    # modelctl.core.stats 的 _targets_from_profiles() 从 models/*.yaml 加载全部
-    # profile 构造——未运行的模型会返回不可用状态（isValid=False），而非在此过滤。
-    # 这是计划"独立进程入口"的合理实现，故此处不预构造 targets。
-    script_dir = str(Path(__file__).resolve().parents[1])
-    extra_env = {"PYTHONPATH": script_dir + os.pathsep + os.environ.get("PYTHONPATH", "")}
-    pid = start_detached("usage-stats", [sys.executable, "-m", "modelctl.core.stats"], extra_env)
-    port = int(os.environ.get("USAGE_PORT", str(USAGE_PORT)))
-    logger.info(f"用量统计服务已启动（PID {pid}），监听端口 {port}")
+    all_service.start_stats()
     return 0
 
 
 def _cmd_stats_stop() -> int:
-    port = int(os.environ.get("USAGE_PORT", str(USAGE_PORT)))
-    stop_instance("usage-stats", port, ["modelctl.core.stats"])
-    logger.info("用量统计服务已停止")
+    all_service.stop_stats()
+    return 0
+
+
+def _cmd_stats_restart(args, models_dir: Path | None, caps) -> int:
+    r = all_service.restart_stats()
+    (logger.error if r.status == "error" else logger.info)(f"用量统计：{r.detail}")
+    return 0 if r.status in ("ok", "skipped") else 2
+
+
+def _cmd_stats_status(args, models_dir: Path | None, caps) -> int:
+    r = all_service.status_stats()
+    logger.info(f"用量统计：{r.detail}")
     return 0
 
 
 def _cmd_gateway_start() -> int:
-    if is_running("llm-gateway"):
-        logger.info("网关已在运行")
-        return 0
-    script_dir = str(Path(__file__).resolve().parents[1])
-    extra_env = {"PYTHONPATH": script_dir + os.pathsep + os.environ.get("PYTHONPATH", "")}
-    pid = start_detached("llm-gateway", [sys.executable, "-m", "modelctl.core.gateway"], extra_env)
-    port = int(os.environ.get("GATEWAY_PORT", str(GATEWAY_PORT)))
-    logger.info(f"网关已启动（PID {pid}），监听端口 {port}")
+    all_service.start_gateway()
     return 0
 
 
 def _cmd_gateway_stop() -> int:
-    port = int(os.environ.get("GATEWAY_PORT", str(GATEWAY_PORT)))
-    stop_instance("llm-gateway", port, ["modelctl.core.gateway"])
-    logger.info("网关已停止")
+    all_service.stop_gateway()
     return 0
 
 
+def _cmd_gateway_restart(args, models_dir: Path | None, caps) -> int:
+    r = all_service.restart_gateway()
+    (logger.error if r.status == "error" else logger.info)(f"网关：{r.detail}")
+    return 0 if r.status in ("ok", "skipped") else 2
+
+
 def _cmd_gateway_status() -> int:
-    if is_running("llm-gateway"):
-        port = int(os.environ.get("GATEWAY_PORT", str(GATEWAY_PORT)))
-        ok = wait_health(f"http://127.0.0.1:{port}/v1/models", 3.0)
-        print("网关：运行中，/v1/models " + ("正常" if ok else "无响应"))
-        return 0
-    print("网关：已停止")
+    logger.info(f"网关：{all_service.status_gateway().detail}")
+    return 0
+
+
+def _cmd_all(args, models_dir: Path | None, caps) -> int:
+    if args.action == "start":
+        results = all_service.start_all(models_dir, args.model, args.timeout)
+        exit_code = 2
+    elif args.action == "stop":
+        results = all_service.stop_all(models_dir)
+        exit_code = 1
+    elif args.action == "restart":
+        results = all_service.restart_all(models_dir, args.model, args.timeout)
+        exit_code = 2
+    else:
+        results = all_service.status_all(models_dir)
+        exit_code = 0
+    for r in results:
+        line = f"[{r.status}] {r.component}"
+        if r.detail:
+            line += f"：{r.detail}"
+        if r.status == "error":
+            logger.error(line)
+        else:
+            logger.info(line)
+    if any(r.status == "error" for r in results):
+        logger.info("提示：可执行 `modelctl status` 细查各组件状态")
+        return exit_code
     return 0
 
 
@@ -407,13 +377,23 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "probe":
             return _cmd_probe(args, models_dir, caps)
         if args.command == "stats":
-            return _cmd_stats_start() if args.action == "start" else _cmd_stats_stop()
+            if args.action == "start":
+                return _cmd_stats_start()
+            if args.action == "stop":
+                return _cmd_stats_stop()
+            if args.action == "restart":
+                return _cmd_stats_restart(args, models_dir, caps)
+            return _cmd_stats_status(args, models_dir, caps)
         if args.command == "gateway":
             if args.action == "start":
                 return _cmd_gateway_start()
             if args.action == "stop":
                 return _cmd_gateway_stop()
+            if args.action == "restart":
+                return _cmd_gateway_restart(args, models_dir, caps)
             return _cmd_gateway_status()
+        if args.command == "all":
+            return _cmd_all(args, models_dir, caps)
         if args.command == "ui":
             if args.action == "start":
                 return _cmd_ui_start(args, models_dir, caps)

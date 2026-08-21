@@ -43,8 +43,10 @@ def test_nginx_snippet_output(tmp_path, monkeypatch, capsys):
 def test_gateway_start_detaches(tmp_path, monkeypatch):
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     called: dict = {}
-    monkeypatch.setattr(cli, "start_detached", lambda name, cmd, extra_env: called.update(name=name, cmd=cmd) or 123)
-    monkeypatch.setattr(cli, "is_running", lambda name: False)
+    monkeypatch.setattr(
+        cli.all_service, "start_detached", lambda name, cmd, extra_env: called.update(name=name, cmd=cmd) or 123
+    )
+    monkeypatch.setattr(cli.all_service, "is_running", lambda name: False)
     rc = cli.main(["gateway", "start"])
     assert rc == 0
     assert called["name"] == "llm-gateway"
@@ -54,7 +56,9 @@ def test_gateway_start_detaches(tmp_path, monkeypatch):
 def test_gateway_stop(tmp_path, monkeypatch):
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     called: dict = {}
-    monkeypatch.setattr(cli, "stop_instance", lambda name, port, patterns: called.update(name=name, port=port))
+    monkeypatch.setattr(
+        cli.all_service, "stop_instance", lambda name, port, patterns: called.update(name=name, port=port)
+    )
     rc = cli.main(["gateway", "stop"])
     assert rc == 0
     assert called["name"] == "llm-gateway"
@@ -144,3 +148,64 @@ def test_ensure_ufw_allow_missing_binary(monkeypatch):
 
     monkeypatch.setattr(ufw_mod.shutil, "which", lambda name: None)
     assert ufw_mod.ensure_ufw_allow("1.2.3.4", 8888) is False
+
+
+def test_all_command_dispatch(tmp_path, monkeypatch):
+    """all start/stop/restart/status 分发到 all_service 编排，--model/--timeout 透传。"""
+    import modelctl.cli as cli
+    from modelctl.core import all_service
+
+    seen: dict = {}
+
+    def _start_all(md, model_name=None, timeout=300):
+        seen["cmd"] = "start"
+        seen["model"] = model_name
+        seen["timeout"] = timeout
+        return [all_service.ComponentResult("model:x", "ok", "")]
+
+    monkeypatch.setattr(cli.all_service, "start_all", _start_all)
+    rc = cli.main(["all", "start", "--model", "q", "--timeout", "10", "--models-dir", str(tmp_path)])
+    assert rc == 0 and seen == {"cmd": "start", "model": "q", "timeout": 10.0}
+
+
+def test_all_start_error_exit_2(tmp_path, monkeypatch):
+    import modelctl.cli as cli
+    from modelctl.core import all_service
+
+    monkeypatch.setattr(cli.all_service, "start_all", lambda md, model_name=None, timeout=300: [
+        all_service.ComponentResult("model:x", "error", "boom"),
+        all_service.ComponentResult("gateway", "ok", ""),
+    ])
+    rc = cli.main(["all", "start", "--models-dir", str(tmp_path)])
+    assert rc == 2
+
+
+def test_all_stop_error_exit_1(tmp_path, monkeypatch):
+    import modelctl.cli as cli
+    from modelctl.core import all_service
+
+    monkeypatch.setattr(cli.all_service, "stop_all", lambda md: [
+        all_service.ComponentResult("gateway", "error", "boom"),
+    ])
+    rc = cli.main(["all", "stop", "--models-dir", str(tmp_path)])
+    assert rc == 1
+
+
+def test_gateway_restart_dispatch(tmp_path, monkeypatch):
+    import modelctl.cli as cli
+
+    monkeypatch.setattr(
+        cli.all_service, "restart_gateway", lambda: cli.all_service.ComponentResult("gateway", "ok", "")
+    )
+    rc = cli.main(["gateway", "restart"])
+    assert rc == 0
+
+
+def test_stats_status_dispatch(tmp_path, monkeypatch):
+    import modelctl.cli as cli
+
+    monkeypatch.setattr(
+        cli.all_service, "status_stats", lambda: cli.all_service.ComponentResult("stats", "ok", "已停止")
+    )
+    rc = cli.main(["stats", "status"])
+    assert rc == 0
