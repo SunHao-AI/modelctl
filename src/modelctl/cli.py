@@ -23,6 +23,7 @@ from pathlib import Path
 
 from loguru import logger
 
+import modelctl.core.compat_rules  # noqa: F401 —— 导入即注册内置规则
 from modelctl.core.capabilities import ENGINE_BINARIES, ENGINE_INSTALL_HINTS, probe
 from modelctl.core.envfile import load_env
 from modelctl.core.gateway import GATEWAY_PORT
@@ -262,6 +263,20 @@ def _cmd_probe(args, models_dir: Path | None, caps) -> int:
         else:
             hint = ENGINE_INSTALL_HINTS.get(name, "")
             print(f"  {name}: 不可用（未在 PATH 中找到 {name} 可执行文件{hint}）")
+    # 软件能力摘要（EnvSpec：静态元数据 + 文件检查，不导入引擎）
+    from modelctl.core.compat import EnvSpec
+
+    env = EnvSpec.from_env()
+    print(f"site-packages：{env.site_packages or '未知'}")
+    print(f"已安装包：{len(env.packages)} 个")
+    print(f"nvidia .so 文件：{len(env.nvidia_so)} 个")
+    resolvable_note = ""
+    if env.libs_resolvable_known and env.cuda_libs_resolvable:
+        resolvable_note = "（" + ", ".join(sorted(env.cuda_libs_resolvable))[:120] + "）"
+    print(f"CUDA 库可解析：{'是' if env.libs_resolvable_known else '未知'}{resolvable_note}")
+    print("关键环境变量：")
+    for key in ("HF_HOME", "MODEL_ROOT", "MODELSCOPE_CACHE"):
+        print(f"  {key}={env.env_vars.get(key) or '（未设置）'}")
     return 0
 
 
