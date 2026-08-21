@@ -233,7 +233,9 @@ def _cmd_probe(args, models_dir: Path | None, caps) -> int:
 
 
 def _cmd_stats_start() -> int:
-    all_service.start_stats()
+    r = all_service.start_stats()
+    if r.status == "skipped":
+        logger.info(r.detail)
     return 0
 
 
@@ -255,7 +257,9 @@ def _cmd_stats_status(args, models_dir: Path | None, caps) -> int:
 
 
 def _cmd_gateway_start() -> int:
-    all_service.start_gateway()
+    r = all_service.start_gateway()
+    if r.status == "skipped":
+        logger.info(r.detail)
     return 0
 
 
