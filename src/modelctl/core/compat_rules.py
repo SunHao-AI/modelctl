@@ -110,6 +110,8 @@ def _cuda_lib_resolvable_check(gpu: GpuSpec, env: EnvSpec, model: ModelSpec | No
         return None
     needed: set[str] = set()
     for pkg, version in env.packages.items():
+        if not version:
+            continue  # 空版本防御：避免产出 "libcudart.so." 畸形库名
         if pkg == "nvidia-cuda-runtime":
             needed.add(f"libcudart.so.{version.split('.')[0]}")
         elif pkg.startswith("nvidia-cudnn"):

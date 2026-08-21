@@ -50,7 +50,7 @@ def test_vllm_preflight_blocks_torch_mismatch(tmp_path, monkeypatch):
         assert "vllm_torch_abi" in str(e)
 
 
-def test_vllm_post_download_precise_check(tmp_path, monkeypatch):
+def test_vllm_post_download_precise_check(tmp_path):
     # 精检：目录名不含 DeepSeek 特征（预检 is_deepseek_v4=False 放行），
     # 但本地 config.json 的 architectures 暴露 DeepSeek-V4 → pre_start 精检拦截
     model_dir = tmp_path / "m1"

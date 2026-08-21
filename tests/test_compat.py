@@ -100,6 +100,19 @@ def test_model_spec_from_id_detects_deepseek_v4():
 def test_model_spec_from_id_download_id():
     m = ModelSpec.from_id("vllm", "", "deepseek-ai/DeepSeek-V4-Flash")
     assert m.is_deepseek_v4
+    assert m.name_hint == "deepseek-ai/DeepSeek-V4-Flash"
+
+
+def test_is_deepseek_v4_model_type_branch():
+    """model_type 分支独立成立：不依赖 architectures/name_hint。"""
+    m = ModelSpec(engine="vllm", architectures=(), model_type="deepseek_v4")
+    assert m.is_deepseek_v4
+
+
+def test_is_deepseek_v4_false_for_other_model():
+    """非 DeepSeek 模型（如 Qwen）反向断言：is_deepseek_v4 为 False。"""
+    m = ModelSpec(engine="vllm", name_hint="Qwen/Qwen3-32B")
+    assert not m.is_deepseek_v4
 
 
 def test_model_spec_from_id_quantization():
@@ -244,6 +257,8 @@ def test_spec_matches_not_equal_uses_segmented_compare():
     """!= 分支应与 == 一致采用版本分段比较，而非字符串比较。"""
     assert _spec_matches("!=1.0.0", "1.0.1")
     assert not _spec_matches("!=1.0.0", "1.0.0")
+    # local 标签（1.0.0+cu128）：字符串比较会判 != 成立，分段比较剥标签后判相等 → 锁定分段实现
+    assert not _spec_matches("!=1.0.0", "1.0.0+cu128")
 
 
 def _run(engine: str, cc: str, model: ModelSpec | None):
@@ -261,7 +276,7 @@ def test_deepseek_v4_mhc_block_on_ada():
 
 def test_deepseek_v4_mhc_block_on_sm120():
     issues = _run("sglang", "12.0", _ds4("sglang"))
-    assert any(i.rule_id == "deepseek_v4_mhc" for i in issues)
+    assert any(i.rule_id == "deepseek_v4_mhc" and i.level == "block" for i in issues)
 
 
 def test_deepseek_v4_mhc_allowed_on_hopper_blackwell_dc():
@@ -290,6 +305,23 @@ def test_fp4_quant_blackwell():
     assert any(i.rule_id == "fp4_quant_blackwell" for i in _run("vllm", "8.9", m))
     assert _run("vllm", "10.0", m) == []
     assert _run("vllm", "12.0", m) == []
+
+
+def test_fp4_quant_blackwell_skips_when_cc_unknown():
+    m = ModelSpec(engine="vllm", name_hint="m", quantization="fp4")
+    assert _run("vllm", "", m) == []  # CC 未知跳过
+
+
+def test_fp4_quant_blackwell_not_registered_for_sglang():
+    """fp4 规则 engines 仅 vllm：sglang 引擎不触发。"""
+    m = ModelSpec(engine="sglang", name_hint="m", quantization="fp4")
+    assert _run("sglang", "8.9", m) == []
+
+
+def test_fp8_quant_cc_triggers_on_sglang():
+    """fp8 规则注册了 sglang 引擎：CC 7.5 下应触发 block。"""
+    m = ModelSpec(engine="sglang", name_hint="Qwen/Qwen3-32B", quantization="fp8")
+    assert any(i.rule_id == "fp8_quant_cc" for i in _run("sglang", "7.5", m))
 
 
 def test_fp8_quant_cc_skips_when_cc_unparseable():
@@ -342,12 +374,33 @@ def test_nvidia_pkg_complete_pass_when_present(tmp_path):
     assert run_compat("vllm", GpuSpec(), env, None) == []
 
 
-def test_cuda_lib_resolvable_block(tmp_path, monkeypatch):
-    env = _env(tmp_path, packages={"nvidia-cuda-runtime": "13.0.96"})
+def test_nvidia_pkg_complete_pass_when_so_matches(tmp_path):
+    """RECORD 声明的 .so 与磁盘实际存在匹配 → 无 issue。"""
+    sp = tmp_path / "sp"
+    dist = sp / "nvidia_cudnn_cu13-9.20.0.48.dist-info"
+    dist.mkdir(parents=True)
+    (dist / "RECORD").write_text("nvidia/cudnn/lib/libcudnn.so.9,,", encoding="utf-8")
+    lib = sp / "nvidia" / "cudnn" / "lib" / "libcudnn.so.9"
+    lib.parent.mkdir(parents=True)
+    lib.write_bytes(b"")
+    env = EnvSpec.from_env(site_packages=sp)
+    assert run_compat("vllm", GpuSpec(), env, None) == []
+
+
+@pytest.mark.parametrize(
+    ("pkg", "version", "lib"),
+    [
+        ("nvidia-cuda-runtime", "13.0.96", "libcudart.so.13"),
+        ("nvidia-cudnn-cu13", "9.20.0.48", "libcudnn.so.9"),
+        ("nvidia-nccl-cu13", "2.32.0", "libnccl.so.2"),
+    ],
+)
+def test_cuda_lib_resolvable_block(tmp_path, pkg, version, lib):
+    env = _env(tmp_path, packages={pkg: version})
     env.cuda_libs_resolvable = set()  # 模拟库不可解析
     env.libs_resolvable_known = True
     issues = run_compat("vllm", GpuSpec(), env, None)
-    assert any(i.rule_id == "cuda_lib_resolvable" and "libcudart.so.13" in i.reason for i in issues)
+    assert any(i.rule_id == "cuda_lib_resolvable" and lib in i.reason for i in issues)
 
 
 def test_cuda_lib_resolvable_skip_when_unknown(tmp_path):
@@ -360,6 +413,17 @@ def test_engine_dep_missing(tmp_path):
     env = _env(tmp_path, "Requires-Dist: xgrammar>=0.2.3\n", packages={"xgrammar": "0.1.0"})
     issues = run_compat("vllm", GpuSpec(), env, None)
     assert any(i.rule_id == "engine_dep_missing" and i.level == "block" for i in issues)
+
+
+def test_engine_dep_missing_pass_when_matched(tmp_path):
+    """依赖约束与已装版本匹配 → 无 issue。"""
+    env = _env(tmp_path, "Requires-Dist: xgrammar>=0.2.3\n", packages={"xgrammar": "0.3.0"})
+    assert run_compat("vllm", GpuSpec(), env, None) == []
+
+
+def test_engine_dep_missing_skip_when_no_req(tmp_path):
+    """vllm 无依赖约束 → 无 issue。"""
+    assert run_compat("vllm", GpuSpec(), _env(tmp_path, ""), None) == []
 
 
 def test_env_var_missing_degrade(tmp_path, monkeypatch):

@@ -77,10 +77,13 @@ class EngineAdapter(ABC):
         from modelctl.core.compat import EnvSpec, GpuSpec, ModelSpec, apply_compat, run_compat
 
         if model is None:
+            download = self.profile.engine_config.get("download")
+            # download 段可能是字符串等非 dict 配置，先判型再取值（防御 AttributeError）
+            download_id = download.get("modelscope_id") if isinstance(download, dict) else ""
             model = ModelSpec.from_id(
                 self.profile.engine,
                 str(self.profile.engine_config.get("model") or ""),
-                str((self.profile.engine_config.get("download") or {}).get("modelscope_id") or ""),
+                str(download_id or ""),
                 quantization=str(self.profile.engine_config.get("quantization") or ""),
             )
         # EnvSpec 单次进程内缓存：check_requirements 探测一次，pre_start 精检复用（spec 第 5 节）

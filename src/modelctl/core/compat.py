@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -154,11 +155,15 @@ class EnvSpec:
 
 
 def _current_site_packages() -> Path | None:
-    """定位当前解释器的 site-packages（纯标准库）。"""
-    import site
+    """定位当前解释器的 site-packages（从 sys.path 过滤，跨平台稳定）。
 
-    paths = site.getsitepackages()
-    return Path(paths[0]) if paths else None
+    Windows/uv venv 下 site.getsitepackages() 可能返回 venv 根路径，
+    导致包数探测为 0；sys.path 中含 "site-packages" 的条目更可靠。
+    """
+    for p in sys.path:
+        if "site-packages" in p:
+            return Path(p)
+    return None
 
 
 def _read_installed_packages(sp: Path) -> dict[str, str]:
