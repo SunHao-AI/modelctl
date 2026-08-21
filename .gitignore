@@ -28,6 +28,7 @@ model-gguf/
 # IDE
 .idea/
 .vscode/
+.trae/
 *.swp
 .python-header.yaml
 data/
