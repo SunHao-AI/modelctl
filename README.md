@@ -213,6 +213,16 @@ bash script/modelctl.sh stats start
 bash script/modelctl.sh stats stop
 ```
 
+**token 统计显示**（cc-switch 卡片，已精简；金额由 `used`/`unit` 字段渲染，`extra` 为附加信息）：
+
+```
+已使用：0.40 CNY  累计 648.5k toks（输入 499.3k/输出 149.2k）| 输入速率 2127.8 tok/s| 输出速率 373 tok/s
+```
+
+- token 数量按 k/m/g 单位换算（`648,532` → `648.5k`），减少显示长度
+- 仅保留：金额、累计 token 总量、输入/输出 token 数、输入/输出速率
+- 已移除运行时间等非必要信息
+
 查看日志（LOG_DIR 默认 = 项目根目录上级的 `../logs/`）：
 
 ```bash
