@@ -34,9 +34,20 @@ from modelctl.core.envfile import PROJECT_ROOT, load_env
 USAGE_PORT = 5002
 
 
-def _fmt_int(value: float) -> str:
-    """千分位格式化整数。"""
-    return f"{int(round(value)):,}"
+def _fmt_tokens(value: float) -> str:
+    """token 数量换算为 k/m/g 单位缩写（648532 -> 648.5k），减少显示长度。
+
+    规则：>=1e9 用 g（十亿）、>=1e6 用 m（百万）、>=1e3 用 k（千），否则整数。
+    """
+    av = abs(value)
+    sign = "-" if value < 0 else ""
+    if av >= 1e9:
+        return f"{sign}{av / 1e9:.2f}g"
+    if av >= 1e6:
+        return f"{sign}{av / 1e6:.2f}m"
+    if av >= 1e3:
+        return f"{sign}{av / 1e3:.1f}k"
+    return f"{sign}{int(round(av))}"
 
 
 def _build_patterns(mapping: dict[str, list[str]]) -> dict[str, list[re.Pattern]]:
@@ -45,7 +56,10 @@ def _build_patterns(mapping: dict[str, list[str]]) -> dict[str, list[re.Pattern]
     匹配形如 "name 123" 或 "name{label=\"x\"} 123" 的 Prometheus 采样行。
     """
     return {
-        key: [re.compile(r"^" + re.escape(name) + r"(?:\{[^}]*\})?\s+([0-9.eE+-]+)$", re.MULTILINE) for name in names]
+        key: [
+            re.compile(r"^" + re.escape(name) + r"(?:\{[^}]*\})?\s+([0-9.eE+-]+)$", re.MULTILINE)
+            for name in names
+        ]
         for key, names in mapping.items()
     }
 
@@ -91,18 +105,16 @@ def build_usage_payload(tokens: dict[str, float], usage_cfg: dict, start_time: f
     prompt_rate = tokens.get("prompt_rate", 0.0)
     predicted_rate = tokens.get("predicted_rate", 0.0)
     used = round(calc_cost(prompt, predicted, price_in, price_out), 2)
-    runtime = max(now - start_time, 0.0)
     payload = {
         "isValid": True,
         "used": used,
         "unit": "CNY",
         "planName": "DeepSeek-V4-Flash 本地部署",
         "extra": (
-            f"累计 {_fmt_int(prompt + predicted)} tokens"
-            f"（输入 {_fmt_int(prompt)} / 输出 {_fmt_int(predicted)}）"
+            f"累计 {_fmt_tokens(prompt + predicted)} toks"
+            f"（输入 {_fmt_tokens(prompt)}/输出 {_fmt_tokens(predicted)}）"
             f"| 输入速率 {prompt_rate:.1f} tok/s"
-            f"| 生成速率 {predicted_rate:.1f} tok/s"
-            f"| 运行 {int(runtime // 3600)}h{int((runtime % 3600) // 60)}m"
+            f"| 输出速率 {predicted_rate:.1f} tok/s"
         ),
         "prompt_rate": prompt_rate,
         "predicted_rate": predicted_rate,
@@ -397,8 +409,8 @@ class UsageHandler(BaseHTTPRequestHandler):
             prompt_total_total += snap["prompt_total"]
             predicted_total_total += snap["predicted_total"]
             extra_parts.append(
-                f"{target.name}: 累计 {_fmt_int(snap['prompt_total'] + snap['predicted_total'])} tokens, "
-                f"生成 {snap.get('predicted_rate', 0.0):.1f} tok/s"
+                f"{target.name}: 累计 {_fmt_tokens(snap['prompt_total'] + snap['predicted_total'])} toks, "
+                f"输出 {snap.get('predicted_rate', 0.0):.1f} tok/s"
             )
         payload: dict[str, object] = {
             "isValid": all_valid,
@@ -467,7 +479,8 @@ def run_server(targets: list[StatsTarget] | None = None) -> None:
     server = ThreadingHTTPServer((host, port), UsageHandler)
     mode_desc = "由 cc-switch 轮询触发、每次请求同步拉取" if mode == "on-demand" else f"后台每 {poll_interval:g}s 轮询"
     print(
-        f"cc-switch 用量统计服务运行于 http://{host}:{port}/api/usage（{mode_desc}，{len(targets)} 个模型）", flush=True
+        f"cc-switch 用量统计服务运行于 http://{host}:{port}/api/usage（{mode_desc}，{len(targets)} 个模型）",
+        flush=True,
     )
     try:
         server.serve_forever()

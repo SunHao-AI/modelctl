@@ -66,6 +66,18 @@ def test_build_payload_no_budget():
     assert payload["remaining"] is None
 
 
+def test_fmt_tokens_units():
+    from modelctl.core.stats import _fmt_tokens
+
+    assert _fmt_tokens(648_532) == "648.5k"
+    assert _fmt_tokens(499_300) == "499.3k"
+    assert _fmt_tokens(149_232) == "149.2k"
+    assert _fmt_tokens(1_500_000) == "1.50m"
+    assert _fmt_tokens(2_000_000_000) == "2.00g"
+    assert _fmt_tokens(999) == "999"
+    assert _fmt_tokens(-1500) == "-1.5k"
+
+
 def test_build_payload_includes_rate_fields():
     import time
 
@@ -80,7 +92,11 @@ def test_build_payload_includes_rate_fields():
     )
     assert payload["prompt_rate"] == 10.0
     assert payload["predicted_rate"] == 5.0
-    assert "生成速率 5.0 tok/s" in payload["extra"]
+    assert "累计 1.5k toks" in payload["extra"]
+    assert "输入 1.0k/输出 500" in payload["extra"]
+    assert "输入速率 10.0 tok/s" in payload["extra"]
+    assert "输出速率 5.0 tok/s" in payload["extra"]
+    assert "运行" not in payload["extra"]  # 移除运行时间等非必要信息
 
 
 def test_usage_collector_loads_persisted_totals(tmp_path):
