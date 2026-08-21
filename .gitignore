@@ -9,6 +9,9 @@ logs/
 temp.log
 temp.json
 
+# SDD 工作区（任务报告/ledger，git 历史为准）
+.superpowers/
+
 # Python
 __pycache__/
 *.py[cod]
