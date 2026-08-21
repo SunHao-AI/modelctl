@@ -148,6 +148,8 @@ def _instance_state(name: str) -> str:
 def _cmd_start(args, models_dir: Path | None, caps) -> int:
     profile = load_profile(args.name, models_dir)
     r = all_service.start_profile(profile, caps, args.timeout)
+    if r.status == "skipped":
+        logger.info(r.detail)
     return 0 if r.status in ("ok", "skipped") else 1
 
 
