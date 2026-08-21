@@ -17,7 +17,7 @@ from typing import Literal
 
 from loguru import logger
 
-from modelctl.core.capabilities import Capabilities
+from modelctl.core.capabilities import Capabilities, probe
 from modelctl.core.gateway import GATEWAY_PORT
 from modelctl.core.process import (
     is_running,
@@ -31,6 +31,7 @@ from modelctl.core.process import (
 from modelctl.core.profile import Profile, list_profiles
 from modelctl.core.stats import USAGE_PORT
 from modelctl.engines import get_adapter
+from modelctl.engines.base import RequirementError
 
 # all_service.py 位于 src/modelctl/core/，src 目录 = parents[2]（对应 cli.py 的 parents[1]）
 _SRC_DIR = str(Path(__file__).resolve().parents[2])
@@ -185,3 +186,81 @@ def status_stats() -> ComponentResult:
         ok = wait_health(f"http://127.0.0.1:{port}/api/usage", 3.0)
         return ComponentResult("stats", "ok", "运行中，/api/usage " + ("正常" if ok else "无响应"))
     return ComponentResult("stats", "ok", "已停止")
+
+
+def start_all(models_dir: Path | None, model_name: str | None = None, timeout: float = 300) -> list[ComponentResult]:
+    """一键启动：默认模型 → gateway → stats；单组件失败继续后续。"""
+    caps = probe()
+    results: list[ComponentResult] = []
+    profile = resolve_default_profile(models_dir, model_name)
+    if profile is None:
+        mid = model_name or os.environ.get("GATEWAY_DEFAULT_MODEL") or DEFAULT_MODEL_ID
+        results.append(
+            ComponentResult(
+                "model",
+                "error",
+                f"未找到默认模型 profile（{mid}），请配置 GATEWAY_DEFAULT_MODEL 或 --model；"
+                "可运行 `modelctl list` 查看",
+            )
+        )
+    else:
+        try:
+            results.append(start_profile(profile, caps, timeout))
+        except RequirementError as error:  # check_requirements 失败（配置错误）
+            results.append(ComponentResult(f"model:{profile.name}", "error", str(error)))
+    results.append(start_gateway())
+    results.append(start_stats())
+    return results
+
+
+def stop_all(models_dir: Path | None) -> list[ComponentResult]:
+    """一键关闭：stats → gateway → 全部运行中模型（含非默认）。"""
+    caps = probe()
+    results: list[ComponentResult] = [stop_stats(), stop_gateway()]
+    for profile in list_profiles(models_dir):
+        if is_running(profile.name):
+            results.append(stop_profile(profile, caps, models_dir))
+    return results
+
+
+def restart_all(models_dir: Path | None, model_name: str | None = None, timeout: float = 300) -> list[ComponentResult]:
+    """一键重启：仅默认模型 + gateway + stats。"""
+    caps = probe()
+    results: list[ComponentResult] = []
+    profile = resolve_default_profile(models_dir, model_name)
+    if profile is None:
+        mid = model_name or os.environ.get("GATEWAY_DEFAULT_MODEL") or DEFAULT_MODEL_ID
+        results.append(
+            ComponentResult(
+                "model",
+                "error",
+                f"未找到默认模型 profile（{mid}），请配置 GATEWAY_DEFAULT_MODEL"
+                " 或 --model",
+            )
+        )
+    else:
+        try:
+            results.append(restart_profile(profile, caps, timeout))
+        except RequirementError as error:
+            results.append(ComponentResult(f"model:{profile.name}", "error", str(error)))
+    results.append(restart_gateway())
+    results.append(restart_stats())
+    return results
+
+
+def status_all(models_dir: Path | None) -> list[ComponentResult]:
+    """汇总默认模型 + gateway + stats 状态。"""
+    results: list[ComponentResult] = []
+    profile = resolve_default_profile(models_dir, None)
+    if profile is None:
+        results.append(ComponentResult("model", "ok", "默认模型未找到（GATEWAY_DEFAULT_MODEL 未匹配任何 profile）"))
+    elif is_running(profile.name):
+        ok = wait_health(f"http://127.0.0.1:{profile.port}", 3.0)
+        results.append(
+            ComponentResult(f"model:{profile.name}", "ok", "运行中" + ("，健康正常" if ok else "，健康无响应"))
+        )
+    else:
+        results.append(ComponentResult(f"model:{profile.name}", "ok", "已停止"))
+    results.append(status_gateway())
+    results.append(status_stats())
+    return results

@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from modelctl.core.all_service import (
+    ComponentResult,
     resolve_default_profile,
     start_gateway,
     start_profile,
@@ -202,3 +203,86 @@ def test_stop_gateway_and_stats(monkeypatch):
     monkeypatch.setattr(all_service, "stop_instance", lambda *a, **k: True)
     assert stop_gateway().status == "ok"
     assert stop_stats().status == "ok"
+
+
+# ---- 一键编排 ----
+
+def test_start_all_order_and_continue(tmp_path, monkeypatch):
+    """默认模型解析失败 → error 但继续启动 gateway/stats。"""
+    from modelctl.core import all_service
+
+    calls: list[str] = []
+    monkeypatch.setattr(all_service, "resolve_default_profile", lambda d, m: None)
+    monkeypatch.setattr(
+        all_service,
+        "start_gateway",
+        lambda: (calls.append("gateway") or ComponentResult("gateway", "ok", "")),
+    )
+    monkeypatch.setattr(
+        all_service,
+        "start_stats",
+        lambda: (calls.append("stats") or ComponentResult("stats", "ok", "")),
+    )
+    results = all_service.start_all(tmp_path, "nonexistent")
+    assert results[0].status == "error" and "model" in results[0].component
+    assert calls == ["gateway", "stats"]  # 模型失败不阻断后续
+
+
+def test_start_all_starts_default_model_first(tmp_path, monkeypatch):
+    from modelctl.core import all_service
+
+    order: list[str] = []
+    monkeypatch.setattr(all_service, "resolve_default_profile", lambda d, m: _profile("m"))
+    monkeypatch.setattr(
+        all_service,
+        "start_profile",
+        lambda p, c, t: (order.append("model") or ComponentResult("model:m", "ok", "")),
+    )
+    monkeypatch.setattr(
+        all_service,
+        "start_gateway",
+        lambda: (order.append("gateway") or ComponentResult("gateway", "ok", "")),
+    )
+    monkeypatch.setattr(
+        all_service,
+        "start_stats",
+        lambda: (order.append("stats") or ComponentResult("stats", "ok", "")),
+    )
+    all_service.start_all(tmp_path)
+    assert order == ["model", "gateway", "stats"]
+
+
+def test_stop_all_stops_every_running_model(tmp_path, monkeypatch):
+    """stop 遍历全部 profiles，非默认模型也停；未运行不记录。"""
+    from modelctl.core import all_service
+
+    stopped: list[str] = []
+    monkeypatch.setattr(all_service, "probe", lambda: Capabilities())
+    monkeypatch.setattr(all_service, "stop_stats", lambda: ComponentResult("stats", "ok", ""))
+    monkeypatch.setattr(all_service, "stop_gateway", lambda: ComponentResult("gateway", "ok", ""))
+    monkeypatch.setattr(all_service, "list_profiles", lambda d: [_profile("a"), _profile("b")])
+    monkeypatch.setattr(all_service, "is_running", lambda name: name == "a")  # 仅 a 运行
+    monkeypatch.setattr(
+        all_service,
+        "stop_profile",
+        lambda p, c, d: (stopped.append(p.name) or ComponentResult(f"model:{p.name}", "ok", "")),
+    )
+    results = all_service.stop_all(tmp_path)
+    assert [r.component for r in results] == ["stats", "gateway", "model:a"]  # 顺序 stats→gateway→模型；b 未运行不记录
+    assert stopped == ["a"]
+
+
+def test_restart_all_only_default_model(tmp_path, monkeypatch):
+    from modelctl.core import all_service
+
+    restarted: list[str] = []
+    monkeypatch.setattr(all_service, "resolve_default_profile", lambda d, m: _profile("m"))
+    monkeypatch.setattr(
+        all_service,
+        "restart_profile",
+        lambda p, c, t: (restarted.append(p.name) or ComponentResult("model:m", "ok", "")),
+    )
+    monkeypatch.setattr(all_service, "restart_gateway", lambda: ComponentResult("gateway", "ok", ""))
+    monkeypatch.setattr(all_service, "restart_stats", lambda: ComponentResult("stats", "ok", ""))
+    all_service.restart_all(tmp_path)
+    assert restarted == ["m"]  # 仅默认模型
