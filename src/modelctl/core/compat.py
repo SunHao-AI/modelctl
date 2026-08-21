@@ -7,11 +7,13 @@ import json
 import os
 import shutil
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
 from modelctl.core.capabilities import Capabilities
+from modelctl.engines.base import RequirementError
 
 # 计算能力主版本 -> 架构家族（仅用于错误消息展示，不参与规则判定）
 ARCH_FAMILY_LABELS: dict[int, str] = {
@@ -243,3 +245,78 @@ def _disk_free_mb() -> int:
         return int(shutil.disk_usage(os.getcwd()).free / 1024 / 1024)
     except OSError:
         return 0
+
+
+@dataclass(frozen=True)
+class CompatIssue:
+    level: Literal["block", "degrade"]
+    rule_id: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class CompatRule:
+    id: str
+    engines: tuple[str, ...]
+    check: Callable[[GpuSpec, EnvSpec, ModelSpec | None], CompatIssue | None]
+
+
+_RULES: list[CompatRule] = []
+
+
+def register_rule(rule: CompatRule) -> None:
+    if any(r.id == rule.id for r in _RULES):
+        raise ValueError(f"规则重复注册：{rule.id}")
+    _RULES.append(rule)
+
+
+def run_compat(engine: str, gpu: GpuSpec, env: EnvSpec, model: ModelSpec | None) -> list[CompatIssue]:
+    """按引擎过滤规则并执行，block 在前、degrade 在后。"""
+    issues: list[CompatIssue] = []
+    for rule in _RULES:
+        if engine not in rule.engines:
+            continue
+        issue = rule.check(gpu, env, model)
+        if issue is not None:
+            issues.append(issue)
+    return sorted(issues, key=lambda i: 0 if i.level == "block" else 1)
+
+
+def apply_compat(profile_name: str, engine: str, warnings: list[str], issues: list[CompatIssue]) -> None:
+    """block 拼接全部原因抛 RequirementError；degrade 写入 warnings。"""
+    blocks = [i for i in issues if i.level == "block"]
+    if blocks:
+        lines = "\n".join(f"  [{i.rule_id}] {i.reason}" for i in blocks)
+        raise RequirementError(f"当前服务器不支持 {engine} 引擎部署 {profile_name} 模型：\n{lines}")
+    for issue in issues:
+        warnings.append(f"[{issue.rule_id}] {issue.reason}")
+
+
+def _spec_matches(requirement: str, version: str) -> bool:
+    """极简单条目版本约束匹配（==/>=/<=/>/</!=）；无法解析视为匹配（不误报）。"""
+    req = requirement.strip()
+    for op in ("==", ">=", "<=", "!=", ">", "<"):
+        if req.startswith(op):
+            target = req[len(op):].strip()
+            if op == "!=":
+                return version != target
+            return _cmp_versions(version, target, op)
+    return True
+
+
+def _cmp_versions(a: str, b: str, op: str) -> bool:
+    def _t(v: str) -> tuple:
+        parts: list = []
+        for x in v.replace("-", ".").split("."):
+            try:
+                parts.append(int(x))
+            except ValueError:
+                parts.append(x)
+        return tuple(parts)
+
+    try:
+        ta, tb = _t(a), _t(b)
+    except Exception:  # noqa: BLE001 —— 解析失败不误报
+        return True
+    ops = {"==": ta == tb, ">=": ta >= tb, "<=": ta <= tb, ">": ta > tb, "<": ta < tb}
+    return ops.get(op, True)

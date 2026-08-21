@@ -4,8 +4,30 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from modelctl.core import compat as _compat_module
 from modelctl.core.capabilities import Capabilities
-from modelctl.core.compat import EnvSpec, GpuSpec, ModelSpec, _resolvable_cuda_libs, cc_major
+from modelctl.core.compat import (
+    CompatIssue,
+    CompatRule,
+    EnvSpec,
+    GpuSpec,
+    ModelSpec,
+    _resolvable_cuda_libs,
+    _spec_matches,
+    apply_compat,
+    cc_major,
+    register_rule,
+    run_compat,
+)
+from modelctl.engines.base import RequirementError
+
+
+@pytest.fixture(autouse=True)
+def _reset_rules() -> None:
+    """每个测试前清空规则注册表，避免规则注册在测试间共享状态。"""
+    _compat_module._RULES.clear()
 
 
 def test_cc_major_parsing():
@@ -149,3 +171,53 @@ def test_env_spec_libs_resolvable_unknown_without_ldconfig(monkeypatch, tmp_path
     monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
     env = EnvSpec.from_env(site_packages=tmp_path)
     assert env.libs_resolvable_known is False
+
+
+def _rule(rule_id: str, issue: CompatIssue | None):
+    return CompatRule(id=rule_id, engines=("vllm",), check=lambda g, e, m: issue)
+
+
+def test_run_compat_filters_by_engine():
+    register_rule(_rule("r1", CompatIssue("block", "r1", "x")))
+    issues = run_compat("vllm", GpuSpec(), EnvSpec(), None)
+    assert [i.rule_id for i in issues] == ["r1"]
+    assert run_compat("sglang", GpuSpec(), EnvSpec(), None) == []
+
+
+def test_run_compat_sorts_block_first():
+    register_rule(_rule("d1", CompatIssue("degrade", "d1", "x")))
+    register_rule(_rule("b1", CompatIssue("block", "b1", "x")))
+    issues = run_compat("vllm", GpuSpec(), EnvSpec(), None)
+    assert [i.level for i in issues] == ["block", "degrade"]
+
+
+def test_register_rule_duplicate_raises():
+    register_rule(_rule("dup", None))
+    try:
+        register_rule(_rule("dup", None))
+        raise AssertionError("应抛 ValueError")
+    except ValueError:
+        pass
+
+
+def test_apply_compat_block_raises():
+    issues = [CompatIssue("degrade", "d", "警告a"), CompatIssue("block", "b", "阻断b")]
+    try:
+        apply_compat("ds4", "vllm", [], issues)
+        raise AssertionError("应抛 RequirementError")
+    except RequirementError as e:
+        assert "ds4" in str(e) and "阻断b" in str(e)
+
+
+def test_apply_compat_degrade_writes_warnings():
+    warnings: list[str] = []
+    apply_compat("ds4", "vllm", warnings, [CompatIssue("degrade", "d", "警告a")])
+    assert warnings == ["[d] 警告a"]
+
+
+def test_spec_matches():
+    assert _spec_matches("==2.13.0", "2.13.0")
+    assert not _spec_matches("==2.13.0", "2.9.1")
+    assert _spec_matches(">=0.2.3", "0.2.3")
+    assert _spec_matches(">=0.2.3", "0.3.0")
+    assert _spec_matches("garbage", "1.0")  # 无法解析不误报
