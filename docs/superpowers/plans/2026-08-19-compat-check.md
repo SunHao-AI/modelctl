@@ -1065,7 +1065,11 @@ if TYPE_CHECKING:
                 str((self.profile.engine_config.get("download") or {}).get("modelscope_id") or ""),
                 quantization=str(self.profile.engine_config.get("quantization") or ""),
             )
-        env = EnvSpec.from_env()
+        # EnvSpec 单次进程内缓存：check_requirements 探测一次，pre_start 精检复用（spec 第 5 节）
+        env = getattr(self, "_compat_env", None)
+        if env is None:
+            env = EnvSpec.from_env()
+            self._compat_env = env
         issues = run_compat(self.profile.engine, GpuSpec.from_caps(self.caps), env, model)
         apply_compat(self.profile.name, self.profile.engine, self.warnings, issues)
 ```
