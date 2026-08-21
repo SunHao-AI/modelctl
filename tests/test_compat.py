@@ -33,6 +33,13 @@ def _reset_rules() -> None:
     importlib.reload(modelctl.core.compat_rules)
 
 
+@pytest.fixture(autouse=True)
+def _set_env_vars(monkeypatch) -> None:
+    """固定 HF_HOME / MODELSCOPE_CACHE，使 env_var_missing 规则判定不依赖宿主机环境（确定性）。"""
+    monkeypatch.setenv("HF_HOME", "/tmp/hf")
+    monkeypatch.setenv("MODELSCOPE_CACHE", "/tmp/modelscope")
+
+
 def test_cc_major_parsing():
     assert cc_major("8.9") == 8
     assert cc_major("12.0") == 12
@@ -184,7 +191,8 @@ def test_run_compat_filters_by_engine():
     register_rule(_rule("r1", CompatIssue("block", "r1", "x")))
     issues = run_compat("vllm", GpuSpec(), EnvSpec(), None)
     assert [i.rule_id for i in issues] == ["r1"]
-    assert run_compat("sglang", GpuSpec(), EnvSpec(), None) == []
+    # 假引擎名不在任何内置规则 engines 内，验证引擎过滤（避免受内置 env_var_missing 等规则干扰）
+    assert run_compat("fake-engine", GpuSpec(), EnvSpec(), None) == []
 
 
 def test_run_compat_sorts_block_first():
@@ -270,3 +278,81 @@ def test_fp4_quant_blackwell():
     assert any(i.rule_id == "fp4_quant_blackwell" for i in _run("vllm", "8.9", m))
     assert _run("vllm", "10.0", m) == []
     assert _run("vllm", "12.0", m) == []
+
+
+def test_fp8_quant_cc_skips_when_cc_unparseable():
+    """非空但无法解析的 CC（如 "abc"）应视为 CC 未知跳过，不误报 block。"""
+    m = ModelSpec(engine="vllm", name_hint="m", quantization="fp8")
+    assert _run("vllm", "abc", m) == []
+
+
+def _env(tmp_path, vllm_reqs="", packages=None, nvidia_missing=False):
+    sp = tmp_path / "sp"
+    (sp / "vllm-0.27.1.dist-info").mkdir(parents=True)
+    (sp / "vllm-0.27.1.dist-info" / "METADATA").write_text(
+        f"Name: vllm\nVersion: 0.27.1\n{vllm_reqs}", encoding="utf-8"
+    )
+    for pkg, ver in (packages or {"torch": "2.9.1"}).items():
+        dist = sp / f"{pkg}-{ver}.dist-info"
+        dist.mkdir(parents=True)
+        (dist / "METADATA").write_text(f"Name: {pkg}\nVersion: {ver}\n", encoding="utf-8")
+    if nvidia_missing:
+        # RECORD 声明 libcudnn.so.9 但磁盘缺失
+        dist = sp / "nvidia_cudnn_cu13-9.20.0.48.dist-info"
+        dist.mkdir(parents=True)
+        (dist / "RECORD").write_text("nvidia/cudnn/lib/libcudnn.so.9,,", encoding="utf-8")
+    return EnvSpec.from_env(site_packages=sp)
+
+
+def test_vllm_torch_abi_block(tmp_path):
+    env = _env(tmp_path, "Requires-Dist: torch==2.13.0\n")
+    issues = run_compat("vllm", GpuSpec(), env, None)
+    assert any(i.rule_id == "vllm_torch_abi" and i.level == "block" and "2.13.0" in i.reason for i in issues)
+
+
+def test_vllm_torch_abi_pass_when_matched(tmp_path):
+    env = _env(tmp_path, "Requires-Dist: torch==2.9.1\n", packages={"torch": "2.9.1"})
+    assert run_compat("vllm", GpuSpec(), env, None) == []
+
+
+def test_vllm_torch_abi_skip_when_no_req(tmp_path):
+    assert run_compat("vllm", GpuSpec(), _env(tmp_path, ""), None) == []
+
+
+def test_nvidia_pkg_complete_block(tmp_path):
+    env = _env(tmp_path, nvidia_missing=True)
+    issues = run_compat("vllm", GpuSpec(), env, None)
+    assert any(i.rule_id == "nvidia_pkg_complete" and i.level == "block" for i in issues)
+
+
+def test_nvidia_pkg_complete_pass_when_present(tmp_path):
+    env = EnvSpec.from_env(site_packages=tmp_path)  # 无 nvidia dist-info
+    assert run_compat("vllm", GpuSpec(), env, None) == []
+
+
+def test_cuda_lib_resolvable_block(tmp_path, monkeypatch):
+    env = _env(tmp_path, packages={"nvidia-cuda-runtime": "13.0.96"})
+    env.cuda_libs_resolvable = set()  # 模拟库不可解析
+    env.libs_resolvable_known = True
+    issues = run_compat("vllm", GpuSpec(), env, None)
+    assert any(i.rule_id == "cuda_lib_resolvable" and "libcudart.so.13" in i.reason for i in issues)
+
+
+def test_cuda_lib_resolvable_skip_when_unknown(tmp_path):
+    env = _env(tmp_path, packages={"nvidia-cuda-runtime": "13.0.96"})
+    env.libs_resolvable_known = False
+    assert run_compat("vllm", GpuSpec(), env, None) == []
+
+
+def test_engine_dep_missing(tmp_path):
+    env = _env(tmp_path, "Requires-Dist: xgrammar>=0.2.3\n", packages={"xgrammar": "0.1.0"})
+    issues = run_compat("vllm", GpuSpec(), env, None)
+    assert any(i.rule_id == "engine_dep_missing" and i.level == "block" for i in issues)
+
+
+def test_env_var_missing_degrade(tmp_path, monkeypatch):
+    monkeypatch.delenv("HF_HOME", raising=False)
+    monkeypatch.delenv("MODELSCOPE_CACHE", raising=False)
+    env = EnvSpec.from_env(site_packages=tmp_path)
+    issues = run_compat("llamacpp", GpuSpec(), env, None)
+    assert any(i.rule_id == "env_var_missing" and i.level == "degrade" for i in issues)

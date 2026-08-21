@@ -10,6 +10,7 @@ from modelctl.core.compat import (
     EnvSpec,
     GpuSpec,
     ModelSpec,
+    _spec_matches,
     register_rule,
 )
 
@@ -38,7 +39,9 @@ def _deepseek_v4_mhc_check(gpu: GpuSpec, env: EnvSpec, model: ModelSpec | None) 
 def _fp8_quant_cc_check(gpu: GpuSpec, env: EnvSpec, model: ModelSpec | None) -> CompatIssue | None:
     if model is None or "fp8" not in model.quantization:
         return None
-    if not gpu.cc or cc_at_least(gpu.cc, 8, 9):
+    if not gpu.cc or gpu.cc_major is None:
+        return None  # CC 未知或无法解析，不误报
+    if cc_at_least(gpu.cc, 8, 9):
         return None
     return CompatIssue(
         level="block",
@@ -62,10 +65,124 @@ def _fp4_quant_blackwell_check(gpu: GpuSpec, env: EnvSpec, model: ModelSpec | No
     )
 
 
+def _vllm_torch_abi_check(gpu: GpuSpec, env: EnvSpec, model: ModelSpec | None) -> CompatIssue | None:
+    req = env.wheel_requires.get("vllm", {}).get("torch")
+    if not req:
+        return None
+    installed = env.packages.get("torch")
+    if installed is None or _spec_matches(req, installed):
+        return None
+    return CompatIssue(
+        level="block",
+        rule_id="vllm_torch_abi",
+        reason=f"vllm 要求 torch{req}，当前已装 {installed}（ABI 不匹配）。"
+        f"建议执行：uv pip install \"torch{req}\"",
+    )
+
+
+def _nvidia_pkg_complete_check(gpu: GpuSpec, env: EnvSpec, model: ModelSpec | None) -> CompatIssue | None:
+    sp = env.site_packages
+    if sp is None or not sp.is_dir():
+        return None
+    missing: list[str] = []
+    for record in sorted(sp.glob("nvidia_*.dist-info/RECORD")):
+        for line in record.read_text(encoding="utf-8", errors="replace").splitlines():
+            rel = line.split(",", 1)[0].replace("\\", "/")
+            if rel.endswith(".so") or ".so." in rel:
+                if rel not in env.nvidia_so:
+                    missing.append(rel)
+        if len(missing) >= 5:
+            break
+    if not missing:
+        return None
+    return CompatIssue(
+        level="block",
+        rule_id="nvidia_pkg_complete",
+        reason=(
+            f"检测到 nvidia 依赖包文件缺失（空壳包）：{', '.join(missing[:5])}。"
+            "建议执行：uv pip install --reinstall \"nvidia-cudnn-cu13\" \"nvidia-nccl-cu13\" 等对应包。"
+        ),
+    )
+
+
+def _cuda_lib_resolvable_check(gpu: GpuSpec, env: EnvSpec, model: ModelSpec | None) -> CompatIssue | None:
+    if not env.libs_resolvable_known:
+        return None
+    needed: set[str] = set()
+    for pkg, version in env.packages.items():
+        if pkg == "nvidia-cuda-runtime":
+            needed.add(f"libcudart.so.{version.split('.')[0]}")
+        elif pkg.startswith("nvidia-cudnn"):
+            needed.add("libcudnn.so.9")
+        elif pkg.startswith("nvidia-nccl"):
+            needed.add("libnccl.so.2")
+    missing = sorted(n for n in needed if n not in env.cuda_libs_resolvable)
+    if not missing:
+        return None
+    return CompatIssue(
+        level="block",
+        rule_id="cuda_lib_resolvable",
+        reason=(
+            f"CUDA 运行库无法解析：{', '.join(missing)}。"
+            "请将对应 nvidia 库目录加入 LD_LIBRARY_PATH 或 /etc/ld.so.conf.d/ 后执行 ldconfig。"
+        ),
+    )
+
+
+_DEP_MISMATCH_KEYS = ("xgrammar", "flashinfer-python", "tokenizers", "transformers", "triton")
+
+
+def _engine_dep_missing_check(gpu: GpuSpec, env: EnvSpec, model: ModelSpec | None) -> CompatIssue | None:
+    reqs = env.wheel_requires.get("vllm", {})
+    problems: list[str] = []
+    for dep in _DEP_MISMATCH_KEYS:
+        req = reqs.get(dep)
+        if not req:
+            continue
+        installed = env.packages.get(dep)
+        if installed is None or _spec_matches(req, installed):
+            continue
+        problems.append(f"{dep}{req}（当前 {installed}）")
+    if not problems:
+        return None
+    return CompatIssue(
+        level="block",
+        rule_id="engine_dep_missing",
+        reason="vllm 依赖版本不匹配：" + "；".join(problems) + "。建议执行：uv pip install vllm 对应版本以对齐依赖。",
+    )
+
+
+_ENV_VAR_WARN = ("HF_HOME", "MODELSCOPE_CACHE")
+
+
+def _env_var_missing_check(gpu: GpuSpec, env: EnvSpec, model: ModelSpec | None) -> CompatIssue | None:
+    if not env.env_vars:
+        return None  # 未探测环境变量（env_vars 为空），不误报
+    missing = [k for k in _ENV_VAR_WARN if not env.env_vars.get(k)]
+    if not missing:
+        return None
+    return CompatIssue(
+        level="degrade",
+        rule_id="env_var_missing",
+        reason=f"环境变量未设置：{'、'.join(missing)}（将使用默认路径）。",
+    )
+
+
 def _register() -> None:
     register_rule(CompatRule(id="deepseek_v4_mhc", engines=("vllm", "sglang"), check=_deepseek_v4_mhc_check))
     register_rule(CompatRule(id="fp8_quant_cc", engines=("vllm", "sglang"), check=_fp8_quant_cc_check))
     register_rule(CompatRule(id="fp4_quant_blackwell", engines=("vllm",), check=_fp4_quant_blackwell_check))
+    register_rule(CompatRule(id="vllm_torch_abi", engines=("vllm",), check=_vllm_torch_abi_check))
+    register_rule(CompatRule(id="nvidia_pkg_complete", engines=("vllm", "sglang"), check=_nvidia_pkg_complete_check))
+    register_rule(CompatRule(id="cuda_lib_resolvable", engines=("vllm", "sglang"), check=_cuda_lib_resolvable_check))
+    register_rule(CompatRule(id="engine_dep_missing", engines=("vllm",), check=_engine_dep_missing_check))
+    register_rule(
+        CompatRule(
+            id="env_var_missing",
+            engines=("vllm", "sglang", "llamacpp", "unsloth", "ollama"),
+            check=_env_var_missing_check,
+        )
+    )
 
 
 _register()
