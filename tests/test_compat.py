@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from modelctl.core.capabilities import Capabilities
-from modelctl.core.compat import EnvSpec, GpuSpec, ModelSpec, cc_major
+from modelctl.core.compat import EnvSpec, GpuSpec, ModelSpec, _resolvable_cuda_libs, cc_major
 
 
 def test_cc_major_parsing():
@@ -120,3 +120,32 @@ def test_env_spec_env_vars(monkeypatch, tmp_path):
     env = EnvSpec.from_env(site_packages=tmp_path)
     assert env.env_vars["HF_HOME"] == "/data/hf"
     assert env.env_vars["MODEL_ROOT"] == ""
+
+
+def test_resolvable_cuda_libs_glibc_ldconfig(monkeypatch):
+    """glibc 系统 ldconfig -p 行含架构注释（如 (libc6,x86-64)），应解析出库名而非注释。"""
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = "libcudart.so.13 (libc6,x86-64) => /lib/x86_64-linux-gnu/libcudart.so.13\n"
+        stderr = ""
+
+    monkeypatch.setattr(
+        "modelctl.core.compat.subprocess.run", lambda *args, **kwargs: _FakeCompleted()
+    )
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+    names, known = _resolvable_cuda_libs()
+    assert known is True
+    assert names == {"libcudart.so.13"}
+
+
+def test_env_spec_libs_resolvable_unknown_without_ldconfig(monkeypatch, tmp_path):
+    """ldconfig 不可用（命令缺失/非 Linux）时 libs_resolvable_known 应为 False。"""
+
+    def _raise_oserror(*args, **kwargs):
+        raise OSError("ldconfig not found")
+
+    monkeypatch.setattr("modelctl.core.compat.subprocess.run", _raise_oserror)
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+    env = EnvSpec.from_env(site_packages=tmp_path)
+    assert env.libs_resolvable_known is False

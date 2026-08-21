@@ -226,7 +226,9 @@ def _resolvable_cuda_libs() -> tuple[set[str], bool]:
     for line in out.stdout.splitlines():
         parts = line.split("=>")
         if len(parts) == 2:
-            names.add(parts[0].strip().split()[-1])
+            # ldconfig -p 行形如 "libcuda.so.1 (libc6,x86-64) => /lib/x86_64-linux-gnu/libcuda.so.1"，
+            # 左侧可能带架构注释 token，取 => 右侧路径的 basename 最稳妥。
+            names.add(Path(parts[1].strip()).name)
     for d in os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep):
         if not d:
             continue
