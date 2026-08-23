@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 from modelctl.core.capabilities import Capabilities
+from modelctl.core.gpu_utils import GPUValidationError, resolve_gpu_list, validate_gpu_selection
 from modelctl.core.process import wait_health
 from modelctl.core.profile import Profile
 
@@ -38,6 +40,23 @@ class EngineAdapter(ABC):
 
     def health_url(self) -> str:
         return f"http://127.0.0.1:{self.profile.port}/health"
+
+    def selected_gpus(self) -> list[int] | None:
+        """按 profile.gpu_list > 环境变量 MODELCTL_GPUS（CLI --gpus 亦写入此变量）解析。"""
+        cfg = self.profile.engine_config
+        return resolve_gpu_list(cfg.get("gpu_list"), None, os.environ.get("MODELCTL_GPUS"))
+
+    def validate_gpu_selection(self, gpus: list[int] | None = None) -> None:
+        gpus = gpus if gpus is not None else self.selected_gpus()
+        if gpus is None:
+            return
+        try:
+            validate_gpu_selection(gpus, self.caps.gpu_indices)
+        except GPUValidationError as exc:
+            raise RequirementError(str(exc)) from exc
+
+    def cuda_visible_devices(self, gpus: list[int]) -> dict[str, str]:
+        return {"CUDA_VISIBLE_DEVICES": ",".join(str(g) for g in gpus)}
 
     def pre_start(self) -> None:
         """启动前钩子（下载/编译/pull）。"""
