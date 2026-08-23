@@ -159,37 +159,28 @@ def resolve_gpu_list(
 
 - [ ] **Step 4: Capabilities 新增 gpu_indices 与显存 helper**
 
-In `src/modelctl/core/capabilities.py`:
+In `src/modelctl/core/capabilities.py`. IMPORTANT: do NOT change the meaning of `vram_total_mb` — it is "单卡显存"（first GPU total）, asserted by `tests/test_capabilities.py::test_probe...` and printed by `cli.py` as 单卡显存. Only ADD two new fields with defaults; existing tests construct `Capabilities(...)` positionally/keyword so defaults are required.
 
 ```python
-@dataclass
-class Capabilities:
-    gpu_count: int = 0
+# dataclass Capabilities — ADD these two fields (keep all existing fields unchanged):
     gpu_indices: list[int] = field(default_factory=list)
-    gpu_name: str = ""
-    vram_total_mb: int = 0
-    vram_total_mb_per_gpu: list[int] = field(default_factory=list)  # 新增
-    vram_free_mb: list[int] = field(default_factory=list)
-    cuda_driver: str = ""
-    compute_capability: str = ""
-    binaries: dict[str, bool] = field(default_factory=dict)
-    binary_paths: dict[str, str | None] = field(default_factory=dict)
+    vram_total_mb_per_gpu: list[int] = field(default_factory=list)  # 每卡总显存（MB），与 vram_free_mb 对齐
 
-# In probe(), populate per-GPU totals and indices:
-totals: list[int] = []
-# inside row loop:
+# probe(): inside the EXISTING row loop that already appends to `frees`, also collect per-GPU totals.
+#   Initialize `totals: list[int] = []` right before the loop (next to `frees`).
+#   Inside the loop, after the frees append block, add:
 try:
     totals.append(int(parts[1]))
 except ValueError:
     totals.append(0)
-# after loop:
-caps.vram_total_mb_per_gpu = totals
-caps.vram_total_mb = sum(totals)
-caps.gpu_indices = list(range(len(frees)))
-caps.gpu_count = len(frees)
+# After the loop, alongside `caps.vram_free_mb = frees` / `caps.gpu_count = len(frees)`:
+caps.vram_total_mb_per_gpu = totals          # NEW
+caps.gpu_indices = list(range(len(frees)))   # NEW
+# Do NOT touch caps.vram_total_mb or caps.gpu_count assignment logic.
 
 
 def selected_vram_total_mb(caps: Capabilities, gpus: list[int]) -> int:
+    """按选中 GPU 索引汇总各卡总显存。"""
     return sum(
         (caps.vram_total_mb_per_gpu[g] if g < len(caps.vram_total_mb_per_gpu) else 0)
         for g in gpus
@@ -197,11 +188,14 @@ def selected_vram_total_mb(caps: Capabilities, gpus: list[int]) -> int:
 
 
 def selected_vram_free_mb(caps: Capabilities, gpus: list[int]) -> int:
+    """按选中 GPU 索引汇总各卡剩余显存（MB）。"""
     return sum(
         (caps.vram_free_mb[g] if g < len(caps.vram_free_mb) else 0)
         for g in gpus
     )
 ```
+
+Also add a test to `tests/test_capabilities.py` verifying `gpu_indices` and `vram_total_mb_per_gpu` are populated by `probe()` from the existing multi-GPU sample input (without altering existing assertions).
 
 - [ ] **Step 5: Run tests to verify they pass**
 
