@@ -97,7 +97,12 @@ def test_stop_instance_windows_uses_taskkill(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "platform", "win32")
     (tmp_path / "app.pid").write_text("4242", encoding="utf-8")
     ran: list[list[str]] = []
-    monkeypatch.setattr(process.subprocess, "run", lambda cmd, **k: ran.append(cmd) or type("R", (), {"returncode": 0})())
+
+    def _run_recorder(cmd, **k):
+        ran.append(cmd)
+        return type("R", (), {"returncode": 0})()
+
+    monkeypatch.setattr(process.subprocess, "run", _run_recorder)
     stopped = process.stop_instance("app", port=9, patterns=["foo"])
     assert stopped is True
     assert any(r[0] == "taskkill" and "/PID" in r and "4242" in r and "/T" in r and "/F" in r for r in ran)
@@ -111,7 +116,12 @@ def test_stop_instance_posix_uses_fuser_pkill(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "platform", "linux")
     (tmp_path / "app.pid").write_text("777", encoding="utf-8")
     ran: list[list[str]] = []
-    monkeypatch.setattr(process.subprocess, "run", lambda cmd, **k: ran.append(cmd) or type("R", (), {"returncode": 0})())
+
+    def _run_recorder(cmd, **k):
+        ran.append(cmd)
+        return type("R", (), {"returncode": 0})()
+
+    monkeypatch.setattr(process.subprocess, "run", _run_recorder)
     # make the process appear already dead so the SIGTERM wait loop exits immediately
 
     def fake_kill(pid, sig):

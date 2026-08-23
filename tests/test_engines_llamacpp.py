@@ -445,7 +445,8 @@ def test_find_first_skips_directory_named_dspark(tmp_path):
 
 
 def test_llamacpp_gpu_list_sets_cuda_and_tensor_split(tmp_path, monkeypatch):
-    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path / "locks")  # check_requirements 会获取 GPU 锁，隔离到临时目录
+    # check_requirements 会获取 GPU 锁，隔离到临时目录
+    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path / "locks")
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
     caps = probe(nvidia_smi_output=SMI)
     adapter = get_adapter("llamacpp")(_profile(tmp_path, "  gpu_list: '0,1'\n"), caps)

@@ -15,7 +15,6 @@ from pathlib import Path
 
 from modelctl.core.envfile import PROJECT_ROOT
 
-
 if sys.platform == "win32":
     import ctypes
 

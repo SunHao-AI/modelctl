@@ -13,7 +13,10 @@ def parse_gpu_list(raw: str | list[int] | None) -> list[int] | None:
     if raw is None or (isinstance(raw, str) and raw.strip() == ""):
         return None
     if isinstance(raw, list):
-        items = [int(x) for x in raw]
+        try:
+            items = [int(x) for x in raw]
+        except (ValueError, TypeError) as exc:
+            raise GPUValidationError(f"gpu_list 包含非整数项：{raw!r}") from exc
     else:
         parts = [p.strip() for p in str(raw).split(",") if p.strip() != ""]
         try:

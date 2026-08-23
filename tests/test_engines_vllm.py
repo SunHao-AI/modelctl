@@ -164,7 +164,11 @@ def _vllm_caps(n):
 
 def test_vllm_gpu_list_sets_cuda(tmp_path, monkeypatch):
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
-    p = _write(tmp_path, "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: Qwen/Qwen3-32B\n  tensor_parallel_size: 2\n  gpu_list: '2,3'\n")
+    p = _write(
+        tmp_path,
+        "name: q\nengine: vllm\nport: 8000\nvllm:\n"
+        "  model: Qwen/Qwen3-32B\n  tensor_parallel_size: 2\n  gpu_list: '2,3'\n",
+    )
     a = get_adapter("vllm")(p, _vllm_caps(4))
     _, env = a.build_command()
     assert env["CUDA_VISIBLE_DEVICES"] == "2,3"
@@ -190,7 +194,11 @@ def test_vllm_tp_derived_from_gpu_list(tmp_path, monkeypatch):
 
 def test_vllm_tp_mismatch_raises(tmp_path, monkeypatch):
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
-    p = _write(tmp_path, "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: Qwen/Qwen3-32B\n  tensor_parallel_size: 4\n  gpu_list: '1,2'\n")
+    p = _write(
+        tmp_path,
+        "name: q\nengine: vllm\nport: 8000\nvllm:\n"
+        "  model: Qwen/Qwen3-32B\n  tensor_parallel_size: 4\n  gpu_list: '1,2'\n",
+    )
     a = get_adapter("vllm")(p, _vllm_caps(4))
     with pytest.raises(RequirementError):
         a.check_requirements()

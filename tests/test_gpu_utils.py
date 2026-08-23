@@ -26,6 +26,16 @@ def test_parse_gpu_list_duplicate():
         parse_gpu_list("0,1,1")
 
 
+def test_parse_gpu_list_bad_list_item():
+    with pytest.raises(GPUValidationError, match="非整数"):
+        parse_gpu_list([0, None])
+
+
+def test_parse_gpu_list_non_integer_string():
+    with pytest.raises(GPUValidationError, match="非整数"):
+        parse_gpu_list("0,a")
+
+
 def test_validate_gpu_selection_ok():
     validate_gpu_selection([0, 1], [0, 1, 2, 3])
 

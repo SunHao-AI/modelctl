@@ -70,7 +70,10 @@ def _sgl_caps(n):
 
 def test_sglang_gpu_list_sets_cuda_and_tp(tmp_path, monkeypatch):
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
-    p = _write(tmp_path, "name: s\nengine: sglang\nport: 30000\nsglang:\n  model: Qwen/Qwen3-32B\n  gpu_list: '1,2,3'\n")
+    p = _write(
+        tmp_path,
+        "name: s\nengine: sglang\nport: 30000\nsglang:\n  model: Qwen/Qwen3-32B\n  gpu_list: '1,2,3'\n",
+    )
     a = get_adapter("sglang")(p, _sgl_caps(4))
     cmd, env = a.build_command()
     assert env["CUDA_VISIBLE_DEVICES"] == "1,2,3"
@@ -79,7 +82,11 @@ def test_sglang_gpu_list_sets_cuda_and_tp(tmp_path, monkeypatch):
 
 def test_sglang_tp_mismatch_raises(tmp_path, monkeypatch):
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
-    p = _write(tmp_path, "name: s\nengine: sglang\nport: 30000\nsglang:\n  model: Qwen/Qwen3-32B\n  tensor_parallel_size: 4\n  gpu_list: '1,2'\n")
+    p = _write(
+        tmp_path,
+        "name: s\nengine: sglang\nport: 30000\nsglang:\n"
+        "  model: Qwen/Qwen3-32B\n  tensor_parallel_size: 4\n  gpu_list: '1,2'\n",
+    )
     a = get_adapter("sglang")(p, _sgl_caps(4))
     with pytest.raises(RequirementError):
         a.check_requirements()

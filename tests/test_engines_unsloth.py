@@ -291,7 +291,8 @@ def test_unsloth_gpu_list_sets_cuda(tmp_path, monkeypatch):
 
 def test_unsloth_tp_requires_two_gpus(tmp_path, monkeypatch):
     (tmp_path / "m.gguf").write_bytes(b"0" * 1024)
-    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path / "locks")  # check_requirements 会获取 GPU 锁，隔离到临时目录
+    # check_requirements 会获取 GPU 锁，隔离到临时目录
+    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path / "locks")
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
     # tensor_parallel on + gpu_list 仅一块 GPU → check_requirements 必须拒绝
     p = _write(
