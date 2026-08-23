@@ -222,14 +222,14 @@ git commit -m "feat(gpu): 新增 gpu_list 解析/校验工具与 Capabilities.gp
 **Files:**
 - Modify: `src/modelctl/engines/base.py`
 - Modify: `src/modelctl/cli.py`
-- Modify: `src/modelctl/engines/__init__.py` (if adapter factory needs cli_gpas kwarg)
+
+**Design note (pre-flight refinement):** Do NOT add a `cli_gpus` parameter to `EngineAdapter.__init__`. Adapters are constructed as `get_adapter(engine)(profile, caps)` inside `core/all_service.py`; threading a new param would touch every call site. Instead the CLI sets `os.environ["MODELCTL_GPUS"] = args.gpus` when `--gpus` is provided, and `selected_gpus()` reads it via the env slot. This preserves the spec priority profile > CLI > env with zero signature changes.
 
 **Interfaces:**
-- Consumes: `parse_gpu_list`, `resolve_gpu_list`, `validate_gpu_selection` from `core.gpu_utils`
+- Consumes: `resolve_gpu_list`, `validate_gpu_selection`, `GPUValidationError` from `core.gpu_utils`
 - Produces:
-  - `EngineAdapter.__init__(profile, caps, cli_gpus=None)`
-  - `EngineAdapter.selected_gpus() -> list[int] | None`
-  - `EngineAdapter.validate_gpu_selection(gpus) -> None`
+  - `EngineAdapter.selected_gpus() -> list[int] | None`  # reads cfg.gpu_list then os.environ MODELCTL_GPUS
+  - `EngineAdapter.validate_gpu_selection(gpus=None) -> None`  # raises RequirementError on invalid
   - `EngineAdapter.cuda_visible_devices(gpus) -> dict[str, str]`
 
 - [ ] **Step 1: Write failing tests for EngineAdapter GPU helpers**
@@ -247,26 +247,27 @@ class DummyAdapter(EngineAdapter):
     def check_requirements(self): pass
     def metrics_mapping(self): return None
 
-def test_selected_gpus_priority():
-    profile = Profile(
-        name="x", engine="dummy", port=1,
-        engine_config={"gpu_list": "0,1"},
-    )
-    adapter = DummyAdapter(profile, Capabilities(gpu_indices=[0, 1, 2, 3]), cli_gpus="2,3")
+def test_profile_wins_over_env(monkeypatch):
+    monkeypatch.setenv("MODELCTL_GPUS", "2,3")
+    profile = Profile(name="x", engine="dummy", port=1, engine_config={"gpu_list": "0,1"})
+    adapter = DummyAdapter(profile, Capabilities(gpu_indices=[0, 1, 2, 3]))
     assert adapter.selected_gpus() == [0, 1]
 
-    adapter = DummyAdapter(profile, Capabilities(gpu_indices=[0, 1, 2, 3]), cli_gpus=None)
-    assert adapter.selected_gpus() == [0, 1]
-
-def test_selected_gpus_env(monkeypatch):
+def test_env_fallback(monkeypatch):
     monkeypatch.setenv("MODELCTL_GPUS", "4,5")
     profile = Profile(name="x", engine="dummy", port=1, engine_config={})
-    adapter = DummyAdapter(profile, Capabilities(gpu_indices=[0,1,2,3,4,5]))
+    adapter = DummyAdapter(profile, Capabilities(gpu_indices=[0, 1, 2, 3, 4, 5]))
     assert adapter.selected_gpus() == [4, 5]
 
-def test_validate_gpu_selection():
+def test_none_when_unset(monkeypatch):
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    profile = Profile(name="x", engine="dummy", port=1, engine_config={})
+    adapter = DummyAdapter(profile, Capabilities(gpu_indices=[0, 1, 2, 3]))
+    assert adapter.selected_gpus() is None
+
+def test_validate_gpu_selection_raises():
     profile = Profile(name="x", engine="dummy", port=1, engine_config={"gpu_list": "0,8"})
-    adapter = DummyAdapter(profile, Capabilities(gpu_indices=[0,1,2,3]))
+    adapter = DummyAdapter(profile, Capabilities(gpu_indices=[0, 1, 2, 3]))
     with pytest.raises(RequirementError, match="超出可用范围"):
         adapter.validate_gpu_selection(adapter.selected_gpus())
 
@@ -282,49 +283,45 @@ Expected: FAIL
 
 - [ ] **Step 3: Implement EngineAdapter GPU helpers**
 
-In `src/modelctl/engines/base.py`:
+In `src/modelctl/engines/base.py`, keep the existing `__init__(self, profile, caps)` unchanged (do NOT add cli_gpus). Add these three methods to `EngineAdapter`:
 
 ```python
 import os
 from modelctl.core.gpu_utils import GPUValidationError, resolve_gpu_list, validate_gpu_selection
 
-class EngineAdapter(ABC):
-    def __init__(self, profile: Profile, caps: Capabilities, cli_gpus: str | None = None):
-        self.profile = profile
-        self.caps = caps
-        self.cli_gpus = cli_gpus
-        self.warnings: list[str] = []
+# inside class EngineAdapter(ABC):
+def selected_gpus(self) -> list[int] | None:
+    """按 profile.gpu_list > 环境变量 MODELCTL_GPUS（CLI --gpus 亦写入此变量）解析。"""
+    cfg = self.profile.engine_config
+    return resolve_gpu_list(cfg.get("gpu_list"), None, os.environ.get("MODELCTL_GPUS"))
 
-    def selected_gpus(self) -> list[int] | None:
-        cfg = self.profile.engine_config
-        return resolve_gpu_list(
-            cfg.get("gpu_list"),
-            self.cli_gpus,
-            os.environ.get("MODELCTL_GPUS"),
-        )
+def validate_gpu_selection(self, gpus: list[int] | None = None) -> None:
+    gpus = gpus if gpus is not None else self.selected_gpus()
+    if gpus is None:
+        return
+    try:
+        validate_gpu_selection(gpus, self.caps.gpu_indices)
+    except GPUValidationError as exc:
+        raise RequirementError(str(exc)) from exc
 
-    def validate_gpu_selection(self, gpus: list[int] | None = None) -> None:
-        gpus = gpus if gpus is not None else self.selected_gpus()
-        if gpus is None:
-            return
-        try:
-            validate_gpu_selection(gpus, self.caps.gpu_indices)
-        except GPUValidationError as exc:
-            raise RequirementError(str(exc)) from exc
-
-    def cuda_visible_devices(self, gpus: list[int]) -> dict[str, str]:
-        return {"CUDA_VISIBLE_DEVICES": ",".join(str(g) for g in gpus)}
+def cuda_visible_devices(self, gpus: list[int]) -> dict[str, str]:
+    return {"CUDA_VISIBLE_DEVICES": ",".join(str(g) for g in gpus)}
 ```
 
-- [ ] **Step 4: Update CLI to parse --gpus**
+- [ ] **Step 4: Update CLI to parse --gpus and set env**
 
-In `src/modelctl/cli.py`, find `start` command parser and add:
-
-```python
-start_parser.add_argument("--gpus", default=None, help="逗号分隔的 GPU 索引，覆盖环境变量 MODELCTL_GPUS")
-```
-
-Pass `cli_gpus=args.gpus` when constructing adapter in `_cmd_start` and `_cmd_all_start`.
+In `src/modelctl/cli.py`:
+1. In the parser loop where `start`/`restart` subcommands get `--timeout`, also add `--gpus`:
+   ```python
+   p.add_argument("--gpus", default=None, help="逗号分隔的 GPU 索引，如 0,1,2（覆盖环境变量 MODELCTL_GPUS）")
+   ```
+   And on the `all` subparser (`ap`) add the same `--gpus` option so `modelctl all start --gpus ...` works.
+2. In the main dispatch (where commands are routed), after parsing args and before invoking the command handler, when a model-start path runs, apply:
+   ```python
+   if getattr(args, "gpus", None):
+       os.environ["MODELCTL_GPUS"] = args.gpus
+   ```
+   Place it early in `main()` right after argument parsing so both `_cmd_start` and `all start` pick it up. Ensure `import os` is present at module top.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
