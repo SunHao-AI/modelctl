@@ -17,8 +17,9 @@ import time
 import urllib.request
 from pathlib import Path
 
-from modelctl.core.capabilities import free_vram_total_mb
+from modelctl.core.capabilities import free_vram_total_mb, selected_vram_free_mb
 from modelctl.core.envfile import PROJECT_ROOT
+from modelctl.core.gpu_lock import acquire_gpu_lock
 from modelctl.core.gpu_utils import GPUValidationError
 from modelctl.core.process import launch_log, wait_health
 from modelctl.engines._persist import persist_model_path
@@ -67,6 +68,7 @@ class UnslothAdapter(EngineAdapter):
             raise RequirementError(f"[gpu_list] {exc}") from exc
         if gpus is not None:
             self.validate_gpu_selection(gpus)
+            acquire_gpu_lock(self.profile.name, gpus)
             if cfg.get("tensor_parallel") and len(gpus) < 2:
                 raise RequirementError(f"tensor_parallel 需要至少 2 块 GPU，但 gpu_list 仅指定 {len(gpus)} 块：{gpus}")
         self._check_vram(cfg)

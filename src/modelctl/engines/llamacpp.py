@@ -10,8 +10,9 @@ from pathlib import Path
 
 from loguru import logger
 
-from modelctl.core.capabilities import free_vram_total_mb
+from modelctl.core.capabilities import free_vram_total_mb, selected_vram_free_mb
 from modelctl.core.envfile import PROJECT_ROOT
+from modelctl.core.gpu_lock import acquire_gpu_lock
 from modelctl.core.gpu_utils import GPUValidationError
 from modelctl.engines._download import ensure_modelscope, snapshot_download
 from modelctl.engines.base import EngineAdapter, RequirementError
@@ -205,6 +206,7 @@ class LlamaCppAdapter(EngineAdapter):
             raise RequirementError(f"[gpu_list] {exc}") from exc
         if gpus is not None:
             self.validate_gpu_selection(gpus)
+            acquire_gpu_lock(self.profile.name, gpus)
             gpu_count = len(gpus)
         else:
             gpu_count = int(cfg.get("gpu_count", 8))
@@ -256,10 +258,9 @@ class LlamaCppAdapter(EngineAdapter):
         # 显存预检：模型文件大小 × 1.1
         if self._model and self._model.is_file():
             need_mb = self._model.stat().st_size / 1024 / 1024 * 1.1
-            if need_mb > free_vram_total_mb(self.caps):
-                raise RequirementError(
-                    f"剩余显存不足：模型约需 {need_mb:.0f}MB（×1.1），剩余 {free_vram_total_mb(self.caps)}MB"
-                )
+            free_mb = selected_vram_free_mb(self.caps, gpus) if gpus else free_vram_total_mb(self.caps)
+            if need_mb > free_mb:
+                raise RequirementError(f"剩余显存不足：模型约需 {need_mb:.0f}MB（×1.1），剩余 {free_mb}MB")
         self.run_compat_checks()  # 预检：软件规则 + 模型 id 特征
 
     def _find_draft(self, cfg: dict) -> Path | None:

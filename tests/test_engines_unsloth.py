@@ -291,6 +291,7 @@ def test_unsloth_gpu_list_sets_cuda(tmp_path, monkeypatch):
 
 def test_unsloth_tp_requires_two_gpus(tmp_path, monkeypatch):
     (tmp_path / "m.gguf").write_bytes(b"0" * 1024)
+    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path / "locks")  # check_requirements 会获取 GPU 锁，隔离到临时目录
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
     # tensor_parallel on + gpu_list 仅一块 GPU → check_requirements 必须拒绝
     p = _write(
@@ -301,3 +302,23 @@ def test_unsloth_tp_requires_two_gpus(tmp_path, monkeypatch):
     a = get_adapter("unsloth")(p, _unsloth_caps(4))
     with pytest.raises(RequirementError):
         a.check_requirements()
+
+
+def test_unsloth_gpu_conflict_blocks_second_model(tmp_path, monkeypatch):
+    from pathlib import Path as _P
+
+    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path / "locks")
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    for name in ("ua", "ub"):
+        (_P(tmp_path) / f"{name}.gguf").write_bytes(b"0" * 1024)
+        gl = "'0,1'" if name == "ua" else "'1,2'"
+        yaml_text = (f"name: {name}\nengine: unsloth\nport: 18900\nunsloth:\n"
+                     f"  model: {_P(tmp_path)}/{name}.gguf\n  gpu_list: {gl}\n")
+        (tmp_path / f"{name}.yaml").write_text(yaml_text, encoding="utf-8")
+    caps_a = Capabilities(gpu_count=4, gpu_indices=[0, 1, 2, 3], compute_capability="9.0",
+                          vram_free_mb=[40000] * 4, binaries={"unsloth": True})
+    a = get_adapter("unsloth")(load_profile("ua", tmp_path), caps_a)
+    a.check_requirements()
+    b = get_adapter("unsloth")(load_profile("ub", tmp_path), caps_a)
+    with pytest.raises(RequirementError, match="占用"):
+        b.check_requirements()

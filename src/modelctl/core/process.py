@@ -94,6 +94,12 @@ def stop_instance(name: str, port: int, patterns: list[str]) -> bool:
     subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True)
     for pat in patterns:
         subprocess.run(["pkill", "-f", pat], capture_output=True)
+    try:
+        from modelctl.core.gpu_lock import release_gpu_lock
+
+        release_gpu_lock(name)
+    except Exception:
+        pass
     return stopped
 
 
