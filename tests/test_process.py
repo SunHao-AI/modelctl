@@ -60,3 +60,67 @@ def test_tail_file(tmp_path):
     f = tmp_path / "x.log"
     f.write_text("\n".join(f"line{i}" for i in range(100)), encoding="utf-8")
     assert process.tail_file(f, 3).splitlines() == ["line97", "line98", "line99"]
+
+
+def test_wait_health_exponential_backoff(monkeypatch):
+    import urllib.error as _ue
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(process.time, "sleep", lambda s: sleeps.append(s))
+    calls = {"n": 0}
+
+    class _Resp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:  # first two attempts fail, third succeeds
+            raise _ue.URLError("down")
+        return _Resp()
+
+    monkeypatch.setattr(process.urllib.request, "urlopen", fake_urlopen)
+    assert process.wait_health("http://x/health", timeout=60) is True
+    # backoff doubles: ~1s then ~2s before the successful third probe
+    assert len(sleeps) == 2
+    assert abs(sleeps[0] - 1.0) < 1e-6
+    assert abs(sleeps[1] - 2.0) < 1e-6
+
+
+def test_stop_instance_windows_uses_taskkill(monkeypatch, tmp_path):
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(sys, "platform", "win32")
+    (tmp_path / "app.pid").write_text("4242", encoding="utf-8")
+    ran: list[list[str]] = []
+    monkeypatch.setattr(process.subprocess, "run", lambda cmd, **k: ran.append(cmd) or type("R", (), {"returncode": 0})())
+    stopped = process.stop_instance("app", port=9, patterns=["foo"])
+    assert stopped is True
+    assert any(r[0] == "taskkill" and "/PID" in r and "4242" in r and "/T" in r and "/F" in r for r in ran)
+    # POSIX-only tools must NOT be invoked on Windows
+    assert not any("fuser" in r for r in ran)
+    assert not any("pkill" in r for r in ran)
+
+
+def test_stop_instance_posix_uses_fuser_pkill(monkeypatch, tmp_path):
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(sys, "platform", "linux")
+    (tmp_path / "app.pid").write_text("777", encoding="utf-8")
+    ran: list[list[str]] = []
+    monkeypatch.setattr(process.subprocess, "run", lambda cmd, **k: ran.append(cmd) or type("R", (), {"returncode": 0})())
+    # make the process appear already dead so the SIGTERM wait loop exits immediately
+
+    def fake_kill(pid, sig):
+        raise OSError("no such process")
+
+    monkeypatch.setattr(process.os, "kill", fake_kill)
+    monkeypatch.setattr(process.os, "killpg", fake_kill, raising=False)  # os.killpg 仅 POSIX 存在
+    stopped = process.stop_instance("app", port=9, patterns=["foo"])
+    assert stopped is True
+    assert any("fuser" in r for r in ran)
+    assert any(r and r[0] == "pkill" and "foo" in r for r in ran)
+    assert not any("taskkill" in r for r in ran)
