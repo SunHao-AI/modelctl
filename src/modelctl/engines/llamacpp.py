@@ -12,6 +12,7 @@ from loguru import logger
 
 from modelctl.core.capabilities import free_vram_total_mb
 from modelctl.core.envfile import PROJECT_ROOT
+from modelctl.core.gpu_utils import GPUValidationError
 from modelctl.engines._download import ensure_modelscope, snapshot_download
 from modelctl.engines.base import EngineAdapter, RequirementError
 
@@ -198,9 +199,17 @@ class LlamaCppAdapter(EngineAdapter):
         cfg = self.profile.engine_config
         if self.caps.gpu_count == 0:
             raise RequirementError("未探测到 GPU（nvidia-smi 失败或无 GPU）")
-        gpu_count = int(cfg.get("gpu_count", 8))
-        if gpu_count > self.caps.gpu_count:
-            raise RequirementError(f"profile gpu_count={gpu_count} 超过实际 GPU 数 {self.caps.gpu_count}")
+        try:
+            gpus = self.selected_gpus()
+        except (GPUValidationError, ValueError) as exc:
+            raise RequirementError(f"[gpu_list] {exc}") from exc
+        if gpus is not None:
+            self.validate_gpu_selection(gpus)
+            gpu_count = len(gpus)
+        else:
+            gpu_count = int(cfg.get("gpu_count", 8))
+            if gpu_count > self.caps.gpu_count:
+                raise RequirementError(f"profile gpu_count={gpu_count} 超过实际 GPU 数 {self.caps.gpu_count}")
         model = cfg.get("model")
         if not model and not cfg.get("download"):
             raise RequirementError(f"{self.profile.name}：llamacpp.model 必填（或配置 download 段自动下载）")
@@ -294,7 +303,9 @@ class LlamaCppAdapter(EngineAdapter):
         # llama-server 的 --ctx-size 是总量（槽位共享），故总量 = 单槽 × parallel。
         per_slot = int(cfg["ctx_size"]) if cfg.get("ctx_size") else CTX_PER_SLOT
         ctx = per_slot * parallel
-        gpu_split = ",".join(["1"] * int(cfg.get("gpu_count", 8)))
+        gpus = self.selected_gpus()
+        gpu_count = len(gpus) if gpus else int(cfg.get("gpu_count", 8))
+        gpu_split = ",".join(["1"] * gpu_count)
         cmd = [
             server,
             "--model",
@@ -357,6 +368,8 @@ class LlamaCppAdapter(EngineAdapter):
         if cfg.get("cache_type_v", "q8_0"):
             cmd += ["--cache-type-v", str(cfg.get("cache_type_v", "q8_0"))]
         env = {"MODELSCOPE_CACHE": os.environ["MODELSCOPE_CACHE"]} if os.environ.get("MODELSCOPE_CACHE") else {}
+        if gpus:
+            env.update(self.cuda_visible_devices(gpus))
         return cmd, env
 
     def pre_start(self) -> None:

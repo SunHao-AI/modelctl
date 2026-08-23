@@ -120,3 +120,18 @@ def test_pre_start_pull_failure_raises_friendly_error(tmp_path, monkeypatch):
     monkeypatch.setattr(ollama_mod.subprocess, "run", fake_run)
     with pytest.raises(RequirementError, match="file does not exist"):
         a.pre_start()
+
+
+def _ollama_caps(n):
+    return Capabilities(gpu_count=n, gpu_indices=list(range(n)), compute_capability="9.0", binaries={"ollama": True})
+
+
+def test_ollama_gpu_list_sets_cuda(monkeypatch):
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    from modelctl.core.profile import Profile
+
+    profile = Profile(name="o", engine="ollama", port=11434, engine_config={"model": "qwen3:8b", "gpu_list": "6,7"})
+    a = get_adapter("ollama")(profile, _ollama_caps(8))
+    _, env = a.build_command()
+    assert env["CUDA_VISIBLE_DEVICES"] == "6,7"
+    assert env["OLLAMA_HOST"].endswith(":11434")

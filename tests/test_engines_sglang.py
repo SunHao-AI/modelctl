@@ -1,8 +1,11 @@
 """tests/test_engines_sglang.py — SGLang 适配器下载/persist 测试。"""
 
+import pytest
+
 from modelctl.core.capabilities import Capabilities
 from modelctl.core.profile import load_profile
 from modelctl.engines import get_adapter
+from modelctl.engines.base import RequirementError
 
 CAPS8 = Capabilities(gpu_count=8, compute_capability="8.9", binaries={"vllm": True, "sglang": True})
 
@@ -59,3 +62,24 @@ def test_sglang_pre_start_skips_when_model_exists(tmp_path, monkeypatch):
 
     a.pre_start()  # model 路径已存在，直接返回
     assert calls == []
+
+
+def _sgl_caps(n):
+    return Capabilities(gpu_count=n, gpu_indices=list(range(n)), compute_capability="9.0", binaries={"sglang": True})
+
+
+def test_sglang_gpu_list_sets_cuda_and_tp(tmp_path, monkeypatch):
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    p = _write(tmp_path, "name: s\nengine: sglang\nport: 30000\nsglang:\n  model: Qwen/Qwen3-32B\n  gpu_list: '1,2,3'\n")
+    a = get_adapter("sglang")(p, _sgl_caps(4))
+    cmd, env = a.build_command()
+    assert env["CUDA_VISIBLE_DEVICES"] == "1,2,3"
+    assert cmd[cmd.index("--tp") + 1] == "3"
+
+
+def test_sglang_tp_mismatch_raises(tmp_path, monkeypatch):
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    p = _write(tmp_path, "name: s\nengine: sglang\nport: 30000\nsglang:\n  model: Qwen/Qwen3-32B\n  tensor_parallel_size: 4\n  gpu_list: '1,2'\n")
+    a = get_adapter("sglang")(p, _sgl_caps(4))
+    with pytest.raises(RequirementError):
+        a.check_requirements()

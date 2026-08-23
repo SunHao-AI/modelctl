@@ -271,3 +271,33 @@ def test_unsloth_post_start_ignores_errors(tmp_path, monkeypatch):
 
     monkeypatch.setattr("modelctl.engines.unsloth.urllib.request.urlopen", _boom)
     a.post_start()  # 预热失败不应抛异常
+
+
+def _unsloth_caps(n):
+    return Capabilities(gpu_count=n, gpu_indices=list(range(n)), compute_capability="9.0", binaries={"unsloth": True})
+
+
+def test_unsloth_gpu_list_sets_cuda(tmp_path, monkeypatch):
+    (tmp_path / "m.gguf").write_bytes(b"0" * 1024)
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    p = _write(
+        tmp_path,
+        f"name: u\nengine: unsloth\nport: 8900\nunsloth:\n  model: {tmp_path}/m.gguf\n  gpu_list: '0,1'\n",
+    )
+    a = get_adapter("unsloth")(p, _unsloth_caps(4))
+    _, env = a.build_command()
+    assert env["CUDA_VISIBLE_DEVICES"] == "0,1"
+
+
+def test_unsloth_tp_requires_two_gpus(tmp_path, monkeypatch):
+    (tmp_path / "m.gguf").write_bytes(b"0" * 1024)
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    # tensor_parallel on + gpu_list 仅一块 GPU → check_requirements 必须拒绝
+    p = _write(
+        tmp_path,
+        f"name: u\nengine: unsloth\nport: 8900\nunsloth:\n"
+        f"  model: {tmp_path}/m.gguf\n  tensor_parallel: on\n  gpu_list: '0'\n",
+    )
+    a = get_adapter("unsloth")(p, _unsloth_caps(4))
+    with pytest.raises(RequirementError):
+        a.check_requirements()

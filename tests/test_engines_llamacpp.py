@@ -442,3 +442,21 @@ def test_find_first_skips_directory_named_dspark(tmp_path):
     # 即使 pattern 更宽泛（如 *dspark*），也必须跳过目录
     got_wide = _find_first(repo, ["*dspark*"])
     assert got_wide is not None and got_wide.is_file()
+
+
+def test_llamacpp_gpu_list_sets_cuda_and_tensor_split(tmp_path, monkeypatch):
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    caps = probe(nvidia_smi_output=SMI)
+    adapter = get_adapter("llamacpp")(_profile(tmp_path, "  gpu_list: '0,1'\n"), caps)
+    adapter.check_requirements()
+    cmd, env = adapter.build_command()
+    assert env["CUDA_VISIBLE_DEVICES"] == "0,1"
+    assert cmd[cmd.index("--tensor-split") + 1] == "1,1"
+
+
+def test_llamacpp_gpu_out_of_range_raises(tmp_path, monkeypatch):
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    caps = probe(nvidia_smi_output=SMI)
+    adapter = get_adapter("llamacpp")(_profile(tmp_path, "  gpu_list: '0,9'\n"), caps)
+    with pytest.raises(RequirementError):
+        adapter.check_requirements()

@@ -156,3 +156,49 @@ def test_vllm_pre_start_skips_when_model_exists(tmp_path, monkeypatch):
 
     a.pre_start()  # model 路径已存在，直接返回
     assert calls == []
+
+
+def _vllm_caps(n):
+    return Capabilities(gpu_count=n, gpu_indices=list(range(n)), compute_capability="9.0", binaries={"vllm": True})
+
+
+def test_vllm_gpu_list_sets_cuda(tmp_path, monkeypatch):
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    p = _write(tmp_path, "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: Qwen/Qwen3-32B\n  tensor_parallel_size: 2\n  gpu_list: '2,3'\n")
+    a = get_adapter("vllm")(p, _vllm_caps(4))
+    _, env = a.build_command()
+    assert env["CUDA_VISIBLE_DEVICES"] == "2,3"
+
+
+def test_vllm_env_used_when_no_profile_gpus(monkeypatch):
+    monkeypatch.setenv("MODELCTL_GPUS", "4,5")
+    from modelctl.core.profile import Profile
+
+    profile = Profile(name="q", engine="vllm", port=8000, engine_config={"model": "Qwen/Qwen3-32B"})
+    a = get_adapter("vllm")(profile, _vllm_caps(6))
+    _, env = a.build_command()
+    assert env["CUDA_VISIBLE_DEVICES"] == "4,5"
+
+
+def test_vllm_tp_derived_from_gpu_list(tmp_path, monkeypatch):
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    p = _write(tmp_path, "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: Qwen/Qwen3-32B\n  gpu_list: '1,2'\n")
+    a = get_adapter("vllm")(p, _vllm_caps(4))
+    cmd, _ = a.build_command()
+    assert cmd[cmd.index("--tensor-parallel-size") + 1] == "2"
+
+
+def test_vllm_tp_mismatch_raises(tmp_path, monkeypatch):
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    p = _write(tmp_path, "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: Qwen/Qwen3-32B\n  tensor_parallel_size: 4\n  gpu_list: '1,2'\n")
+    a = get_adapter("vllm")(p, _vllm_caps(4))
+    with pytest.raises(RequirementError):
+        a.check_requirements()
+
+
+def test_vllm_gpu_out_of_range_raises(tmp_path, monkeypatch):
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    p = _write(tmp_path, "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: Qwen/Qwen3-32B\n  gpu_list: '7,8'\n")
+    a = get_adapter("vllm")(p, _vllm_caps(8))  # valid indices 0..7; index 8 invalid
+    with pytest.raises(RequirementError):
+        a.check_requirements()
