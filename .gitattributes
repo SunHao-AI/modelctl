@@ -1,0 +1,14 @@
+# 自动识别文本文件并在提交时统一换行符处理；默认全部使用 LF
+* text=auto eol=lf
+
+# 本文件自身也强制 LF，避免 Windows 检出时被转 CRLF
+.gitattributes text eol=lf
+
+# 二进制文件不进行换行符转换
+*.gguf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.pdf binary
