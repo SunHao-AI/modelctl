@@ -223,6 +223,52 @@ bash script/modelctl.sh stats stop
 - 仅保留：金额、累计 token 总量、输入/输出 token 数、输入/输出速率
 - 已移除运行时间等非必要信息
 
+**样式化显示**（两种形态均需在 profile 配置预算后生效）：
+
+在模型 YAML 的 `usage` 段设置预算上限（元，可选）：
+
+```yaml
+# models/vllm/qwen3.8.yaml
+usage:
+  price_in: 0.5
+  price_out: 1.0
+  budget: 50   # 预算上限（元）；不设置则只显示已用金额
+```
+
+1. **自定义模板（默认）**：卡片内联显示 `已用 X.XX | 剩余 Y.YY CNY [extra]`，剩余额度带颜色（<10% 预算橙色告警，充足绿色，失效红色）。
+2. **Token Plan 模板（百分比徽章，与官方订阅同款样式）**：用量查询选择内置「Token Plan」模板，把请求 URL 改为 `{{baseUrl}}/api/usage?model=<模型名>&view=tier`（聚合多模型用 `?model=all&view=tier`）。服务把各模型的预算消耗折算为百分比（0–100），cc-switch 按使用率渲染彩色徽章（<70% 绿 / 70–89% 橙 / ≥90% 红），未配置预算或模型不可用时返回 503，卡片显示失败态并可重试。nginx 无需改动（查询参数随 `/api/usage` 路由透传）。
+
+cc-switch 推荐 extractor 片段：
+
+```js
+// ① 自定义模板（金额 + 附加信息模式）
+({
+  request: { url: "{{baseUrl}}/api/usage", method: "GET" },
+  extractor: function(response) {
+    if (!response || response.error || response.isValid === false) {
+      return { isValid: false, invalidMessage: (response && (response.invalidMessage || response.error)) || "接口调用失败" };
+    }
+    return {
+      isValid: true, used: response.used, remaining: response.remaining, total: response.total,
+      unit: response.unit || "CNY", planName: response.planName, extra: response.extra
+    };
+  }
+})
+```
+
+```js
+// ② Token Plan 模板（百分比徽章模式；查询方式选内置「Token Plan」后把 URL 改为 ?view=tier）
+({
+  request: { url: "{{baseUrl}}/api/usage?model=all&view=tier", method: "GET" },
+  extractor: function(response) {
+    if (!Array.isArray(response)) {
+      return { isValid: false, invalidMessage: (response && response.error) || "响应格式异常" };
+    }
+    return response; // 数组 → cc-switch 逐条渲染为彩色徽章
+  }
+})
+```
+
 查看日志（LOG_DIR 默认 = 项目根目录上级的 `../logs/`）：
 
 ```bash

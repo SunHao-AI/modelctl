@@ -370,3 +370,164 @@ def test_run_server_passes_base_url_without_metrics_suffix(tmp_path, monkeypatch
     )
     stats_mod.run_server(targets=[target])
     assert captured["base_url"] == "http://127.0.0.1:18888"
+
+
+def test_build_tier_item_percent_and_extra_json():
+    from modelctl.core.stats import build_tier_item
+
+    snap = {"prompt_total": 1_000_000, "predicted_total": 500_000}
+    item = build_tier_item("demo", snap, {"price_in": 1.0, "price_out": 2.0, "budget": 100}, "label")
+    # 1M 输入 × 1元/M + 0.5M 输出 × 2元/M = 2 元 → 预算 100 元的 2%
+    assert item["used"] == 2.0
+    assert item["planName"] == "demo"
+    assert item["isValid"] is True
+    data = json.loads(item["extra"])
+    assert data["resetsAt"] is None
+    assert data["planLabel"] == "label"
+
+
+def test_build_tier_item_clamps_over_budget():
+    from modelctl.core.stats import build_tier_item
+
+    snap = {"prompt_total": 10_000_000, "predicted_total": 0}
+    item = build_tier_item("demo", snap, {"price_in": 1.0, "price_out": 2.0, "budget": 10}, "x")
+    assert item["used"] == 100.0
+
+
+def test_build_tier_item_requires_valid_budget():
+    from modelctl.core.stats import _budget_of, build_tier_item
+
+    assert _budget_of({}) is None
+    assert _budget_of({"budget": -5}) is None
+    assert _budget_of({"budget": "abc"}) is None
+    assert _budget_of({"budget": 100}) == 100.0
+    try:
+        build_tier_item("demo", {}, {"price_in": 1.0, "price_out": 2.0}, "x")
+        raise AssertionError("应抛出 ValueError")
+    except ValueError as error:
+        assert "未配置有效预算" in str(error)
+
+
+def _make_tier_handler(usage_cfg: dict, ok: bool = True):
+    from unittest.mock import MagicMock
+
+    from modelctl.core.stats import StatsTarget, UsageHandler
+
+    target = StatsTarget(
+        name="a",
+        data_dir=None,
+        metrics_url="http://127.0.0.1:8000/metrics",
+        mapping={"predicted_total": ["x"]},
+        usage_cfg=usage_cfg,
+    )
+    mock_collector = MagicMock()
+    mock_collector.get_snapshot.return_value = {
+        "ok": ok,
+        "error": None if ok else "boom",
+        "prompt_total": 1_000_000.0,
+        "predicted_total": 500_000.0,
+        "prompt_rate": 0.0,
+        "predicted_rate": 0.0,
+    }
+    UsageHandler.targets = [target]
+    UsageHandler.collectors = {"a": mock_collector}
+    return UsageHandler.__new__(UsageHandler)
+
+
+def test_resolve_tier_payload_single_target():
+    handler = _make_tier_handler({"price_in": 1.0, "price_out": 2.0, "budget": 100})
+    result = handler._resolve_tier_payload("a")
+    assert isinstance(result, list) and len(result) == 1
+    assert result[0]["planName"] == "a"
+    assert result[0]["used"] == 2.0
+
+
+def test_resolve_tier_payload_single_no_budget():
+    handler = _make_tier_handler({"price_in": 1.0, "price_out": 2.0})
+    result = handler._resolve_tier_payload("a")
+    assert isinstance(result, dict)
+    assert "未配置预算" in result["error"]
+
+
+def test_resolve_tier_payload_all_aggregates_only_budged_targets():
+    from unittest.mock import MagicMock
+
+    from modelctl.core.stats import StatsTarget, UsageHandler
+
+    t1 = StatsTarget(
+        name="a",
+        data_dir=None,
+        metrics_url="http://127.0.0.1:8000/metrics",
+        mapping={"predicted_total": ["x"]},
+        usage_cfg={"price_in": 1.0, "price_out": 2.0, "budget": 100},
+    )
+    t2 = StatsTarget(
+        name="b",
+        data_dir=None,
+        metrics_url="http://127.0.0.1:8001/metrics",
+        mapping={"predicted_total": ["x"]},
+        usage_cfg={"price_in": 1.0, "price_out": 2.0},  # 无预算 → 跳过
+    )
+    mock_a = MagicMock()
+    mock_a.get_snapshot.return_value = {
+        "ok": True,
+        "error": None,
+        "prompt_total": 1_000_000.0,
+        "predicted_total": 500_000.0,
+        "prompt_rate": 0.0,
+        "predicted_rate": 0.0,
+    }
+    UsageHandler.targets = [t1, t2]
+    UsageHandler.collectors = {"a": mock_a}
+    handler = UsageHandler.__new__(UsageHandler)
+    result = handler._resolve_tier_payload(None)
+    assert isinstance(result, list) and len(result) == 1
+    assert result[0]["planName"] == "a"
+
+
+def test_resolve_tier_payload_all_no_budget_data():
+    from modelctl.core.stats import StatsTarget, UsageHandler
+
+    target = StatsTarget(
+        name="a",
+        data_dir=None,
+        metrics_url="http://127.0.0.1:8000/metrics",
+        mapping={"predicted_total": ["x"]},
+        usage_cfg={},
+    )
+    UsageHandler.targets = [target]
+    UsageHandler.collectors = {}
+    handler = UsageHandler.__new__(UsageHandler)
+    result = handler._resolve_tier_payload("all")
+    assert isinstance(result, dict)
+    assert "无可用预算数据" in result["error"]
+
+
+def test_do_get_routes_view_tier_param():
+    sent: dict = {}
+
+    class FakeWfile:
+        def write(self, body):
+            sent["body"] = json.loads(body.decode("utf-8"))
+
+    def wire(handler) -> None:
+        handler.path = "/api/usage?model=a&view=tier"
+        handler.send_response = lambda code: sent.update(code=code)
+        handler.send_header = lambda key, value: None
+        handler.end_headers = lambda: None
+        handler.wfile = FakeWfile()
+
+    # 有预算 → 200 + 徽章数组
+    handler = _make_tier_handler({"price_in": 1.0, "price_out": 2.0, "budget": 100})
+    wire(handler)
+    handler.do_GET()
+    assert sent["code"] == 200
+    assert isinstance(sent["body"], list) and sent["body"][0]["planName"] == "a"
+
+    # 无预算 → 503 + 错误对象（cc-switch 走查询失败分支）
+    sent.clear()
+    handler = _make_tier_handler({"price_in": 1.0, "price_out": 2.0})
+    wire(handler)
+    handler.do_GET()
+    assert sent["code"] == 503
+    assert "未配置预算" in sent["body"]["error"]

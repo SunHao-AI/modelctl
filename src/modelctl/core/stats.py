@@ -6,7 +6,8 @@ targets 列表 + 按 ?model= 路由，指标名映射由各引擎适配器的
 metrics_mapping() 提供（mapping 为 None 表示该引擎不支持精确统计）。
 
 对外 /api/usage 输出字段与现版完全一致（cc-switch 无感），仅额外增加
-"model" 字段标识数据源。
+"model" 字段标识数据源；另支持 ?view=tier 返回 cc-switch Token Plan
+模板可渲染的百分比徽章数组（需在 profile 配置 usage.budget）。
 
 支持两种数据获取模式（USAGE_MODE）：
 - poll（默认）：后台线程按 USAGE_POLL_INTERVAL 定时轮询 /metrics，
@@ -126,6 +127,42 @@ def build_usage_payload(tokens: dict[str, float], usage_cfg: dict, start_time: f
         payload["total"] = None
         payload["remaining"] = None
     return payload
+
+
+def _budget_of(usage_cfg: dict) -> float | None:
+    """读取预算配置（元）；未设置、非法或非正数返回 None。"""
+    raw = usage_cfg.get("budget")
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def build_tier_item(name: str, snap: dict, usage_cfg: dict, plan_label: str) -> dict:
+    """构造 cc-switch Token Plan 模板可渲染的单条徽章数据。
+
+    cc-switch 在 templateType=token_plan 时把 used 解释为百分比（0-100），
+    planName 作为徽章标签，extra 以 "{" 开头则按 JSON 解析出
+    resetsAt/usedValueUsd/maxValueUsd/planLabel。本地部署无重置窗口，
+    resetsAt 恒为 null；不带 USD 字段避免界面硬编码的 $ 前缀误导。
+    """
+    budget = _budget_of(usage_cfg)
+    if budget is None:
+        raise ValueError(f"{name} 未配置有效预算（usage.budget）")
+    price_in = float(usage_cfg.get("price_in", 1.0))
+    price_out = float(usage_cfg.get("price_out", 2.0))
+    cost = calc_cost(snap.get("prompt_total", 0.0), snap.get("predicted_total", 0.0), price_in, price_out)
+    pct = min(max(round(cost / budget * 100.0, 1), 0.0), 100.0)
+    return {
+        "isValid": True,
+        "planName": name,
+        "used": pct,
+        "unit": "CNY",
+        "extra": json.dumps({"resetsAt": None, "planLabel": plan_label}, ensure_ascii=False),
+    }
 
 
 @dataclass
@@ -323,9 +360,17 @@ class UsageHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         model = self._query_param("model")
-        payload = self._resolve_payload(model)
+        status_code = 200
+        if self._query_param("view") == "tier":
+            payload = self._resolve_tier_payload(model)
+            # tier 视图的错误对象无法被 Token Plan 模板正常渲染，改用非 2xx
+            # 让 cc-switch 走"查询失败 + 重试入口"分支并保留最近一次成功值
+            if isinstance(payload, dict):
+                status_code = 503
+        else:
+            payload = self._resolve_payload(model)
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(200)
+        self.send_response(status_code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -364,6 +409,8 @@ class UsageHandler(BaseHTTPRequestHandler):
             return {"isValid": False, "invalidMessage": f"{target.name} 不可用：{snap['error'] or '未知错误'}"}
         payload = build_usage_payload(snap, target.usage_cfg, self.start_time, time.time())
         payload["model"] = target.name
+        # 覆盖默认 planName，避免多模型时卡片展开视图显示错误名称
+        payload["planName"] = f"{target.name} 本地部署"
         return payload
 
     def _aggregate_payload(self) -> dict:
@@ -431,6 +478,42 @@ class UsageHandler(BaseHTTPRequestHandler):
             payload["total"] = None
             payload["remaining"] = None
         return payload
+
+    def _resolve_tier_payload(self, model: str | None) -> list[dict] | dict:
+        """view=tier：返回 cc-switch Token Plan 模板的百分比徽章数组。
+
+        每条对应一个已配置预算且可访问的 profile；used 为预算消耗百分比（0-100），
+        cc-switch 按使用率渲染彩色徽章（<70% 绿 / 70–89% 橙 / ≥90% 红）。
+        无可用数据时返回 {"error": ...}，由 extractor 映射为失效提示。
+        """
+        plan_label = "modelctl 本地部署"
+        if model and model != "all":
+            target = next((t for t in self.targets if t.name == model or model in t.aliases), None)
+            if target is None:
+                return {"error": f"未知模型：{model}"}
+            collector = self.collectors.get(target.name)
+            if collector is None:
+                return {"error": "该引擎不支持精确统计"}
+            if _budget_of(target.usage_cfg) is None:
+                return {"error": "未配置预算：请在本 profile 的 usage.budget 设置预算（元）后重试"}
+            snap = collector.get_snapshot()
+            if not snap["ok"]:
+                return {"error": f"{target.name} 不可用：{snap['error'] or '未知错误'}"}
+            return [build_tier_item(target.name, snap, target.usage_cfg, plan_label)]
+
+        items: list[dict] = []
+        for target in self.targets:
+            if target.mapping is None or target.name not in self.collectors:
+                continue
+            if _budget_of(target.usage_cfg) is None:
+                continue
+            snap = self.collectors[target.name].get_snapshot()
+            if not snap["ok"]:
+                continue
+            items.append(build_tier_item(target.name, snap, target.usage_cfg, plan_label))
+        if not items:
+            return {"error": "无可用预算数据：请为至少一个模型配置 usage.budget（元）并确保服务运行中"}
+        return items
 
     def log_message(self, fmt: str, *args) -> None:  # noqa: A003 —— 抑制默认请求日志
         pass

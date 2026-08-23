@@ -56,3 +56,5 @@ usage:
   price_in: 1.0
   # price_out：每千输出 token 计价（元）
   price_out: 2.0
+  # budget：预算上限（元，可选）；设置后 cc-switch 显示剩余金额并支持百分比徽章（?view=tier）
+  # budget: 50
