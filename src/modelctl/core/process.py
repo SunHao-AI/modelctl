@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -71,35 +72,55 @@ def is_running(name: str) -> bool:
 
 
 def stop_instance(name: str, port: int, patterns: list[str]) -> bool:
-    """先 PID 优雅终止，再按端口/进程名兜底。返回是否有进程被终止。"""
+    """先按 PID 优雅终止（POSIX：进程组 SIGTERM→SIGKILL；Windows：taskkill /T /F），
+    POSIX 平台再按端口/进程名兜底。返回是否执行了基于 PID 的停止。"""
     stopped = False
     pf = pid_file(name)
     if pf.is_file():
         try:
             pid = int(pf.read_text(encoding="utf-8").strip())
-            os.killpg(pid, signal.SIGTERM)  # type: ignore[attr-defined]  # POSIX-only，Windows 类型桩无此 API
-            deadline = time.time() + 10
-            while time.time() < deadline:
+        except ValueError:
+            pid = None
+        if sys.platform != "win32":
+            if pid is not None:
                 try:
-                    os.kill(pid, 0)
-                    time.sleep(0.5)
+                    os.killpg(pid, signal.SIGTERM)  # type: ignore[attr-defined]  # POSIX-only，Windows 类型桩无此 API
                 except OSError:
-                    break
-            else:
-                os.killpg(pid, signal.SIGKILL)  # type: ignore[attr-defined]  # POSIX-only，Windows 类型桩无此 API
+                    pass
+                deadline = time.time() + 10
+                while time.time() < deadline:
+                    try:
+                        os.kill(pid, 0)
+                        time.sleep(0.5)
+                    except OSError:
+                        break
+                else:
+                    try:
+                        os.killpg(pid, signal.SIGKILL)  # type: ignore[attr-defined]  # POSIX-only，Windows 类型桩无此 API
+                    except OSError:
+                        pass
+                stopped = True
+        elif pid is not None:
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
             stopped = True
-        except (ValueError, OSError):
-            pass
         pf.unlink(missing_ok=True)
-    subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True)
-    for pat in patterns:
-        subprocess.run(["pkill", "-f", pat], capture_output=True)
+    if sys.platform != "win32":
+        subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True)
+        for pat in patterns:
+            subprocess.run(["pkill", "-f", pat], capture_output=True)
+    try:
+        from modelctl.core.gpu_lock import release_gpu_lock
+
+        release_gpu_lock(name)
+    except Exception:
+        pass
     return stopped
 
 
 def wait_health(url: str, timeout: float, api_key: str | None = None) -> bool:
     deadline = time.time() + timeout
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    interval = 1.0
     while time.time() < deadline:
         try:
             req = urllib.request.Request(url, headers=headers)
@@ -108,7 +129,11 @@ def wait_health(url: str, timeout: float, api_key: str | None = None) -> bool:
                     return True
         except (urllib.error.URLError, OSError):
             pass
-        time.sleep(2)
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        time.sleep(min(interval, remaining))
+        interval = min(interval * 2, 5.0)
     return False
 
 

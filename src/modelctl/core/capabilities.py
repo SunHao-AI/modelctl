@@ -26,6 +26,8 @@ class Capabilities:
     """当前运行环境的硬件与二进制能力摘要。"""
 
     gpu_count: int = 0
+    gpu_indices: list[int] = field(default_factory=list)
+    vram_total_mb_per_gpu: list[int] = field(default_factory=list)  # 每卡总显存（MB），与 vram_free_mb 对齐
     gpu_name: str = ""
     vram_total_mb: int = 0
     vram_free_mb: list[int] = field(default_factory=list)
@@ -104,6 +106,7 @@ def probe(nvidia_smi_output: str | None = None) -> Capabilities:
         return caps
 
     frees: list[int] = []
+    totals: list[int] = []
     for row in rows:
         parts = [p.strip() for p in row.split(",")]
         if len(parts) < 5:
@@ -120,8 +123,14 @@ def probe(nvidia_smi_output: str | None = None) -> Capabilities:
             frees.append(int(parts[2]))
         except ValueError:
             frees.append(0)
+        try:
+            totals.append(int(parts[1]))
+        except ValueError:
+            totals.append(0)
     caps.vram_free_mb = frees
     caps.gpu_count = len(frees)
+    caps.vram_total_mb_per_gpu = totals
+    caps.gpu_indices = list(range(len(frees)))
     return caps
 
 
@@ -137,3 +146,13 @@ def cc_at_least(cc: str, major: int, minor: int) -> bool:
 def free_vram_total_mb(caps: Capabilities) -> int:
     """汇总所有 GPU 的剩余显存（MB）。"""
     return sum(caps.vram_free_mb)
+
+
+def selected_vram_total_mb(caps: Capabilities, gpus: list[int]) -> int:
+    """按选中 GPU 索引汇总各卡总显存。"""
+    return sum((caps.vram_total_mb_per_gpu[g] if g < len(caps.vram_total_mb_per_gpu) else 0) for g in gpus)
+
+
+def selected_vram_free_mb(caps: Capabilities, gpus: list[int]) -> int:
+    """按选中 GPU 索引汇总各卡剩余显存（MB）。"""
+    return sum((caps.vram_free_mb[g] if g < len(caps.vram_free_mb) else 0) for g in gpus)

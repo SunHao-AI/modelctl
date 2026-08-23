@@ -1,6 +1,12 @@
 """modelctl/core/capabilities.py 单元测试。"""
 
-from modelctl.core.capabilities import cc_at_least, free_vram_total_mb, probe
+from modelctl.core.capabilities import (
+    cc_at_least,
+    free_vram_total_mb,
+    probe,
+    selected_vram_free_mb,
+    selected_vram_total_mb,
+)
 
 SMI_5880 = "\n".join(["RTX 5880 Ada Generation, 49140, 48000, 580.65.05, 8.9"] * 8)
 
@@ -54,3 +60,11 @@ def test_cc_at_least():
 def test_free_vram_total():
     caps = probe(nvidia_smi_output=SMI_5880)
     assert free_vram_total_mb(caps) == 48000 * 8
+
+
+def test_probe_populates_gpu_indices_and_per_gpu_totals():
+    caps = probe(nvidia_smi_output=SMI_5880)
+    assert caps.gpu_indices == [0, 1, 2, 3, 4, 5, 6, 7]
+    assert caps.vram_total_mb_per_gpu == [49140] * 8
+    assert selected_vram_total_mb(caps, [0, 1]) == 49140 * 2
+    assert selected_vram_free_mb(caps, [3, 4, 5]) == 48000 * 3

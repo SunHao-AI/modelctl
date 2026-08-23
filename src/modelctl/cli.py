@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -76,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("name", nargs="?" if cmd == "status" else None)
         if cmd in ("start", "restart"):
             p.add_argument("--timeout", type=float, default=300, help="健康检查超时秒数（默认 300）")
+            p.add_argument("--gpus", default=None, help="逗号分隔的 GPU 索引，如 0,1,2（覆盖环境变量 MODELCTL_GPUS）")
     sub.add_parser("list", help="列出所有 profile")
     sub.add_parser("probe", help="探测硬件与引擎二进制")
     sp = sub.add_parser("stats", help="用量统计服务控制")
@@ -86,6 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("action", choices=["start", "stop", "restart", "status"])
     ap.add_argument("--model", default=None, help="默认模型 profile（缺省解析 GATEWAY_DEFAULT_MODEL）")
     ap.add_argument("--timeout", type=float, default=300, help="模型健康检查超时秒数（默认 300）")
+    ap.add_argument("--gpus", default=None, help="逗号分隔的 GPU 索引，如 0,1,2（覆盖环境变量 MODELCTL_GPUS）")
     up = sub.add_parser("ui", help="Web 管理控制台控制（unsloth studio UI）")
     up.add_argument("action", choices=["start", "stop"])
     up.add_argument("name", help="profile 名称（实例记为 ui-<name>，与推理服务独立）")
@@ -374,6 +377,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(rest)
     models_dir = models_dir or args.models_dir
+    if getattr(args, "gpus", None):
+        os.environ["MODELCTL_GPUS"] = args.gpus
     try:
         if args.command == "start":
             return _cmd_start(args, models_dir, caps)

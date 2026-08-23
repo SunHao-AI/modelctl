@@ -8,6 +8,7 @@ import os
 import subprocess
 import urllib.request
 
+from modelctl.core.gpu_utils import GPUValidationError
 from modelctl.engines.base import EngineAdapter, RequirementError
 
 
@@ -20,6 +21,9 @@ class OllamaAdapter(EngineAdapter):
         env["OLLAMA_NUM_PARALLEL"] = str(cfg.get("num_parallel", 2))
         if cfg.get("context_length"):
             env["OLLAMA_CONTEXT_LENGTH"] = str(cfg["context_length"])
+        gpus = self.selected_gpus()
+        if gpus:
+            env.update(self.cuda_visible_devices(gpus))
         return ["ollama", "serve"], env
 
     def check_requirements(self) -> None:
@@ -27,6 +31,14 @@ class OllamaAdapter(EngineAdapter):
             raise RequirementError("未安装 ollama（PATH 中找不到 ollama 命令）")
         if not self.profile.engine_config.get("model"):
             raise RequirementError(f"{self.profile.name}：ollama.model 必填（如 qwen3:32b）")
+        # 注意：`ollama serve` 是共享常驻进程，CUDA_VISIBLE_DEVICES 会限制该服务可见的
+        # 全部 GPU（影响所有 ollama 模型），无 per-model 隔离。
+        try:
+            gpus = self.selected_gpus()
+        except (GPUValidationError, ValueError) as exc:
+            raise RequirementError(f"[gpu_list] {exc}") from exc
+        if gpus is not None:
+            self.validate_gpu_selection(gpus)
         self.run_compat_checks()  # 预检：软件规则 + 模型 id 特征
 
     def health_url(self) -> str:

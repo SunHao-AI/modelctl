@@ -17,8 +17,10 @@ import time
 import urllib.request
 from pathlib import Path
 
-from modelctl.core.capabilities import free_vram_total_mb
+from modelctl.core.capabilities import free_vram_total_mb, selected_vram_free_mb
 from modelctl.core.envfile import PROJECT_ROOT
+from modelctl.core.gpu_lock import acquire_gpu_lock
+from modelctl.core.gpu_utils import GPUValidationError
 from modelctl.core.process import launch_log, wait_health
 from modelctl.engines._persist import persist_model_path
 from modelctl.engines.base import EngineAdapter, RequirementError
@@ -60,10 +62,20 @@ class UnslothAdapter(EngineAdapter):
         # API key 由 unsloth 运行时自动生成并打印到启动日志，无需在 profile 配置。
         if cfg.get("tensor_parallel") and self.caps.gpu_count < 2:
             raise RequirementError(f"tensor_parallel 需要至少 2 块 GPU，当前 {self.caps.gpu_count}")
+        try:
+            gpus = self.selected_gpus()
+        except (GPUValidationError, ValueError) as exc:
+            raise RequirementError(f"[gpu_list] {exc}") from exc
+        if gpus is not None:
+            self.validate_gpu_selection(gpus)
+            if cfg.get("tensor_parallel") and len(gpus) < 2:
+                raise RequirementError(f"tensor_parallel 需要至少 2 块 GPU，但 gpu_list 仅指定 {len(gpus)} 块：{gpus}")
         self._check_vram(cfg)
         # 用量统计降级提示：无头 API 模式的 /metrics 端点尚未验证
         self.warnings.append("unsloth 引擎暂未验证 /metrics 端点，用量统计降级为'不支持精确统计'")
         self.run_compat_checks()  # 预检：软件规则 + 模型 id 特征
+        if gpus:
+            acquire_gpu_lock(self.profile.name, gpus)
 
     def _check_vram(self, cfg: dict) -> None:
         """GGUF 本地文件存在时按文件大小做显存预检。"""
@@ -74,7 +86,8 @@ class UnslothAdapter(EngineAdapter):
         if not p.is_file():
             return
         need_mb = p.stat().st_size / 1024 / 1024 * 1.1
-        free_mb = free_vram_total_mb(self.caps)
+        gpus = self.selected_gpus()
+        free_mb = selected_vram_free_mb(self.caps, gpus) if gpus else free_vram_total_mb(self.caps)
         if need_mb > free_mb:
             raise RequirementError(f"剩余显存不足：模型约需 {need_mb:.0f}MB（×1.1），剩余 {free_mb}MB")
 
@@ -124,6 +137,9 @@ class UnslothAdapter(EngineAdapter):
         if cfg.get("extra_args"):
             cmd += shlex.split(str(cfg["extra_args"]))
         env = {"HF_HOME": os.environ["HF_HOME"]} if os.environ.get("HF_HOME") else {}
+        gpus = self.selected_gpus()
+        if gpus:
+            env.update(self.cuda_visible_devices(gpus))
         return cmd, env
 
     def ui_spec(self, port: int | None = None, host: str | None = None) -> dict | None:

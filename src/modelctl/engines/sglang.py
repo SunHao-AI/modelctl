@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 
 from modelctl.core.envfile import PROJECT_ROOT
+from modelctl.core.gpu_lock import acquire_gpu_lock
+from modelctl.core.gpu_utils import GPUValidationError
 from modelctl.engines._download import download_repo
 from modelctl.engines._persist import persist_model_path
 from modelctl.engines.base import EngineAdapter, RequirementError
@@ -21,10 +23,24 @@ class SglangAdapter(EngineAdapter):
         cfg = self.profile.engine_config
         if not cfg.get("model") and not cfg.get("download"):
             raise RequirementError(f"{self.profile.name}：sglang.model 必填（或配置 download 段自动下载）")
-        tp = int(cfg.get("tensor_parallel_size", 1))
-        if self.caps.gpu_count and tp > self.caps.gpu_count:
-            raise RequirementError(f"tensor_parallel_size={tp} 超过实际 GPU 数 {self.caps.gpu_count}")
+        try:
+            gpus = self.selected_gpus()
+        except (GPUValidationError, ValueError) as exc:
+            raise RequirementError(f"[gpu_list] {exc}") from exc
+        if gpus is not None:
+            self.validate_gpu_selection(gpus)
+            tp = int(cfg.get("tensor_parallel_size", len(gpus)))
+            if tp != len(gpus):
+                raise RequirementError(
+                    f"gpu_list 指定了 {len(gpus)} 块 GPU，但 tensor_parallel_size={tp}，二者必须一致"
+                )
+        else:
+            tp = int(cfg.get("tensor_parallel_size", 1))
+            if self.caps.gpu_count and tp > self.caps.gpu_count:
+                raise RequirementError(f"tensor_parallel_size={tp} 超过实际 GPU 数 {self.caps.gpu_count}")
         self.run_compat_checks()  # 预检：软件规则 + 模型 id 特征
+        if gpus is not None:
+            acquire_gpu_lock(self.profile.name, gpus)
 
     def pre_start(self) -> None:
         cfg = self.profile.engine_config
@@ -48,6 +64,8 @@ class SglangAdapter(EngineAdapter):
 
     def build_command(self) -> tuple[list[str], dict[str, str]]:
         cfg = self.profile.engine_config
+        gpus = self.selected_gpus()
+        tp = len(gpus) if gpus else int(cfg.get("tensor_parallel_size", 1))
         cmd = [
             sys.executable,
             "-m",
@@ -59,7 +77,7 @@ class SglangAdapter(EngineAdapter):
             "--port",
             str(self.profile.port),
             "--tp",
-            str(cfg.get("tensor_parallel_size", 1)),
+            str(tp),
         ]
         if cfg.get("context_length"):
             cmd += ["--context-length", str(cfg["context_length"])]
@@ -68,6 +86,8 @@ class SglangAdapter(EngineAdapter):
         if cfg.get("extra_args"):
             cmd += shlex.split(str(cfg["extra_args"]))
         env = {"HF_HOME": os.environ["HF_HOME"]} if os.environ.get("HF_HOME") else {}
+        if gpus:
+            env.update(self.cuda_visible_devices(gpus))
         return cmd, env
 
     def metrics_mapping(self) -> dict[str, list[str]]:

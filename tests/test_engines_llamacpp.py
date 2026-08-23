@@ -442,3 +442,64 @@ def test_find_first_skips_directory_named_dspark(tmp_path):
     # 即使 pattern 更宽泛（如 *dspark*），也必须跳过目录
     got_wide = _find_first(repo, ["*dspark*"])
     assert got_wide is not None and got_wide.is_file()
+
+
+def test_llamacpp_gpu_list_sets_cuda_and_tensor_split(tmp_path, monkeypatch):
+    # check_requirements 会获取 GPU 锁，隔离到临时目录
+    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path / "locks")
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    caps = probe(nvidia_smi_output=SMI)
+    adapter = get_adapter("llamacpp")(_profile(tmp_path, "  gpu_list: '0,1'\n"), caps)
+    adapter.check_requirements()
+    cmd, env = adapter.build_command()
+    assert env["CUDA_VISIBLE_DEVICES"] == "0,1"
+    assert cmd[cmd.index("--tensor-split") + 1] == "1,1"
+
+
+def test_llamacpp_gpu_out_of_range_raises(tmp_path, monkeypatch):
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    caps = probe(nvidia_smi_output=SMI)
+    adapter = get_adapter("llamacpp")(_profile(tmp_path, "  gpu_list: '0,9'\n"), caps)
+    with pytest.raises(RequirementError):
+        adapter.check_requirements()
+
+
+def test_llamacpp_gpu_conflict_blocks_second_model(tmp_path, monkeypatch):
+    from pathlib import Path as _P
+
+    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path / "locks")
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    caps = probe(nvidia_smi_output=SMI)  # 8 GPUs → indices 0..7
+    for name, gpu_list in (("a", "'0,1'"), ("b", "'1,2'")):
+        (_P(tmp_path) / f"{name}.gguf").write_bytes(b"0" * 1024)
+        yaml_text = (
+            f"name: {name}\nengine: llamacpp\nport: 18890\nllamacpp:\n"
+            f"  model: {_P(tmp_path)}/{name}.gguf\n  dspark: off\n  vision: off\n  gpu_list: {gpu_list}\n"
+        )
+        (tmp_path / f"{name}.yaml").write_text(yaml_text, encoding="utf-8")
+    a = get_adapter("llamacpp")(load_profile("a", tmp_path), caps)
+    a.check_requirements()  # acquires lock on GPU 0,1
+    b = get_adapter("llamacpp")(load_profile("b", tmp_path), caps)
+    with pytest.raises(RequirementError, match="占用"):
+        b.check_requirements()
+
+
+def test_llamacpp_vram_gate_uses_selected_gpus_only(tmp_path, monkeypatch):
+    from pathlib import Path as _P
+
+    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path / "locks")
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    # Build caps where the SELECTED single GPU has little free VRAM but others have plenty.
+    from modelctl.core.capabilities import Capabilities
+
+    caps = Capabilities(gpu_count=4, gpu_indices=[0, 1, 2, 3], compute_capability="9.0",
+                        vram_free_mb=[20, 40000, 40000, 40000])
+    (_P(tmp_path) / "big.gguf").write_bytes(b"0" * (30 * 1024 * 1024))  # ~30MB → need ~33MB > GPU 0 free 20MB
+    yaml_text = (
+        f"name: c\nengine: llamacpp\nport: 18891\nllamacpp:\n"
+        f"  model: {_P(tmp_path)}/big.gguf\n  dspark: off\n  vision: off\n  gpu_list: '0'\n"
+    )
+    (tmp_path / "c.yaml").write_text(yaml_text, encoding="utf-8")
+    a = get_adapter("llamacpp")(load_profile("c", tmp_path), caps)
+    with pytest.raises(RequirementError):  # selected GPU 0 has only 20MB free < needed (~33MB)
+        a.check_requirements()

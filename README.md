@@ -170,6 +170,34 @@ bash script/modelctl.sh start kimi-k2.5-unsloth
 uv run modelctl start deepseek-v4-flash-llamacpp
 ```
 
+### 3.5 指定 GPU（可选）
+
+默认使用全部可见 GPU；以下三种方式可指定使用的 GPU 子集，按优先级从高到低：
+
+- **Profile 字段**：在对应引擎段加 `gpu_list`，逗号分隔的 GPU 索引：
+
+  ```yaml
+  llamacpp:
+    model: /path/to/model.gguf
+    gpu_list: "0,1,2,3"   # 仅使用 GPU 0~3
+  ```
+
+- **CLI 参数**：`modelctl start <name> --gpus 0,1,2,3`（`restart` 与 `all start` 同样支持）。
+- **环境变量**：`MODELCTL_GPUS=4,5 modelctl start <name>`。
+
+三者都未设置时默认使用全部可见 GPU（保持旧行为）。
+
+各引擎说明：
+
+- vllm/sglang：`tensor_parallel_size`/`tp` 缺省时自动取 `len(gpu_list)`；若显式配置则必须等于 `len(gpu_list)`，否则报错。
+- llamacpp：`--tensor-split` 数量 = `len(gpu_list)`。
+- unsloth：开启 `tensor_parallel` 且指定 `gpu_list` 时需至少 2 块 GPU。
+- ollama：`CUDA_VISIBLE_DEVICES` 限制的是常驻 `ollama serve` 进程可见的全部 GPU（所有 ollama 模型共享，无法按单模型隔离）。
+
+冲突检测：启动前对选中的 GPU 做文件锁占用检查（data/cache/\*.gpu-lock），两个模型抢占同一张卡会在启动前报 `[gpu_lock] ... 已被模型 X 占用`；停止时自动释放。该机制为 best-effort。
+
+严格校验：GPU 索引越界或重复会直接报错并提示可用范围。
+
 ### 4. 验证
 
 ```bash
