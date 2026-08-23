@@ -322,3 +322,21 @@ def test_unsloth_gpu_conflict_blocks_second_model(tmp_path, monkeypatch):
     b = get_adapter("unsloth")(load_profile("ub", tmp_path), caps_a)
     with pytest.raises(RequirementError, match="占用"):
         b.check_requirements()
+
+
+def test_unsloth_vram_gate_uses_selected_gpus_only(tmp_path, monkeypatch):
+    """gpu_list 仅选中部分 GPU 时，显存预检按选中卡剩余显存计算（镜像 llamacpp selection-aware 用例）。"""
+    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path / "locks")
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    # 选中的 GPU 0 几乎无空闲显存，其余卡充裕 → 全量口径足够、按选中卡不足
+    caps = Capabilities(gpu_count=4, gpu_indices=[0, 1, 2, 3], compute_capability="9.0",
+                        vram_free_mb=[20, 40000, 40000, 40000], binaries={"unsloth": True})
+    (tmp_path / "big.gguf").write_bytes(b"0" * (30 * 1024 * 1024))  # ~30MB → need ~33MB > GPU 0 free 20MB
+    p = _write(
+        tmp_path,
+        f"name: u\nengine: unsloth\nport: 8900\nunsloth:\n"
+        f"  model: {tmp_path}/big.gguf\n  gpu_list: '0'\n",
+    )
+    a = get_adapter("unsloth")(p, caps)
+    with pytest.raises(RequirementError):  # 选中 GPU 0 仅 20MB 空闲 < 所需(~33MB)；旧的全量口径会放行
+        a.check_requirements()

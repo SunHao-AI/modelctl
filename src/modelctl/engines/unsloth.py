@@ -85,7 +85,8 @@ class UnslothAdapter(EngineAdapter):
         if not p.is_file():
             return
         need_mb = p.stat().st_size / 1024 / 1024 * 1.1
-        free_mb = free_vram_total_mb(self.caps)
+        gpus = self.selected_gpus()
+        free_mb = selected_vram_free_mb(self.caps, gpus) if gpus else free_vram_total_mb(self.caps)
         if need_mb > free_mb:
             raise RequirementError(f"剩余显存不足：模型约需 {need_mb:.0f}MB（×1.1），剩余 {free_mb}MB")
 
