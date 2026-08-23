@@ -94,6 +94,7 @@ def test_wait_health_exponential_backoff(monkeypatch):
 
 def test_stop_instance_windows_uses_taskkill(monkeypatch, tmp_path):
     monkeypatch.setenv("CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path)
     monkeypatch.setattr(sys, "platform", "win32")
     (tmp_path / "app.pid").write_text("4242", encoding="utf-8")
     ran: list[list[str]] = []
@@ -113,6 +114,7 @@ def test_stop_instance_windows_uses_taskkill(monkeypatch, tmp_path):
 
 def test_stop_instance_posix_uses_fuser_pkill(monkeypatch, tmp_path):
     monkeypatch.setenv("CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path)
     monkeypatch.setattr(sys, "platform", "linux")
     (tmp_path / "app.pid").write_text("777", encoding="utf-8")
     ran: list[list[str]] = []

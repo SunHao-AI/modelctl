@@ -129,8 +129,8 @@ def probe(nvidia_smi_output: str | None = None) -> Capabilities:
             totals.append(0)
     caps.vram_free_mb = frees
     caps.gpu_count = len(frees)
-    caps.vram_total_mb_per_gpu = totals          # NEW
-    caps.gpu_indices = list(range(len(frees)))   # NEW
+    caps.vram_total_mb_per_gpu = totals
+    caps.gpu_indices = list(range(len(frees)))
     return caps
 
 

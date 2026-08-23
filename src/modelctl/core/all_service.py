@@ -70,6 +70,13 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float) -> Compo
     adapter.pre_start()
     cmd, env = adapter.build_command()
     pid = start_detached(profile.name, cmd, env)
+    try:
+        from modelctl.core.gpu_lock import update_gpu_lock_owner
+
+        if adapter.selected_gpus():
+            update_gpu_lock_owner(profile.name, pid)
+    except Exception:
+        pass
     logger.info(f"已启动 {profile.name}（PID {pid}），等待健康检查（超时 {timeout:g}s）...")
     if adapter.wait_ready(timeout):
         upstream_key = adapter.upstream_api_key()

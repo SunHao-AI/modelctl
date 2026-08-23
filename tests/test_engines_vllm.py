@@ -210,3 +210,17 @@ def test_vllm_gpu_out_of_range_raises(tmp_path, monkeypatch):
     a = get_adapter("vllm")(p, _vllm_caps(8))  # valid indices 0..7; index 8 invalid
     with pytest.raises(RequirementError):
         a.check_requirements()
+
+
+def test_vllm_gpu_conflict_blocks_second_model(tmp_path, monkeypatch):
+    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path / "locks")
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    caps = Capabilities(gpu_count=4, gpu_indices=[0, 1, 2, 3], compute_capability="9.0", binaries={"vllm": True})
+    for name, gl in (("va", "'0,1'"), ("vb", "'1,2'")):
+        yaml_text = f"name: {name}\nengine: vllm\nport: 8100\nvllm:\n  model: Qwen/Qwen3-32B\n  gpu_list: {gl}\n"
+        (tmp_path / f"{name}.yaml").write_text(yaml_text, encoding="utf-8")
+    a = get_adapter("vllm")(load_profile("va", tmp_path), caps)
+    a.check_requirements()   # passes all gates → acquires lock at end
+    b = get_adapter("vllm")(load_profile("vb", tmp_path), caps)
+    with pytest.raises(RequirementError):
+        b.check_requirements()

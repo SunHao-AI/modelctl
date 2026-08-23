@@ -68,13 +68,14 @@ class UnslothAdapter(EngineAdapter):
             raise RequirementError(f"[gpu_list] {exc}") from exc
         if gpus is not None:
             self.validate_gpu_selection(gpus)
-            acquire_gpu_lock(self.profile.name, gpus)
             if cfg.get("tensor_parallel") and len(gpus) < 2:
                 raise RequirementError(f"tensor_parallel 需要至少 2 块 GPU，但 gpu_list 仅指定 {len(gpus)} 块：{gpus}")
         self._check_vram(cfg)
         # 用量统计降级提示：无头 API 模式的 /metrics 端点尚未验证
         self.warnings.append("unsloth 引擎暂未验证 /metrics 端点，用量统计降级为'不支持精确统计'")
         self.run_compat_checks()  # 预检：软件规则 + 模型 id 特征
+        if gpus:
+            acquire_gpu_lock(self.profile.name, gpus)
 
     def _check_vram(self, cfg: dict) -> None:
         """GGUF 本地文件存在时按文件大小做显存预检。"""

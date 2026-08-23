@@ -95,5 +95,20 @@ def acquire_gpu_lock(name: str, gpus: list[int]) -> None:
     )
 
 
+def update_gpu_lock_owner(name: str, pid: int) -> None:
+    """将锁的持有者 PID 更新为引擎真实进程（CLI 启动后退出，须改挂到长驻引擎上）。幂等、缺文件时 no-op。"""
+    path = _lock_path(name)
+    if not path.is_file():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if isinstance(data, dict):
+        data["pid"] = pid
+        data["updated_at"] = time.time()
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
 def release_gpu_lock(name: str) -> None:
     _lock_path(name).unlink(missing_ok=True)

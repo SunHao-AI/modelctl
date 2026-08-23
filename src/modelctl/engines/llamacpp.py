@@ -206,7 +206,6 @@ class LlamaCppAdapter(EngineAdapter):
             raise RequirementError(f"[gpu_list] {exc}") from exc
         if gpus is not None:
             self.validate_gpu_selection(gpus)
-            acquire_gpu_lock(self.profile.name, gpus)
             gpu_count = len(gpus)
         else:
             gpu_count = int(cfg.get("gpu_count", 8))
@@ -262,6 +261,8 @@ class LlamaCppAdapter(EngineAdapter):
             if need_mb > free_mb:
                 raise RequirementError(f"剩余显存不足：模型约需 {need_mb:.0f}MB（×1.1），剩余 {free_mb}MB")
         self.run_compat_checks()  # 预检：软件规则 + 模型 id 特征
+        if gpus:
+            acquire_gpu_lock(self.profile.name, gpus)
 
     def _find_draft(self, cfg: dict) -> Path | None:
         if self._model is None:

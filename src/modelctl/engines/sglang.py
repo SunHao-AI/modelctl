@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from modelctl.core.envfile import PROJECT_ROOT
+from modelctl.core.gpu_lock import acquire_gpu_lock
 from modelctl.core.gpu_utils import GPUValidationError
 from modelctl.engines._download import download_repo
 from modelctl.engines._persist import persist_model_path
@@ -38,6 +39,8 @@ class SglangAdapter(EngineAdapter):
             if self.caps.gpu_count and tp > self.caps.gpu_count:
                 raise RequirementError(f"tensor_parallel_size={tp} 超过实际 GPU 数 {self.caps.gpu_count}")
         self.run_compat_checks()  # 预检：软件规则 + 模型 id 特征
+        if gpus is not None:
+            acquire_gpu_lock(self.profile.name, gpus)
 
     def pre_start(self) -> None:
         cfg = self.profile.engine_config
