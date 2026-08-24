@@ -172,11 +172,14 @@ python script/benchmark_latency.py \
 | 模型 | 参考平台 | 配置 | 实测数据 |
 |------|---------|------|---------|
 | Qwen3.8-27B | vLLM recipe：2×RTX 5090（32GB×2） | FP8 检查点，TP2，FP8 KV，MTP 投机 | 262K 上下文下 KV 377,456 tokens；权重 14.28 GiB/卡；MTP acceptance ≈0.771 |
+| DeepSeek-V4-Flash | vLLM recipe：8×H200（141GB×8） | 284B/13B MoE，FP4+FP8 混合 ~160GB，TP8+EP，DSpark 投机 | 单节点 1M 上下文可服务；Think Max 需 ≥384K |
+| Kimi-K2.5 | vLLM recipe：8×H200（~640GB） | 1T/32B MoE，INT4 714GB / NVFP4 600GB / MXFP4 669GB | 本机 384GB 无法部署（最小 INT4 714GB） |
+| Qwen3-Coder-480B | vLLM recipe：Qwen 系列 | 480B/35B MoE，BF16 1152GB / FP8 576GB / NVFP4 288GB | 本机仅 Q4_K_M GGUF（~290GB）可部署 |
 | Qwen3.8-2.4T MoE | SGLang cookbook：4×GB300（16 卡） | FP8，TP16/DP4/EP16，NEXTN 投机 | 权重 FP8≈2.4TB，本机 384GB 无法部署 |
 
 > 对照结论：本机 Qwen3.8-27B 配置（TP4、FP8 KV、48GB/卡）显存余量远大于 2×5090 参考平台；
-> 与官方方向一致的关键参数（`--reasoning-parser qwen3`、`--tool-call-parser qwen3_coder`、FP8 KV）
-> 已落地到 `models/vllm/qwen3.8.yaml`（详见优化指南第十节）。
+> DeepSeek-V4-Flash 已按 recipe 补全专家并行 / deepseek_v4 tokenizer / parser / DSpark 投机参数；
+> Kimi-K2.5 与 Qwen3.8-2.4T MoE 超出本机显存不可部署（详见优化指南第十节）。
 
 ## 七、优化前后配置对比表
 
@@ -188,8 +191,8 @@ python script/benchmark_latency.py \
 | DeepSeek-V4-Flash | unsloth | 单卡无法启动 | 32K / TP8 | - | - | 内部 |
 | Qwen3.8 | llamacpp | 原配置（262K/槽） | 保持不变 | 65K（18894） | 16K（18895） | q8_0 / q5_0 |
 | Qwen3.8 | ollama | 262K × 4 | 65K × 1 | - | - | 内部 |
-| Kimi-K2.5 | vllm | 65K / BF16 KV | 65K / FP8 KV | - | - | fp8 |
-| Kimi-K2.5 | sglang | 65K / FP16 KV | 65K / FP8 KV（权重+KV） | - | - | fp8 |
+| Kimi-K2.5 | vllm | 不可部署（1T/32B MoE，INT4 714GB 起） | - | - | - | - |
+| Kimi-K2.5 | sglang | 不可部署（同左） | - | - | - | - |
 | Qwen3.8 | vllm | 262K | 262K / FP8 KV | - | 16K / TP4（8105，附录 B.1） | fp8 |
 
 > 注：vLLM 各配置 `gpu_memory_utilization` 已由 0.9 上调至 0.92（附录 A.3）。

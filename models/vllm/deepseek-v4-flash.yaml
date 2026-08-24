@@ -1,5 +1,8 @@
 # vllm/deepseek-v4-flash.yaml —— DeepSeek-V4-Flash（vLLM 引擎，HuggingFace 原始权重）
 # 学习要点：vLLM 使用 HF 格式权重（非 GGUF），支持张量并行与 FP8 量化，适合高吞吐在线服务。
+# 官方 recipe（recipes.vllm.ai）：284B/13B MoE（CSA+HCA 混合注意力），0731 检查点为 FP4+FP8 混合
+#（MoE 专家 FP4，attention/norm/router FP8），约 160-167GB；需 vLLM 0.25+ 支持 DSpark 投机与
+# deepseek_v4 tokenizer/parser。Think Max 推理模式需 max-model-len >= 393216（384K）。
 # name：CLI 标识符，`modelctl start deepseek-v4-flash-vllm` 使用；全局唯一
 name: deepseek-v4-flash-vllm
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
@@ -12,7 +15,6 @@ api_key: ${API_KEY}
 vllm:
   # model：HuggingFace 模型 ID 或本地模型目录。
   # 为空/不存在时通过 download 段从 ModelScope 下载并写回本地路径。
-  # 请替换为实际可用的 HF 模型 ID，如 deepseek-ai/DeepSeek-V4-Flash-0731
   model: deepseek-ai/DeepSeek-V4-Flash-0731
   # download：模型不存在时的自动下载配置（ModelScope，HF 格式仓库）
   download:
@@ -22,6 +24,7 @@ vllm:
   tensor_parallel_size: 8
   # max_model_len：最大上下文长度（token）
   # 注意：单序列完整可用（与并发无关）；KV 显存按 max_num_seqs × max_model_len 估算
+  # recipe 支持单节点 1M 上下文；Think Max 需 >=384K，默认 131K 已覆盖日常场景
   max_model_len: 131072
   # gpu_memory_utilization：显存利用率上限（0~1）
   gpu_memory_utilization: 0.92
@@ -31,7 +34,8 @@ vllm:
   # kv_cache_dtype：KV 缓存精度；DeepSeek-V4 的 fp8_ds_mla 布局强制要求 fp8（vLLM 0.27+ 断言）
   kv_cache_dtype: fp8
   # extra_args：透传给 `vllm serve` 的额外参数（空格分隔，按 shlex 拆分）
-  extra_args: ""
+  # 官方 recipe（H200 验证，vLLM 0.25+）：专家并行 + deepseek_v4 tokenizer/parser + DSpark 投机
+  extra_args: '--trust-remote-code --block-size 256 --enable-expert-parallel --tokenizer-mode deepseek_v4 --tool-call-parser deepseek_v4 --enable-auto-tool-choice --reasoning-parser deepseek_v4 --reasoning-config ''{"reasoning_parser":"deepseek_v4","reasoning_start_str":"","reasoning_end_str":""}'' --speculative-config ''{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'''
 
 usage:
   # price_in：每千输入 token 计价（元），供 cc-switch 用量统计

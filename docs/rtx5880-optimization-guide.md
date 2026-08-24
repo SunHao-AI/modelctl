@@ -253,30 +253,51 @@ light 变体目标是在保证低延迟的同时释放 GPU 资源，让同一节
   262K 已覆盖绝大多数场景，默认不开启。
 - **llama.cpp 优先级低**：混合注意力（linear attention）在 llama.cpp 支持有限，且无 MTP 投机（`dspark: off`），Qwen3.8 建议以 vLLM 为主引擎。
 
-### 10.2 DeepSeek-V4-Flash —— 保持 FP8 KV + DSpark
+### 10.2 DeepSeek-V4-Flash —— vLLM 已按 recipe 补全参数
 
-DeepSeek-V4 权重自带 fp8 量化（`deepseek_v4_fp8` / `fp8_ds_mla` 布局），vLLM 强制 FP8 KV；llama.cpp 侧使用 DSpark 投机解码。与官方"FP8 权重 + FP8 KV"方向一致，维持现状即可，无需额外参数。
+模型特性（官方 recipe）：**284B 总参 / 13B active MoE**，CSA+HCA 混合注意力，0731 检查点为 FP4+FP8 混合（MoE 专家 FP4，attention/norm/router FP8，约 160-167GB）；Think Max 推理模式需 `max-model-len >= 384K`。
 
-### 10.3 Kimi-K2.5 120B —— TP8 BF16（FP8 检查点未确认）
+`models/vllm/deepseek-v4-flash.yaml` 已按 recipe（H200 验证，vLLM 0.25+）补全参数：
 
-BF16 权重约 240GB，必须 TP8 才能装载；FP8 检查点存在性未确认（见附录 A.1）。确认后按注释切换，可降至 TP4（约 30GB/卡）并释放 4 张卡。
+| 项 | 值 | 说明 |
+|----|-----|------|
+| 专家并行 | `--enable-expert-parallel` | MoE 专家层跨卡分片 |
+| tokenizer | `--tokenizer-mode deepseek_v4` | 检查点无 Jinja 模板，内置 encoding 才能用 OpenAI 兼容端点 |
+| 推理解析 | `--reasoning-parser deepseek_v4` + `--reasoning-config` | 三段推理（Non-think / Think High / Think Max） |
+| 工具调用 | `--tool-call-parser deepseek_v4 --enable-auto-tool-choice` | agent 场景必备 |
+| 投机解码 | `--speculative-config '{"method":"dspark","num_speculative_tokens":7,...}'` | DSpark 投机（与 llamacpp 侧一致），需 vLLM 0.25+ |
+| block size | `--block-size 256` | recipe 推荐长上下文吞吐 |
+| 远程代码 | `--trust-remote-code` | 加载自定义建模代码 |
 
-### 10.4 Qwen3.8-2.4T MoE —— 本机无法部署
+llama.cpp 侧已使用 DSpark 投机（`dspark: on` + `spec_type: draft-dspark`），与 vLLM 方向一致。
+
+### 10.3 Kimi-K2.5 —— 本机不可部署（1T/32B MoE）
+
+官方 recipe 显示 Kimi-K2.5 为 **1T 参数 / 32B active 多模态 MoE**：量化后最小 INT4 约 714GB、NVFP4 600GB、MXFP4 669GB，均超出本机 384GB 显存（官方验证硬件为 8×H200，~640GB）。**本机不可部署**，4 个引擎配置已标注"仅供未来硬件参考"，`modelctl start` 会因显存不足失败。
+
+### 10.4 Qwen3-Coder-480B —— Q4 GGUF 可部署（290GB），FP8 超显存
+
+官方 recipe：**480B 总参 / 35B active MoE**，BF16≈1152GB、FP8≈576GB（均超本机 384GB）、NVFP4 288GB（可装入但需 Blackwell sm120 原生支持，RTX 5880 为 Ada sm89 不可用）。因此只能走 **Q4_K_M GGUF（约 290GB，llamacpp/ollama/unsloth）**路线，vLLM/SGLang 无可用变体——与项目现有配置一致。
+
+### 10.5 Qwen3.8-2.4T MoE —— 本机无法部署
 
 SGLang cookbook 的 Qwen3.8 旗舰为 **2.4T 参数（95B active）**：BF16≈4.8TB、FP8≈2.4TB，远超本机 384GB 显存，需 4 节点 16×GB300 才能服务。其已验证参数中可借鉴到本机小模型的思路：NEXTN/MTP 投机解码、`--kv-cache-dtype fp8_e4m3`、`--reasoning-parser qwen3 --tool-call-parser qwen3_coder`（已部分应用到本机 Qwen3.8 配置）。
 
-### 10.5 落地状态
+### 10.6 落地状态
 
-- `models/vllm/qwen3.8.yaml` 已补充 `--reasoning-parser qwen3` / `--tool-call-parser qwen3_coder` 参数与 FP8 检查点切换注释（见下）。
-- MTP 投机、batch 调优等参数保持注释说明，待实测验证后启用。
+- `models/vllm/qwen3.8.yaml` 与 `qwen3.8-light.yaml`：已启用 `--reasoning-parser qwen3` / `--enable-auto-tool-choice --tool-call-parser qwen3_coder`，并补充 FP8 检查点切换注释。
+- `models/vllm/deepseek-v4-flash.yaml`：已按 recipe 补全专家并行 / deepseek_v4 tokenizer / parser / DSpark 投机参数（10.2）。
+- `models/{vllm,llamacpp,sglang,unsloth}/kimi-k2.5.yaml`：已修正为 1T/32B MoE 事实并标注本机不可部署。
+- `models/llamacpp/qwen3-coder.yaml`：注释数据更新为 recipe 口径（BF16 1152GB / FP8 576GB / NVFP4 288GB）。
+- MTP/batch 调优等参数保持注释说明，待实测验证后启用。
 
 ## 十一、附录 A/B 优化落地
 
 以下内容来自 `docs/superpowers/plans/2026-08-24-rtx5880-optimization.md` 附录 A/B，本次已实施：
 
-### A.1 Kimi-K2.5 vLLM FP8 权重量化（说明文档化）
+### A.1 Kimi-K2.5 模型规模修正（不可部署）
 
-`moonshotai/Kimi-K2.5-Instruct-FP8` 检查点存在性未确认，保持 BF16 主配置不变；切换步骤与回退方式已写入 `models/vllm/kimi-k2.5.yaml` 头部注释。
+经官方 recipe 核实，Kimi-K2.5 实为 **1T/32B 多模态 MoE**（此前按 120B dense 假设有误）：量化后最小 INT4 约 714GB，超出本机 384GB 显存，**本机不可部署**；4 个引擎配置已修正并标注"仅供未来硬件参考"（见 10.3）。
 
 ### A.2 SGLang 显式 FP8 权重量化（已启用）
 
@@ -319,5 +340,6 @@ ollama 适配器按 profile 的 `port` 设置 `OLLAMA_HOST`，**支持**独立 s
 1. **实测 batch size 上限**：使用 `script/benchmark_latency.py` 在不同 batch 下测试吞吐。
 2. **pipeline-parallel 实测**：对比 `deepseek-v4-flash-vllm-pp` 与 `deepseek-v4-flash-vllm`（TP8）的吞吐，确认无 NVLink 下是否提升。
 3. **动态调度**：结合 `modelctl all` 和网关上下文切换（B.3），根据负载自动切换模型。
-4. **量化权重**：Kimi-K2.5 若官方提供 FP8 检查点，按 A.1 注释切换，可进一步降低 vLLM/SGLang 权重显存占用。
+4. **DeepSeek-V4-Flash DSpark 实测**：按 recipe 参数（10.2）实测 DSpark 投机 acceptance 与吞吐后决定是否调 `num_speculative_tokens`。
 5. **Qwen3.8 MTP 投机**：按第十节参数实测 MTP acceptance 后决定是否启用 `--speculative-config`。
+6. **Kimi-K2.5 不可部署**：本机 384GB 显存无法装载（INT4 714GB 起），配置仅保留供未来硬件（8×H200 或 4×Blackwell）升级。

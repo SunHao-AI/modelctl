@@ -1,6 +1,8 @@
 # llamacpp/qwen3-coder.yaml —— Qwen3-Coder-480B-A35B（llama.cpp 引擎）
 # 学习要点：480B MoE（约 35B active），Q4_K_M 权重约 290GB，占满 8×RTX 5880（共 384GB）。
-# 无 vllm/sglang 变体原因：HF 原始权重 BF16 约 960GB、FP8 约 480GB，均超出本机总显存，只能走 GGUF 路线。
+# 无 vllm/sglang 变体原因：官方 recipe（recipes.vllm.ai）显示 BF16 约 1152GB、FP8 约 576GB，
+# 均超出本机总显存；NVFP4 288GB 虽可装入但需 Blackwell（sm120）原生支持，RTX 5880（Ada, sm89）不可用，
+# 只能走 GGUF 路线。
 # name：CLI 标识符，`modelctl start qwen3-coder-llamacpp` 使用；全局唯一
 name: qwen3-coder-llamacpp
 # alias：短名别名，网关/nginx 路由可用 `qwen3-coder` 指代本模型（如 URL /210/llm/qwen3-coder/v1）

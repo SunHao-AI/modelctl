@@ -1,6 +1,8 @@
-# llamacpp/kimi-k2.5.yaml —— Kimi-K2.5（120B dense，llama.cpp 引擎）
-# 学习要点：120B 稠密模型，Q4_K_M 权重约 72GB；默认 8 卡全量分片以获得最高解码速度，
-# 如需与其他 GPU 服务共存可下调 gpu_count（最低 2 卡即可装下权重）。
+# llamacpp/kimi-k2.5.yaml —— Kimi-K2.5（1T/32B MoE，llama.cpp 引擎）
+# ⚠️ 本机不可部署：官方 recipe（recipes.vllm.ai）显示 Kimi-K2.5 为 1T/32B 多模态 MoE，
+# 量化后最小 INT4 约 714GB（本机 8×48GB=384GB 不足），Q4_K_M GGUF 亦远超单机显存；
+# 官方验证硬件为 8×H200（~640GB）。配置保留供未来硬件升级参考。
+# 学习要点：llama.cpp 引擎通过 GGUF 分片运行，适合单机多卡。
 # name：CLI 标识符，`modelctl start kimi-k2.5-llamacpp` 使用；全局唯一
 name: kimi-k2.5-llamacpp
 # alias：短名别名，网关/nginx 路由可用 `kimi-k2.5` 指代本模型（如 URL /210/llm/kimi-k2.5/v1）

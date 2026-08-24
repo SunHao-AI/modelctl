@@ -1,17 +1,12 @@
-# vllm/kimi-k2.5.yaml —— Kimi-K2.5（120B dense，vLLM 引擎，HuggingFace 原始权重）
+# vllm/kimi-k2.5.yaml —— Kimi-K2.5（1T/32B MoE，vLLM 引擎，HuggingFace 原始权重）
+# ⚠️ 本机不可部署（8×RTX 5880 共 384GB 显存不足）：官方 recipe（recipes.vllm.ai）显示
+# Kimi-K2.5 为 1T 参数 / 32B active 多模态 MoE，量化后最小 INT4 约 714GB、NVFP4 600GB、
+# MXFP4 669GB，均超出本机 384GB；官方验证硬件为 8×H200（~640GB）。配置保留供未来硬件升级参考。
 # 学习要点：vLLM 使用 HF 格式权重（非 GGUF），支持张量并行与 FP8 量化，适合高吞吐在线服务。
-# 注意：BF16 权重约 240GB，需 8×RTX 5880（共 384GB）全量张量并行。
-#
-# 【FP8 权重量化切换说明】（附录 A.1）
-# 若官方/社区提供 FP8 检查点（如 moonshotai/Kimi-K2.5-Instruct-FP8），可改为以下配置降低约 50% 权重显存：
-#   vllm:
-#     model: moonshotai/Kimi-K2.5-Instruct-FP8
-#     download:
-#       modelscope_id: moonshotai/Kimi-K2.5-Instruct-FP8
-#     quantization: fp8
-#     kv_cache_dtype: fp8
-# 切换前请确认仓库存在（modelctl start 会自动下载，仓库不存在会失败）；
-# 回退：将 model/modelscope_id 改回 moonshotai/Kimi-K2.5-Instruct 并清空 quantization 即可恢复 BF16。
+# 若未来硬件支持（如 8×H200 或 4×Blackwell），参考 recipe 参数：
+#   --tool-call-parser kimi_k2 --enable-auto-tool-choice --reasoning-parser kimi_k2
+#   --mm-encoder-tp-mode data --kv-cache-dtype fp8
+#   --speculative-config '{"model":"lightseekorg/kimi-k2.5-eagle3-mla","method":"eagle3","num_speculative_tokens":3}'
 # name：CLI 标识符，`modelctl start kimi-k2.5-vllm` 使用；全局唯一
 name: kimi-k2.5-vllm
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
