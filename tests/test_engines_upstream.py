@@ -23,6 +23,11 @@ def test_upstream_model_llamacpp_uses_profile_name():
 
 def test_upstream_model_vllm_config_or_name():
     vllm = get_adapter("vllm")(_profile("qwen3.8", "vllm", 8000, {"model": "Qwen/Qwen3.8-27B"}), Capabilities())
-    assert vllm.upstream_model_name() == "Qwen/Qwen3.8-27B"
+    assert vllm.upstream_model_name() == "Qwen3.8-27B"  # 取最后路径组件，匹配 --served-model-name
     vllm_empty = get_adapter("vllm")(_profile("qwen3.8", "vllm", 8000), Capabilities())
     assert vllm_empty.upstream_model_name() == "qwen3.8"
+
+
+def test_upstream_model_sglang_basename():
+    adapter = get_adapter("sglang")(_profile("qwen3.8", "sglang", 8201, {"model": "/raid5/sh/model-hf/Qwen/Qwen3.8-27B"}), Capabilities())
+    assert adapter.upstream_model_name() == "Qwen3.8-27B"  # 本地路径取 basename，匹配 --served-model-name

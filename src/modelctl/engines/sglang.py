@@ -97,6 +97,8 @@ class SglangAdapter(EngineAdapter):
             "sglang.launch_server",
             "--model-path",
             str(cfg["model"]),
+            "--served-model-name",
+            self.upstream_model_name(),
             "--host",
             "0.0.0.0",
             "--port",
@@ -124,7 +126,13 @@ class SglangAdapter(EngineAdapter):
         }
 
     def upstream_model_name(self) -> str:
-        return str(self.profile.engine_config.get("model") or self.profile.name)
+        """SGLang 对外暴露的 served 模型名（与 build_command 的 --served-model-name 一致）。
+
+        本地路径或 HF ID 均取最后路径组件，保证网关改写请求体 model 字段后
+        能精确匹配 SGLang 注册的模型 id。
+        """
+        model = str(self.profile.engine_config.get("model") or self.profile.name)
+        return Path(model).name
 
     def stop_patterns(self) -> list[str]:
         return ["sglang"]
