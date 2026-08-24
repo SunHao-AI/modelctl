@@ -35,7 +35,7 @@ modelctl/
 │   │   ├── qwen3-coder.yaml        # Qwen3-Coder-480B MoE GGUF（llamacpp，8 卡全量）
 │   │   └── kimi-k2.5.yaml          # Kimi-K2.5 120B dense GGUF（llamacpp）
 │   ├── ollama/                     # ollama 引擎 profile 子目录
-│   │   ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（ollama）
+│   │   ├── deepseek-v4-flash.yaml.disabled  # DeepSeek-V4-Flash（ollama，已停用：无本地支持）
 │   │   ├── qwen3.8.yaml            # Qwen3.8-27B（ollama）
 │   │   ├── qwen3-coder.yaml        # Qwen3-Coder-480B（ollama）
 │   │   └── kimi-k2.5.yaml          # Kimi-K2.5（ollama）
@@ -210,8 +210,10 @@ bash script/modelctl.sh start qwen3.8-llamacpp
 bash script/modelctl.sh start qwen3-coder-llamacpp
 bash script/modelctl.sh start kimi-k2.5-llamacpp
 
-# ollama：DeepSeek-V4-Flash / Qwen3.8-27B / Qwen3-Coder-480B / Kimi-K2.5（ollama pull 自动拉取）
-bash script/modelctl.sh start deepseek-v4-flash-ollama
+# ollama：Qwen3.8-27B / Qwen3-Coder-480B / Kimi-K2.5（ollama pull 自动拉取）
+# 注：DeepSeek-V4-Flash 无 ollama 本地支持（官方仅有 -cloud 云端标签；ollama 的 llama.cpp 不支持
+#     DeepseekV4ForCausalLM 架构），对应 profile 已停用（models/ollama/deepseek-v4-flash.yaml.disabled），
+#     本地推理请用 llamacpp / vllm / sglang / unsloth 引擎。
 bash script/modelctl.sh start qwen3.8-ollama
 bash script/modelctl.sh start qwen3-coder-ollama
 bash script/modelctl.sh start kimi-k2.5-ollama

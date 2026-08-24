@@ -58,7 +58,7 @@ models/
 │   ├── qwen3-coder.yaml        # Qwen3-Coder-480B MoE GGUF（llamacpp，8 卡全量）
 │   └── kimi-k2.5.yaml          # Kimi-K2.5 120B dense GGUF（llamacpp）
 ├── ollama/                     # ollama 引擎 profile 子目录
-│   ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（ollama）
+│   │   ├── deepseek-v4-flash.yaml.disabled  # DeepSeek-V4-Flash（ollama，已停用：无本地支持）
 │   ├── qwen3.8.yaml            # Qwen3.8-27B（ollama）
 │   ├── qwen3-coder.yaml        # Qwen3-Coder-480B（ollama）
 │   └── kimi-k2.5.yaml          # Kimi-K2.5（ollama）

@@ -1,0 +1,37 @@
+# ============================================================================
+# 已停用（disabled）——本文件不会被 modelctl 加载（后缀非 .yaml）。
+# 停用原因（2026-08-24 核实）：
+#   DeepSeek-V4-Flash 无法通过 ollama 引擎本地运行：
+#   1. ollama 官方库 deepseek-v4-flash 仅有 -cloud 标签（cloud / 0731-cloud / preview-cloud），
+#      无 latest 或本地量化标签；-cloud 模型需 ollama.com 账号（ollama signin），
+#      推理走 ollama 云端而非本地 GPU，且受使用配额与网络限制。
+#   2. ollama 自带的 llama.cpp 不支持 DeepSeek-V4 架构（DeepseekV4ForCausalLM）：
+#      即使本地已有 GGUF，`ollama create` 建模型后加载也会报 unsupported architecture
+#      （见 ollama issue #15824 / #17264）。DSv4 需专门移植的 llama.cpp fork
+#      （如 antirez/llama.cpp-deepseek-v4-flash）才能运行。
+#   结论：如需本地推理 DeepSeek-V4-Flash，请使用 llamacpp / vllm / sglang / unsloth 引擎
+#   （models/<engine>/deepseek-v4-flash.yaml）。
+# ============================================================================
+# 以下为原配置（保留作学习参考；如确需重新启用，请去掉 .disabled 后缀并核实模型可用性）：
+#
+# ollama/deepseek-v4-flash.yaml —— DeepSeek-V4-Flash（ollama 引擎）
+# 学习要点：ollama 引擎是常驻 serve 进程，模型按需加载/卸载，无需 download 段（由 ollama pull 处理）。
+group: deepseek-v4-flash
+# port：服务监听端口（ollama serve 常驻端口）
+port: 11434
+# 注意：ollama 引擎无需 api_key（本地服务，无 OpenAI 兼容鉴权）
+
+ollama:
+  # model：ollama 模型名（<name>:<tag>），不存在时 pre_start 自动 `ollama pull`
+  # 请替换为实际可用的 ollama 模型名，如 deepseek-v4-flash:latest
+  model: deepseek-v4-flash:latest
+  # keep_alive：模型驻留内存时长（秒）；-1 = 永久驻留，0 = 用完即卸载
+  keep_alive: -1
+  # num_parallel：并发请求数（OLLAMA_NUM_PARALLEL）
+  num_parallel: 2
+  # context_length：上下文长度（OLLAMA_CONTEXT_LENGTH）
+  # 注意：单请求完整可用（与并发无关）；KV 显存 ≈ 并发 × context_length
+  context_length: 131072
+  # gpu_list：限制 ollama serve 进程可见的 GPU（可选，默认不设=全部可见）；
+  # 注意：ollama 为常驻进程，所有 ollama 模型共享该限制，无法按单模型隔离
+  # 示例：gpu_list: "0,1,2,3"
