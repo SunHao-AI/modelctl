@@ -1,5 +1,17 @@
 # vllm/qwen3.8.yaml —— Qwen3.8-27B（vLLM 引擎，HuggingFace 原始权重）
 # 学习要点：vLLM 使用 HF 格式权重（非 GGUF），支持张量并行与 FP8 量化，适合高吞吐在线服务。
+# 官方 recipe（recipes.vllm.ai）：混合注意力模型（16/64 全注意力 + 48 线性注意力 + MTP 头），
+# chat 模板以 <think> 开头，必须启用 --reasoning-parser qwen3，否则推理块会进入 content。
+#
+# 【FP8 检查点切换说明】（官方 recipe 推荐）
+# 官方 FP8 检查点 Qwen/Qwen3.8-27B-FP8（block-scaled，约 28.7GiB，单卡可装）可降低约 50% 权重显存：
+#   vllm:
+#     model: Qwen/Qwen3.8-27B-FP8
+#     download:
+#       modelscope_id: Qwen/Qwen3.8-27B-FP8
+#     quantization: fp8
+# 切换前请确认仓库存在（modelctl start 会自动下载，仓库不存在会失败）；
+# 回退：model/modelscope_id 改回 Qwen/Qwen3.8-27B 并清空 quantization 即可恢复 BF16。
 # name：CLI 标识符，`modelctl start qwen3.8-vllm` 使用；全局唯一
 name: qwen3.8-vllm
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
@@ -25,11 +37,15 @@ vllm:
   # gpu_memory_utilization：显存利用率上限（0~1）
   gpu_memory_utilization: 0.92
   # quantization：量化方式（可选，如 fp8；FP8 需要 CC ≥ 8.9）
+  # 默认 BF16；官方 FP8 检查点可用时改 quantization: fp8（见文件头注释）
   quantization: ""
   # kv_cache_dtype：KV cache 数据类型（fp8 / fp16 / bf16；fp8 可节省一半 KV 显存，精度损失 <1%）
   kv_cache_dtype: fp8
   # extra_args：透传给 `vllm serve` 的额外参数（空格分隔，按 shlex 拆分）
-  extra_args: ""
+  # 官方 recipe 关键参数：reasoning 解析（非可选）+ 自动工具调用；MTP 投机与 batch 调优待实测：
+  #   --speculative-config '{"method":"mtp","num_speculative_tokens":3}'
+  #   --max-num-batched-tokens 8192 --max-num-seqs 256
+  extra_args: "--reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder"
 
 usage:
   # price_in：每千输入 token 计价（元），供 cc-switch 用量统计

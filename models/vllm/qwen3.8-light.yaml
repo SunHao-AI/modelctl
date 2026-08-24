@@ -34,7 +34,8 @@ vllm:
   # kv_cache_dtype：KV cache 数据类型（fp8 / fp16 / bf16；fp8 可节省一半 KV 显存，精度损失 <1%）
   kv_cache_dtype: fp8
   # extra_args：透传给 `vllm serve` 的额外参数（空格分隔，按 shlex 拆分）
-  extra_args: ""
+  # 官方 recipe 关键参数：reasoning 解析（非可选）+ 自动工具调用（与主配置一致）
+  extra_args: "--reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder"
 
 usage:
   # price_in：每千输入 token 计价（元），供 cc-switch 用量统计

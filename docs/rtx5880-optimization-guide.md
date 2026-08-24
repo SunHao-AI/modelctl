@@ -222,7 +222,55 @@ light 变体目标是在保证低延迟的同时释放 GPU 资源，让同一节
 
 会（附录 B.4）。`modelctl start` 时若模型架构可解析（内置表或本地 `config.json`），会按引擎上下文/并发/KV 量化类型估算 KV cache 显存；估算值超过单卡 48GB 上限时打印 OOM 警告，接近上限（>90%）时打印提示。仅告警、不拦截启动。
 
-## 十、附录 A/B 优化落地
+## 十、引擎最佳配置建议（官方 recipe 参考）
+
+本节基于 vLLM 官方 recipe（[recipes.vllm.ai](https://recipes.vllm.ai/Qwen/Qwen3.8-27B?hardware=rtx_5090_2x&kv_offload=lmcache&variant=fp8&features=tool_calling%2Creasoning%2Cspec_decoding)，Qwen3.8-27B / 2×RTX 5090 / TP2 / FP8）与 SGLang cookbook（[docs.sglang.io](https://docs.sglang.io/cookbook/autoregressive/Qwen/Qwen3.8#hw=gb300&variant=default&quant=fp8&strategy=balanced&nodes=multi-4)，Qwen3.8-2.4T MoE / 4×GB300）的已验证参数，结合本机 8×RTX 5880（48GB/卡、128GB 系统内存、无 NVLink）给出各模型引擎配置建议。
+
+### 10.1 Qwen3.8-27B —— 首选 vLLM（FP8 检查点 + MTP 投机）
+
+模型特性（官方 recipe）：
+- **混合注意力**：64 层中仅 16 层全注意力（`full_attention_interval: 4`），其余 48 层为线性注意力（恒定循环状态）；并内置视觉 tower 与 MTP 草稿头。
+- 262K 原生上下文，可经 `--hf-overrides` 扩展至 1M。
+- 官方 FP8 检查点 `Qwen/Qwen3.8-27B-FP8`（block-scaled，约 28.7 GiB，**单卡可装**）。
+
+推荐配置要点：
+
+| 项 | 建议 | 说明 |
+|----|------|------|
+| 权重精度 | FP8 检查点 + `quantization: fp8` | 28.7 GiB 权重，TP4 下每卡约 7 GB，KV 余量大 |
+| KV cache | `kv_cache_dtype: fp8` | 已启用 |
+| 推理解析 | `--reasoning-parser qwen3` | **非可选**：chat 模板以 `<think>` 开头，缺省会导致整段推理进入 `content` |
+| 工具调用 | `--enable-auto-tool-choice --tool-call-parser qwen3_coder` | agent / 工具调用场景必备 |
+| 投机解码 | `--speculative-config '{"method":"mtp","num_speculative_tokens":3}'` | 使用检查点内置 MTP 头，2×5090 实测 acceptance ≈0.77 |
+| batch 预算 | `--max-num-batched-tokens 8192 --max-num-seqs 256` | recipe 标注的常用甜点值 |
+| 显存利用率 | `gpu_memory_utilization: 0.95` | recipe 建议（共享卡请谨慎） |
+| 依赖 | `transformers>=5.8.0` | `config.json` 由 transformers 5.8.0 写入，需匹配 |
+
+注意事项：
+- **LMCache KV offload 不推荐**：recipe 的 2×RTX 5090 方案依赖 LMCache 512GB CPU-DRAM 池；
+  本机系统内存仅 128GB 且为 PCIe 4.0，收益有限、复杂度高。
+- **1M 上下文**：`--max-model-len 1010000 --hf-overrides '{"text_config": {"max_position_embeddings": 1010000}}'`；
+  262K 已覆盖绝大多数场景，默认不开启。
+- **llama.cpp 优先级低**：混合注意力（linear attention）在 llama.cpp 支持有限，且无 MTP 投机（`dspark: off`），Qwen3.8 建议以 vLLM 为主引擎。
+
+### 10.2 DeepSeek-V4-Flash —— 保持 FP8 KV + DSpark
+
+DeepSeek-V4 权重自带 fp8 量化（`deepseek_v4_fp8` / `fp8_ds_mla` 布局），vLLM 强制 FP8 KV；llama.cpp 侧使用 DSpark 投机解码。与官方"FP8 权重 + FP8 KV"方向一致，维持现状即可，无需额外参数。
+
+### 10.3 Kimi-K2.5 120B —— TP8 BF16（FP8 检查点未确认）
+
+BF16 权重约 240GB，必须 TP8 才能装载；FP8 检查点存在性未确认（见附录 A.1）。确认后按注释切换，可降至 TP4（约 30GB/卡）并释放 4 张卡。
+
+### 10.4 Qwen3.8-2.4T MoE —— 本机无法部署
+
+SGLang cookbook 的 Qwen3.8 旗舰为 **2.4T 参数（95B active）**：BF16≈4.8TB、FP8≈2.4TB，远超本机 384GB 显存，需 4 节点 16×GB300 才能服务。其已验证参数中可借鉴到本机小模型的思路：NEXTN/MTP 投机解码、`--kv-cache-dtype fp8_e4m3`、`--reasoning-parser qwen3 --tool-call-parser qwen3_coder`（已部分应用到本机 Qwen3.8 配置）。
+
+### 10.5 落地状态
+
+- `models/vllm/qwen3.8.yaml` 已补充 `--reasoning-parser qwen3` / `--tool-call-parser qwen3_coder` 参数与 FP8 检查点切换注释（见下）。
+- MTP 投机、batch 调优等参数保持注释说明，待实测验证后启用。
+
+## 十一、附录 A/B 优化落地
 
 以下内容来自 `docs/superpowers/plans/2026-08-24-rtx5880-optimization.md` 附录 A/B，本次已实施：
 
@@ -266,9 +314,10 @@ modelctl gateway start
 
 ollama 适配器按 profile 的 `port` 设置 `OLLAMA_HOST`，**支持**独立 serve + `gpu_list` 隔离；但现有 `ollama/*.yaml` 均使用 11434（共享 serve），stop 时仅卸载模型。已修正 `engines/ollama.py` 注释，说明隔离的正确配置方式（不同端口 + gpu_list）。
 
-## 十一、后续调优方向
+## 十二、后续调优方向
 
 1. **实测 batch size 上限**：使用 `script/benchmark_latency.py` 在不同 batch 下测试吞吐。
 2. **pipeline-parallel 实测**：对比 `deepseek-v4-flash-vllm-pp` 与 `deepseek-v4-flash-vllm`（TP8）的吞吐，确认无 NVLink 下是否提升。
 3. **动态调度**：结合 `modelctl all` 和网关上下文切换（B.3），根据负载自动切换模型。
 4. **量化权重**：Kimi-K2.5 若官方提供 FP8 检查点，按 A.1 注释切换，可进一步降低 vLLM/SGLang 权重显存占用。
+5. **Qwen3.8 MTP 投机**：按第十节参数实测 MTP acceptance 后决定是否启用 `--speculative-config`。

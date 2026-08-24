@@ -167,6 +167,17 @@ python script/benchmark_latency.py \
 | total_time_s | 总耗时 | 越低越好 |
 | prompt_tokens | 输入 token 数 | 反映上下文长度 |
 
+### 外部参考基准（官方 recipe）
+
+| 模型 | 参考平台 | 配置 | 实测数据 |
+|------|---------|------|---------|
+| Qwen3.8-27B | vLLM recipe：2×RTX 5090（32GB×2） | FP8 检查点，TP2，FP8 KV，MTP 投机 | 262K 上下文下 KV 377,456 tokens；权重 14.28 GiB/卡；MTP acceptance ≈0.771 |
+| Qwen3.8-2.4T MoE | SGLang cookbook：4×GB300（16 卡） | FP8，TP16/DP4/EP16，NEXTN 投机 | 权重 FP8≈2.4TB，本机 384GB 无法部署 |
+
+> 对照结论：本机 Qwen3.8-27B 配置（TP4、FP8 KV、48GB/卡）显存余量远大于 2×5090 参考平台；
+> 与官方方向一致的关键参数（`--reasoning-parser qwen3`、`--tool-call-parser qwen3_coder`、FP8 KV）
+> 已落地到 `models/vllm/qwen3.8.yaml`（详见优化指南第十节）。
+
 ## 七、优化前后配置对比表
 
 | 模型 | 引擎 | 优化前 | 优化后 balanced | 新增 high | 新增 light | KV 量化 |
