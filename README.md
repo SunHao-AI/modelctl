@@ -387,7 +387,7 @@ B 机 nginx 通过 URL 路径把请求路由到不同模型；同时提供按 `m
 | 统一网关 | `https://xxx:5000/210/llm/v1` | body 里 `model=模型名` 切换；缺省/未知回退默认模型 |
 | 用量查询 | `https://xxx:5000/210/llm/<模型名>/v1/api/usage` | cc-switch 用量卡片 |
 
-> 网关转发请求时会把 `model` 参数改写为后端实际注册的模型名：vLLM / SGLang 取模型路径的 basename（启动时显式传入 `--served-model-name`，与 `/v1/models` 返回的 id 一致），因此客户端请求无需关心模型仓库路径。
+> 网关转发请求时会把 `model` 参数改写为后端实际注册的模型名：vLLM / SGLang 启动时显式传入 `--served-model-name <profile.name>`（与 `/v1/models` 返回的 id 一致），因此无论经网关还是直连后端端口，请求体 `model` 都使用 `modelctl list` 显示的标识符（如 `qwen3.8-vllm`）。
 
 **生成 nginx 注册表**
 

@@ -128,13 +128,12 @@ class VllmAdapter(EngineAdapter):
         }
 
     def upstream_model_name(self) -> str:
-        """vLLM 对外暴露的 served 模型名（与 build_command 的 --served-model-name 一致）。
+        """vLLM 对外暴露的 served 模型名 = profile.name。
 
-        本地路径或 HF ID 均取最后路径组件（如 `.../Qwen3.8-27B` → `Qwen3.8-27B`），
-        保证网关改写请求体 model 字段后能精确匹配 vLLM 注册的模型 id。
+        与 build_command 的 --served-model-name、modelctl list 标识符一致：
+        无论经网关转发还是直连 vLLM 端口，请求体 model 都用 profile.name（如 qwen3.8-vllm）。
         """
-        model = str(self.profile.engine_config.get("model") or self.profile.name)
-        return Path(model).name
+        return self.profile.name
 
     def stop_patterns(self) -> list[str]:
         return ["vllm"]

@@ -28,7 +28,7 @@ def test_vllm_command(tmp_path, monkeypatch):
     assert cmd[:3] == ["vllm", "serve", "Qwen/Qwen3-32B"]
     assert cmd[cmd.index("--tensor-parallel-size") + 1] == "2"
     assert cmd[cmd.index("--max-model-len") + 1] == "32768"
-    assert cmd[cmd.index("--served-model-name") + 1] == "Qwen3-32B"
+    assert cmd[cmd.index("--served-model-name") + 1] == "q"  # = profile.name
     assert "--enable-prefix-caching" in cmd
     assert env["HF_HOME"] == "/raid5/sh/model/huggingface"
 

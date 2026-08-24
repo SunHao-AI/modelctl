@@ -78,7 +78,7 @@ def test_sglang_gpu_list_sets_cuda_and_tp(tmp_path, monkeypatch):
     cmd, env = a.build_command()
     assert env["CUDA_VISIBLE_DEVICES"] == "1,2,3"
     assert cmd[cmd.index("--tp") + 1] == "3"
-    assert cmd[cmd.index("--served-model-name") + 1] == "Qwen3-32B"
+    assert cmd[cmd.index("--served-model-name") + 1] == "s"  # = profile.name
 
 
 def test_sglang_tp_mismatch_raises(tmp_path, monkeypatch):
