@@ -89,7 +89,10 @@ def _nvidia_pkg_complete_check(gpu: GpuSpec, env: EnvSpec, model: ModelSpec | No
         for line in record.read_text(encoding="utf-8", errors="replace").splitlines():
             rel = line.split(",", 1)[0].replace("\\", "/")
             if rel.endswith(".so") or ".so." in rel:
-                if rel not in env.nvidia_so:
+                # 以磁盘实际存在为准：RECORD 声明的 .so 不一定位于 nvidia/ 下
+                # （如 cudnn/、nvidia_cutlass_dsl/ 等顶层包目录），仅与 nvidia/ 扫描集
+                # 比对会对这些本就存在的文件产生误报。
+                if not (sp / rel).is_file():
                     missing.append(rel)
         if len(missing) >= 5:
             break

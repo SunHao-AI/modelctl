@@ -387,6 +387,37 @@ def test_nvidia_pkg_complete_pass_when_so_matches(tmp_path):
     assert run_compat("vllm", GpuSpec(), env, None) == []
 
 
+def test_nvidia_pkg_complete_pass_when_so_outside_nvidia_dir(tmp_path):
+    """RECORD 声明的 .so 位于 nvidia/ 之外（如 cudnn/、nvidia_cutlass_dsl/）但磁盘存在 → 不误报。"""
+    sp = tmp_path / "sp"
+    dist = sp / "nvidia_cudnn_cu13-9.20.0.48.dist-info"
+    dist.mkdir(parents=True)
+    (dist / "RECORD").write_text(
+        "cudnn/_compiled_module.cpython-312-x86_64-linux-gnu.so,,\n"
+        "nvidia_cutlass_dsl/lib/libcuda_dialect_runtime.so,,",
+        encoding="utf-8",
+    )
+    (sp / "cudnn").mkdir(parents=True)
+    (sp / "cudnn" / "_compiled_module.cpython-312-x86_64-linux-gnu.so").write_bytes(b"")
+    (sp / "nvidia_cutlass_dsl" / "lib").mkdir(parents=True)
+    (sp / "nvidia_cutlass_dsl" / "lib" / "libcuda_dialect_runtime.so").write_bytes(b"")
+    env = EnvSpec.from_env(site_packages=sp)
+    assert run_compat("vllm", GpuSpec(), env, None) == []
+
+
+def test_nvidia_pkg_complete_block_when_missing_outside_nvidia_dir(tmp_path):
+    """RECORD 声明的 .so 在 nvidia/ 之外且磁盘确实缺失 → 仍应 block。"""
+    sp = tmp_path / "sp"
+    dist = sp / "nvidia_cudnn_cu13-9.20.0.48.dist-info"
+    dist.mkdir(parents=True)
+    (dist / "RECORD").write_text(
+        "cudnn/_compiled_module.cpython-312-x86_64-linux-gnu.so,,", encoding="utf-8"
+    )
+    env = EnvSpec.from_env(site_packages=sp)
+    issues = run_compat("vllm", GpuSpec(), env, None)
+    assert any(i.rule_id == "nvidia_pkg_complete" and i.level == "block" for i in issues)
+
+
 @pytest.mark.parametrize(
     ("pkg", "version", "lib"),
     [
