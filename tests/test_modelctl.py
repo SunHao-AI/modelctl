@@ -28,6 +28,27 @@ def test_list_grouped_catalog(tmp_path, monkeypatch, capsys):
     assert "light" in out and "8105" in out
 
 
+def test_list_group_route_mapping(tmp_path, monkeypatch, capsys):
+    """家族标题展示网关路由映射：输入 group 名 → 第一个运行中的成员。"""
+    (tmp_path / "qwen3.8.yaml").write_text(
+        "group: qwen3.8\nengine: vllm\nport: 8101\nvllm:\n  model: q\n", encoding="utf-8"
+    )
+    (tmp_path / "qwen3.8-light.yaml").write_text(
+        "group: qwen3.8\nvariant: light\nengine: vllm\nport: 8105\nvllm:\n  model: q\n", encoding="utf-8"
+    )
+    (tmp_path / "flash.yaml").write_text(
+        "group: deepseek-v4-flash\nengine: ollama\nport: 11434\nollama:\n  model: d\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+    # 仅 qwen3.8-vllm 运行中 → 输入 qwen3.8 路由至它
+    monkeypatch.setattr("modelctl.cli.is_running", lambda name: name == "qwen3.8-vllm")
+    rc = cli.main(["list", "--models-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert '输入 "qwen3.8" 路由至 qwen3.8-vllm' in out
+    assert '输入 "deepseek-v4-flash" 当前无运行成员' in out
+
+
 def test_profile_error_exit_code(tmp_path, capsys):
     rc = cli.main(["start", "ghost", "--models-dir", str(tmp_path)])
     assert rc == 2

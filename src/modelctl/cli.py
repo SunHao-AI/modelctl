@@ -409,8 +409,20 @@ def _cmd_status(args, models_dir: Path | None, caps) -> int:
     return 0
 
 
+def _group_runtime_target(members: list[Profile]) -> Profile | None:
+    """返回组内第一个运行中的 profile。
+
+    成员已按引擎优先级排序（vllm 优先），与网关家族路由 _resolve_group 一致
+    （网关额外做健康检查，此处仅以运行状态作答，与状态列口径统一）。
+    """
+    for p in members:
+        if is_running(p.name):
+            return p
+    return None
+
+
 def _cmd_list(args, models_dir: Path | None, caps) -> int:
-    """列出可用模型目录：按家族（group）分组，展示引擎/变体/端口/状态。"""
+    """列出可用模型目录：按家族（group）分组，展示引擎/变体/端口/状态与网关路由映射。"""
     from modelctl.core.gateway import ENGINE_PRIORITY
 
     profiles = list_profiles(models_dir)
@@ -427,12 +439,21 @@ def _cmd_list(args, models_dir: Path | None, caps) -> int:
 
     for group_name in sorted(grouped):
         members = grouped[group_name]
-        print(f"{group_name}（{len(members)} 配置）")
+        target = _group_runtime_target(members)
+        if target:
+            route = f'输入 "{group_name}" 路由至 {target.name}（运行中）'
+        else:
+            route = f'输入 "{group_name}" 当前无运行成员'
+        print(f"{group_name}（{len(members)} 配置）｜{route}")
         rows = [
             [p.engine, p.variant or "-", p.port, _instance_state(p.name), p.name]
             for p in members
         ]
         _print_table(["引擎", "变体", "端口", "状态", "标识符"], rows)
+
+    default_model = os.environ.get("GATEWAY_DEFAULT_MODEL")
+    if default_model:
+        print(f"未匹配任何家族/标识符的请求将回退至默认模型：{default_model}")
     return 0
 
 

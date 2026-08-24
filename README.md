@@ -149,7 +149,7 @@ ModelScope 下载模型：
 
 ### 2.6 查看可用模型目录
 
-`modelctl list` 按模型家族（group）分组展示全部可用 profile，含引擎、变体、端口与运行状态：
+`modelctl list` 按模型家族（group）分组展示全部可用 profile，含引擎、变体、端口与运行状态；每个家族标题行标注**网关路由映射**（输入该家族名会路由到哪个实际模型）：
 
 ```bash
 uv run modelctl list
@@ -158,7 +158,7 @@ uv run modelctl list
 输出示例（节选）：
 
 ```
-deepseek-v4-flash（10 配置）
+deepseek-v4-flash（10 配置）｜输入 "deepseek-v4-flash" 当前无运行成员
 引擎      变体   端口   状态    标识符
 --------  -----  -----  ------  --------------------------------
 vllm      -      8100   已停止  deepseek-v4-flash-vllm
@@ -167,9 +167,15 @@ vllm      light  8104   已停止  deepseek-v4-flash-vllm-light
 vllm      pp     8106   已停止  deepseek-v4-flash-vllm-pp
 sglang    -      8200   已停止  deepseek-v4-flash-sglang
 ...
+
+qwen3.8（8 配置）｜输入 "qwen3.8" 路由至 qwen3.8-vllm（运行中）
+引擎      变体   端口   状态    标识符
+--------  -----  -----  ------  ----------------------
+vllm      -      8101   运行中  qwen3.8-vllm
+...
 ```
 
-组内按引擎优先级排序（vllm 优先，与网关家族路由一致），默认变体（`-`）在前。
+路由规则（与网关一致）：组内按引擎优先级（vllm 优先）取第一个**运行中**的成员；组内成员全部停止时请求失败。`name` / `alias` 输入则精确路由到对应 profile。若设置了 `GATEWAY_DEFAULT_MODEL`，未匹配任何家族/标识符的请求回退至该默认模型。
 
 ### 3. 启动服务
 
