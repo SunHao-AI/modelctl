@@ -3,11 +3,8 @@
 # 量化后最小 INT4 约 714GB（本机 8×48GB=384GB 不足），官方验证硬件为 8×H200（~640GB）。
 # 配置保留供未来硬件升级参考。
 # 学习要点：SGLang 与 vLLM 类似使用 HF 格式权重，通过 --tp 张量并行，适合高吞吐在线服务。
-# name：CLI 标识符，`modelctl start kimi-k2.5-sglang` 使用；全局唯一
-name: kimi-k2.5-sglang
 group: kimi-k2.5
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
-engine: sglang
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
 port: 8202
 # api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值

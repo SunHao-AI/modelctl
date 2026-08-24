@@ -1,10 +1,6 @@
 # ollama/deepseek-v4-flash.yaml —— DeepSeek-V4-Flash（ollama 引擎）
 # 学习要点：ollama 引擎是常驻 serve 进程，模型按需加载/卸载，无需 download 段（由 ollama pull 处理）。
-# name：CLI 标识符，`modelctl start deepseek-v4-flash-ollama` 使用；全局唯一
-name: deepseek-v4-flash-ollama
 group: deepseek-v4-flash
-# engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
-engine: ollama
 # port：服务监听端口（ollama serve 常驻端口）
 port: 11434
 # 注意：ollama 引擎无需 api_key（本地服务，无 OpenAI 兼容鉴权）

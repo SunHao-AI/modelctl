@@ -187,13 +187,57 @@ def test_group_field(tmp_path):
     assert p.group == "qwen3.8"
 
 
-def test_group_missing_defaults_none(tmp_path):
+def test_group_missing_derived_from_filename(tmp_path):
+    """group 缺省时自动从文件名（stem）推导。"""
     d = _write(tmp_path, "name: demo\nengine: ollama\nport: 11434\n")
     p = load_profile("demo", d)
-    assert p.group is None
+    assert p.group == "demo"
 
 
-def test_group_invalid_ignored_with_warning(tmp_path):
+def test_group_empty_derived_from_filename(tmp_path):
+    """group 为空字符串时回退文件名推导。"""
     d = _write(tmp_path, "name: demo\ngroup: \"\"\nengine: ollama\nport: 11434\n")
     p = load_profile("demo", d)
-    assert p.group is None
+    assert p.group == "demo"
+
+
+def test_group_derived_strips_variant_suffix(tmp_path):
+    """文件名带 variant 后缀且声明 variant 时，group 自动去掉 -{variant}。"""
+    d = _write(tmp_path, "variant: high\nengine: vllm\nport: 8103\n", name="qwen3.8-high.yaml")
+    p = load_profile("qwen3.8-vllm-high", d)
+    assert p.group == "qwen3.8"
+    assert p.variant == "high"
+    assert p.name == "qwen3.8-vllm-high"
+
+
+def test_name_auto_derived_without_variant(tmp_path):
+    """name 缺省 = group-engine（无 variant）。"""
+    d = _write(tmp_path, "group: qwen3.8\nengine: vllm\nport: 8101\nvllm:\n  model: q\n", name="qwen3.8.yaml")
+    p = load_profile("qwen3.8-vllm", d)
+    assert p.name == "qwen3.8-vllm"
+    assert p.group == "qwen3.8"
+
+
+def test_name_auto_derived_with_variant(tmp_path):
+    """name 缺省 = group-engine-variant（有 variant）。"""
+    d = _write(tmp_path, "group: qwen3.8\nvariant: light\nengine: vllm\nport: 8105\nvllm:\n  model: q\n", name="qwen3.8-light.yaml")
+    p = load_profile("qwen3.8-vllm-light", d)
+    assert p.name == "qwen3.8-vllm-light"
+    assert p.variant == "light"
+
+
+def test_engine_inferred_from_parent_dir(tmp_path):
+    """engine 可从父目录名推导（models/{engine}/{name}.yaml）。"""
+    sub = tmp_path / "ollama"
+    sub.mkdir()
+    (sub / "kimi.yaml").write_text("group: kimi-k2.5\nport: 11434\nollama:\n  model: kimi\n", encoding="utf-8")
+    p = load_profile("kimi-k2.5-ollama", tmp_path)
+    assert p.engine == "ollama"
+    assert p.name == "kimi-k2.5-ollama"
+
+
+def test_engine_missing_and_no_parent_dir_raises(tmp_path):
+    """无 engine 且不在引擎子目录 → 报错。"""
+    d = _write(tmp_path, "name: demo\nport: 11434\n")
+    with pytest.raises(ProfileError, match="引擎"):
+        load_profile("demo", d)

@@ -3,13 +3,10 @@
 # 无 vllm/sglang 变体原因：官方 recipe（recipes.vllm.ai）显示 BF16 约 1152GB、FP8 约 576GB，
 # 均超出本机总显存；NVFP4 288GB 虽可装入但需 Blackwell（sm120）原生支持，RTX 5880（Ada, sm89）不可用，
 # 只能走 GGUF 路线。
-# name：CLI 标识符，`modelctl start qwen3-coder-llamacpp` 使用；全局唯一
-name: qwen3-coder-llamacpp
 group: qwen3-coder
 # alias：短名别名，网关/nginx 路由可用 `qwen3-coder` 指代本模型（如 URL /210/llm/qwen3-coder/v1）
 alias: qwen3-coder
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
-engine: llamacpp
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
 port: 18890
 # api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值

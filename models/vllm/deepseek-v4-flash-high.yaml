@@ -1,14 +1,11 @@
 # vllm/deepseek-v4-flash-high.yaml —— DeepSeek-V4-Flash（vLLM 引擎，HuggingFace 原始权重，高上下文）
 # 学习要点：vLLM 使用 HF 格式权重（非 GGUF），支持张量并行与 FP8 量化，适合高吞吐在线服务。
-# name：CLI 标识符，`modelctl start deepseek-v4-flash-vllm-high` 使用；全局唯一
-name: deepseek-v4-flash-vllm-high
 group: deepseek-v4-flash
 # alias：服务显示别名
 alias: deepseek-v4-flash-vllm-h
-# engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
-engine: vllm
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
 port: 8103
+variant: high
 # api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值
 api_key: ${API_KEY}
 

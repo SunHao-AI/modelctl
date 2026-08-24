@@ -12,11 +12,7 @@
 #     quantization: fp8
 # 切换前请确认仓库存在（modelctl start 会自动下载，仓库不存在会失败）；
 # 回退：model/modelscope_id 改回 Qwen/Qwen3.8-27B 并清空 quantization 即可恢复 BF16。
-# name：CLI 标识符，`modelctl start qwen3.8-vllm` 使用；全局唯一
-name: qwen3.8-vllm
 group: qwen3.8
-# engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
-engine: vllm
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
 port: 8101
 # api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值

@@ -84,6 +84,45 @@ vi .env        # 修改 API 密钥、存储目录、日志目录等全局配置
 
 配置优先级：**profile YAML > 环境变量 > .env 文件 > 代码默认值**。
 
+#### Profile 字段自动推导
+
+profile 按 `models/<engine>/<group>[-<variant>].yaml` 组织，多个头部字段**可省略**，由路径自动推导：
+
+| 字段 | 缺省规则 | 示例 |
+|---|---|---|
+| `engine` | 从父目录名推导（如 `models/vllm/…` → `vllm`）；根目录文件需显式声明 | — |
+| `group` | 从文件名推导（去掉 `-<variant>` 后缀） | `deepseek-v4-flash-high.yaml` → `deepseek-v4-flash` |
+| `variant` | 空字符串（默认变体）；`light` / `high` / `pp` 等 | `high` |
+| `name` | `{group}-{engine}[-{variant}]`（CLI 标识符） | `deepseek-v4-flash-vllm-high` |
+| `alias` / `aliases` | 空列表（网关/nginx 短名路由） | — |
+| `port` | **必填**，无法推导 | `8103` |
+
+最小 profile 示例（`models/vllm/qwen3.8.yaml`）：
+
+```yaml
+group: qwen3.8
+port: 8101
+api_key: ${API_KEY}
+
+vllm:
+  model: Qwen/Qwen3.8-27B
+  ...
+```
+
+带变体示例（`models/vllm/qwen3.8-light.yaml`）：
+
+```yaml
+group: qwen3.8
+variant: light     # 显式声明后 name 自动推导为 qwen3.8-vllm-light
+port: 8105
+
+vllm:
+  model: Qwen/Qwen3.8-27B
+  ...
+```
+
+显式声明任意字段（`name` / `engine` / `group`）时优先于自动推导，兼容旧格式。
+
 > 首次启动前，请务必在 `.env` 中设置模型存储目录，否则下载/缓存位置会回退到代码默认值（可能落在项目根目录或当前盘符）：
 >
 > | 引擎 | 控制下载/缓存位置的环境变量 |

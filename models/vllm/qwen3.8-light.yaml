@@ -1,15 +1,13 @@
 # vllm/qwen3.8-light.yaml —— Qwen3.8-27B（vLLM 引擎，HuggingFace 原始权重，轻量上下文）
 # 学习要点：vLLM 使用 HF 格式权重（非 GGUF），支持张量并行与 FP8 量化，适合高吞吐在线服务。
 # 附录 B.1：多模型 GPU 隔离 —— 与 deepseek-v4-flash-vllm-light（gpu 0-3）互补，占用 gpu 4-7。
-# name：CLI 标识符，`modelctl start qwen3.8-vllm-light` 使用；全局唯一
-name: qwen3.8-vllm-light
 group: qwen3.8
 # alias：服务显示别名
 alias: qwen3.8-vllm-l
-# engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
-engine: vllm
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
 port: 8105
+# variant：变体标识（light/high/pp 等），影响自动推导的 name 与 group
+variant: light
 # api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值
 api_key: ${API_KEY}
 

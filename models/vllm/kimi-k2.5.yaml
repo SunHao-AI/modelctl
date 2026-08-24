@@ -7,11 +7,7 @@
 #   --tool-call-parser kimi_k2 --enable-auto-tool-choice --reasoning-parser kimi_k2
 #   --mm-encoder-tp-mode data --kv-cache-dtype fp8
 #   --speculative-config '{"model":"lightseekorg/kimi-k2.5-eagle3-mla","method":"eagle3","num_speculative_tokens":3}'
-# name：CLI 标识符，`modelctl start kimi-k2.5-vllm` 使用；全局唯一
-name: kimi-k2.5-vllm
 group: kimi-k2.5
-# engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
-engine: vllm
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
 port: 8102
 # api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值

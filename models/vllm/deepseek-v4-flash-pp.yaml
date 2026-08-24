@@ -4,15 +4,13 @@
 # 附录 B.2：本 profile 为实验变体，不改变既有主配置（balanced 仍为 TP8）。
 # 验证方式：与 deepseek-v4-flash-vllm（TP8）实测吞吐对比，确认无 NVLink 下是否提升；
 # 若性能无提升或启动失败，删除本文件即可，不影响其他配置。
-# name：CLI 标识符，`modelctl start deepseek-v4-flash-vllm-pp` 使用；全局唯一
-name: deepseek-v4-flash-vllm-pp
 group: deepseek-v4-flash
 # alias：服务显示别名
 alias: deepseek-v4-flash-pp
-# engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
-engine: vllm
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
 port: 8106
+# variant：变体标识（light/high/pp 等），影响自动推导的 name 与 group
+variant: pp
 # api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值
 api_key: ${API_KEY}
 

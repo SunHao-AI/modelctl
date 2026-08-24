@@ -77,13 +77,11 @@ models/
     └── kimi-k2.5.yaml          # Kimi-K2.5（unsloth）
 ```
 
-各引擎 profile 的 `name` 全局唯一，示例配置统一采用 `<model>-<engine>` 命名（如 `deepseek-v4-flash-llamacpp`、`deepseek-v4-flash-vllm`）。文件本身位于 `models/<engine>/` 下，因此文件名不再需要引擎后缀。
+各引擎 profile 的 `name` 全局唯一，自动推导为 `<group>-<engine>[-<variant>]`（如 `deepseek-v4-flash-llamacpp`）。文件本身位于 `models/<engine>/` 下，因此 `engine`（从父目录推导）与 `name`（从 group+engine 推导）均可省略。
 
 ### 2. 按需修改 `models/llamacpp/deepseek-v4-flash.yaml`
 
 ```yaml
-name: deepseek-v4-flash-llamacpp
-engine: llamacpp
 port: 18888
 api_key: ${API_KEY}
 

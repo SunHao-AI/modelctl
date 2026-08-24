@@ -1,14 +1,12 @@
 # llamacpp/qwen3.8-high.yaml —— Qwen3.8-27B（llama.cpp 引擎，高性能上下文变体）
 # 学习要点：Qwen 无 DSpark 草稿，dspark 必须 off；其余字段与 DeepSeek 配置一致。
-# name：CLI 标识符，`modelctl start qwen3.8-llamacpp-high` 使用；全局唯一
-name: qwen3.8-llamacpp-high
 group: qwen3.8
 # alias：短名别名，网关/nginx 路由可用 `qwen3.8-high` 指代本模型（如 URL /210/llm/qwen3.8-high/v1）
 alias: qwen3.8-high
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
-engine: llamacpp
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
 port: 18894
+variant: high
 # api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值
 api_key: ${API_KEY}
 

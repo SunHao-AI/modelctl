@@ -24,14 +24,15 @@ class ProfileError(ValueError):
 
 @dataclass
 class Profile:
-    name: str
-    engine: str
+    name: str          # CLI 标识符，缺省自动推导为 {group}-{engine}[-{variant}]
+    engine: str        # 引擎类型；从父目录名推断或 YAML 显式指定
     port: int
+    variant: str = ""               # light / high / pp ...（空=默认变体）
     api_key: str | None = None
     engine_config: dict[str, Any] = field(default_factory=dict)
     usage: dict[str, Any] = field(default_factory=dict)
     aliases: list[str] = field(default_factory=list)
-    group: str | None = None
+    group: str | None = None        # 模型家族名（网关路由用）
     path: Path | None = None
     tool_call_rounds: int | None = None
     max_output_tokens: int | None = None
@@ -56,26 +57,76 @@ def _interpolate(value: Any, source: str) -> Any:
     return value
 
 
+def _resolve_engine(raw: dict[str, Any], path: Path) -> str:
+    """解析 engine：优先用 YAML 显式值；否则从父目录名推断。"""
+    explicit = raw.get("engine")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+    # 子目录文件 models/{engine}/{name}.yaml → parent dir name
+    parent_name = path.parent.name.lower()  # type: ignore[attr-defined]
+    if parent_name in KNOWN_ENGINES:
+        logger.debug(f"{path.name}：从父目录推断 engine={parent_name!r}")
+        return str(parent_name)
+    raise ProfileError(
+        f"{path.name}：无法确定引擎类型。请将文件放入 {sorted(KNOWN_ENGINES)} 子目录，"
+        "或在 YAML 中显式设置 `engine:`"
+    )
+
+
+def _resolve_group(raw: dict[str, Any], path: Path) -> str:
+    """解析 group（模型家族名）：优先用 YAML 值；否则从文件名自动推导。
+
+    若 variant 已声明且文件后缀匹配，则去掉 -{variant} 后剩余部分即为 group。
+    """
+    explicit = raw.get("group")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+    stem = path.stem
+    variant = raw.get("variant", "")
+    # auto-strip known suffix: {stem}-{variant}
+    if isinstance(variant, str) and variant:
+        suffix_to_strip = f"-{variant}"
+        if stem.endswith(suffix_to_strip):
+            candidate = stem[: -len(suffix_to_strip)]
+            return candidate.strip()
+    # 无匹配或未设 variant → 全文件名作为 group
+    return stem
+
+
 def _to_profile(raw: dict[str, Any], path: Path) -> Profile:
     """将已插值的原始字典转换为 Profile，并执行字段校验。"""
     src = path.name
-    for key in ("name", "engine", "port"):
-        if key not in raw or raw[key] in (None, ""):
-            raise ProfileError(f"{src}：缺少必填字段 {key}")
-    engine = str(raw["engine"])
-    if engine not in KNOWN_ENGINES:
-        raise ProfileError(f"{src}：未知引擎 {engine}（支持：{sorted(KNOWN_ENGINES)}）")
+
+    # ── port（唯一不可推导的必填项）──
+    if "port" not in raw or raw["port"] in (None, ""):
+        raise ProfileError(f"{src}：缺少必填字段 `port`")
     port = int(raw["port"])
     if not 1 <= port <= 65535:
         raise ProfileError(f"{src}：port 必须在 1-65535，当前 {port}")
+
+    # ── engine（YAML > parent dir）──
+    engine = _resolve_engine(raw, path)
+    if engine not in KNOWN_ENGINES:
+        raise ProfileError(f"{src}：未知引擎 {engine!r}（支持：{sorted(KNOWN_ENGINES)}）")
+
+    # ── group / variant（显式 > 文件名推导）──
+    group = _resolve_group(raw, path)
+    raw_variant = str(raw.get("variant", "") or "")
+
+    # ── name（YAML 值优先；缺省自动拼接 {group}-{engine}[-{variant}]）──
+    explicit_name = raw.get("name")
+    if isinstance(explicit_name, str) and explicit_name.strip():
+        resolved_name = explicit_name.strip()
+    else:
+        base = f"{group}-{engine}"
+        resolved_name = f"{base}-{raw_variant}" if raw_variant else base
+
+    # ── engine 配置段（以实际引擎名查找）──
     engine_config = raw.get(engine) or {}
     if not isinstance(engine_config, dict):
         raise ProfileError(f"{src}：{engine} 段必须是映射")
-    aliases = _parse_aliases(raw, src)
-    group = raw.get("group")
-    if group is not None and (not isinstance(group, str) or not group.strip()):
-        logger.warning(f"{src}：group 必须是非空字符串，已忽略")
-        group = None
+
+    aliases = _parse_aliases(raw, src, resolved_name)
     tool_call_rounds = raw.get("tool_call_rounds")
     if tool_call_rounds is not None:
         try:
@@ -89,25 +140,26 @@ def _to_profile(raw: dict[str, Any], path: Path) -> Profile:
         except (TypeError, ValueError) as exc:
             raise ProfileError(f"{src}：max_output_tokens 必须是整数") from exc
     return Profile(
-        name=str(raw["name"]),
+        name=resolved_name,
         engine=engine,
         port=port,
+        variant=str(raw_variant),
         api_key=raw.get("api_key") or None,
         engine_config=engine_config,
         usage=raw.get("usage") or {},
         aliases=aliases,
-        group=group,
+        group=group if isinstance(group, str) and group.strip() else None,
         path=path,
         tool_call_rounds=tool_call_rounds,
         max_output_tokens=max_output_tokens,
     )
 
 
-def _parse_aliases(raw: dict[str, Any], src: str) -> list[str]:
+def _parse_aliases(raw: dict[str, Any], src: str, resolved_name: str | None = None) -> list[str]:
     """解析顶层 alias / aliases 字段为别名列表（供网关/nginx 短名路由使用）。
 
     支持 `alias: short` 或 `aliases: [a, b]` 两种写法；别名须为非空字符串，
-    且不得与 name 相同。缺省返回空列表。
+    且不得与 profile name 相同。缺省返回空列表。
     """
     value = raw.get("aliases", raw.get("alias", []))
     if isinstance(value, str):
@@ -117,9 +169,14 @@ def _parse_aliases(raw: dict[str, Any], src: str) -> list[str]:
     else:
         return []
     aliases: list[str] = []
+    profile_name = resolved_name or (raw.get("name") and str(raw["name"]))
     for alias in candidates:
-        if not alias or alias == raw.get("name"):
-            raise ProfileError(f"{src}：alias 必须是非空字符串且不能与 name 相同（当前：{alias!r}）")
+        if not alias:
+            raise ProfileError(f"{src}：alias 必须是非空字符串（当前：{alias!r}）")
+        if isinstance(profile_name, str) and profile_name == alias:
+            raise ProfileError(
+                f"{src}：alias ({alias!r}) 不能与 name ({profile_name!r}) 相同"
+            )
         if alias not in aliases:
             aliases.append(alias)
     return aliases

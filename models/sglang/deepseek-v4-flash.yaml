@@ -1,10 +1,7 @@
 # sglang/deepseek-v4-flash.yaml —— DeepSeek-V4-Flash（SGLang 引擎，HuggingFace 原始权重）
 # 学习要点：SGLang 与 vLLM 类似使用 HF 格式权重，通过 --tp 张量并行，适合高吞吐在线服务。
-# name：CLI 标识符，`modelctl start deepseek-v4-flash-sglang` 使用；全局唯一
-name: deepseek-v4-flash-sglang
 group: deepseek-v4-flash
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
-engine: sglang
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
 port: 8200
 # api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值

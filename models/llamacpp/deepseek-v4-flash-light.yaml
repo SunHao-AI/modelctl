@@ -1,14 +1,13 @@
 # llamacpp/deepseek-v4-flash-light.yaml —— DeepSeek-V4-Flash-0731（llama.cpp 引擎，轻量配置）
 # 学习要点：llama.cpp 引擎通过 GGUF 分片 + DSpark 投机解码运行，适合单机多卡。
-# name：CLI 标识符，`modelctl start deepseek-v4-flash-llamacpp-light` 使用；全局唯一
-name: deepseek-v4-flash-llamacpp-light
+
 group: deepseek-v4-flash
 # alias：短名别名，网关/nginx 路由可用 `deepseek-v4-flash-light` 指代本模型（如 URL /210/llm/deepseek-v4-flash-light/v1）
 alias: deepseek-v4-flash-light
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
-engine: llamacpp
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
 port: 18893
+variant: light
 # api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值
 api_key: ${API_KEY}
 

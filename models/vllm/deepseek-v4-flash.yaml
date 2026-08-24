@@ -3,11 +3,8 @@
 # 官方 recipe（recipes.vllm.ai）：284B/13B MoE（CSA+HCA 混合注意力），0731 检查点为 FP4+FP8 混合
 #（MoE 专家 FP4，attention/norm/router FP8），约 160-167GB；需 vLLM 0.25+ 支持 DSpark 投机与
 # deepseek_v4 tokenizer/parser。Think Max 推理模式需 max-model-len >= 393216（384K）。
-# name：CLI 标识符，`modelctl start deepseek-v4-flash-vllm` 使用；全局唯一
-name: deepseek-v4-flash-vllm
+
 group: deepseek-v4-flash
-# engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
-engine: vllm
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
 port: 8100
 # api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值

@@ -224,8 +224,10 @@ def test_build_groups_sorted_by_engine_priority(tmp_path):
         encoding="utf-8",
     )
     groups = build_groups(models_dir=tmp_path)
-    assert list(groups) == ["qwen3.8"]  # 未声明 group 的不进入家族
+    # c.yaml 未声明 group → 自动从文件名推导为 "c"，故同样进入家族索引
+    assert list(groups) == ["qwen3.8", "c"]
     assert [m.name for m in groups["qwen3.8"]] == ["qwen3.8-vllm", "qwen3.8-llamacpp"]  # vllm 优先
+    assert [m.name for m in groups["c"]] == ["standalone"]
 
 
 def test_resolve_model_group_prefers_running_member():
