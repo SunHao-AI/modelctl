@@ -2,6 +2,7 @@
 # 学习要点：vLLM 使用 HF 格式权重（非 GGUF），支持张量并行与 FP8 量化，适合高吞吐在线服务。
 # name：CLI 标识符，`modelctl start deepseek-v4-flash-vllm-light` 使用；全局唯一
 name: deepseek-v4-flash-vllm-light
+group: deepseek-v4-flash
 # alias：服务显示别名
 alias: deepseek-v4-flash-vllm-l
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）

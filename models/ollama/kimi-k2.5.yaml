@@ -2,6 +2,7 @@
 # 学习要点：ollama 引擎是常驻 serve 进程，模型按需加载/卸载，无需 download 段（由 ollama pull 处理）。
 # name：CLI 标识符，`modelctl start kimi-k2.5-ollama` 使用；全局唯一
 name: kimi-k2.5-ollama
+group: kimi-k2.5
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
 engine: ollama
 # port：服务监听端口（ollama serve 常驻端口）
@@ -19,3 +20,6 @@ ollama:
   # context_length：上下文长度（OLLAMA_CONTEXT_LENGTH）
   # 注意：单请求完整可用（与并发无关）；KV 显存 ≈ 并发 × context_length
   context_length: 65536
+  # gpu_list：限制 ollama serve 进程可见的 GPU（可选，默认不设=全部可见）；
+  # 注意：ollama 为常驻进程，所有 ollama 模型共享该限制，无法按单模型隔离
+  # 示例：gpu_list: "0,1,2,3"

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import httpx
 
-from modelctl.core.gateway import GatewayModel, build_registry, create_app, resolve_model
+from modelctl.core.gateway import GatewayModel, build_groups, build_registry, create_app, resolve_model
 
 
 def _run(coro):
@@ -208,3 +208,122 @@ def test_list_models_dedups_alias_and_name():
         resp = _run(_get(app, "/v1/models"))
     assert resp.status_code == 200
     assert [m["id"] for m in resp.json()["data"]] == ["ds-llamacpp"]
+
+
+def test_build_groups_sorted_by_engine_priority(tmp_path):
+    (tmp_path / "a.yaml").write_text(
+        "name: qwen3.8-llamacpp\ngroup: qwen3.8\nengine: llamacpp\nport: 18888\nllamacpp:\n  model: q\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "b.yaml").write_text(
+        "name: qwen3.8-vllm\ngroup: qwen3.8\nengine: vllm\nport: 8101\nvllm:\n  model: q\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "c.yaml").write_text(
+        "name: standalone\nengine: ollama\nport: 11434\nollama:\n  model: s\n",
+        encoding="utf-8",
+    )
+    groups = build_groups(models_dir=tmp_path)
+    assert list(groups) == ["qwen3.8"]  # 未声明 group 的不进入家族
+    assert [m.name for m in groups["qwen3.8"]] == ["qwen3.8-vllm", "qwen3.8-llamacpp"]  # vllm 优先
+
+
+def test_resolve_model_group_prefers_running_member():
+    reg = {}
+    members = [
+        GatewayModel("qwen3.8-vllm", "vllm", "http://127.0.0.1:2", "q", None, "http://127.0.0.1:2/"),
+        GatewayModel("qwen3.8-llamacpp", "llamacpp", "http://127.0.0.1:1", "q", None, "http://127.0.0.1:1/"),
+    ]
+    groups = {"qwen3.8": members}
+    with (
+        patch("modelctl.core.gateway.is_running", side_effect=lambda n: n == "qwen3.8-llamacpp"),
+        patch("modelctl.core.gateway.is_model_healthy", return_value=True),
+    ):
+        target = resolve_model(reg, "qwen3.8", None, groups=groups)
+    assert target is members[1]  # vllm 不健康（未运行）→ 落到 llamacpp
+
+
+def test_resolve_model_group_none_running_returns_none():
+    reg = {"qwen3.8": GatewayModel("qwen3.8-llamacpp", "llamacpp", "http://127.0.0.1:1", "q", None, "http://127.0.0.1:1/")}
+    groups = {"qwen3.8": [reg["qwen3.8"]]}
+    with (
+        patch("modelctl.core.gateway.is_running", return_value=False),
+        patch("modelctl.core.gateway.is_model_healthy", return_value=True),
+    ):
+        # 裸名 qwen3.8 同时是 llamacpp alias 与 group 名：group 优先，无健康成员 → None（不回退 alias）
+        assert resolve_model(reg, "qwen3.8", None, groups=groups) is None
+
+
+def test_resolve_model_group_as_default():
+    reg = {}
+    members = [GatewayModel("qwen3.8-vllm", "vllm", "http://127.0.0.1:2", "q", None, "http://127.0.0.1:2/")]
+    groups = {"qwen3.8": members}
+    with (
+        patch("modelctl.core.gateway.is_running", return_value=True),
+        patch("modelctl.core.gateway.is_model_healthy", return_value=True),
+    ):
+        target = resolve_model(reg, "ghost", "qwen3.8", groups=groups)
+    assert target is members[0]
+
+
+def test_list_models_shows_group_when_member_healthy():
+    members = [GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "q", None, "http://upstream/")]
+    app = create_app({}, groups={"qwen3.8": members}, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    with (
+        patch("modelctl.core.gateway.is_model_healthy", return_value=True),
+        patch("modelctl.core.gateway.is_running", return_value=True),
+    ):
+        resp = _run(_get(app, "/v1/models"))
+    assert resp.status_code == 200
+    assert [m["id"] for m in resp.json()["data"]] == ["qwen3.8"]
+
+
+def test_list_models_hides_group_when_no_member_healthy():
+    members = [GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "q", None, "http://upstream/")]
+    app = create_app({}, groups={"qwen3.8": members}, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    with (
+        patch("modelctl.core.gateway.is_model_healthy", return_value=False),
+        patch("modelctl.core.gateway.is_running", return_value=False),
+    ):
+        resp = _run(_get(app, "/v1/models"))
+    assert resp.status_code == 200
+    assert resp.json()["data"] == []
+
+
+def test_proxy_group_routes_to_running_member():
+    captured = {}
+
+    def upstream(request):
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"id": "1", "model": captured["body"]["model"]})
+
+    members = [
+        GatewayModel("qwen3.8-llamacpp", "llamacpp", "http://upstream", "q3-llama", None, "http://upstream/"),
+        GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "q3-vllm", None, "http://upstream/"),
+    ]
+    groups = {"qwen3.8": members}
+    app = create_app({}, groups=groups, transport=httpx.MockTransport(upstream))
+    with (
+        patch("modelctl.core.gateway.is_running", side_effect=lambda n: n == "qwen3.8-vllm"),
+        patch("modelctl.core.gateway.is_model_healthy", return_value=True),
+    ):
+        resp = _run(_post(app, "/v1/chat/completions", json={"model": "qwen3.8", "messages": []}))
+    assert resp.status_code == 200
+    assert captured["body"]["model"] == "q3-vllm"  # 已改写为运行成员的上游模型名
+
+
+def test_create_app_auto_builds_registry_and_groups():
+    """/v1/models 无注入时自动构建 registry 与 groups（生产路径 main() 走这里）。"""
+    gm = GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "q", None, "http://upstream/")
+    with (
+        patch("modelctl.core.gateway.build_registry", return_value={"qwen3.8-vllm": gm}),
+        patch("modelctl.core.gateway.build_groups", return_value={"qwen3.8": [gm]}),
+    ):
+        app = create_app()  # registry=None, groups=None
+    with (
+        patch("modelctl.core.gateway.is_model_healthy", return_value=True),
+        patch("modelctl.core.gateway.is_running", return_value=True),
+    ):
+        resp = _run(_get(app, "/v1/models"))
+    assert resp.status_code == 200
+    assert [m["id"] for m in resp.json()["data"]] == ["qwen3.8-vllm", "qwen3.8"]

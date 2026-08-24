@@ -5,6 +5,7 @@
 # deepseek_v4 tokenizer/parser。Think Max 推理模式需 max-model-len >= 393216（384K）。
 # name：CLI 标识符，`modelctl start deepseek-v4-flash-vllm` 使用；全局唯一
 name: deepseek-v4-flash-vllm
+group: deepseek-v4-flash
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
 engine: vllm
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
@@ -22,6 +23,8 @@ vllm:
     modelscope_id: deepseek-ai/DeepSeek-V4-Flash-0731
   # tensor_parallel_size：张量并行 GPU 数（不得超过实际 GPU 数）
   tensor_parallel_size: 8
+  # gpu_list：指定使用的 GPU 设备编号（可选，默认不设=使用全部 GPU）；配置后长度必须等于 tensor_parallel_size
+  # 示例：gpu_list: "0,1,2,3,4,5,6,7"
   # max_model_len：最大上下文长度（token）
   # 注意：单序列完整可用（与并发无关）；KV 显存按 max_num_seqs × max_model_len 估算
   # recipe 支持单节点 1M 上下文；Think Max 需 >=384K，默认 131K 已覆盖日常场景

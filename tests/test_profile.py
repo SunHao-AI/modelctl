@@ -179,3 +179,21 @@ def test_max_output_tokens_invalid_rejected(tmp_path):
     d = _write(tmp_path, "name: demo\nengine: vllm\nport: 8000\nmax_output_tokens: not_a_number\n")
     with pytest.raises(ProfileError, match="max_output_tokens"):
         load_profile("demo", d)
+
+
+def test_group_field(tmp_path):
+    d = _write(tmp_path, "name: demo\ngroup: qwen3.8\nengine: ollama\nport: 11434\n")
+    p = load_profile("demo", d)
+    assert p.group == "qwen3.8"
+
+
+def test_group_missing_defaults_none(tmp_path):
+    d = _write(tmp_path, "name: demo\nengine: ollama\nport: 11434\n")
+    p = load_profile("demo", d)
+    assert p.group is None
+
+
+def test_group_invalid_ignored_with_warning(tmp_path):
+    d = _write(tmp_path, "name: demo\ngroup: \"\"\nengine: ollama\nport: 11434\n")
+    p = load_profile("demo", d)
+    assert p.group is None

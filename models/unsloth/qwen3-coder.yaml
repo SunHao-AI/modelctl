@@ -3,6 +3,7 @@
 # 注意：Q4_K_M 权重约 290GB，远超单卡 48GB，tensor_parallel 必须为 true 多卡分片加载。
 # name：CLI 标识符，`modelctl start qwen3-coder-unsloth` 使用；全局唯一
 name: qwen3-coder-unsloth
+group: qwen3-coder
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
 engine: unsloth
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/v1/models）
@@ -22,6 +23,8 @@ unsloth:
   context_length: 32768
   # tensor_parallel：多卡 GGUF tensor-parallel 加载（需至少 2 块 GPU）
   tensor_parallel: true
+  # gpu_list：指定使用的 GPU 设备编号（可选，默认不设=使用全部 GPU）；tensor_parallel 开启时需至少 2 块
+  # 示例：gpu_list: "0,1,2,3"
   # load_in_4bit：非 GGUF HF 模型的 4bit 加载
   load_in_4bit: false
   # download：ModelScope 自动下载配置（model 不存在本地路径时触发）

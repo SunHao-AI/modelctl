@@ -5,6 +5,7 @@
 # 学习要点：llama.cpp 引擎通过 GGUF 分片运行，适合单机多卡。
 # name：CLI 标识符，`modelctl start kimi-k2.5-llamacpp` 使用；全局唯一
 name: kimi-k2.5-llamacpp
+group: kimi-k2.5
 # alias：短名别名，网关/nginx 路由可用 `kimi-k2.5` 指代本模型（如 URL /210/llm/kimi-k2.5/v1）
 alias: kimi-k2.5
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
@@ -36,6 +37,8 @@ llamacpp:
   # gpu_count：实际参与推理的 GPU 数量，决定 --tensor-split 分片
   # 8 卡 = 最高速度；与其他服务共存时可调为 2~4（2 卡即可装下全部权重）
   gpu_count: 8
+  # gpu_list：指定使用的 GPU 设备编号（可选，默认不设=使用全部 GPU）；与 gpu_count 二选一，配置后覆盖 gpu_count
+  # 示例：gpu_list: "0,1,2,3,4,5,6,7"
   # fit：llama.cpp 显存适配策略（on/off）
   fit: off
   # 采样参数（可选）：缓解重复输出/贪心采样。llama.cpp 默认 repeat-penalty=1.0（无重复惩罚），

@@ -14,6 +14,7 @@
 # 回退：model/modelscope_id 改回 Qwen/Qwen3.8-27B 并清空 quantization 即可恢复 BF16。
 # name：CLI 标识符，`modelctl start qwen3.8-vllm` 使用；全局唯一
 name: qwen3.8-vllm
+group: qwen3.8
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
 engine: vllm
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
@@ -31,10 +32,14 @@ vllm:
     modelscope_id: Qwen/Qwen3.8-27B
   # tensor_parallel_size：张量并行 GPU 数（不得超过实际 GPU 数）
   tensor_parallel_size: 4
+  # gpu_list：指定使用的 GPU 设备编号（可选，默认不设=使用全部 GPU）；配置后长度必须等于 tensor_parallel_size
+  # 示例：gpu_list: "0,1,2,3"
   # max_model_len：最大上下文长度（token）
   # 注意：单序列完整可用（与并发无关）；KV 显存按 max_num_seqs × max_model_len 估算
   max_model_len: 262144
   # gpu_memory_utilization：显存利用率上限（0~1）
+  # 注意：vLLM ≥0.21 默认启用 CUDA graph memory profiling，0.92 实际等效旧版的 0.8525；
+  # 若想完全吃满显存，可改用下方 extra_args 里的 --kv-cache-memory（见其注释）
   gpu_memory_utilization: 0.92
   # quantization：量化方式（可选，如 fp8；FP8 需要 CC ≥ 8.9）
   # 默认 BF16；官方 FP8 检查点可用时改 quantization: fp8（见文件头注释）
@@ -45,7 +50,12 @@ vllm:
   # 官方 recipe 关键参数：reasoning 解析（非可选）+ 自动工具调用；MTP 投机与 batch 调优待实测：
   #   --speculative-config '{"method":"mtp","num_speculative_tokens":3}'
   #   --max-num-batched-tokens 8192 --max-num-seqs 256
-  extra_args: "--reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder"
+  # --generation-config vllm：让客户端传入的 temperature/top_k/top_p 生效，
+  #   不被模型自带 generation_config.json（Qwen3.8 为 temperature=1.0, top_k=20, top_p=0.95）覆盖
+  # --kv-cache-memory=27990797312（26.07 GiB/卡）：vLLM ≥0.21 完全吃满显存的推荐值
+  #   （4×RTX 5880 Ada 48GB 实测：权重 13.31 + 激活 4.4 + CUDA graph 2.93 GiB）；
+  #   换机器后按启动日志提示调整，或删除该项回退 gpu_memory_utilization=0.92
+  extra_args: "--reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder --generation-config vllm --kv-cache-memory=27990797312"
 
 usage:
   # price_in：每千输入 token 计价（元），供 cc-switch 用量统计

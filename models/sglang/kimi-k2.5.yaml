@@ -5,6 +5,7 @@
 # 学习要点：SGLang 与 vLLM 类似使用 HF 格式权重，通过 --tp 张量并行，适合高吞吐在线服务。
 # name：CLI 标识符，`modelctl start kimi-k2.5-sglang` 使用；全局唯一
 name: kimi-k2.5-sglang
+group: kimi-k2.5
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
 engine: sglang
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
@@ -23,6 +24,8 @@ sglang:
     modelscope_id: moonshotai/Kimi-K2.5-Instruct
   # tensor_parallel_size：张量并行 GPU 数（--tp，不得超过实际 GPU 数）
   tensor_parallel_size: 8
+  # gpu_list：指定使用的 GPU 设备编号（可选，默认不设=使用全部 GPU）；配置后长度必须等于 tensor_parallel_size
+  # 示例：gpu_list: "0,1,2,3,4,5,6,7"
   # context_length：最大上下文长度（token）
   # 注意：单序列完整可用（与并发无关）；KV 显存 ≈ 并发 × context_length
   context_length: 65536

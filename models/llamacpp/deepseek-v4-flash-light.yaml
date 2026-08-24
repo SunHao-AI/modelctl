@@ -2,6 +2,7 @@
 # 学习要点：llama.cpp 引擎通过 GGUF 分片 + DSpark 投机解码运行，适合单机多卡。
 # name：CLI 标识符，`modelctl start deepseek-v4-flash-llamacpp-light` 使用；全局唯一
 name: deepseek-v4-flash-llamacpp-light
+group: deepseek-v4-flash
 # alias：短名别名，网关/nginx 路由可用 `deepseek-v4-flash-light` 指代本模型（如 URL /210/llm/deepseek-v4-flash-light/v1）
 alias: deepseek-v4-flash-light
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
@@ -40,6 +41,8 @@ llamacpp:
   cache_type_v: q5_0
   # gpu_count：实际参与推理的 GPU 数量，决定 --tensor-split 分片
   gpu_count: 8
+  # gpu_list：指定使用的 GPU 设备编号（可选，默认不设=使用全部 GPU）；与 gpu_count 二选一，配置后覆盖 gpu_count
+  # 示例：gpu_list: "0,1,2,3,4,5,6,7"
   # fit：llama.cpp 显存适配策略（on/off）
   fit: off
   # 采样参数（可选）：缓解重复输出/贪心采样。llama.cpp 默认 repeat-penalty=1.0（无重复惩罚），

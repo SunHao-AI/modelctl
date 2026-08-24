@@ -11,4 +11,20 @@ else
     UV=uv.exe
 fi
 
-"$UV" run modelctl "$@"
+# 默认健康检查超时：vLLM 首次冷启动（torch.compile + warmup + CUDA graph 捕获）实测约 6 分钟。
+# 仅对 start/restart/all 生效，且用户显式传 --timeout 时以用户值为准。
+DEFAULT_TIMEOUT=600
+args=("$@")
+case "${1:-}" in
+start|restart|all)
+    has_timeout=false
+    for a in "$@"; do
+        if [[ "$a" == --timeout* ]]; then has_timeout=true; break; fi
+    done
+    if ! $has_timeout; then
+        args+=(--timeout "$DEFAULT_TIMEOUT")
+    fi
+    ;;
+esac
+
+"$UV" run modelctl "${args[@]}"

@@ -31,6 +31,7 @@ class Profile:
     engine_config: dict[str, Any] = field(default_factory=dict)
     usage: dict[str, Any] = field(default_factory=dict)
     aliases: list[str] = field(default_factory=list)
+    group: str | None = None
     path: Path | None = None
     tool_call_rounds: int | None = None
     max_output_tokens: int | None = None
@@ -71,6 +72,10 @@ def _to_profile(raw: dict[str, Any], path: Path) -> Profile:
     if not isinstance(engine_config, dict):
         raise ProfileError(f"{src}：{engine} 段必须是映射")
     aliases = _parse_aliases(raw, src)
+    group = raw.get("group")
+    if group is not None and (not isinstance(group, str) or not group.strip()):
+        logger.warning(f"{src}：group 必须是非空字符串，已忽略")
+        group = None
     tool_call_rounds = raw.get("tool_call_rounds")
     if tool_call_rounds is not None:
         try:
@@ -91,6 +96,7 @@ def _to_profile(raw: dict[str, Any], path: Path) -> Profile:
         engine_config=engine_config,
         usage=raw.get("usage") or {},
         aliases=aliases,
+        group=group,
         path=path,
         tool_call_rounds=tool_call_rounds,
         max_output_tokens=max_output_tokens,

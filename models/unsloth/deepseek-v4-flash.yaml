@@ -2,6 +2,7 @@
 # 学习要点：Unsloth 无头推理（unsloth studio run --api-only）支持 GGUF 动态量化；API key 运行时自动生成并打印到启动日志。
 # name：CLI 标识符，`modelctl start deepseek-v4-flash-unsloth` 使用；全局唯一
 name: deepseek-v4-flash-unsloth
+group: deepseek-v4-flash
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
 engine: unsloth
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/v1/models）
@@ -19,6 +20,8 @@ unsloth:
   context_length: 32768
   # tensor_parallel：多卡 GGUF tensor-parallel 加载（需至少 2 块 GPU）
   tensor_parallel: true
+  # gpu_list：指定使用的 GPU 设备编号（可选，默认不设=使用全部 GPU）；tensor_parallel 开启时需至少 2 块
+  # 示例：gpu_list: "0,1,2,3"
   # load_in_4bit：非 GGUF HF 模型的 4bit 加载
   load_in_4bit: false
   # Web 管理控制台（modelctl ui start）：监听 LAN 地址供 nginx/SSH 隧道转发访问；

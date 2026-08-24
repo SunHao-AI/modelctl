@@ -31,6 +31,9 @@ from modelctl.engines.base import EngineAdapter
 
 GATEWAY_PORT = 5003
 
+# 家族路由引擎优先级（数值越小越优先）；未知引擎兜底 99
+ENGINE_PRIORITY = {"vllm": 0, "sglang": 1, "unsloth": 2, "ollama": 3, "llamacpp": 4}
+
 
 @dataclass
 class ContextSwitchRule:
@@ -146,6 +149,32 @@ def build_registry(models_dir: Path | None = None, host: str = "127.0.0.1") -> d
     return registry
 
 
+def build_groups(models_dir: Path | None = None, host: str = "127.0.0.1") -> dict[str, list[GatewayModel]]:
+    """group 名 -> 按引擎优先级排序的成员 GatewayModel 列表（同引擎保持扫描顺序）。
+
+    未声明 group 的 profile 不进入任何家族；组内排序见 ENGINE_PRIORITY。
+    """
+    groups: dict[str, list[GatewayModel]] = {}
+    for profile in list_profiles(models_dir):
+        if not profile.group:
+            continue
+        adapter = get_adapter(profile.engine)(profile, Capabilities())
+        model = GatewayModel(
+            name=profile.name,
+            engine=profile.engine,
+            backend_url=f"http://{host}:{profile.port}",
+            upstream_model=adapter.upstream_model_name(),
+            api_key=profile.api_key,
+            health_url=adapter.health_url(),
+            aliases=profile.aliases,
+            adapter=adapter,
+        )
+        groups.setdefault(profile.group, []).append(model)
+    for members in groups.values():
+        members.sort(key=lambda m: ENGINE_PRIORITY.get(m.engine, 99))
+    return groups
+
+
 def apply_context_switch(
     registry: dict[str, GatewayModel],
     rules: dict[str, list[ContextSwitchRule]],
@@ -168,12 +197,32 @@ def apply_context_switch(
     return None
 
 
+def _resolve_group(groups: dict[str, list[GatewayModel]], name: str) -> GatewayModel | None:
+    """家族解析：按引擎优先级顺序返回第一个运行中且健康的成员；无则 None。"""
+    for m in groups.get(name, []):
+        if is_running(m.name) and is_model_healthy(m):
+            return m
+    return None
+
+
 def resolve_model(
-    registry: dict[str, GatewayModel], body_model: str | None, default_model: str | None
+    registry: dict[str, GatewayModel],
+    body_model: str | None,
+    default_model: str | None,
+    groups: dict[str, list[GatewayModel]] | None = None,
 ) -> GatewayModel | None:
-    """按 body.model 解析目标模型；未知或省略均回退 default_model，都不可用时返回 None。"""
+    """按 body.model 解析目标模型；支持家族（group）路由。
+
+    顺序：body_model 命中 group（家族解析，无健康成员即 None 不回退）→
+    body_model 精确匹配 name/alias → 回退 default_model（同样 group 优先）→ None。
+    groups 为 None（未启用家族路由）时行为与旧版一致。
+    """
+    if groups and body_model and body_model in groups:
+        return _resolve_group(groups, body_model)
     if body_model and body_model in registry:
         return registry[body_model]
+    if groups and default_model and default_model in groups:
+        return _resolve_group(groups, default_model)
     if default_model and default_model in registry:
         return registry[default_model]
     return None
@@ -201,17 +250,25 @@ def create_app(
     read_timeout: float = 600.0,
     transport=None,
     context_rules: dict[str, list[ContextSwitchRule]] | None = None,
+    groups: dict[str, list[GatewayModel]] | None = None,
 ):
     """构建 FastAPI 网关应用（transport 供测试注入 httpx.MockTransport）。
 
     环境变量：GATEWAY_DEFAULT_MODEL（默认模型，缺省/未知 model 回退目标）；
     GATEWAY_CONTEXT_SWITCH（JSON 上下文切换规则，见 load_context_switch_rules）。
+    groups：家族索引（group -> 成员列表）；调用方注入 registry 时缺省为空 dict，
+    未注入时自动从 models/*.yaml 构建。
     """
     import httpx
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-    registry = registry if registry is not None else build_registry()
+    if registry is None:
+        registry = build_registry()
+        if groups is None:
+            groups = build_groups()
+    else:
+        groups = groups or {}
     default_model = default_model or os.environ.get("GATEWAY_DEFAULT_MODEL")
     context_rules = context_rules if context_rules is not None else load_context_switch_rules(_env_context_rules())
     app = FastAPI(title="modelctl gateway", docs_url="/docs", openapi_url="/openapi.json")
@@ -233,20 +290,28 @@ def create_app(
             return is_running(m.name) and is_model_healthy(m)
 
         results = await asyncio.gather(*(asyncio.to_thread(_available, m) for m in models))
-        return {
-            "object": "list",
-            "data": [
-                {
-                    # 对外 id 优先用 alias（如 deepseek-v4-flash），无 alias 时回退 profile name
-                    "id": m.aliases[0] if m.aliases else m.name,
-                    "object": "model",
-                    "created": 0,
-                    "owned_by": "modelctl",
-                }
-                for m, ok in zip(models, results, strict=False)
-                if ok
-            ],
-        }
+        data = [
+            {
+                "id": m.aliases[0] if m.aliases else m.name,
+                "object": "model",
+                "created": 0,
+                "owned_by": "modelctl",
+            }
+            for m, ok in zip(models, results, strict=False)
+            if ok
+        ]
+        # 家族逻辑名：组内有健康成员时展示（id=group 名，与具体成员 id 去重）
+        existing_ids = {item["id"] for item in data}
+
+        def _group_healthy(members: list[GatewayModel]) -> bool:
+            return any(is_running(m.name) and is_model_healthy(m) for m in members)
+
+        for group_name, members in groups.items():
+            if group_name in existing_ids:
+                continue
+            if await asyncio.to_thread(_group_healthy, members):
+                data.append({"id": group_name, "object": "model", "created": 0, "owned_by": "modelctl"})
+        return {"object": "list", "data": data}
 
     @app.post("/v1/{path:path}")
     async def proxy(path: str, request: Request):
@@ -262,7 +327,7 @@ def create_app(
                 status_code=400,
                 content={"error": {"message": "请求体必须是 JSON", "type": "invalid_request_error"}},
             )
-        target = resolve_model(registry, body.get("model"), default_model)
+        target = resolve_model(registry, body.get("model"), default_model, groups)
         if target is None:
             err_msg = f"model not found: {body.get('model')}"
             return JSONResponse(

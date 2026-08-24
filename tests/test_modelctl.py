@@ -80,9 +80,9 @@ def test_status_vision_defaults(tmp_path, monkeypatch, capsys):
 
 
 def test_restart_accepts_timeout():
-    """restart 转调 start，必须提供 --timeout 参数（默认 300）。"""
+    """restart 转调 start，必须提供 --timeout 参数（默认 600）。"""
     args = cli.build_parser().parse_args(["restart", "x"])
-    assert args.timeout == 300
+    assert args.timeout == 600
     args = cli.build_parser().parse_args(["restart", "x", "--timeout", "60"])
     assert args.timeout == 60
 
@@ -99,9 +99,7 @@ def test_nginx_snippet_output(tmp_path, monkeypatch, capsys):
 def test_gateway_start_detaches(tmp_path, monkeypatch):
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     called: dict = {}
-    monkeypatch.setattr(
-        cli.all_service, "start_detached", lambda name, cmd, extra_env: called.update(name=name, cmd=cmd) or 123
-    )
+    monkeypatch.setattr(cli.all_service, "start_detached", lambda name, cmd, extra_env: called.update(name=name, cmd=cmd) or 123)
     monkeypatch.setattr(cli.all_service, "is_running", lambda name: False)
     rc = cli.main(["gateway", "start"])
     assert rc == 0
@@ -112,9 +110,7 @@ def test_gateway_start_detaches(tmp_path, monkeypatch):
 def test_gateway_stop(tmp_path, monkeypatch):
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     called: dict = {}
-    monkeypatch.setattr(
-        cli.all_service, "stop_instance", lambda name, port, patterns: called.update(name=name, port=port)
-    )
+    monkeypatch.setattr(cli.all_service, "stop_instance", lambda name, port, patterns: called.update(name=name, port=port))
     rc = cli.main(["gateway", "stop"])
     assert rc == 0
     assert called["name"] == "llm-gateway"
@@ -123,8 +119,7 @@ def test_gateway_stop(tmp_path, monkeypatch):
 
 def _write_unsloth_ui_profile(tmp_path) -> None:
     (tmp_path / "u.yaml").write_text(
-        "name: u\nengine: unsloth\nport: 30000\napi_key: k\n"
-        "unsloth:\n  model: m\n  ui:\n    port: 8888\n    allow_from: [192.168.77.202]\n",
+        "name: u\nengine: unsloth\nport: 30000\napi_key: k\n" "unsloth:\n  model: m\n  ui:\n    port: 8888\n    allow_from: [192.168.77.202]\n",
         encoding="utf-8",
     )
 
@@ -152,9 +147,7 @@ def test_ui_start_cli_overrides_yaml(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "is_running", lambda name: False)
     rules: list = []
     monkeypatch.setattr(cli, "ensure_ufw_allow", lambda src, port: rules.append((src, port)) or True)
-    rc = cli.main(
-        ["ui", "start", "u", "--port", "9999", "--allow-from", "1.2.3.4", "--models-dir", str(tmp_path)]
-    )
+    rc = cli.main(["ui", "start", "u", "--port", "9999", "--allow-from", "1.2.3.4", "--models-dir", str(tmp_path)])
     assert rc == 0
     assert "9999" in called["cmd"]
     assert rules == [("1.2.3.4", 9999)]
@@ -164,9 +157,7 @@ def test_ui_stop(tmp_path, monkeypatch):
     _write_unsloth_ui_profile(tmp_path)
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     called: dict = {}
-    monkeypatch.setattr(
-        cli, "stop_instance", lambda name, port, patterns: called.update(name=name, port=port, patterns=patterns)
-    )
+    monkeypatch.setattr(cli, "stop_instance", lambda name, port, patterns: called.update(name=name, port=port, patterns=patterns))
     monkeypatch.setattr(cli, "is_running", lambda name: True)
     rc = cli.main(["ui", "stop", "u", "--models-dir", str(tmp_path)])
     assert rc == 0
@@ -228,10 +219,14 @@ def test_all_start_error_exit_2(tmp_path, monkeypatch):
     import modelctl.cli as cli
     from modelctl.core import all_service
 
-    monkeypatch.setattr(cli.all_service, "start_all", lambda md, model_name=None, timeout=300: [
-        all_service.ComponentResult("model:x", "error", "boom"),
-        all_service.ComponentResult("gateway", "ok", ""),
-    ])
+    monkeypatch.setattr(
+        cli.all_service,
+        "start_all",
+        lambda md, model_name=None, timeout=300: [
+            all_service.ComponentResult("model:x", "error", "boom"),
+            all_service.ComponentResult("gateway", "ok", ""),
+        ],
+    )
     rc = cli.main(["all", "start", "--models-dir", str(tmp_path)])
     assert rc == 2
 
@@ -240,9 +235,13 @@ def test_all_stop_error_exit_1(tmp_path, monkeypatch):
     import modelctl.cli as cli
     from modelctl.core import all_service
 
-    monkeypatch.setattr(cli.all_service, "stop_all", lambda md: [
-        all_service.ComponentResult("gateway", "error", "boom"),
-    ])
+    monkeypatch.setattr(
+        cli.all_service,
+        "stop_all",
+        lambda md: [
+            all_service.ComponentResult("gateway", "error", "boom"),
+        ],
+    )
     rc = cli.main(["all", "stop", "--models-dir", str(tmp_path)])
     assert rc == 1
 
@@ -250,9 +249,7 @@ def test_all_stop_error_exit_1(tmp_path, monkeypatch):
 def test_gateway_restart_dispatch(tmp_path, monkeypatch):
     import modelctl.cli as cli
 
-    monkeypatch.setattr(
-        cli.all_service, "restart_gateway", lambda: cli.all_service.ComponentResult("gateway", "ok", "")
-    )
+    monkeypatch.setattr(cli.all_service, "restart_gateway", lambda: cli.all_service.ComponentResult("gateway", "ok", ""))
     rc = cli.main(["gateway", "restart"])
     assert rc == 0
 
@@ -260,8 +257,305 @@ def test_gateway_restart_dispatch(tmp_path, monkeypatch):
 def test_stats_status_dispatch(tmp_path, monkeypatch):
     import modelctl.cli as cli
 
-    monkeypatch.setattr(
-        cli.all_service, "status_stats", lambda: cli.all_service.ComponentResult("stats", "ok", "已停止")
-    )
+    monkeypatch.setattr(cli.all_service, "status_stats", lambda: cli.all_service.ComponentResult("stats", "ok", "已停止"))
     rc = cli.main(["stats", "status"])
     assert rc == 0
+
+
+def test_benchmark_token_rate_parses_sse(monkeypatch):
+    """流式 SSE 响应：TTFT=0.5s、prompt=10、completion=5 → 输入 20 tok/s、输出 10 tok/s、TTFT 500ms。"""
+    import io
+
+    import modelctl.cli as cli
+
+    sse = b'data: {"id":"x","choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n' b'data: {"id":"x","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}\n\n' b"data: [DONE]\n\n"
+
+    class _FakeResp:
+        def __init__(self, data):
+            self._buf = io.BytesIO(data)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def readable(self):
+            return True
+
+        def writable(self):
+            return False
+
+        def seekable(self):
+            return False
+
+        @property
+        def closed(self):
+            return self._buf.closed
+
+        def flush(self):
+            pass
+
+        def close(self):
+            self._buf.close()
+
+        def read(self, *a, **k):
+            return self._buf.read(*a, **k)
+
+    ticks = iter([1.0, 1.5, 2.0])  # t_start=1.0 → t_ttft=1.5 → t_end=2.0
+    monkeypatch.setattr(cli.time, "perf_counter", lambda: next(ticks))
+
+    def fake_urlopen(req, timeout=10):
+        return _FakeResp(sse)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    from types import SimpleNamespace
+
+    adapter = SimpleNamespace(
+        profile=SimpleNamespace(port=8101),
+        upstream_model_name=lambda: "m",
+        upstream_api_key=lambda: None,
+    )
+    result = cli._benchmark_token_rate(adapter)
+    assert result == (20.0, 10.0, 500)
+
+
+def test_benchmark_token_rate_timeout_returns_none(monkeypatch):
+    import modelctl.cli as cli
+
+    def fake_urlopen(req, timeout=10):
+        raise TimeoutError("timeout")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    from types import SimpleNamespace
+
+    adapter = SimpleNamespace(
+        profile=SimpleNamespace(port=8101),
+        upstream_model_name=lambda: "m",
+        upstream_api_key=lambda: None,
+    )
+    assert cli._benchmark_token_rate(adapter) is None
+
+
+def test_benchmark_token_rate_empty_stream_returns_none(monkeypatch):
+    import io
+
+    import modelctl.cli as cli
+
+    class _FakeResp:
+        def __init__(self, data):
+            self._buf = io.BytesIO(data)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def readable(self):
+            return True
+
+        def writable(self):
+            return False
+
+        def seekable(self):
+            return False
+
+        @property
+        def closed(self):
+            return self._buf.closed
+
+        def flush(self):
+            pass
+
+        def close(self):
+            self._buf.close()
+
+        def read(self, *a, **k):
+            return self._buf.read(*a, **k)
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=10: _FakeResp(b""))
+    from types import SimpleNamespace
+
+    adapter = SimpleNamespace(
+        profile=SimpleNamespace(port=8101),
+        upstream_model_name=lambda: "m",
+        upstream_api_key=lambda: None,
+    )
+    assert cli._benchmark_token_rate(adapter) is None  # 无任何 chunk → 无 TTFT
+
+
+def test_token_rate_data_uses_stats_when_valid(monkeypatch):
+    """stats 有效且速率 > 0 → 用 stats，不测速。"""
+    import io
+    import json
+
+    import modelctl.cli as cli
+
+    class _FakeResp:
+        def __init__(self, data):
+            self._buf = io.BytesIO(data)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, *a, **k):
+            return self._buf.read(*a, **k)
+
+    def fake_urlopen(req, timeout=None):
+        body = json.dumps({"isValid": True, "prompt_rate": 12.5, "predicted_rate": 33.3}).encode()
+        return _FakeResp(body)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(cli, "_benchmark_token_rate", lambda adapter: (9.9, 9.9, 100))
+    from types import SimpleNamespace
+
+    caps = SimpleNamespace()
+    profile = SimpleNamespace(name="m")
+    data = cli._token_rate_data(profile, caps)
+    assert data == {"prompt_rate": 12.5, "predicted_rate": 33.3, "ttft_ms": None, "source": "stats"}
+
+
+def test_token_rate_data_benchmarks_when_stats_zero(monkeypatch):
+    """stats 速率为 0 → 主动测速。"""
+    import io
+    import json
+
+    import modelctl.cli as cli
+
+    class _FakeResp:
+        def __init__(self, data):
+            self._buf = io.BytesIO(data)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, *a, **k):
+            return self._buf.read(*a, **k)
+
+    def fake_urlopen(req, timeout=None):
+        body = json.dumps({"isValid": True, "prompt_rate": 0.0, "predicted_rate": 0.0}).encode()
+        return _FakeResp(body)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(cli, "_benchmark_token_rate", lambda adapter: (5.0, 8.0, 300))
+    from types import SimpleNamespace
+
+    caps = SimpleNamespace()
+    profile = SimpleNamespace(name="m")
+    data = cli._token_rate_data(profile, caps)
+    assert data == {"prompt_rate": 5.0, "predicted_rate": 8.0, "ttft_ms": 300, "source": "bench"}
+
+
+def test_token_rate_data_benchmarks_when_stats_unavailable(monkeypatch):
+    """stats 服务不可用（连接失败）→ 主动测速。"""
+    import modelctl.cli as cli
+
+    def fake_urlopen(req, timeout=None):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(cli, "_benchmark_token_rate", lambda adapter: (5.0, 8.0, 300))
+    from types import SimpleNamespace
+
+    caps = SimpleNamespace()
+    profile = SimpleNamespace(name="m")
+    data = cli._token_rate_data(profile, caps)
+    assert data["source"] == "bench" and data["ttft_ms"] == 300
+
+
+def test_status_output_shows_benchmark_rates_and_ttft(monkeypatch, capsys):
+    """status 单模型：速率行带（实测）标注，且显示首 Token 耗时。"""
+    from types import SimpleNamespace
+
+    import modelctl.cli as cli
+
+    monkeypatch.setattr(
+        cli,
+        "_token_rate_data",
+        lambda profile, caps: {"prompt_rate": 20.0, "predicted_rate": 10.0, "ttft_ms": 500, "source": "bench"},
+    )
+    monkeypatch.setattr(
+        cli,
+        "list_profiles",
+        lambda models_dir=None: [SimpleNamespace(name="qwen3.8-vllm", engine="vllm", port=8101)],
+    )
+    monkeypatch.setattr(cli, "_instance_state", lambda name: "运行中")  # 运行中 → 门控放行测速；mock get_adapter 跳过健康检查
+    monkeypatch.setattr(
+        cli,
+        "get_adapter",
+        lambda engine: lambda profile, caps: SimpleNamespace(wait_ready=lambda timeout: True),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_agent_config_info",
+        lambda profile: {
+            "context_length": 262144,
+            "input_context": 253952,
+            "output_context": 8192,
+            "tool_call_rounds": "-",
+            "vision": "是",
+            "temperature": "-",
+            "top_p": "-",
+            "top_k": "-",
+        },
+    )
+    monkeypatch.setattr(cli, "_price_rate_text", lambda profile: "输入 0.5 元/千token，输出 1 元/千token")
+
+    class _Args:
+        name = "qwen3.8-vllm"
+
+    cli._cmd_status(_Args(), None, object())
+    out = capsys.readouterr().out
+    assert "输入 20.0 tok/s，输出 10.0 tok/s（实测）" in out
+    assert "首 Token 耗时：500 ms" in out
+
+
+def test_status_output_hides_rates_when_not_running(monkeypatch, capsys):
+    """未运行的模型不测速：速率与首 Token 耗时显示 -，且不调用 _token_rate_data。"""
+    from types import SimpleNamespace
+
+    import modelctl.cli as cli
+
+    monkeypatch.setattr(
+        cli,
+        "_token_rate_data",
+        lambda profile, caps: (_ for _ in ()).throw(AssertionError("未运行的模型不应触发测速")),
+    )
+    monkeypatch.setattr(
+        cli,
+        "list_profiles",
+        lambda models_dir=None: [SimpleNamespace(name="qwen3.8-vllm", engine="vllm", port=8101)],
+    )
+    monkeypatch.setattr(cli, "_instance_state", lambda name: "已停止")
+    monkeypatch.setattr(
+        cli,
+        "_agent_config_info",
+        lambda profile: {
+            "context_length": 262144,
+            "input_context": 253952,
+            "output_context": 8192,
+            "tool_call_rounds": "-",
+            "vision": "是",
+            "temperature": "-",
+            "top_p": "-",
+            "top_k": "-",
+        },
+    )
+    monkeypatch.setattr(cli, "_price_rate_text", lambda profile: "输入 0.5 元/千token，输出 1 元/千token")
+
+    class _Args:
+        name = "qwen3.8-vllm"
+
+    cli._cmd_status(_Args(), None, object())
+    out = capsys.readouterr().out
+    assert "输入 -，输出 -" in out
+    assert "首 Token 耗时：-" in out

@@ -5,6 +5,7 @@
 # 只能走 GGUF 路线。
 # name：CLI 标识符，`modelctl start qwen3-coder-llamacpp` 使用；全局唯一
 name: qwen3-coder-llamacpp
+group: qwen3-coder
 # alias：短名别名，网关/nginx 路由可用 `qwen3-coder` 指代本模型（如 URL /210/llm/qwen3-coder/v1）
 alias: qwen3-coder
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
@@ -35,15 +36,17 @@ llamacpp:
   cache_type_v: q8_0
   # gpu_count：实际参与推理的 GPU 数量，决定 --tensor-split 分片（本机 8 卡全用）
   gpu_count: 8
+  # gpu_list：指定使用的 GPU 设备编号（可选，默认不设=使用全部 GPU）；与 gpu_count 二选一，配置后覆盖 gpu_count
+  # 示例：gpu_list: "0,1,2,3,4,5,6,7"
   # fit：llama.cpp 显存适配策略（on/off）
   fit: off
   # 采样参数（可选）：缓解重复输出/贪心采样。llama.cpp 默认 repeat-penalty=1.0（无重复惩罚），
   # 缺省不传时保持引擎默认行为
-  repeat_penalty: 1.1      # 重复惩罚（1.0=关闭；1.05~1.15 可有效中断循环）
-  repeat_last_n: 256       # 对最后 N 个 token 施加重复惩罚
-  temperature: 0.6         # 采样温度（0=贪心，易重复；建议 0.6~0.8）
-  top_p: 0.95              # 核采样阈值
-  top_k: 40                # 候选 token 数
+  repeat_penalty: 1.1 # 重复惩罚（1.0=关闭；1.05~1.15 可有效中断循环）
+  repeat_last_n: 256 # 对最后 N 个 token 施加重复惩罚
+  temperature: 0.6 # 采样温度（0=贪心，易重复；建议 0.6~0.8）
+  top_p: 0.95 # 核采样阈值
+  top_k: 40 # 候选 token 数
   # download：模型不存在时的自动下载配置（ModelScope，GGUF 格式）
   # 注意：仓库 ID 与量化名以 ModelScope 实际可用为准，启动前请核对
   download:

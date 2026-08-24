@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -78,7 +79,8 @@ def build_parser() -> argparse.ArgumentParser:
         p = sub.add_parser(cmd)
         p.add_argument("name", nargs="?" if cmd == "status" else None)
         if cmd in ("start", "restart"):
-            p.add_argument("--timeout", type=float, default=300, help="健康检查超时秒数（默认 300）")
+            # 默认 600s：vLLM 首次冷启动（torch.compile + warmup + CUDA graph 捕获）实测约 6 分钟
+            p.add_argument("--timeout", type=float, default=600, help="健康检查超时秒数（默认 600）")
             p.add_argument("--gpus", default=None, help="逗号分隔的 GPU 索引，如 0,1,2（覆盖环境变量 MODELCTL_GPUS）")
     sub.add_parser("list", help="列出所有 profile")
     sub.add_parser("probe", help="探测硬件与引擎二进制")
@@ -89,7 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap = sub.add_parser("all", help="一键启停（默认模型 + 网关 + 统计）")
     ap.add_argument("action", choices=["start", "stop", "restart", "status"])
     ap.add_argument("--model", default=None, help="默认模型 profile（缺省解析 GATEWAY_DEFAULT_MODEL）")
-    ap.add_argument("--timeout", type=float, default=300, help="模型健康检查超时秒数（默认 300）")
+    ap.add_argument("--timeout", type=float, default=600, help="模型健康检查超时秒数（默认 600）")
     ap.add_argument("--gpus", default=None, help="逗号分隔的 GPU 索引，如 0,1,2（覆盖环境变量 MODELCTL_GPUS）")
     up = sub.add_parser("ui", help="Web 管理控制台控制（unsloth studio UI）")
     up.add_argument("action", choices=["start", "stop"])
@@ -252,11 +254,79 @@ def _price_rate_text(profile: Profile) -> str:
     return f"输入 {_fmt(price_in)} 元/千token，输出 {_fmt(price_out)} 元/千token"
 
 
-def _live_token_rate_text(profile: Profile) -> str:
-    """实时 token 速率（tok/s）：查询用量统计服务 /api/usage。
+def _benchmark_token_rate(adapter) -> tuple[float, float, int] | None:
+    """主动测速：发一次短流式请求，返回 (input_rate, output_rate, ttft_ms)。
 
-    返回如 "输入 0.0 tok/s，输出 12.5 tok/s"；stats 服务未运行、模型不支持
-    精确统计或数据不可用时返回 "输入 -，输出 -（stats 服务不可用）"。
+    输入速率 = prompt_tokens / TTFT（prefill）；输出速率 = completion_tokens / (总耗时 - TTFT)（decode）。
+    TTFT 取首个非 [DONE] 的 data: 事件到达时刻（reasoning 模型为思考首 token 时刻）。
+    请求失败 / 超时 / 空响应返回 None。
+    """
+    import io
+
+    profile = adapter.profile
+    body = json.dumps(
+        {
+            "model": adapter.upstream_model_name(),
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+    ).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    key = adapter.upstream_api_key()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    url = f"http://127.0.0.1:{profile.port}/v1/chat/completions"
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    t_start = time.perf_counter()
+    t_ttft: float | None = None
+    t_end: float | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            reader = io.TextIOWrapper(resp, encoding="utf-8", errors="replace")
+            for line in reader:
+                line = line.strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if not payload or payload == "[DONE]":
+                    continue
+                if t_ttft is None:
+                    t_ttft = time.perf_counter()
+                try:
+                    data = json.loads(payload)
+                except ValueError:
+                    continue
+                usage = data.get("usage") if isinstance(data, dict) else None
+                if isinstance(usage, dict):
+                    if isinstance(usage.get("prompt_tokens"), int):
+                        prompt_tokens = usage["prompt_tokens"]
+                    if isinstance(usage.get("completion_tokens"), int):
+                        completion_tokens = usage["completion_tokens"]
+            t_end = time.perf_counter()
+    except (OSError, ValueError):
+        return None
+    if t_ttft is None or t_end is None:
+        return None
+    ttft_s = t_ttft - t_start
+    if ttft_s <= 0:
+        return None
+    prompt_tokens = prompt_tokens if prompt_tokens is not None else len("hi") // 4
+    completion_tokens = completion_tokens if completion_tokens is not None else 1
+    input_rate = round(prompt_tokens / ttft_s, 1)
+    decode_s = (t_end - t_start) - ttft_s
+    output_rate = round(completion_tokens / decode_s, 1) if decode_s > 0 else 0.0
+    return input_rate, output_rate, round(ttft_s * 1000)
+
+
+def _token_rate_data(profile, caps) -> dict:
+    """Token 速率数据：stats 优先，无效/为 0 时主动测速。
+
+    返回 {"prompt_rate": float|None, "predicted_rate": float|None,
+          "ttft_ms": int|None, "source": "stats"|"bench"|None}。
     """
     port = int(os.environ.get("USAGE_PORT", "5002"))
     url = f"http://127.0.0.1:{port}/api/usage?model={profile.name}"
@@ -264,14 +334,30 @@ def _live_token_rate_text(profile: Profile) -> str:
         with urllib.request.urlopen(url, timeout=2) as resp:
             data = json.loads(resp.read().decode("utf-8", errors="replace"))
     except (OSError, ValueError, json.JSONDecodeError):
-        return "输入 -，输出 -（stats 服务未运行）"
-    if not isinstance(data, dict) or not data.get("isValid"):
-        return "输入 -，输出 -（stats 服务无数据）"
-    prompt_rate = data.get("prompt_rate")
-    predicted_rate = data.get("predicted_rate")
-    if isinstance(prompt_rate, (int, float)) and isinstance(predicted_rate, (int, float)):
-        return f"输入 {prompt_rate:.1f} tok/s，输出 {predicted_rate:.1f} tok/s"
-    return "输入 -，输出 -（stats 服务无数据）"
+        data = {}
+    if isinstance(data, dict) and data.get("isValid"):
+        prompt_rate = data.get("prompt_rate")
+        predicted_rate = data.get("predicted_rate")
+        if isinstance(prompt_rate, (int, float)) and isinstance(predicted_rate, (int, float)) and (prompt_rate > 0 or predicted_rate > 0):
+            return {
+                "prompt_rate": float(prompt_rate),
+                "predicted_rate": float(predicted_rate),
+                "ttft_ms": None,
+                "source": "stats",
+            }
+    # stats 无效/速率为 0 → 主动测速
+    try:
+        adapter = get_adapter(profile.engine)(profile, caps)
+    except Exception:  # noqa: BLE001 —— 构造 adapter 失败（如 profile 无 engine）不阻塞测速尝试
+        adapter = None
+    try:
+        result = _benchmark_token_rate(adapter)
+    except Exception:  # noqa: BLE001 —— 测速失败不阻塞 status 输出
+        result = None
+    if result is None:
+        return {"prompt_rate": None, "predicted_rate": None, "ttft_ms": None, "source": None}
+    prompt_rate, predicted_rate, ttft_ms = result
+    return {"prompt_rate": prompt_rate, "predicted_rate": predicted_rate, "ttft_ms": ttft_ms, "source": "bench"}
 
 
 def _cmd_status(args, models_dir: Path | None, caps) -> int:
@@ -306,7 +392,20 @@ def _cmd_status(args, models_dir: Path | None, caps) -> int:
         print(f"  Top P：{info['top_p']}")
         print(f"  Top K：{info['top_k']}")
         print(f"  Token 计费：{_price_rate_text(profiles[0])}")
-        print(f"  Token 速率：{_live_token_rate_text(profiles[0])}")
+        if _instance_state(profiles[0].name) == "运行中":
+            rate = _token_rate_data(profiles[0], caps)
+            if rate["source"] is None:
+                rate_text = "输入 -，输出 -（测速失败）"
+            else:
+                rate_text = f"输入 {rate['prompt_rate']:.1f} tok/s，输出 {rate['predicted_rate']:.1f} tok/s"
+                if rate["source"] == "bench":
+                    rate_text += "（实测）"
+            print(f"  Token 速率：{rate_text}")
+            ttft = rate["ttft_ms"]
+            print(f"  首 Token 耗时：{ttft} ms" if ttft is not None else "  首 Token 耗时：-")
+        else:
+            print("  Token 速率：输入 -，输出 -")
+            print("  首 Token 耗时：-")
     return 0
 
 

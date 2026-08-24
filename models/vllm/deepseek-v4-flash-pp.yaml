@@ -6,6 +6,7 @@
 # 若性能无提升或启动失败，删除本文件即可，不影响其他配置。
 # name：CLI 标识符，`modelctl start deepseek-v4-flash-vllm-pp` 使用；全局唯一
 name: deepseek-v4-flash-vllm-pp
+group: deepseek-v4-flash
 # alias：服务显示别名
 alias: deepseek-v4-flash-pp
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）

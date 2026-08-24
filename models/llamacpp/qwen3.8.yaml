@@ -2,6 +2,7 @@
 # 学习要点：Qwen 无 DSpark 草稿，dspark 必须 off；其余字段与 DeepSeek 配置一致。
 # name：CLI 标识符，`modelctl start qwen3.8-llamacpp` 使用；全局唯一
 name: qwen3.8-llamacpp
+group: qwen3.8
 # alias：短名别名，网关/nginx 路由可用 `qwen3.8` 指代本模型（如 URL /210/llm/qwen3.8/v1）
 alias: qwen3.8
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
@@ -44,6 +45,8 @@ llamacpp:
   cache_type_v: q8_0
   # gpu_count：实际参与推理的 GPU 数量，决定 --tensor-split 分片
   gpu_count: 8
+  # gpu_list：指定使用的 GPU 设备编号（可选，默认不设=使用全部 GPU）；与 gpu_count 二选一，配置后覆盖 gpu_count
+  # 示例：gpu_list: "0,1,2,3,4,5,6,7"
   # fit：llama.cpp 显存适配策略（on/off）
   fit: off
   # 采样参数（可选）：缓解重复输出/贪心采样。llama.cpp 默认 repeat-penalty=1.0（无重复惩罚），
