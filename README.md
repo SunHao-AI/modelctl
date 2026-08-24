@@ -147,6 +147,30 @@ ModelScope 下载模型：
 
 环境变量 `MODEL_ROOT` 控制下载目录（默认：项目根目录上级的 `model-gguf/` 或 `model-hf/`）。
 
+### 2.6 查看可用模型目录
+
+`modelctl list` 按模型家族（group）分组展示全部可用 profile，含引擎、变体、端口与运行状态：
+
+```bash
+uv run modelctl list
+```
+
+输出示例（节选）：
+
+```
+deepseek-v4-flash（10 配置）
+引擎      变体   端口   状态    标识符
+--------  -----  -----  ------  --------------------------------
+vllm      -      8100   已停止  deepseek-v4-flash-vllm
+vllm      high   8103   已停止  deepseek-v4-flash-vllm-high
+vllm      light  8104   已停止  deepseek-v4-flash-vllm-light
+vllm      pp     8106   已停止  deepseek-v4-flash-vllm-pp
+sglang    -      8200   已停止  deepseek-v4-flash-sglang
+...
+```
+
+组内按引擎优先级排序（vllm 优先，与网关家族路由一致），默认变体（`-`）在前。
+
 ### 3. 启动服务
 
 ```bash

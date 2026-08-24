@@ -7,6 +7,27 @@ def test_list_empty(tmp_path, monkeypatch, capsys):
     assert rc == 0
 
 
+def test_list_grouped_catalog(tmp_path, monkeypatch, capsys):
+    """list 按家族分组展示，含引擎/变体/端口/状态/标识符列。"""
+    (tmp_path / "qwen3.8.yaml").write_text(
+        "group: qwen3.8\nengine: vllm\nport: 8101\nvllm:\n  model: q\n", encoding="utf-8"
+    )
+    (tmp_path / "qwen3.8-light.yaml").write_text(
+        "group: qwen3.8\nvariant: light\nengine: vllm\nport: 8105\nvllm:\n  model: q\n", encoding="utf-8"
+    )
+    (tmp_path / "flash.yaml").write_text(
+        "group: deepseek-v4-flash\nengine: ollama\nport: 11434\nollama:\n  model: d\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+    rc = cli.main(["list", "--models-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "deepseek-v4-flash（1 配置）" in out
+    assert "qwen3.8（2 配置）" in out
+    assert "qwen3.8-vllm" in out and "qwen3.8-vllm-light" in out
+    assert "light" in out and "8105" in out
+
+
 def test_profile_error_exit_code(tmp_path, capsys):
     rc = cli.main(["start", "ghost", "--models-dir", str(tmp_path)])
     assert rc == 2

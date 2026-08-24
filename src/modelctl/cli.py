@@ -410,9 +410,29 @@ def _cmd_status(args, models_dir: Path | None, caps) -> int:
 
 
 def _cmd_list(args, models_dir: Path | None, caps) -> int:
+    """列出可用模型目录：按家族（group）分组，展示引擎/变体/端口/状态。"""
+    from modelctl.core.gateway import ENGINE_PRIORITY
+
     profiles = list_profiles(models_dir)
-    rows = [[p.name, p.engine, p.port] for p in profiles]
-    _print_table(["名称", "引擎", "端口"], rows)
+    if not profiles:
+        logger.info("models 目录下暂无可用 profile")
+        return 0
+
+    grouped: dict[str, list[Profile]] = {}
+    for p in profiles:
+        grouped.setdefault(p.group or "（未分组）", []).append(p)
+    # 组内排序：引擎优先级（与网关家族路由一致，vllm 优先）→ 默认变体优先 → name
+    for members in grouped.values():
+        members.sort(key=lambda p: (ENGINE_PRIORITY.get(p.engine, 99), p.variant, p.name))
+
+    for group_name in sorted(grouped):
+        members = grouped[group_name]
+        print(f"{group_name}（{len(members)} 配置）")
+        rows = [
+            [p.engine, p.variant or "-", p.port, _instance_state(p.name), p.name]
+            for p in members
+        ]
+        _print_table(["引擎", "变体", "端口", "状态", "标识符"], rows)
     return 0
 
 
