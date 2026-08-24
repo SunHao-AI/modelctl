@@ -136,3 +136,14 @@ def test_stop_instance_posix_uses_fuser_pkill(monkeypatch, tmp_path):
     assert any("fuser" in r for r in ran)
     assert any(r and r[0] == "pkill" and "foo" in r for r in ran)
     assert not any("taskkill" in r for r in ran)
+
+
+def test_is_pid_alive_current_process():
+    import os
+
+    assert process.is_pid_alive(os.getpid()) is True
+
+
+def test_is_pid_alive_dead_pid(dead_pid):
+    # dead_pid fixture（conftest）：确定已死的真实 PID，不假设某个大数一定无效
+    assert process.is_pid_alive(dead_pid) is False

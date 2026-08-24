@@ -155,3 +155,15 @@ def test_list_profiles_prefers_root_over_subdir(tmp_path, monkeypatch, caplog):
     profiles = list_profiles(tmp_path)
     assert [p.name for p in profiles] == ["qwen3"]
     assert profiles[0].engine == "ollama"
+
+
+def test_tool_call_rounds_parsed(tmp_path):
+    d = _write(tmp_path, "name: demo\nengine: vllm\nport: 8000\ntool_call_rounds: 5\n")
+    p = load_profile("demo", d)
+    assert p.tool_call_rounds == 5
+
+
+def test_tool_call_rounds_invalid_rejected(tmp_path):
+    d = _write(tmp_path, "name: demo\nengine: vllm\nport: 8000\ntool_call_rounds: not_a_number\n")
+    with pytest.raises(ProfileError, match="tool_call_rounds"):
+        load_profile("demo", d)

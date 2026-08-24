@@ -14,6 +14,28 @@ from pathlib import Path
 
 from modelctl.core.envfile import PROJECT_ROOT
 
+if sys.platform == "win32":
+    import ctypes
+
+
+def is_pid_alive(pid: int) -> bool:
+    """探测 pid 对应进程是否存活（PID 文件 / GPU 锁共用的统一入口）。"""
+    if sys.platform == "win32":
+        # Windows 实测：对不存在的 PID 调 CPython os.kill(pid, 0)（内部 OpenProcess）
+        # 之后控制台会被投递异步 Ctrl-C 事件、连带杀掉宿主会话；改用 ctypes 直连
+        # kernel32.OpenProcess 做存在性探测可完全规避。
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+    try:
+        os.kill(pid, 0)  # signal 0 = existence probe
+        return True
+    except OSError:
+        return False
+
 
 def log_dir() -> Path:
     d = Path(os.environ.get("LOG_DIR") or PROJECT_ROOT.parent / "logs")
@@ -62,13 +84,11 @@ def is_running(name: str) -> bool:
         # 无法解析的 PID 文件直接删除，视为异常
         pf.unlink(missing_ok=True)
         return False
-    try:
-        os.kill(pid, 0)
+    if is_pid_alive(pid):
         return True
-    except OSError:
-        # 进程已不存在，清理残留的 PID 文件
-        pf.unlink(missing_ok=True)
-        return False
+    # 进程已不存在，清理残留的 PID 文件
+    pf.unlink(missing_ok=True)
+    return False
 
 
 def stop_instance(name: str, port: int, patterns: list[str]) -> bool:
@@ -89,11 +109,9 @@ def stop_instance(name: str, port: int, patterns: list[str]) -> bool:
                     pass
                 deadline = time.time() + 10
                 while time.time() < deadline:
-                    try:
-                        os.kill(pid, 0)
-                        time.sleep(0.5)
-                    except OSError:
+                    if not is_pid_alive(pid):
                         break
+                    time.sleep(0.5)
                 else:
                     try:
                         os.killpg(pid, signal.SIGKILL)  # type: ignore[attr-defined]  # POSIX-only，Windows 类型桩无此 API

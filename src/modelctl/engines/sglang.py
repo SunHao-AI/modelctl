@@ -8,6 +8,7 @@ import shlex
 import sys
 from pathlib import Path
 
+from modelctl.core.capabilities import all_vram_total_mb, selected_vram_total_mb
 from modelctl.core.envfile import PROJECT_ROOT
 from modelctl.core.gpu_lock import acquire_gpu_lock
 from modelctl.core.gpu_utils import GPUValidationError
@@ -38,9 +39,33 @@ class SglangAdapter(EngineAdapter):
             tp = int(cfg.get("tensor_parallel_size", 1))
             if self.caps.gpu_count and tp > self.caps.gpu_count:
                 raise RequirementError(f"tensor_parallel_size={tp} 超过实际 GPU 数 {self.caps.gpu_count}")
+        self._check_vram_advisory(cfg, gpus)
         self.run_compat_checks()  # 预检：软件规则 + 模型 id 特征
         if gpus is not None:
             acquire_gpu_lock(self.profile.name, gpus)
+
+    def _check_vram_advisory(self, cfg: dict, gpus: list[int] | None) -> None:
+        """HF 权重粗估（spec §2.1）：权重大小超可用显存上限时仅告警、不硬拦截。
+
+        上限按 总显存 × mem_fraction_static 估算；未计 KV cache/激活，
+        HF 权重加载行为复杂，故不做硬性 block（sglang 自身启动时会 OOM 报错）。
+        """
+        model = Path(str(cfg.get("model") or "")).expanduser()
+        if not model.is_dir():
+            return  # 尚未下载或非本地路径，无法估算
+        size_bytes = sum(p.stat().st_size for pat in ("*.safetensors", "*.bin") for p in model.rglob(pat))
+        weights_mb = size_bytes / 1024 / 1024
+        if weights_mb <= 0:
+            return
+        fraction = float(cfg.get("mem_fraction_static", 0.85))
+        total_mb = selected_vram_total_mb(self.caps, gpus) if gpus else all_vram_total_mb(self.caps)
+        cap_mb = total_mb * fraction
+        if total_mb > 0 and weights_mb > cap_mb:
+            self.warnings.append(
+                f"模型权重约 {weights_mb:.0f}MB，超过估算可用显存上限 {cap_mb:.0f}MB"
+                f"（总显存 {total_mb}MB × mem_fraction_static={fraction}，未计 KV cache）；"
+                "若实际剩余显存不足 sglang 启动会失败，可更换 gpu_list 或调整 mem_fraction_static"
+            )
 
     def pre_start(self) -> None:
         cfg = self.profile.engine_config

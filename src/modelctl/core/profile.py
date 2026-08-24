@@ -32,6 +32,7 @@ class Profile:
     usage: dict[str, Any] = field(default_factory=dict)
     aliases: list[str] = field(default_factory=list)
     path: Path | None = None
+    tool_call_rounds: int | None = None
 
 
 def _interpolate(value: Any, source: str) -> Any:
@@ -69,6 +70,12 @@ def _to_profile(raw: dict[str, Any], path: Path) -> Profile:
     if not isinstance(engine_config, dict):
         raise ProfileError(f"{src}：{engine} 段必须是映射")
     aliases = _parse_aliases(raw, src)
+    tool_call_rounds = raw.get("tool_call_rounds")
+    if tool_call_rounds is not None:
+        try:
+            tool_call_rounds = int(tool_call_rounds)
+        except (TypeError, ValueError) as exc:
+            raise ProfileError(f"{src}：tool_call_rounds 必须是整数") from exc
     return Profile(
         name=str(raw["name"]),
         engine=engine,
@@ -78,6 +85,7 @@ def _to_profile(raw: dict[str, Any], path: Path) -> Profile:
         usage=raw.get("usage") or {},
         aliases=aliases,
         path=path,
+        tool_call_rounds=tool_call_rounds,
     )
 
 

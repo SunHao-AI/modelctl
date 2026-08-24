@@ -38,7 +38,7 @@ from modelctl.core.process import (
     start_detached,
     stop_instance,
 )
-from modelctl.core.profile import ProfileError, list_profiles, load_profile
+from modelctl.core.profile import Profile, ProfileError, list_profiles, load_profile
 from modelctl.core.ufw import ensure_ufw_allow
 from modelctl.engines import get_adapter
 from modelctl.engines.base import RequirementError
@@ -170,6 +170,38 @@ def _cmd_restart(args, models_dir: Path | None, caps) -> int:
     return 0 if r.status in ("ok", "skipped") else 1
 
 
+def _agent_config_info(profile: Profile) -> dict[str, str]:
+    """从 profile 提取智能体常用配置参数（上下文窗口、采样参数、视觉支持等）。"""
+    ec = profile.engine_config
+    engine = profile.engine
+
+    if engine == "llamacpp":
+        ctx = ec.get("ctx_size")
+        # llamacpp 的 ctx_size 留空时引擎默认 1,048,576 tokens/槽
+        ctx_display = "1048576" if ctx in (None, "") else str(int(ctx))
+    elif engine == "vllm":
+        ctx = ec.get("max_model_len")
+        ctx_display = str(int(ctx)) if ctx is not None else "-"
+    else:  # ollama / sglang / unsloth
+        ctx = ec.get("context_length")
+        ctx_display = str(int(ctx)) if ctx is not None else "-"
+
+    if engine == "llamacpp":
+        vision_val = str(ec.get("vision", "off")).lower()
+        vision = "是" if vision_val in ("on", "true", "yes", "1") else "否"
+    else:
+        vision = "否"
+
+    return {
+        "context_window": ctx_display,
+        "tool_call_rounds": str(profile.tool_call_rounds) if profile.tool_call_rounds is not None else "-",
+        "vision": vision,
+        "temperature": str(ec.get("temperature", "-")),
+        "top_p": str(ec.get("top_p", "-")),
+        "top_k": str(ec.get("top_k", "-")),
+    }
+
+
 def _cmd_status(args, models_dir: Path | None, caps) -> int:
     profiles = list_profiles(models_dir)
     if args.name:
@@ -190,6 +222,15 @@ def _cmd_status(args, models_dir: Path | None, caps) -> int:
                 health = "未知"
         rows.append([p.name, p.engine, p.port, state, health])
     _print_table(["名称", "引擎", "端口", "状态", "健康"], rows)
+    if args.name and profiles:
+        info = _agent_config_info(profiles[0])
+        print("\n智能体配置参考：")
+        print(f"  推荐上下文窗口：{info['context_window']}")
+        print(f"  工具调用轮数：   {info['tool_call_rounds']}")
+        print(f"  支持图片输入： {info['vision']}")
+        print(f"  Temperature：    {info['temperature']}")
+        print(f"  Top P：          {info['top_p']}")
+        print(f"  Top K：          {info['top_k']}")
     return 0
 
 

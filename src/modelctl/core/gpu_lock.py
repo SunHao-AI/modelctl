@@ -9,33 +9,11 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import time
 from pathlib import Path
 
 from modelctl.core.envfile import PROJECT_ROOT
-
-if sys.platform == "win32":
-    import ctypes
-
-
-def _pid_alive(pid: int) -> bool:
-    """探测 pid 对应进程是否存活。"""
-    if sys.platform == "win32":
-        # Windows 实测：对不存在的 PID 调 CPython os.kill(pid, 0)（内部 OpenProcess）
-        # 之后控制台会被投递异步 Ctrl-C 事件、连带杀掉宿主会话；改用 ctypes 直连
-        # kernel32.OpenProcess 做存在性探测可完全规避。
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if not handle:
-            return False
-        ctypes.windll.kernel32.CloseHandle(handle)
-        return True
-    try:
-        os.kill(pid, 0)  # signal 0 = existence probe
-        return True
-    except OSError:
-        return False
+from modelctl.core.process import is_pid_alive
 
 # 注意：不在模块顶层 import modelctl.engines.base —— engines/__init__ 会立即导入
 # llamacpp/unsloth（它们又在本模块被导入），首个入口是 gpu_lock 时会构成循环导入；
@@ -56,7 +34,7 @@ def _read_lock(path: Path) -> dict | None:
     except (OSError, ValueError):
         return None
     if isinstance(data, dict) and "pid" in data:
-        if _pid_alive(int(data["pid"])):
+        if is_pid_alive(int(data["pid"])):
             return data
         path.unlink(missing_ok=True)  # holder gone → stale lock, clean up
         return None

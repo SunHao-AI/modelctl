@@ -148,6 +148,11 @@ def free_vram_total_mb(caps: Capabilities) -> int:
     return sum(caps.vram_free_mb)
 
 
+def all_vram_total_mb(caps: Capabilities) -> int:
+    """汇总所有 GPU 的总显存（MB）。"""
+    return sum(caps.vram_total_mb_per_gpu)
+
+
 def selected_vram_total_mb(caps: Capabilities, gpus: list[int]) -> int:
     """按选中 GPU 索引汇总各卡总显存。"""
     return sum((caps.vram_total_mb_per_gpu[g] if g < len(caps.vram_total_mb_per_gpu) else 0) for g in gpus)

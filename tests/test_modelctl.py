@@ -23,6 +23,32 @@ def test_status_output(tmp_path, monkeypatch, capsys):
     assert rc == 0 and "a" in out and "vllm" in out and "8000" in out
 
 
+def test_status_name_shows_agent_config(tmp_path, monkeypatch, capsys):
+    yaml_text = (
+        "name: agent\nengine: llamacpp\nport: 18889\n"
+        "tool_call_rounds: 3\n"
+        "llamacpp:\n"
+        "  model: /x.gguf\n"
+        "  ctx_size: 32768\n"
+        "  vision: on\n"
+        "  temperature: 0.6\n"
+        "  top_p: 0.95\n"
+        "  top_k: 40\n"
+    )
+    (tmp_path / "agent.yaml").write_text(yaml_text, encoding="utf-8")
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+    rc = cli.main(["status", "agent", "--models-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "智能体配置参考" in out
+    assert "32768" in out
+    assert "3" in out
+    assert "是" in out
+    assert "0.6" in out
+    assert "0.95" in out
+    assert "40" in out
+
+
 def test_restart_accepts_timeout():
     """restart 转调 start，必须提供 --timeout 参数（默认 300）。"""
     args = cli.build_parser().parse_args(["restart", "x"])

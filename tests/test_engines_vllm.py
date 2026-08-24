@@ -224,3 +224,54 @@ def test_vllm_gpu_conflict_blocks_second_model(tmp_path, monkeypatch):
     b = get_adapter("vllm")(load_profile("vb", tmp_path), caps)
     with pytest.raises(RequirementError):
         b.check_requirements()
+
+
+def test_vllm_warns_when_weights_exceed_selected_cap(tmp_path, monkeypatch):
+    # 权重超所选卡可用上限（总×util）→ 仅告警、不拦截；且按所选卡而非全卡估算
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    model_dir = tmp_path / "big"
+    model_dir.mkdir()
+    (model_dir / "model.safetensors").write_bytes(b"x" * 3 * 1024 * 1024)  # ~3MB 权重
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: vllm\nport: 8000\nvllm:\n"
+        f"  model: {model_dir}\n  gpu_list: '0'\n  tensor_parallel_size: 1\n",
+    )
+    # GPU0 总显存 3MB（×0.9=2.7 < 3 → 触发）；GPU1 充足，证明只按所选卡估算
+    caps = Capabilities(
+        gpu_count=2, gpu_indices=[0, 1], compute_capability="9.0", binaries={"vllm": True},
+        vram_total_mb_per_gpu=[3, 9000],
+    )
+    a = get_adapter("vllm")(p, caps)
+    a.check_requirements()
+    assert any("权重" in w for w in a.warnings)
+
+
+def test_vllm_no_warn_when_weights_fit(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_HOME", "/raid5/sh/model/huggingface")
+    model_dir = tmp_path / "small"
+    model_dir.mkdir()
+    (model_dir / "model.safetensors").write_bytes(b"x" * 3 * 1024 * 1024)
+    p = _write(tmp_path, f"name: q\nengine: vllm\nport: 8000\nvllm:\n  model: {model_dir}\n")
+    caps = Capabilities(
+        gpu_count=2, gpu_indices=[0, 1], compute_capability="9.0", binaries={"vllm": True},
+        vram_total_mb_per_gpu=[8000, 8000],
+    )
+    a = get_adapter("vllm")(p, caps)
+    a.check_requirements()
+    assert not any("权重" in w for w in a.warnings)
+
+
+def test_sglang_warns_when_weights_exceed_cap(tmp_path, monkeypatch):
+    # 未指定 gpu_list → 按全卡总显存 × mem_fraction_static(默认0.85) 估算：2×0.85=1.7 < 3 → 告警
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    model_dir = tmp_path / "big-sg"
+    model_dir.mkdir()
+    (model_dir / "model.safetensors").write_bytes(b"x" * 3 * 1024 * 1024)
+    p = _write(tmp_path, f"name: s\nengine: sglang\nport: 30000\nsglang:\n  model: {model_dir}\n")
+    caps = Capabilities(
+        gpu_count=1, gpu_indices=[0], compute_capability="9.0", binaries={"sglang": True}, vram_total_mb_per_gpu=[2]
+    )
+    a = get_adapter("sglang")(p, caps)
+    a.check_requirements()
+    assert any("权重" in w for w in a.warnings)
