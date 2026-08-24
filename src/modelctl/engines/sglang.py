@@ -134,4 +134,5 @@ class SglangAdapter(EngineAdapter):
         return self.profile.name
 
     def stop_patterns(self) -> list[str]:
-        return ["sglang"]
+        # 用启动模块特征而非引擎短名，避免 pkill 误杀 modelctl 自身（命令行含 profile 名）
+        return ["sglang.launch_server"]

@@ -206,4 +206,5 @@ class UnslothAdapter(EngineAdapter):
             pass  # 预热失败不影响启动结果
 
     def stop_patterns(self) -> list[str]:
-        return ["unsloth"]
+        # 用启动命令特征而非引擎短名，避免 pkill 误杀 modelctl 自身（命令行含 profile 名）
+        return ["unsloth studio run"]

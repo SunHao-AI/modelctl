@@ -136,4 +136,6 @@ class VllmAdapter(EngineAdapter):
         return self.profile.name
 
     def stop_patterns(self) -> list[str]:
-        return ["vllm"]
+        # 用启动命令特征而非引擎短名：`modelctl stop qwen3.8-vllm` 自身命令行
+        # 含 "vllm"，若 pkill -f "vllm" 会误杀 modelctl 进程（shell 打印 Terminated）
+        return ["vllm serve"]

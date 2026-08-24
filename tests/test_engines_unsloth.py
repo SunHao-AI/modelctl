@@ -174,7 +174,7 @@ def test_unsloth_health_url_and_metrics(tmp_path):
     a = get_adapter("unsloth")(p, CAPS8)
     assert a.health_url() == "http://127.0.0.1:30000/v1/models"
     assert a.metrics_mapping() is None
-    assert a.stop_patterns() == ["unsloth"]
+    assert a.stop_patterns() == ["unsloth studio run"]  # 启动命令特征，避免误杀 modelctl 自身
 
 
 def test_unsloth_pre_start_downloads_and_persists(tmp_path, monkeypatch):
