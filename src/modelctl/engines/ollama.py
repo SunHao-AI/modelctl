@@ -31,8 +31,10 @@ class OllamaAdapter(EngineAdapter):
             raise RequirementError("未安装 ollama（PATH 中找不到 ollama 命令）")
         if not self.profile.engine_config.get("model"):
             raise RequirementError(f"{self.profile.name}：ollama.model 必填（如 qwen3:32b）")
-        # 注意：`ollama serve` 是共享常驻进程，CUDA_VISIBLE_DEVICES 会限制该服务可见的
-        # 全部 GPU（影响所有 ollama 模型），无 per-model 隔离。
+        # 附录 B.5：适配器按 profile 的 port 设置 OLLAMA_HOST（build_command 内），
+        # 因此**支持**每个 ollama profile 用独立端口启动各自 serve 并配合 gpu_list 隔离 GPU。
+        # 注意：现有 ollama/*.yaml 均使用 11434（共享 serve 语义），stop 时仅卸载模型不杀进程
+        #（见 all_service.stop_profile 的 ollama 特判）；如需 per-profile 隔离，请给 profile 配不同端口。
         try:
             gpus = self.selected_gpus()
         except (GPUValidationError, ValueError) as exc:

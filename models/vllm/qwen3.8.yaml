@@ -23,9 +23,11 @@ vllm:
   # 注意：单序列完整可用（与并发无关）；KV 显存按 max_num_seqs × max_model_len 估算
   max_model_len: 262144
   # gpu_memory_utilization：显存利用率上限（0~1）
-  gpu_memory_utilization: 0.9
+  gpu_memory_utilization: 0.92
   # quantization：量化方式（可选，如 fp8；FP8 需要 CC ≥ 8.9）
   quantization: ""
+  # kv_cache_dtype：KV cache 数据类型（fp8 / fp16 / bf16；fp8 可节省一半 KV 显存，精度损失 <1%）
+  kv_cache_dtype: fp8
   # extra_args：透传给 `vllm serve` 的额外参数（空格分隔，按 shlex 拆分）
   extra_args: ""
 

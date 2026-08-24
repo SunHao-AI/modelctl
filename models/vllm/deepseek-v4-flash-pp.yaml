@@ -1,27 +1,33 @@
-# vllm/deepseek-v4-flash.yaml —— DeepSeek-V4-Flash（vLLM 引擎，HuggingFace 原始权重）
-# 学习要点：vLLM 使用 HF 格式权重（非 GGUF），支持张量并行与 FP8 量化，适合高吞吐在线服务。
-# name：CLI 标识符，`modelctl start deepseek-v4-flash-vllm` 使用；全局唯一
-name: deepseek-v4-flash-vllm
+# vllm/deepseek-v4-flash-pp.yaml —— DeepSeek-V4-Flash（vLLM 引擎，TP4 + PP2 实验配置）
+# 学习要点：无 NVLink 场景下，vLLM 组合张量并行（TP）与管线并行（PP）可减少跨卡
+# all-reduce 通信量（PP 仅在相邻阶段间传递激活，通信压力低于纯 TP8）。
+# 附录 B.2：本 profile 为实验变体，不改变既有主配置（balanced 仍为 TP8）。
+# 验证方式：与 deepseek-v4-flash-vllm（TP8）实测吞吐对比，确认无 NVLink 下是否提升；
+# 若性能无提升或启动失败，删除本文件即可，不影响其他配置。
+# name：CLI 标识符，`modelctl start deepseek-v4-flash-vllm-pp` 使用；全局唯一
+name: deepseek-v4-flash-vllm-pp
+# alias：服务显示别名
+alias: deepseek-v4-flash-pp
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
 engine: vllm
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
-port: 8100
+port: 8106
 # api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值
 api_key: ${API_KEY}
 
 vllm:
   # model：HuggingFace 模型 ID 或本地模型目录。
   # 为空/不存在时通过 download 段从 ModelScope 下载并写回本地路径。
-  # 请替换为实际可用的 HF 模型 ID，如 deepseek-ai/DeepSeek-V4-Flash-0731
   model: deepseek-ai/DeepSeek-V4-Flash-0731
   # download：模型不存在时的自动下载配置（ModelScope，HF 格式仓库）
   download:
     # modelscope_id：ModelScope 仓库 ID（HF 格式）
     modelscope_id: deepseek-ai/DeepSeek-V4-Flash-0731
-  # tensor_parallel_size：张量并行 GPU 数（不得超过实际 GPU 数）
-  tensor_parallel_size: 8
+  # tensor_parallel_size：张量并行 GPU 数（TP4）；与 PP2 组合共使用 8 卡
+  # 注意：modelctl 校验要求 gpu_list 长度 == tensor_parallel_size，故本配置不设 gpu_list，
+  # 默认使用全部 GPU；如需指定卡组请通过环境变量 MODELCTL_GPUS 或 CLI --gpus 控制
+  tensor_parallel_size: 4
   # max_model_len：最大上下文长度（token）
-  # 注意：单序列完整可用（与并发无关）；KV 显存按 max_num_seqs × max_model_len 估算
   max_model_len: 131072
   # gpu_memory_utilization：显存利用率上限（0~1）
   gpu_memory_utilization: 0.92
@@ -31,7 +37,8 @@ vllm:
   # kv_cache_dtype：KV 缓存精度；DeepSeek-V4 的 fp8_ds_mla 布局强制要求 fp8（vLLM 0.27+ 断言）
   kv_cache_dtype: fp8
   # extra_args：透传给 `vllm serve` 的额外参数（空格分隔，按 shlex 拆分）
-  extra_args: ""
+  # 附录 B.2：管线并行大小（与 tensor_parallel_size 乘积 = 总 GPU 数 = 4×2=8）
+  extra_args: "--pipeline-parallel-size 2"
 
 usage:
   # price_in：每千输入 token 计价（元），供 cc-switch 用量统计

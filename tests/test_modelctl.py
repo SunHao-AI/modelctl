@@ -24,6 +24,7 @@ def test_status_output(tmp_path, monkeypatch, capsys):
 
 
 def test_status_name_shows_agent_config(tmp_path, monkeypatch, capsys):
+    # 未配置 max_output_tokens 时，自动按输入长度的 1/8 推荐（32768 // 8 = 4096）
     yaml_text = (
         "name: agent\nengine: llamacpp\nport: 18889\n"
         "tool_call_rounds: 3\n"
@@ -41,12 +42,41 @@ def test_status_name_shows_agent_config(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "智能体配置参考" in out
-    assert "32768" in out
-    assert "3" in out
-    assert "是" in out
-    assert "0.6" in out
-    assert "0.95" in out
-    assert "40" in out
+    assert "上下文长度：32768" in out
+    assert "输入上下文长度：28672" in out
+    assert "输出上下文长度：4096" in out
+    assert "工具调用轮数：3" in out
+    assert "支持图片输入：是" in out
+    assert "Temperature：0.6" in out
+    assert "Top P：0.95" in out
+    assert "Top K：40" in out
+
+
+def test_status_vision_defaults(tmp_path, monkeypatch, capsys):
+    # llamacpp 未设置 vision 时默认开启；显式 off 可关闭
+    (tmp_path / "llama.yaml").write_text(
+        "name: llama\nengine: llamacpp\nport: 18889\nllamacpp:\n  model: /x.gguf\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "llama_off.yaml").write_text(
+        "name: llama_off\nengine: llamacpp\nport: 18890\nllamacpp:\n  model: /x.gguf\n  vision: off\n",
+        encoding="utf-8",
+    )
+    # 其他引擎默认具备视觉能力
+    (tmp_path / "vllm.yaml").write_text(
+        "name: vllm\nengine: vllm\nport: 8000\nvllm:\n  model: x\n  max_model_len: 8192\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+
+    rc = cli.main(["status", "llama", "--models-dir", str(tmp_path)])
+    assert rc == 0 and "支持图片输入：是" in capsys.readouterr().out
+
+    rc = cli.main(["status", "llama_off", "--models-dir", str(tmp_path)])
+    assert rc == 0 and "支持图片输入：否" in capsys.readouterr().out
+
+    rc = cli.main(["status", "vllm", "--models-dir", str(tmp_path)])
+    assert rc == 0 and "支持图片输入：是" in capsys.readouterr().out
 
 
 def test_restart_accepts_timeout():

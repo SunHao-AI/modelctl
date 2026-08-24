@@ -26,7 +26,9 @@ sglang:
   # mem_fraction_static：静态显存分配比例（0~1），预留 KV cache 空间
   mem_fraction_static: 0.9
   # extra_args：透传给 `sglang.launch_server` 的额外参数（空格分隔，按 shlex 拆分）
-  extra_args: ""
+  # 附录 A.2：显式启用 FP8 权重量化 + FP8 KV cache（Ada CC≥8.9 原生支持，精度损失 <1%）
+  # 若引擎不支持权重 FP8，回退为仅保留 "--kv-cache-dtype fp8"
+  extra_args: "--quantization fp8 --kv-cache-dtype fp8"
 
 usage:
   # price_in：每千输入 token 计价（元），供 cc-switch 用量统计

@@ -1,6 +1,17 @@
 # vllm/kimi-k2.5.yaml —— Kimi-K2.5（120B dense，vLLM 引擎，HuggingFace 原始权重）
 # 学习要点：vLLM 使用 HF 格式权重（非 GGUF），支持张量并行与 FP8 量化，适合高吞吐在线服务。
-# 注意：BF16 权重约 240GB，需 8×RTX 5880（共 384GB）全量张量并行；若官方提供 FP8 检查点可改用 quantization: fp8 降低占用。
+# 注意：BF16 权重约 240GB，需 8×RTX 5880（共 384GB）全量张量并行。
+#
+# 【FP8 权重量化切换说明】（附录 A.1）
+# 若官方/社区提供 FP8 检查点（如 moonshotai/Kimi-K2.5-Instruct-FP8），可改为以下配置降低约 50% 权重显存：
+#   vllm:
+#     model: moonshotai/Kimi-K2.5-Instruct-FP8
+#     download:
+#       modelscope_id: moonshotai/Kimi-K2.5-Instruct-FP8
+#     quantization: fp8
+#     kv_cache_dtype: fp8
+# 切换前请确认仓库存在（modelctl start 会自动下载，仓库不存在会失败）；
+# 回退：将 model/modelscope_id 改回 moonshotai/Kimi-K2.5-Instruct 并清空 quantization 即可恢复 BF16。
 # name：CLI 标识符，`modelctl start kimi-k2.5-vllm` 使用；全局唯一
 name: kimi-k2.5-vllm
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
@@ -25,9 +36,11 @@ vllm:
   # 注意：单序列完整可用（与并发无关）；KV 显存按 max_num_seqs × max_model_len 估算
   max_model_len: 65536
   # gpu_memory_utilization：显存利用率上限（0~1）
-  gpu_memory_utilization: 0.9
+  gpu_memory_utilization: 0.92
   # quantization：量化方式（可选，如 fp8；FP8 需要 CC ≥ 8.9，本机 Ada 架构满足）
   quantization: ""
+  # kv_cache_dtype：KV cache 数据类型（fp8 / fp16 / bf16；fp8 可节省一半 KV 显存，精度损失 <1%）
+  kv_cache_dtype: fp8
   # extra_args：透传给 `vllm serve` 的额外参数（空格分隔，按 shlex 拆分）
   extra_args: ""
 

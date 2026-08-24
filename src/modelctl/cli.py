@@ -19,8 +19,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
+import urllib.request
 from pathlib import Path
 
 from loguru import logger
@@ -170,6 +172,17 @@ def _cmd_restart(args, models_dir: Path | None, caps) -> int:
     return 0 if r.status in ("ok", "skipped") else 1
 
 
+def _recommended_output_tokens(context_length: int) -> int:
+    """根据总上下文长度推荐输出长度，保证 输入 + 输出 <= 总上下文。
+
+    启发式规则：输出长度约为总长度的 1/8，同时限制在 1024-8192 之间，
+    并为输入至少预留 1024 tokens；小上下文（<=1024）时各分一半。
+    """
+    if context_length <= 1024:
+        return max(256, context_length // 2)
+    return min(max(1024, context_length // 8), context_length - 1024, 8192)
+
+
 def _agent_config_info(profile: Profile) -> dict[str, str]:
     """从 profile 提取智能体常用配置参数（上下文窗口、采样参数、视觉支持等）。"""
     ec = profile.engine_config
@@ -186,20 +199,79 @@ def _agent_config_info(profile: Profile) -> dict[str, str]:
         ctx = ec.get("context_length")
         ctx_display = str(int(ctx)) if ctx is not None else "-"
 
-    if engine == "llamacpp":
-        vision_val = str(ec.get("vision", "off")).lower()
-        vision = "是" if vision_val in ("on", "true", "yes", "1") else "否"
+    if profile.max_output_tokens is not None:
+        output_context = str(profile.max_output_tokens)
     else:
-        vision = "否"
+        try:
+            output_context = str(_recommended_output_tokens(int(ctx_display)))
+        except ValueError:
+            output_context = "-"
+
+    try:
+        input_context = str(int(ctx_display) - int(output_context))
+    except ValueError:
+        input_context = "-"
+
+    if engine == "llamacpp":
+        # 默认开启视觉；仅当显式 vision: off/false/no/0 时关闭
+        vision_val = str(ec.get("vision", "on")).lower()
+        vision = "否" if vision_val in ("off", "false", "no", "0") else "是"
+    else:
+        # ollama / vllm / sglang / unsloth 后端本身具备多模态能力
+        vision = "是"
 
     return {
-        "context_window": ctx_display,
+        "context_length": ctx_display,
+        "input_context": input_context,
+        "output_context": output_context,
         "tool_call_rounds": str(profile.tool_call_rounds) if profile.tool_call_rounds is not None else "-",
         "vision": vision,
         "temperature": str(ec.get("temperature", "-")),
         "top_p": str(ec.get("top_p", "-")),
         "top_k": str(ec.get("top_k", "-")),
     }
+
+
+def _price_rate_text(profile: Profile) -> str:
+    """从 usage 段读取 token 计费费率（元/千 token）。
+
+    返回如 "输入 1.0 元/千token，输出 2.0 元/千token"；未配置返回 "未配置"。
+    """
+    usage = profile.usage or {}
+    price_in = usage.get("price_in")
+    price_out = usage.get("price_out")
+    if price_in is None and price_out is None:
+        return "未配置"
+
+    def _fmt(value: object) -> str:
+        try:
+            return f"{float(value):g}"
+        except (TypeError, ValueError):
+            return "-"
+
+    return f"输入 {_fmt(price_in)} 元/千token，输出 {_fmt(price_out)} 元/千token"
+
+
+def _live_token_rate_text(profile: Profile) -> str:
+    """实时 token 速率（tok/s）：查询用量统计服务 /api/usage。
+
+    返回如 "输入 0.0 tok/s，输出 12.5 tok/s"；stats 服务未运行、模型不支持
+    精确统计或数据不可用时返回 "输入 -，输出 -（stats 服务不可用）"。
+    """
+    port = int(os.environ.get("USAGE_PORT", "5002"))
+    url = f"http://127.0.0.1:{port}/api/usage?model={profile.name}"
+    try:
+        with urllib.request.urlopen(url, timeout=2) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return "输入 -，输出 -（stats 服务未运行）"
+    if not isinstance(data, dict) or not data.get("isValid"):
+        return "输入 -，输出 -（stats 服务无数据）"
+    prompt_rate = data.get("prompt_rate")
+    predicted_rate = data.get("predicted_rate")
+    if isinstance(prompt_rate, (int, float)) and isinstance(predicted_rate, (int, float)):
+        return f"输入 {prompt_rate:.1f} tok/s，输出 {predicted_rate:.1f} tok/s"
+    return "输入 -，输出 -（stats 服务无数据）"
 
 
 def _cmd_status(args, models_dir: Path | None, caps) -> int:
@@ -225,12 +297,16 @@ def _cmd_status(args, models_dir: Path | None, caps) -> int:
     if args.name and profiles:
         info = _agent_config_info(profiles[0])
         print("\n智能体配置参考：")
-        print(f"  推荐上下文窗口：{info['context_window']}")
-        print(f"  工具调用轮数：   {info['tool_call_rounds']}")
-        print(f"  支持图片输入： {info['vision']}")
-        print(f"  Temperature：    {info['temperature']}")
-        print(f"  Top P：          {info['top_p']}")
-        print(f"  Top K：          {info['top_k']}")
+        print(f"  上下文长度：{info['context_length']}")
+        print(f"  输入上下文长度：{info['input_context']}")
+        print(f"  输出上下文长度：{info['output_context']}")
+        print(f"  工具调用轮数：{info['tool_call_rounds']}")
+        print(f"  支持图片输入：{info['vision']}")
+        print(f"  Temperature：{info['temperature']}")
+        print(f"  Top P：{info['top_p']}")
+        print(f"  Top K：{info['top_k']}")
+        print(f"  Token 计费：{_price_rate_text(profiles[0])}")
+        print(f"  Token 速率：{_live_token_rate_text(profiles[0])}")
     return 0
 
 
@@ -349,10 +425,7 @@ def _cmd_all(args, models_dir: Path | None, caps) -> int:
         else:
             logger.info(line)
     if any(r.status == "error" for r in results):
-        logger.info(
-            "提示：可执行 `modelctl status` 细查模型状态"
-            "（网关/统计用 `modelctl gateway status` / `modelctl stats status`）"
-        )
+        logger.info("提示：可执行 `modelctl status` 细查模型状态" "（网关/统计用 `modelctl gateway status` / `modelctl stats status`）")
         return exit_code
     return 0
 
@@ -366,19 +439,13 @@ def _cmd_ui_start(args, models_dir: Path | None, caps) -> int:
         return 2
     instance = f"ui-{profile.name}"
     if is_running(instance):
-        logger.info(
-            f"Web 控制台已在运行（{instance}, "
-            f"http://{spec['host']}:{spec['port']}）；重启请先 `modelctl ui stop {args.name}`"
-        )
+        logger.info(f"Web 控制台已在运行（{instance}, " f"http://{spec['host']}:{spec['port']}）；重启请先 `modelctl ui stop {args.name}`")
         return 0
     # ufw 入站白名单：只放行指定来源 IP 直连 UI 端口，避免控制台裸奔
     allow_from = args.allow_from or spec["allow_from"]
     for src in allow_from:
         if not ensure_ufw_allow(src, spec["port"]):
-            logger.warning(
-                f"添加 ufw 规则失败（{src} → :{spec['port']}），请手动执行："
-                f"ufw allow from {src} to any port {spec['port']} proto tcp"
-            )
+            logger.warning(f"添加 ufw 规则失败（{src} → :{spec['port']}），请手动执行：" f"ufw allow from {src} to any port {spec['port']} proto tcp")
     if not allow_from:
         logger.warning(f"未配置 --allow-from / yaml allow_from，端口 {spec['port']} 在局域网无访问限制，注意安全")
     pid = start_detached(instance, spec["cmd"], spec["env"])

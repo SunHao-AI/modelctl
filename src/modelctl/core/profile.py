@@ -33,6 +33,7 @@ class Profile:
     aliases: list[str] = field(default_factory=list)
     path: Path | None = None
     tool_call_rounds: int | None = None
+    max_output_tokens: int | None = None
 
 
 def _interpolate(value: Any, source: str) -> Any:
@@ -76,6 +77,12 @@ def _to_profile(raw: dict[str, Any], path: Path) -> Profile:
             tool_call_rounds = int(tool_call_rounds)
         except (TypeError, ValueError) as exc:
             raise ProfileError(f"{src}：tool_call_rounds 必须是整数") from exc
+    max_output_tokens = raw.get("max_output_tokens")
+    if max_output_tokens is not None:
+        try:
+            max_output_tokens = int(max_output_tokens)
+        except (TypeError, ValueError) as exc:
+            raise ProfileError(f"{src}：max_output_tokens 必须是整数") from exc
     return Profile(
         name=str(raw["name"]),
         engine=engine,
@@ -86,6 +93,7 @@ def _to_profile(raw: dict[str, Any], path: Path) -> Profile:
         aliases=aliases,
         path=path,
         tool_call_rounds=tool_call_rounds,
+        max_output_tokens=max_output_tokens,
     )
 
 

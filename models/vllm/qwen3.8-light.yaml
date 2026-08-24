@@ -1,42 +1,45 @@
-# vllm/deepseek-v4-flash.yaml —— DeepSeek-V4-Flash（vLLM 引擎，HuggingFace 原始权重）
+# vllm/qwen3.8-light.yaml —— Qwen3.8-27B（vLLM 引擎，HuggingFace 原始权重，轻量上下文）
 # 学习要点：vLLM 使用 HF 格式权重（非 GGUF），支持张量并行与 FP8 量化，适合高吞吐在线服务。
-# name：CLI 标识符，`modelctl start deepseek-v4-flash-vllm` 使用；全局唯一
-name: deepseek-v4-flash-vllm
+# 附录 B.1：多模型 GPU 隔离 —— 与 deepseek-v4-flash-vllm-light（gpu 0-3）互补，占用 gpu 4-7。
+# name：CLI 标识符，`modelctl start qwen3.8-vllm-light` 使用；全局唯一
+name: qwen3.8-vllm-light
+# alias：服务显示别名
+alias: qwen3.8-vllm-l
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
 engine: vllm
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
-port: 8100
+port: 8105
 # api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值
 api_key: ${API_KEY}
 
 vllm:
   # model：HuggingFace 模型 ID 或本地模型目录。
-  # 为空/不存在时通过 download 段从 ModelScope 下载并写回本地路径。
-  # 请替换为实际可用的 HF 模型 ID，如 deepseek-ai/DeepSeek-V4-Flash-0731
-  model: deepseek-ai/DeepSeek-V4-Flash-0731
+  # 为空/不存在时通过 download 段从 ModelScope 下载并写回本地路径
+  model: Qwen/Qwen3.8-27B
   # download：模型不存在时的自动下载配置（ModelScope，HF 格式仓库）
   download:
     # modelscope_id：ModelScope 仓库 ID（HF 格式）
-    modelscope_id: deepseek-ai/DeepSeek-V4-Flash-0731
+    modelscope_id: Qwen/Qwen3.8-27B
   # tensor_parallel_size：张量并行 GPU 数（不得超过实际 GPU 数）
-  tensor_parallel_size: 8
+  tensor_parallel_size: 4
   # max_model_len：最大上下文长度（token）
   # 注意：单序列完整可用（与并发无关）；KV 显存按 max_num_seqs × max_model_len 估算
-  max_model_len: 131072
+  max_model_len: 16384
+  # gpu_list：使用的 GPU 设备编号列表（与 deepseek-v4-flash-vllm-light 的 0-3 不重叠）
+  gpu_list: "4,5,6,7"
   # gpu_memory_utilization：显存利用率上限（0~1）
   gpu_memory_utilization: 0.92
   # quantization：量化方式（可选，如 fp8；FP8 需要 CC ≥ 8.9）
-  # DeepSeek-V4 权重自带 fp8 量化（deepseek_v4_fp8），vLLM 会自动识别，此项留空即可
   quantization: ""
-  # kv_cache_dtype：KV 缓存精度；DeepSeek-V4 的 fp8_ds_mla 布局强制要求 fp8（vLLM 0.27+ 断言）
+  # kv_cache_dtype：KV cache 数据类型（fp8 / fp16 / bf16；fp8 可节省一半 KV 显存，精度损失 <1%）
   kv_cache_dtype: fp8
   # extra_args：透传给 `vllm serve` 的额外参数（空格分隔，按 shlex 拆分）
   extra_args: ""
 
 usage:
   # price_in：每千输入 token 计价（元），供 cc-switch 用量统计
-  price_in: 1.0
+  price_in: 0.5
   # price_out：每千输出 token 计价（元）
-  price_out: 2.0
+  price_out: 1.0
   # budget：预算上限（元，可选）；设置后 cc-switch 显示剩余金额并支持百分比徽章（?view=tier）
   # budget: 50

@@ -13,6 +13,7 @@
 """
 
 import asyncio
+import json
 import os
 import urllib.error
 import urllib.request
@@ -29,6 +30,73 @@ from modelctl.engines import get_adapter
 from modelctl.engines.base import EngineAdapter
 
 GATEWAY_PORT = 5003
+
+
+@dataclass
+class ContextSwitchRule:
+    """上下文切换规则：估算输入 token >= min_prompt_tokens 时路由到 target 模型。"""
+
+    min_prompt_tokens: int
+    target: str
+
+
+def load_context_switch_rules(raw: dict) -> dict[str, list[ContextSwitchRule]]:
+    """从配置 dict 解析上下文切换规则，按 min_prompt_tokens 降序排序。
+
+    raw 格式：{base_model: [{"min_prompt_tokens": int, "target": str}, ...]}
+    非法项跳过；返回空 dict 表示未配置。降序排序保证第一个命中的阈值即最合适的目标。
+    """
+    rules: dict[str, list[ContextSwitchRule]] = {}
+    for base, items in (raw or {}).items():
+        parsed: list[ContextSwitchRule] = []
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    threshold = int(item["min_prompt_tokens"])
+                    target = str(item["target"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if threshold < 0 or not target:
+                    continue
+                parsed.append(ContextSwitchRule(threshold, target))
+        if parsed:
+            parsed.sort(key=lambda r: r.min_prompt_tokens, reverse=True)
+            rules[str(base)] = parsed
+    return rules
+
+
+def _env_context_rules() -> dict:
+    """从环境变量 GATEWAY_CONTEXT_SWITCH（JSON 字符串）读取切换规则；非法时返回空 dict。"""
+    raw = os.environ.get("GATEWAY_CONTEXT_SWITCH")
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("GATEWAY_CONTEXT_SWITCH 不是合法 JSON，已忽略")
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def estimate_prompt_tokens(body: dict) -> int:
+    """按请求体启发式估算输入 token 数（字符数 / 4，与 benchmark 脚本口径一致）。
+
+    仅统计 messages 中各 role 的 content 文本；无法估算时返回 0。
+    """
+    total_chars = 0
+    for message in body.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            total_chars += len(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    total_chars += len(part["text"])
+    return total_chars // 4
 
 
 @dataclass
@@ -78,6 +146,28 @@ def build_registry(models_dir: Path | None = None, host: str = "127.0.0.1") -> d
     return registry
 
 
+def apply_context_switch(
+    registry: dict[str, GatewayModel],
+    rules: dict[str, list[ContextSwitchRule]],
+    body_model: str | None,
+    prompt_tokens: int,
+) -> GatewayModel | None:
+    """按上下文长度规则把请求切换到 high/balanced/light 变体（附录 B.3）。
+
+    规则按 base 模型名匹配请求中的 model 字段；选择第一个 min_prompt_tokens <=
+    估算输入 token 数的目标。目标不在注册表（未配置/未启动）时返回 None，调用方沿用原模型。
+    """
+    if not rules or not body_model:
+        return None
+    candidates = rules.get(body_model)
+    if not candidates:
+        return None
+    for rule in candidates:
+        if prompt_tokens >= rule.min_prompt_tokens:
+            return registry.get(rule.target)
+    return None
+
+
 def resolve_model(
     registry: dict[str, GatewayModel], body_model: str | None, default_model: str | None
 ) -> GatewayModel | None:
@@ -110,10 +200,12 @@ def create_app(
     default_model: str | None = None,
     read_timeout: float = 600.0,
     transport=None,
+    context_rules: dict[str, list[ContextSwitchRule]] | None = None,
 ):
     """构建 FastAPI 网关应用（transport 供测试注入 httpx.MockTransport）。
 
-    环境变量：GATEWAY_DEFAULT_MODEL（默认模型，缺省/未知 model 回退目标）。
+    环境变量：GATEWAY_DEFAULT_MODEL（默认模型，缺省/未知 model 回退目标）；
+    GATEWAY_CONTEXT_SWITCH（JSON 上下文切换规则，见 load_context_switch_rules）。
     """
     import httpx
     from fastapi import FastAPI, Request
@@ -121,6 +213,7 @@ def create_app(
 
     registry = registry if registry is not None else build_registry()
     default_model = default_model or os.environ.get("GATEWAY_DEFAULT_MODEL")
+    context_rules = context_rules if context_rules is not None else load_context_switch_rules(_env_context_rules())
     app = FastAPI(title="modelctl gateway", docs_url="/docs", openapi_url="/openapi.json")
 
     @app.get("/v1/models")
@@ -176,6 +269,13 @@ def create_app(
                 status_code=404,
                 content={"error": {"message": err_msg, "type": "invalid_request_error"}},
             )
+        # 上下文切换（附录 B.3）：按估算输入长度路由到 high/balanced/light 变体
+        if context_rules:
+            prompt_tokens = estimate_prompt_tokens(body)
+            switched = apply_context_switch(registry, context_rules, target.name, prompt_tokens)
+            if switched is not None and switched.name != target.name:
+                logger.info(f"上下文切换：{target.name} -> {switched.name}（估算输入 {prompt_tokens} tokens）")
+                target = switched
         # 改写为后端期望的模型名（ollama 严格校验，llamacpp 忽略）
         body["model"] = target.upstream_model
         headers = {"Content-Type": "application/json"}

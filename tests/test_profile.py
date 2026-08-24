@@ -167,3 +167,15 @@ def test_tool_call_rounds_invalid_rejected(tmp_path):
     d = _write(tmp_path, "name: demo\nengine: vllm\nport: 8000\ntool_call_rounds: not_a_number\n")
     with pytest.raises(ProfileError, match="tool_call_rounds"):
         load_profile("demo", d)
+
+
+def test_max_output_tokens_parsed(tmp_path):
+    d = _write(tmp_path, "name: demo\nengine: vllm\nport: 8000\nmax_output_tokens: 4096\n")
+    p = load_profile("demo", d)
+    assert p.max_output_tokens == 4096
+
+
+def test_max_output_tokens_invalid_rejected(tmp_path):
+    d = _write(tmp_path, "name: demo\nengine: vllm\nport: 8000\nmax_output_tokens: not_a_number\n")
+    with pytest.raises(ProfileError, match="max_output_tokens"):
+        load_profile("demo", d)

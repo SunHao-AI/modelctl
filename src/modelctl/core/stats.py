@@ -310,14 +310,11 @@ class UsageCollector:
             self._baseline["prompt_total"] = new_prompt
             self._baseline["predicted_total"] = new_predicted
 
-            # 滑动窗口回填速率：gauge > 0 用 gauge；gauge <= 0 时用窗口内累计差值计算速率
+            # 统一使用滑动窗口内 total 计数器差分计算平均速率，与市面主流监控一致
             self._record_window(now, new_prompt, new_predicted)
-            if metrics["prompt_rate"] <= 0.0 or metrics["predicted_rate"] <= 0.0:
-                prompt_rate, predicted_rate = self._compute_window_rate()
-                if metrics["prompt_rate"] <= 0.0:
-                    metrics["prompt_rate"] = prompt_rate
-                if metrics["predicted_rate"] <= 0.0:
-                    metrics["predicted_rate"] = predicted_rate
+            prompt_rate, predicted_rate = self._compute_window_rate()
+            metrics["prompt_rate"] = prompt_rate
+            metrics["predicted_rate"] = predicted_rate
 
             with self._lock:
                 self._snapshot = {

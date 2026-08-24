@@ -185,7 +185,7 @@ def test_usage_collector_sliding_window_rate(tmp_path):
     assert rr == 50.0
 
 
-def test_usage_collector_prefers_gauge_over_window(tmp_path):
+def test_usage_collector_uses_window_rate_over_gauge(tmp_path):
     data_dir = tmp_path / "cache"
     data_dir.mkdir()
     from modelctl.core.stats import UsageCollector
@@ -203,7 +203,7 @@ def test_usage_collector_prefers_gauge_over_window(tmp_path):
             "predicted_rate": ["predicted_tokens_seconds"],
         },
     )
-    # 预填窗口制造确定性的窗口速率：若回填错误覆盖 gauge，会得到 400/600 tok/s
+    # 预填窗口制造确定性的窗口速率
     collector._record_window(1000.0, 0.0, 0.0)
     collector._record_window(1001.0, 60.0, 30.0)
 
@@ -232,9 +232,9 @@ def test_usage_collector_prefers_gauge_over_window(tmp_path):
         collector._poll_once()
 
     snap = collector.snapshot()
-    # gauge > 0 时优先使用 gauge，而不是窗口计算速率
-    assert snap["prompt_rate"] == 12.0
-    assert snap["predicted_rate"] == 42.0
+    # 统一使用窗口差分速率：(2000-0)/(1005-1000)=400，(3000-0)/(1005-1000)=600
+    assert snap["prompt_rate"] == 400.0
+    assert snap["predicted_rate"] == 600.0
 
 
 def test_resolve_payload_all_aggregates_targets():

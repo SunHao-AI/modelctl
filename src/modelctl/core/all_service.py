@@ -30,6 +30,7 @@ from modelctl.core.process import (
 )
 from modelctl.core.profile import Profile, list_profiles
 from modelctl.core.stats import USAGE_PORT
+from modelctl.core.vram_estimator import kv_estimate_warnings
 from modelctl.engines import get_adapter
 from modelctl.engines.base import RequirementError
 
@@ -66,6 +67,8 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float) -> Compo
     adapter = get_adapter(profile.engine)(profile, caps)
     adapter.check_requirements()  # RequirementError 向上抛
     for warning in adapter.warnings:
+        logger.warning(warning)
+    for warning in kv_estimate_warnings(profile):  # 附录 B.4：KV 显存预检（仅告警，不拦截）
         logger.warning(warning)
     adapter.pre_start()
     cmd, env = adapter.build_command()

@@ -1,13 +1,13 @@
-# llamacpp/qwen3.8.yaml —— Qwen3.8-27B（llama.cpp 引擎）
+# llamacpp/qwen3.8-high.yaml —— Qwen3.8-27B（llama.cpp 引擎，高性能上下文变体）
 # 学习要点：Qwen 无 DSpark 草稿，dspark 必须 off；其余字段与 DeepSeek 配置一致。
-# name：CLI 标识符，`modelctl start qwen3.8-llamacpp` 使用；全局唯一
-name: qwen3.8-llamacpp
-# alias：短名别名，网关/nginx 路由可用 `qwen3.8` 指代本模型（如 URL /210/llm/qwen3.8/v1）
-alias: qwen3.8
+# name：CLI 标识符，`modelctl start qwen3.8-llamacpp-high` 使用；全局唯一
+name: qwen3.8-llamacpp-high
+# alias：短名别名，网关/nginx 路由可用 `qwen3.8-high` 指代本模型（如 URL /210/llm/qwen3.8-high/v1）
+alias: qwen3.8-high
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
 engine: llamacpp
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
-port: 18889
+port: 18894
 # api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值
 api_key: ${API_KEY}
 
@@ -22,11 +22,11 @@ llamacpp:
     # quant：仓库内实际量化名（需与 GGUF 文件名量化段一致），如 Q4_K_M / Q5_K_M / Q8_0
     quant: Q4_K_M
   # parallel：并发槽位数（同时处理多少请求），显存占用随其增长
-  parallel: 4
+  parallel: 2
   # ctx_size：单槽（每并发请求）完整可用的上下文；留空 = 1,048,576（1M）
   # 注意：llama-server 的 --ctx-size 是总量，实际启动总量 = ctx_size × parallel
-  #（本配置 262144 × 4 = 1048576，每个并发请求都能用满 262144，与其他引擎语义一致）
-  ctx_size: 262144
+  #（本配置 65536 × 2 = 131072，每个并发请求都能用满 65536，与其他引擎语义一致）
+  ctx_size: 65536
   # reasoning：是否输出推理过程内容（on/off）
   reasoning: on
   # reasoning_format：推理内容格式（deepseek / none 等）
@@ -43,7 +43,7 @@ llamacpp:
   cache_type_k: q8_0
   cache_type_v: q8_0
   # gpu_count：实际参与推理的 GPU 数量，决定 --tensor-split 分片
-  gpu_count: 8
+  gpu_count: 4
   # fit：llama.cpp 显存适配策略（on/off）
   fit: off
   # 采样参数（可选）：缓解重复输出/贪心采样。llama.cpp 默认 repeat-penalty=1.0（无重复惩罚），
