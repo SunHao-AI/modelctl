@@ -233,6 +233,42 @@ def test_anthropic_messages_404_unknown_model():
     assert resp.status_code == 404
 
 
+def test_reasoning_effort_normalized_openai():
+    """OpenAI 端点：Claude Code 的 reasoning_effort=high 映射为 vLLM 支持的 xhigh。"""
+    captured = {}
+
+    def upstream(request):
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"id": "1", "model": captured["body"]["model"]})
+
+    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None, "http://upstream/", group="qwen3.8")}
+    app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
+    body = {"model": "qwen3.8", "messages": [{"role": "user", "content": "hi"}], "reasoning_effort": "high"}
+    resp = _run(_post(app, "/v1/chat/completions", json=body))
+    assert resp.status_code == 200
+    assert captured["body"]["reasoning_effort"] == "xhigh"  # high 映射为 xhigh
+
+
+def test_reasoning_effort_normalized_anthropic():
+    """Anthropic 端点：reasoning_effort=ultra 映射为 xhigh，已支持的枚举保持不变。"""
+    captured = []
+
+    def upstream(request):
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": "msg_1", "type": "message", "role": "assistant", "content": [{"type": "text", "text": "hi"}], "model": "qwen3.8-vllm"})
+
+    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None, "http://upstream/", group="qwen3.8")}
+    app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
+
+    resp = _run(_post(app, "/v1/messages", json={"model": "qwen3.8", "messages": [{"role": "user", "content": "hi"}], "reasoning_effort": "ultra"}))
+    assert resp.status_code == 200
+    assert captured[-1]["reasoning_effort"] == "xhigh"
+
+    resp = _run(_post(app, "/v1/messages", json={"model": "qwen3.8", "messages": [{"role": "user", "content": "hi"}], "reasoning_effort": "medium"}))
+    assert resp.status_code == 200
+    assert captured[-1]["reasoning_effort"] == "medium"  # 支持的值不改变
+
+
 def test_proxy_streaming_sse_passthrough():
     def upstream(request):
         return httpx.Response(

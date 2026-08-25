@@ -44,6 +44,27 @@ _THINKING_DISABLED_GROUPS: frozenset[str] = frozenset({"qwen3.8"})
 # 仅对原生支持 chat_template_kwargs 的引擎注入；llama.cpp 不识别该字段
 _THINKING_DISABLED_ENGINES: frozenset[str] = frozenset({"vllm", "sglang", "unsloth"})
 
+# vLLM 0.27 的 reasoning_effort 枚举仅支持 xhigh/medium/low（默认 xhigh）；
+# Claude Code 等客户端发送 high/ultra 等枚举会触发 500
+# （"Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low"），
+# 网关统一映射为最接近的支持值。
+_REASONING_EFFORT_MAP: dict[str, str] = {
+    "high": "xhigh",
+    "ultra": "xhigh",
+    "extreme": "xhigh",
+    "balanced": "medium",
+    "minimal": "low",
+}
+
+
+def _normalize_reasoning_effort(body: dict) -> None:
+    """就地改写不兼容的 reasoning_effort 枚举（vLLM 仅支持 xhigh/medium/low）。"""
+    effort = body.get("reasoning_effort")
+    if isinstance(effort, str) and effort.lower() in _REASONING_EFFORT_MAP:
+        mapped = _REASONING_EFFORT_MAP[effort.lower()]
+        body["reasoning_effort"] = mapped
+        logger.info(f"reasoning_effort 兼容映射：{effort} -> {mapped}")
+
 
 @dataclass
 class ContextSwitchRule:
@@ -398,6 +419,7 @@ def create_app(
             )
         # 改写为后端期望的模型名（同 OpenAI 端点）
         body["model"] = target.upstream_model
+        _normalize_reasoning_effort(body)
         # 透传 Anthropic 版本头等；认证头以 profile 有效 key 为准：
         # 后端（vLLM 等）的 /v1/messages 认证头格式因实现而异（x-api-key /
         # Authorization Bearer），客户端自配 key 可能与后端不一致，故用
@@ -483,6 +505,7 @@ def create_app(
                 target = switched
         # 改写为后端期望的模型名（ollama 严格校验，llamacpp 忽略）
         body["model"] = target.upstream_model
+        _normalize_reasoning_effort(body)
         # 思考型模型家族默认关闭 thinking（见 _THINKING_DISABLED_GROUPS 注释）；
         # 请求显式传 chat_template_kwargs 时尊重调用方意图，不覆盖。
         if (
