@@ -141,7 +141,7 @@ def test_nginx_snippet_output(tmp_path, monkeypatch, capsys):
 def test_gateway_start_detaches(tmp_path, monkeypatch):
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     called: dict = {}
-    monkeypatch.setattr(cli.all_service, "start_detached", lambda name, cmd, extra_env: called.update(name=name, cmd=cmd) or 123)
+    monkeypatch.setattr(cli.all_service, "start_detached", lambda name, cmd, extra_env: called.update(name=name, cmd=cmd) or (123, None))
     monkeypatch.setattr(cli.all_service, "is_running", lambda name: False)
     rc = cli.main(["gateway", "start"])
     assert rc == 0
@@ -170,7 +170,7 @@ def test_ui_start_detaches_and_adds_ufw_rule(tmp_path, monkeypatch):
     _write_unsloth_ui_profile(tmp_path)
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     called: dict = {}
-    monkeypatch.setattr(cli, "start_detached", lambda name, cmd, extra_env: called.update(name=name, cmd=cmd) or 123)
+    monkeypatch.setattr(cli, "start_detached", lambda name, cmd, extra_env: called.update(name=name, cmd=cmd) or (123, None))
     monkeypatch.setattr(cli, "is_running", lambda name: False)
     rules: list = []
     monkeypatch.setattr(cli, "ensure_ufw_allow", lambda src, port: rules.append((src, port)) or True)
@@ -185,7 +185,7 @@ def test_ui_start_cli_overrides_yaml(tmp_path, monkeypatch):
     _write_unsloth_ui_profile(tmp_path)
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     called: dict = {}
-    monkeypatch.setattr(cli, "start_detached", lambda name, cmd, extra_env: called.update(cmd=cmd) or 1)
+    monkeypatch.setattr(cli, "start_detached", lambda name, cmd, extra_env: called.update(cmd=cmd) or (1, None))
     monkeypatch.setattr(cli, "is_running", lambda name: False)
     rules: list = []
     monkeypatch.setattr(cli, "ensure_ufw_allow", lambda src, port: rules.append((src, port)) or True)

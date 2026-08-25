@@ -27,6 +27,16 @@ def _profile(name: str = "m", aliases: list[str] | None = None) -> Profile:
     )
 
 
+class _FakeProc:
+    """假 Popen：poll() 固定返回给定退出码（None = 存活）。"""
+
+    def __init__(self, exit_code=None):
+        self._exit = exit_code
+
+    def poll(self):
+        return self._exit
+
+
 class _FakeAdapter:
     """可配置 wait_ready 结果的假引擎适配器。"""
 
@@ -135,7 +145,7 @@ def test_start_profile_ok(monkeypatch):
 
     monkeypatch.setattr(all_service, "is_running", lambda name: False)
     monkeypatch.setattr(all_service, "get_adapter", lambda engine: lambda p, c: _FakeAdapter(p, c, ready=True))
-    monkeypatch.setattr(all_service, "start_detached", lambda name, cmd, env: 123)
+    monkeypatch.setattr(all_service, "start_detached", lambda name, cmd, env: (123, _FakeProc(None)))
     r = start_profile(_profile(), Capabilities(), 5.0)
     assert r.status == "ok" and "18080" in r.detail
 
@@ -145,9 +155,23 @@ def test_start_profile_health_timeout(monkeypatch):
 
     monkeypatch.setattr(all_service, "is_running", lambda name: False)
     monkeypatch.setattr(all_service, "get_adapter", lambda engine: lambda p, c: _FakeAdapter(p, c, ready=False))
-    monkeypatch.setattr(all_service, "start_detached", lambda name, cmd, env: 123)
+    # 进程仍存活（poll() → None）：走"健康检查超时"分支而非"提前退出"
+    monkeypatch.setattr(all_service, "start_detached", lambda name, cmd, env: (123, _FakeProc(None)))
+    monkeypatch.setattr(all_service, "launch_log", lambda name: None)
     r = start_profile(_profile(), Capabilities(), 5.0)
     assert r.status == "error" and "超时" in r.detail
+
+
+def test_start_profile_early_exit(monkeypatch):
+    """回归：引擎进程未能就绪前已退出时应报"提前退出"（此前空转满超时且只见 traceback 尾巴）。"""
+    from modelctl.core import all_service
+
+    monkeypatch.setattr(all_service, "is_running", lambda name: False)
+    monkeypatch.setattr(all_service, "get_adapter", lambda engine: lambda p, c: _FakeAdapter(p, c, ready=False))
+    monkeypatch.setattr(all_service, "start_detached", lambda name, cmd, env: (123, _FakeProc(1)))
+    monkeypatch.setattr(all_service, "launch_log", lambda name: None)
+    r = start_profile(_profile(), Capabilities(), 5.0)
+    assert r.status == "error" and "提前退出" in r.detail
 
 
 def test_stop_profile_calls_stop_instance(monkeypatch):
@@ -178,7 +202,7 @@ def test_start_gateway_ok(monkeypatch):
     from modelctl.core import all_service
 
     monkeypatch.setattr(all_service, "is_running", lambda name: False)
-    monkeypatch.setattr(all_service, "start_detached", lambda name, cmd, env: 1)
+    monkeypatch.setattr(all_service, "start_detached", lambda name, cmd, env: (1, None))
     r = start_gateway()
     assert r.status == "ok" and r.component == "gateway"
 

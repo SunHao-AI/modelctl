@@ -329,3 +329,96 @@ def test_create_app_auto_builds_registry_and_groups():
         resp = _run(_get(app, "/v1/models"))
     assert resp.status_code == 200
     assert [m["id"] for m in resp.json()["data"]] == ["qwen3.8-vllm", "qwen3.8"]
+
+
+# ---- 网关真实用量统计（vLLM token 计数 gauge 恒 0 的修复）----
+
+class _FakeCollector:
+    """记录 record_tokens 调用的假收集器。"""
+
+    def __init__(self):
+        self.calls: list[tuple[int, int]] = []
+
+    def record_tokens(self, prompt_delta, completion_delta):
+        self.calls.append((prompt_delta, completion_delta))
+
+
+def _make_model(name="ds", collector=None) -> GatewayModel:
+    return GatewayModel(
+        name, "vllm", "http://upstream", name, None, "http://upstream/", collector=collector
+    )
+
+
+def test_proxy_non_streaming_records_usage(monkeypatch):
+    """非流式：网关应把后端 usage 计入收集器（此前 vLLM 无 metrics 时恒为 0）。"""
+    collector = _FakeCollector()
+
+    def upstream(request):
+        return httpx.Response(
+            200,
+            json={
+                "id": "1",
+                "object": "chat.completion",
+                "model": "ds",
+                "usage": {"prompt_tokens": 12, "completion_tokens": 34},
+            },
+        )
+
+    reg = {"ds": _make_model(collector=collector)}
+    app = create_app(reg, default_model="ds", transport=httpx.MockTransport(upstream))
+    resp = _run(_post(app, "/v1/chat/completions", json={"model": "ds", "messages": []}))
+    assert resp.status_code == 200
+    assert collector.calls == [(12, 34)]
+
+
+def test_proxy_non_streaming_no_usage_no_record():
+    collector = _FakeCollector()
+
+    def upstream(request):
+        return httpx.Response(200, json={"id": "1", "object": "chat.completion", "model": "ds"})
+
+    reg = {"ds": _make_model(collector=collector)}
+    app = create_app(reg, default_model="ds", transport=httpx.MockTransport(upstream))
+    _run(_post(app, "/v1/chat/completions", json={"model": "ds", "messages": []}))
+    assert collector.calls == []  # 后端未回 usage → 不累计
+
+
+def test_proxy_streaming_records_usage_increments():
+    """流式：跨多个 data: 块逐次记录 token 增量（重复块不得重复累计）。"""
+    collector = _FakeCollector()
+
+    def upstream(request):
+        sse = (
+            b'data: {"id":"1","model":"ds","usage":{"prompt_tokens":5,"completion_tokens":3}}\n\n'
+            b'data: {"id":"1","model":"ds","usage":{"prompt_tokens":5,"completion_tokens":7}}\n\n'
+            b"data: [DONE]\n\n"
+        )
+        return httpx.Response(200, stream=httpx.ByteStream(sse), headers={"content-type": "text/event-stream"})
+
+    reg = {"ds": _make_model(collector=collector)}
+    app = create_app(reg, default_model="ds", transport=httpx.MockTransport(upstream))
+    resp = _run(_post(app, "/v1/chat/completions", json={"model": "ds", "stream": True, "messages": []}))
+    assert resp.status_code == 200
+    assert 'data: {"id":"1"' in resp.text
+    # 增量：首块 (5,3)，第二块仅新增 completion 4
+    assert collector.calls == [(5, 3), (0, 4)]
+
+
+def test_proxy_streaming_chunk_split_usage_line():
+    """回归：usage 的 data: 行被 HTTP chunk 从中间切开时，网关须跨 chunk 拼回整行再统计。"""
+    collector = _FakeCollector()
+    full = b'data: {"id":"1","model":"ds","usage":{"prompt_tokens":8,"completion_tokens":2}}\n\n'
+    half = len(full) // 2
+
+    def upstream(request):
+        return httpx.Response(
+            200,
+            stream=httpx.ByteStream([full[:half], full[half:]]),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    reg = {"ds": _make_model(collector=collector)}
+    app = create_app(reg, default_model="ds", transport=httpx.MockTransport(upstream))
+    resp = _run(_post(app, "/v1/chat/completions", json={"model": "ds", "stream": True, "messages": []}))
+    assert resp.status_code == 200
+    assert collector.calls == [(8, 2)]

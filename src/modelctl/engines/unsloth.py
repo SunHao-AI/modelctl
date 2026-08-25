@@ -17,6 +17,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+from loguru import logger
+
 from modelctl.core.capabilities import free_vram_total_mb, selected_vram_free_mb
 from modelctl.core.envfile import PROJECT_ROOT
 from modelctl.core.gpu_lock import acquire_gpu_lock
@@ -176,13 +178,17 @@ class UnslothAdapter(EngineAdapter):
         return _runtime_api_key_from_log(self.profile.name) or self.profile.api_key
 
     def wait_ready(self, timeout: float) -> bool:
-        """先等启动日志出现 API Key 行（即模型加载完成），再用该 key 探测 /v1/models。"""
+        """先等启动日志出现 API Key 行（即模型加载完成），再用该 key 探测 /v1/models；进程早退立即失败。"""
+        alive_check = (lambda: self.spawned_proc.poll() is None) if self.spawned_proc else None
         deadline = time.time() + timeout
         while True:
+            if alive_check is not None and not alive_check():
+                logger.warning("引擎进程已提前退出，中止等待 Unsloth API key")
+                return False
             key = _runtime_api_key_from_log(self.profile.name)
             if key:
                 remaining = max(deadline - time.time(), 2.0)
-                return wait_health(self.health_url(), remaining, key)
+                return wait_health(self.health_url(), remaining, key, alive_check=alive_check)
             remaining = deadline - time.time()
             if remaining <= 0:
                 return False

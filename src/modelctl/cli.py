@@ -9,8 +9,9 @@
 流程约定：
 - 所有子命令先 load_env()（注入 .env），再 probe() 探测硬件能力。
 - start：load_profile → get_adapter → check_requirements（打印 warnings）→
-  pre_start → build_command → start_detached → wait_health（超时打印日志尾部
-  50 行并返回 1）→ post_start → 打印访问地址与日志路径。
+  pre_start → build_command → start_detached → wait_health（等待期间引擎进程
+  早退则立即失败并按错误标记截取日志摘录；仍存活才按"健康检查超时 + 日志尾部
+  50 行"处理，均返回 1）→ post_start → 打印访问地址与日志路径。
 - stop 对 ollama 引擎特判：serve 由本工具拉起（PID 文件存在）且无其他
   ollama profile 在运行时才停掉 serve；否则仅 unload_model + 删除 PID 记录。
 - 错误处理：ProfileError / RequirementError 捕获后打印消息并返回 2。
@@ -588,7 +589,7 @@ def _cmd_ui_start(args, models_dir: Path | None, caps) -> int:
             logger.warning(f"添加 ufw 规则失败（{src} → :{spec['port']}），请手动执行：" f"ufw allow from {src} to any port {spec['port']} proto tcp")
     if not allow_from:
         logger.warning(f"未配置 --allow-from / yaml allow_from，端口 {spec['port']} 在局域网无访问限制，注意安全")
-    pid = start_detached(instance, spec["cmd"], spec["env"])
+    pid, _ = start_detached(instance, spec["cmd"], spec["env"])
     log = launch_log(instance)
     logger.info(f"Web 控制台已启动（{instance}, PID {pid}），监听 http://{spec['host']}:{spec['port']}")
     if allow_from:

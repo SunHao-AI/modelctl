@@ -152,7 +152,7 @@ def test_unsloth_wait_ready_uses_runtime_key(tmp_path, monkeypatch):
     (log_dir / "launch-u.log").write_text("API Key: sk-unsloth-xyz\n", encoding="utf-8")
     seen = {}
 
-    def fake_wait(url, timeout, api_key=None):
+    def fake_wait(url, timeout, api_key=None, alive_check=None):
         seen.update(url=url, key=api_key)
         return True
 
@@ -160,6 +160,19 @@ def test_unsloth_wait_ready_uses_runtime_key(tmp_path, monkeypatch):
     assert a.wait_ready(5.0) is True
     assert seen["url"] == "http://127.0.0.1:30000/v1/models"
     assert seen["key"] == "sk-unsloth-xyz"
+
+
+def test_unsloth_wait_ready_early_exit(tmp_path, monkeypatch):
+    """回归：进程在 API Key 出现前退出应立即失败，不再空转到超时。"""
+    import time as _time
+
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+    p = _write(tmp_path, "name: u\nengine: unsloth\nport: 30000\nunsloth:\n  model: m\n")
+    a = get_adapter("unsloth")(p, CAPS8)
+    a.spawned_proc = type("P", (), {"poll": lambda self: 1})()
+    t0 = _time.time()
+    assert a.wait_ready(30.0) is False
+    assert _time.time() - t0 < 2.0  # 未等到 30s 超时
 
 
 def test_unsloth_wait_ready_times_out_without_key(tmp_path, monkeypatch):

@@ -12,6 +12,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from loguru import logger
+
 from modelctl.core.envfile import PROJECT_ROOT
 
 if sys.platform == "win32":
@@ -63,7 +65,8 @@ def launch_log(name: str) -> Path | None:
     return path if path.is_file() else None
 
 
-def start_detached(name: str, command: list[str], extra_env: dict[str, str]) -> int:
+def start_detached(name: str, command: list[str], extra_env: dict[str, str]) -> tuple[int, subprocess.Popen]:
+    """后台启动进程，返回 (pid, Popen)。Popen 供调用方在等待健康检查期间探测早退（fail-fast）。"""
     log_path = log_dir() / f"launch-{name}.log"
     env = {**os.environ, **extra_env}
     fp = open(log_path, "w", encoding="utf-8")  # "w"：每次启动覆盖旧日志
@@ -71,7 +74,7 @@ def start_detached(name: str, command: list[str], extra_env: dict[str, str]) -> 
     kwargs["start_new_session"] = True  # nohup 语义：SSH 断开不影响
     proc = subprocess.Popen(command, **kwargs)
     pid_file(name).write_text(str(proc.pid), encoding="utf-8")
-    return proc.pid
+    return proc.pid, proc
 
 
 def is_running(name: str) -> bool:
@@ -135,23 +138,52 @@ def stop_instance(name: str, port: int, patterns: list[str]) -> bool:
     return stopped
 
 
-def wait_health(url: str, timeout: float, api_key: str | None = None) -> bool:
+def open_local(request: urllib.request.Request, timeout: float):
+    """本机回环探测专用 opener：绕过 http(s)_proxy/no_proxy 环境变量。
+
+    项目内所有健康检查目标均为 127.0.0.1；若沿用 urlopen 默认行为，设置了系统代理的机器上
+    回环请求也会被转发给代理（通常无法访问本机端口），导致探测永远失败、启动卡满超时。
+    """
+    return urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=timeout)
+
+
+def wait_health(url: str, timeout: float, api_key: str | None = None, alive_check=None) -> bool:
+    """轮询探测健康端点直至成功或超时。
+
+    alive_check：可选的进程存活探针（返回 bool）。引擎进程先行退出时立即结束等待，
+    不再空转到超时——但先完成当次探测再判定，保证共享后端场景（如 ollama 多 profile
+    共用一个 serve）中本实例子进程退出、端口仍由他人服务时不误报失败。
+    """
     deadline = time.time() + timeout
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     interval = 1.0
-    while time.time() < deadline:
+    last_err = ""
+    while True:
+        healthy = False
         try:
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with open_local(req, timeout=5) as resp:
                 if 200 <= resp.status < 300:
-                    return True
-        except (urllib.error.URLError, OSError):
-            pass
+                    healthy = True
+                else:
+                    last_err = f"HTTP {resp.status}"
+        except urllib.error.HTTPError as e:
+            last_err = f"HTTP {e.code}"
+        except (urllib.error.URLError, OSError) as e:
+            # URLError.reason 比 str(e) 更简洁（如 "Name or service not known"）
+            last_err = str(getattr(e, "reason", None) or e)
+        if healthy:
+            return True
+        if alive_check is not None and not alive_check():
+            logger.warning("引擎进程已提前退出，中止健康检查等待")
+            break
         remaining = deadline - time.time()
         if remaining <= 0:
             break
         time.sleep(min(interval, remaining))
         interval = min(interval * 2, 5.0)
+    if last_err:
+        logger.warning(f"健康检查未通过（{url}），最后错误：{last_err}")
     return False
 
 
@@ -161,3 +193,61 @@ def tail_file(path: Path, lines: int) -> str:
     except OSError:
         return ""
     return "\n".join(content[-lines:])
+
+
+# 启动失败诊断的错误标记：命中行的前 _EXCERPT_BEFORE、后 _EXCERPT_AFTER 行构成一个上下文块。
+_EXCERPT_MARKERS = (
+    "Traceback (most recent call last)",
+    "CUDA error",
+    "out of memory",
+    "OutOfMemory",
+    "NCCL",
+    "RuntimeError",
+    "ValueError",
+    "AssertionError",
+    "ImportError",
+    "ModuleNotFoundError",
+    "Address already in use",
+    "Engine core initialization failed",
+)
+_EXCERPT_BEFORE = 10
+_EXCERPT_AFTER = 60
+_EXCERPT_MAX_BLOCKS = 3
+_EXCERPT_LINE_WIDTH = 240
+
+
+def log_excerpt(path: Path) -> str | None:
+    """按错误标记截取日志关键片段（多区块合并），用于进程早退时的失败诊断。
+
+    vLLM 等引擎崩溃时真实异常常位于日志中部，尾部 50 行可能只是 traceback 的尾巴；
+    此函数定位 Traceback / OOM / NCCL 等标记并带上下文输出（最多 3 个区块）。
+    无标记或读取失败返回 None。
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    ranges: list[list[int]] = []  # [start, end)，按出现顺序收集、重叠即并入前一区段
+    for i, line in enumerate(lines):
+        if any(m in line for m in _EXCERPT_MARKERS):
+            start = max(0, i - _EXCERPT_BEFORE)
+            end = min(len(lines), i + _EXCERPT_AFTER)
+            if ranges and start <= ranges[-1][1]:
+                ranges[-1][1] = max(ranges[-1][1], end)
+            else:
+                ranges.append([start, end])
+            if len(ranges) >= _EXCERPT_MAX_BLOCKS:
+                break
+    if not ranges:
+        return None
+    out: list[str] = []
+    for start, end in ranges:
+        out.append(f"—— 第 {start + 1}-{end} 行 ——")
+        for n in range(start, end):
+            text = lines[n]
+            if len(text) > _EXCERPT_LINE_WIDTH:
+                text = text[:_EXCERPT_LINE_WIDTH] + " …(截断)"
+            out.append(f"{n + 1:>6} | {text}")
+        if end < len(lines):
+            out.append(f"...（后续还有 {len(lines) - end} 行，完整内容见日志文件）")
+    return "\n".join(out)

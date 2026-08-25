@@ -22,6 +22,7 @@ from modelctl.core.gateway import GATEWAY_PORT
 from modelctl.core.process import (
     is_running,
     launch_log,
+    log_excerpt,
     pid_file,
     start_detached,
     stop_instance,
@@ -72,7 +73,8 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float) -> Compo
         logger.warning(warning)
     adapter.pre_start()
     cmd, env = adapter.build_command()
-    pid = start_detached(profile.name, cmd, env)
+    pid, proc = start_detached(profile.name, cmd, env)
+    adapter.spawned_proc = proc  # 供 wait_ready 在进程早退时 fail-fast
     try:
         from modelctl.core.gpu_lock import update_gpu_lock_owner
 
@@ -94,12 +96,17 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float) -> Compo
             logger.info("提示：用量统计可通过 `modelctl stats start` 启动")
         return ComponentResult(tag, "ok", f"http://127.0.0.1:{profile.port}")
     log = launch_log(profile.name)
-    if log is not None:
+    died = proc.poll() is not None
+    if log is None:
+        logger.warning("引擎未在时限内就绪，且未找到启动日志")
+    elif died:
+        # 进程早退：真实异常通常在日志中部，按错误标记截取上下文；无标记时退回尾部 50 行
+        logger.warning(f"引擎进程提前退出（PID {pid}），未能就绪。相关日志摘录（{log}）：")
+        logger.warning(log_excerpt(log) or tail_file(log, 50))
+    else:
         logger.warning(f"健康检查超时，日志尾部 50 行（{log}）：")
         logger.warning(tail_file(log, 50))
-    else:
-        logger.warning("健康检查超时，且未找到启动日志")
-    return ComponentResult(tag, "error", "健康检查超时")
+    return ComponentResult(tag, "error", "引擎进程提前退出" if died else "健康检查超时")
 
 
 def stop_profile(profile: Profile, caps: Capabilities, models_dir: Path | None) -> ComponentResult:
@@ -140,7 +147,12 @@ def start_gateway() -> ComponentResult:
     if is_running("llm-gateway"):
         return ComponentResult("gateway", "skipped", "网关已在运行")
     cmd, env = _detached_script("modelctl.core.gateway")
-    pid = start_detached("llm-gateway", cmd, env)
+    # 与 stats 服务共用用量持久化目录（USAGE_DATA_DIR 缺省 data/cache），
+    # 网关累计的 token 由 stats 服务读出，费率/预算计算保持一致
+    data_dir = os.environ.get("USAGE_DATA_DIR")
+    if data_dir:
+        env["USAGE_DATA_DIR"] = data_dir
+    pid, _ = start_detached("llm-gateway", cmd, env)
     port = int(os.environ.get("GATEWAY_PORT", str(GATEWAY_PORT)))
     logger.info(f"网关已启动（PID {pid}），监听端口 {port}")
     return ComponentResult("gateway", "ok", f"http://127.0.0.1:{port}")
@@ -171,7 +183,7 @@ def start_stats() -> ComponentResult:
     if is_running("usage-stats"):
         return ComponentResult("stats", "skipped", "用量统计服务已在运行")
     cmd, env = _detached_script("modelctl.core.stats")
-    pid = start_detached("usage-stats", cmd, env)
+    pid, _ = start_detached("usage-stats", cmd, env)
     port = int(os.environ.get("USAGE_PORT", str(USAGE_PORT)))
     logger.info(f"用量统计服务已启动（PID {pid}），监听端口 {port}")
     return ComponentResult("stats", "ok", f"http://127.0.0.1:{port}")

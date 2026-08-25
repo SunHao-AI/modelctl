@@ -7,6 +7,8 @@ import os
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
+import subprocess
+
 from modelctl.core.capabilities import Capabilities
 from modelctl.core.gpu_utils import GPUValidationError, resolve_gpu_list, validate_gpu_selection
 from modelctl.core.process import wait_health
@@ -25,6 +27,9 @@ class EngineAdapter(ABC):
         self.profile = profile
         self.caps = caps
         self.warnings: list[str] = []
+        # 本次 start_detached 拉起的进程句柄（由 all_service.start_profile 注入）；
+        # None 表示非本工具拉起或尚未启动，健康检查不做早退探测
+        self.spawned_proc: subprocess.Popen | None = None
 
     @abstractmethod
     def build_command(self) -> tuple[list[str], dict[str, str]]:
@@ -114,8 +119,9 @@ class EngineAdapter(ABC):
         apply_compat(self.profile.name, self.profile.engine, self.warnings, issues)
 
     def wait_ready(self, timeout: float) -> bool:
-        """等待后端就绪（默认：以上游 API key 探测 health_url）。"""
-        return wait_health(self.health_url(), timeout, self.upstream_api_key())
+        """等待后端就绪（默认：以上游 API key 探测 health_url；本工具拉起的进程早退则立即失败）。"""
+        alive_check = (lambda: self.spawned_proc.poll() is None) if self.spawned_proc else None
+        return wait_health(self.health_url(), timeout, self.upstream_api_key(), alive_check=alive_check)
 
     def ui_spec(self, port: int | None = None, host: str | None = None) -> dict | None:
         """Web 管理控制台规格 {cmd, env, port, host, allow_from}；引擎不提供时返回 None。

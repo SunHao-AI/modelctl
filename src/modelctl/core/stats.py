@@ -203,6 +203,7 @@ class UsageCollector:
         self.mode = mode
         self.mapping = mapping or {}
         self._lock = threading.Lock()
+        self._monotonic = time.monotonic  # 网关注入与轮询共用的速率计算时钟基准
         self._snapshot: dict[str, object] = {
             "ok": False,
             "error": None,
@@ -258,6 +259,26 @@ class UsageCollector:
         self._rate_window.append((now, prompt_total, predicted_total))
         if len(self._rate_window) > self._window_size:
             self._rate_window.pop(0)
+
+    def record_tokens(self, prompt_delta: int, completion_delta: int) -> None:
+        """网关按真实请求用量累计 token（流式按增量调用），与轮询滑窗同源计算速率。"""
+        if prompt_delta <= 0 and completion_delta <= 0:
+            return
+        now = self._monotonic()
+        with self._lock:
+            new_prompt = self._baseline["prompt_total"] + prompt_delta
+            new_predicted = self._baseline["predicted_total"] + completion_delta
+            self._baseline["prompt_total"] = new_prompt
+            self._baseline["predicted_total"] = new_predicted
+            self._snapshot["prompt_total"] = new_prompt
+            self._snapshot["predicted_total"] = new_predicted
+            self._snapshot["ok"] = True
+            self._snapshot["error"] = None
+            self._record_window(now, new_prompt, new_predicted)
+            prompt_rate, predicted_rate = self._compute_window_rate()
+            self._snapshot["prompt_rate"] = prompt_rate
+            self._snapshot["predicted_rate"] = predicted_rate
+            self._persist(new_prompt, new_predicted)
 
     def _compute_window_rate(self) -> tuple[float, float]:
         if len(self._rate_window) < 2:

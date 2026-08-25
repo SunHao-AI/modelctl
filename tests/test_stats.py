@@ -185,6 +185,58 @@ def test_usage_collector_sliding_window_rate(tmp_path):
     assert rr == 50.0
 
 
+def test_usage_collector_record_tokens_updates_totals_and_rate(tmp_path):
+    """网关按真实请求累计 token：总数、滑窗速率与持久化都应更新（vLLM gauge 恒 0 的修复）。"""
+    data_dir = tmp_path / "cache"
+    data_dir.mkdir()
+    from modelctl.core.stats import UsageCollector
+
+    collector = UsageCollector(
+        name="demo",
+        base_url="http://127.0.0.1:8000",
+        poll_interval=5,
+        api_key=None,
+        data_dir=data_dir,
+        mode="on-demand",
+        mapping={},
+    )
+    # 注入单调时钟，使滑窗速率可预期：t=1000 累计 (50, 20)，t=1002 累计 (110, 40)
+    fake_clock = iter([1000.0, 1002.0])
+    collector._monotonic = lambda: next(fake_clock)
+    collector.record_tokens(50, 20)
+    collector.record_tokens(60, 20)
+    snap = collector.snapshot()
+    assert snap["prompt_total"] == 110.0
+    assert snap["predicted_total"] == 40.0
+    # 滑窗速率 = 窗口内首尾差分 / 时间差：(110-50)/2 与 (40-20)/2
+    assert snap["prompt_rate"] == 30.0
+    assert snap["predicted_rate"] == 10.0
+    assert snap["ok"] is True
+    # 持久化文件已写入（与 stats 服务共用 data 目录）
+    data = json.loads((data_dir / "demo.json").read_text(encoding="utf-8"))
+    assert data["prompt_total"] == 110.0
+    assert data["predicted_total"] == 40.0
+
+
+def test_usage_collector_record_tokens_ignores_zero_delta(tmp_path):
+    data_dir = tmp_path / "cache"
+    data_dir.mkdir()
+    from modelctl.core.stats import UsageCollector
+
+    collector = UsageCollector(
+        name="demo",
+        base_url="http://127.0.0.1:8000",
+        poll_interval=5,
+        api_key=None,
+        data_dir=data_dir,
+        mode="on-demand",
+        mapping={},
+    )
+    collector.record_tokens(0, 0)
+    assert collector.snapshot()["prompt_total"] == 0.0
+    assert collector.snapshot()["predicted_total"] == 0.0
+
+
 def test_usage_collector_uses_window_rate_over_gauge(tmp_path):
     data_dir = tmp_path / "cache"
     data_dir.mkdir()
