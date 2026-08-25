@@ -75,6 +75,18 @@ def test_list_models_health_filtered():
     assert [m["id"] for m in resp.json()["data"]] == ["qwen3.8"]
 
 
+def test_bare_v1_returns_404_not_redirect():
+    """裸 /v1（无尾斜杠）不得 307 重定向：FastAPI redirect_slashes 的 Location 是
+    根相对路径 /v1/，经 B 机 nginx 前缀路由后客户端跟随会丢 /<node>/llm 前缀落空。"""
+    reg = {"qwen3.8": GatewayModel("qwen3.8", "ollama", "http://upstream", "qwen3.8:27b", None, "http://upstream/")}
+    app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    for path in ("/v1", "/v1/"):
+        resp = _run(_post(app, path))
+        assert resp.status_code == 404
+        assert resp.headers.get("location") is None  # 不重定向
+        assert "unknown endpoint" in resp.json()["error"]["message"]
+
+
 def test_proxy_rewrites_model_to_upstream():
     captured = {}
 
