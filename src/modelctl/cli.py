@@ -419,7 +419,8 @@ def _cmd_list(args, models_dir: Path | None, caps) -> int:
             rate = "-"
             if state == "运行中":
                 r = _stats_token_rate(p)
-                if r is not None:
+                # 仅显示非零速率：0/0（空闲且无兜底数据）无信息量，统一显示 -
+                if r is not None and (r[0] > 0 or r[1] > 0):
                     rate = f"{r[0]:.1f}/{r[1]:.1f}"
             rows.append([p.engine, p.variant or "-", p.port, state, rate, p.name])
         _print_table(["引擎", "变体", "端口", "状态", "速率(入/出)", "标识符"], rows)

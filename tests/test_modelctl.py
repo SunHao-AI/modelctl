@@ -621,6 +621,21 @@ def test_list_rate_column_shows_stats_rates(tmp_path, monkeypatch, capsys):
     assert "12.3/45.6" in out
 
 
+def test_list_rate_column_zero_rates_shown_as_dash(tmp_path, monkeypatch, capsys):
+    """stats 返回 0/0（空闲且无兜底数据）时速率列显示 -，避免误导为真实速率。"""
+    (tmp_path / "qwen3.8.yaml").write_text(
+        "group: qwen3.8\nengine: vllm\nport: 8101\nvllm:\n  model: q\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr("modelctl.cli._instance_state", lambda name: "运行中")
+    monkeypatch.setattr("modelctl.cli._stats_token_rate", lambda p: (0.0, 0.0))
+    rc = cli.main(["list", "--models-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "0.0/0.0" not in out
+    assert "运行中  -" in out
+
+
 def test_list_rate_column_dash_for_stopped(tmp_path, monkeypatch, capsys):
     """未运行成员的速率列显示 -。"""
     (tmp_path / "qwen3.8.yaml").write_text(
