@@ -114,6 +114,7 @@ class VllmAdapter(EngineAdapter):
             str(tp),
             "--gpu-memory-utilization",
             str(cfg.get("gpu_memory_utilization", 0.9)),
+            "--uvicorn-access-log",  # 关闭 uvicorn access log，避免 /metrics 轮询刷屏
         ]
         if cfg.get("max_model_len"):
             cmd += ["--max-model-len", str(cfg["max_model_len"])]
