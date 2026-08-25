@@ -303,6 +303,116 @@ def test_poll_once_prefers_persisted_gateway_totals(tmp_path):
     assert snap["predicted_rate"] == 10.0  # (550-500)/5
 
 
+def test_build_target_payload_benchmarks_when_idle(monkeypatch):
+    """回归：窗口无流量（速率为 0）时用伪造请求测速兜底，cc-switch 不再恒显示 0。"""
+    import time
+    from unittest.mock import MagicMock
+
+    from modelctl.core.stats import StatsTarget, UsageHandler
+
+    target = StatsTarget(
+        name="a",
+        data_dir=None,
+        metrics_url="http://127.0.0.1:8000/metrics",
+        mapping={"predicted_total": ["x"]},
+        usage_cfg={"price_in": 1.0, "price_out": 2.0},
+        bench_url="http://127.0.0.1:8000/v1/chat/completions",
+        bench_model="a",
+    )
+    UsageHandler.targets = [target]
+    UsageHandler.start_time = time.time()
+    mock_collector = MagicMock()
+    mock_collector.get_snapshot.return_value = {
+        "ok": True,
+        "error": None,
+        "prompt_total": 100.0,
+        "predicted_total": 50.0,
+        "prompt_rate": 0.0,
+        "predicted_rate": 0.0,
+    }
+    UsageHandler.collectors = {"a": mock_collector}
+    from modelctl.core.stats import _BENCH_CACHE
+
+    _BENCH_CACHE.clear()
+    monkeypatch.setattr("modelctl.core.stats._bench_cached", lambda t: (12.5, 88.0, 300))
+    handler = UsageHandler.__new__(UsageHandler)
+    payload = handler._resolve_payload("a")
+    assert payload["prompt_rate"] == 12.5
+    assert payload["predicted_rate"] == 88.0
+    assert "输入速率 12.5 tok/s" in payload["extra"]
+    assert "输出速率 88.0 tok/s" in payload["extra"]
+
+
+def test_build_target_payload_skips_bench_when_active(monkeypatch):
+    """窗口有真实流量（速率非 0）时不得用伪造请求覆盖真实速率。"""
+    import time
+    from unittest.mock import MagicMock
+
+    from modelctl.core.stats import StatsTarget, UsageHandler
+
+    target = StatsTarget(
+        name="a",
+        data_dir=None,
+        metrics_url="http://127.0.0.1:8000/metrics",
+        mapping={"predicted_total": ["x"]},
+        usage_cfg={"price_in": 1.0, "price_out": 2.0},
+        bench_url="http://127.0.0.1:8000/v1/chat/completions",
+    )
+    UsageHandler.targets = [target]
+    UsageHandler.start_time = time.time()
+    mock_collector = MagicMock()
+    mock_collector.get_snapshot.return_value = {
+        "ok": True,
+        "error": None,
+        "prompt_total": 100.0,
+        "predicted_total": 50.0,
+        "prompt_rate": 10.0,
+        "predicted_rate": 5.0,
+    }
+    UsageHandler.collectors = {"a": mock_collector}
+
+    def _should_not_call(t):
+        raise AssertionError("有真实速率时不应触发伪造测速")
+
+    monkeypatch.setattr("modelctl.core.stats._bench_cached", _should_not_call)
+    handler = UsageHandler.__new__(UsageHandler)
+    payload = handler._resolve_payload("a")
+    assert payload["prompt_rate"] == 10.0
+    assert payload["predicted_rate"] == 5.0
+
+
+def test_benchmark_rates_parses_streaming_usage(monkeypatch):
+    """主动测速：从流式响应的 usage 计算输入/输出速率与 TTFT。"""
+    import io
+    import urllib.request
+
+    from modelctl.core.stats import benchmark_rates
+
+    sse = (
+        'data: {"id":"1","usage":{"prompt_tokens":4,"completion_tokens":2}}\n'
+        'data: {"id":"1","usage":{"prompt_tokens":4,"completion_tokens":8}}\n'
+        "data: [DONE]\n"
+    )
+    # t_start=0.0, t_ttft=0.5, t_end=2.5 → input=4/0.5=8.0, output=8/2.0=4.0, ttft=500ms
+    clock = iter([0.0, 0.5, 2.5])
+    monkeypatch.setattr("modelctl.core.stats.time.perf_counter", lambda: next(clock))
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: io.BytesIO(sse.encode("utf-8")))
+    assert benchmark_rates("http://127.0.0.1:8101/v1/chat/completions", "k", "qwen3.8") == (8.0, 4.0, 500)
+
+
+def test_benchmark_rates_returns_none_on_failure(monkeypatch):
+    import urllib.error
+    import urllib.request
+
+    from modelctl.core.stats import benchmark_rates
+
+    def _refuse(req, timeout):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _refuse)
+    assert benchmark_rates("http://127.0.0.1:1/v1/chat/completions", None, "m") is None
+
+
 def test_usage_collector_uses_window_rate_over_gauge(tmp_path):
     data_dir = tmp_path / "cache"
     data_dir.mkdir()

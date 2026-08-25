@@ -20,6 +20,7 @@ metrics_mapping() 提供（mapping 为 None 表示该引擎不支持精确统计
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -49,6 +50,69 @@ def _fmt_tokens(value: float) -> str:
     if av >= 1e3:
         return f"{sign}{av / 1e3:.1f}k"
     return f"{sign}{int(round(av))}"
+
+
+def benchmark_rates(completions_url: str, api_key: str | None, model: str) -> tuple[float, float, int] | None:
+    """主动测速：发一次短流式请求，返回 (input_rate, output_rate, ttft_ms)。
+
+    输入速率 = prompt_tokens / TTFT（prefill）；输出速率 = completion_tokens / (总耗时 - TTFT)（decode）。
+    TTFT 取首个非 [DONE] 的 data: 事件到达时刻（reasoning 模型为思考首 token 时刻）。
+    请求失败 / 超时 / 空响应返回 None。
+    """
+    body = json.dumps(
+        {
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+    ).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(completions_url, data=body, headers=headers, method="POST")
+    t_start = time.perf_counter()
+    t_ttft: float | None = None
+    t_end: float | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            reader = io.TextIOWrapper(resp, encoding="utf-8", errors="replace")
+            for line in reader:
+                line = line.strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if not payload or payload == "[DONE]":
+                    continue
+                if t_ttft is None:
+                    t_ttft = time.perf_counter()
+                try:
+                    data = json.loads(payload)
+                except ValueError:
+                    continue
+                usage = data.get("usage") if isinstance(data, dict) else None
+                if isinstance(usage, dict):
+                    if isinstance(usage.get("prompt_tokens"), int):
+                        prompt_tokens = usage["prompt_tokens"]
+                    if isinstance(usage.get("completion_tokens"), int):
+                        completion_tokens = usage["completion_tokens"]
+        t_end = time.perf_counter()
+    except (OSError, ValueError):
+        return None
+    if t_ttft is None or t_end is None:
+        return None
+    ttft_s = t_ttft - t_start
+    if ttft_s <= 0:
+        return None
+    prompt_tokens = prompt_tokens if prompt_tokens is not None else len("hi") // 4
+    completion_tokens = completion_tokens if completion_tokens is not None else 1
+    input_rate = round(prompt_tokens / ttft_s, 1)
+    decode_s = (t_end - t_start) - ttft_s
+    output_rate = round(completion_tokens / decode_s, 1) if decode_s > 0 else 0.0
+    return input_rate, output_rate, round(ttft_s * 1000)
 
 
 def _build_patterns(mapping: dict[str, list[str]]) -> dict[str, list[re.Pattern]]:
@@ -176,6 +240,28 @@ class StatsTarget:
     usage_cfg: dict = field(default_factory=dict)
     api_key: str | None = None
     aliases: list[str] = field(default_factory=list)
+    # 主动测速配置（bench_url 为 None = 窗口无流量时不做兜底测速）
+    bench_url: str | None = None
+    bench_model: str | None = None
+
+
+# 主动测速结果缓存：cc-switch 约每 30-60s 轮询 /api/usage，节流避免每次都伪造请求
+_BENCH_CACHE: dict[str, tuple[float, tuple[float, float, int]]] = {}
+_BENCH_TTL = 30.0
+
+
+def _bench_cached(target: StatsTarget) -> tuple[float, float, int] | None:
+    """窗口无流量时的兜底测速（30s 节流）；未配置 bench_url 或测速失败返回 None。"""
+    if not target.bench_url:
+        return None
+    now = time.time()
+    cached = _BENCH_CACHE.get(target.name)
+    if cached and now - cached[0] < _BENCH_TTL:
+        return cached[1]
+    result = benchmark_rates(target.bench_url, target.api_key, target.bench_model or target.name)
+    if result is not None:
+        _BENCH_CACHE[target.name] = (now, result)
+    return result
 
 
 class UsageCollector:
@@ -431,7 +517,14 @@ class UsageHandler(BaseHTTPRequestHandler):
         snap = collector.get_snapshot()
         if not snap["ok"]:
             return {"isValid": False, "invalidMessage": f"{target.name} 不可用：{snap['error'] or '未知错误'}"}
-        payload = build_usage_payload(snap, target.usage_cfg, self.start_time, time.time())
+        tokens = dict(snap)
+        # 窗口无流量（速率为 0）时用一次伪造请求测速兜底，避免 cc-switch 一直显示 0
+        if tokens.get("prompt_rate", 0.0) == 0 and tokens.get("predicted_rate", 0.0) == 0:
+            bench = _bench_cached(target)
+            if bench is not None:
+                tokens["prompt_rate"] = bench[0]
+                tokens["predicted_rate"] = bench[1]
+        payload = build_usage_payload(tokens, target.usage_cfg, self.start_time, time.time())
         payload["model"] = target.name
         # 覆盖默认 planName，避免多模型时卡片展开视图显示错误名称
         payload["planName"] = f"{target.name} 本地部署"
@@ -618,6 +711,9 @@ def _targets_from_profiles(data_dir: Path) -> list[StatsTarget]:
                 usage_cfg=profile.usage,
                 api_key=profile.api_key,
                 aliases=profile.aliases,
+                # 窗口无流量时主动测速兜底（复用与 cli 测速相同的请求构造）
+                bench_url=f"http://127.0.0.1:{profile.port}/v1/chat/completions",
+                bench_model=adapter.upstream_model_name(),
             )
         )
     return targets

@@ -8,7 +8,7 @@ def test_list_empty(tmp_path, monkeypatch, capsys):
 
 
 def test_list_grouped_catalog(tmp_path, monkeypatch, capsys):
-    """list 按家族分组展示，含引擎/变体/端口/状态/标识符列。"""
+    """list 按家族分组展示，含引擎/变体/端口/状态/速率/标识符列，家族块之间空一行。"""
     (tmp_path / "qwen3.8.yaml").write_text(
         "group: qwen3.8\nengine: vllm\nport: 8101\nvllm:\n  model: q\n", encoding="utf-8"
     )
@@ -26,6 +26,10 @@ def test_list_grouped_catalog(tmp_path, monkeypatch, capsys):
     assert "qwen3.8（2 配置）" in out
     assert "qwen3.8-vllm" in out and "qwen3.8-vllm-light" in out
     assert "light" in out and "8105" in out
+    # 速率列头
+    assert "速率(入/出)" in out
+    # 家族块之间空一行（deepseek 块结束后、qwen3.8 标题前有空行）
+    assert out.index("deepseek-v4-flash（1 配置）") < out.index("\n\nqwen3.8（2 配置）")
 
 
 def test_list_group_route_mapping(tmp_path, monkeypatch, capsys):
@@ -601,3 +605,70 @@ def test_status_output_hides_rates_when_not_running(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "输入 -，输出 -" in out
     assert "首 Token 耗时：-" in out
+
+
+def test_list_rate_column_shows_stats_rates(tmp_path, monkeypatch, capsys):
+    """运行中成员的速率列显示 stats 服务的输入/输出速率（格式 入/出）。"""
+    (tmp_path / "qwen3.8.yaml").write_text(
+        "group: qwen3.8\nengine: vllm\nport: 8101\nvllm:\n  model: q\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr("modelctl.cli._instance_state", lambda name: "运行中")
+    monkeypatch.setattr("modelctl.cli._stats_token_rate", lambda p: (12.3, 45.6))
+    rc = cli.main(["list", "--models-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "12.3/45.6" in out
+
+
+def test_list_rate_column_dash_for_stopped(tmp_path, monkeypatch, capsys):
+    """未运行成员的速率列显示 -。"""
+    (tmp_path / "qwen3.8.yaml").write_text(
+        "group: qwen3.8\nengine: vllm\nport: 8101\nvllm:\n  model: q\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+    rc = cli.main(["list", "--models-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "已停止" in out
+    # 速率列值（状态与速率之间以空格对齐，此处检查速率列存在且为 -）
+    assert "速率(入/出)" in out
+
+
+def test_stats_token_rate_reads_usage_api(tmp_path, monkeypatch):
+    """_stats_token_rate 只读 stats 服务：返回 (prompt_rate, predicted_rate)。"""
+    import json
+
+    from modelctl.core.profile import Profile
+
+    p = Profile(name="qwen3.8", engine="vllm", port=8101, aliases=[], engine_config={})
+    monkeypatch.setenv("USAGE_PORT", "59999")
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"isValid": True, "prompt_rate": 7.5, "predicted_rate": 88.0}).encode("utf-8")
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", lambda url, timeout: FakeResp())
+    assert cli._stats_token_rate(p) == (7.5, 88.0)
+
+
+def test_stats_token_rate_none_when_unavailable(tmp_path, monkeypatch):
+    """stats 服务不可用时 _stats_token_rate 返回 None（不抛异常）。"""
+    import urllib.error
+
+    from modelctl.core.profile import Profile
+
+    p = Profile(name="qwen3.8", engine="vllm", port=8101, aliases=[], engine_config={})
+    monkeypatch.setenv("USAGE_PORT", "59999")
+
+    def _refuse(url, timeout):
+        raise urllib.error.URLError("refused")
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", _refuse)
+    assert cli._stats_token_rate(p) is None

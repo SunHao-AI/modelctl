@@ -258,69 +258,12 @@ def _price_rate_text(profile: Profile) -> str:
 def _benchmark_token_rate(adapter) -> tuple[float, float, int] | None:
     """主动测速：发一次短流式请求，返回 (input_rate, output_rate, ttft_ms)。
 
-    输入速率 = prompt_tokens / TTFT（prefill）；输出速率 = completion_tokens / (总耗时 - TTFT)（decode）。
-    TTFT 取首个非 [DONE] 的 data: 事件到达时刻（reasoning 模型为思考首 token 时刻）。
-    请求失败 / 超时 / 空响应返回 None。
+    实现复用 modelctl.core.stats.benchmark_rates（stats 服务窗口无流量时也用它兜底）。
     """
-    import io
+    from modelctl.core.stats import benchmark_rates
 
-    profile = adapter.profile
-    body = json.dumps(
-        {
-            "model": adapter.upstream_model_name(),
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 64,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
-    ).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    key = adapter.upstream_api_key()
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-    url = f"http://127.0.0.1:{profile.port}/v1/chat/completions"
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    t_start = time.perf_counter()
-    t_ttft: float | None = None
-    t_end: float | None = None
-    prompt_tokens: int | None = None
-    completion_tokens: int | None = None
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            reader = io.TextIOWrapper(resp, encoding="utf-8", errors="replace")
-            for line in reader:
-                line = line.strip()
-                if not line.startswith("data:"):
-                    continue
-                payload = line[5:].strip()
-                if not payload or payload == "[DONE]":
-                    continue
-                if t_ttft is None:
-                    t_ttft = time.perf_counter()
-                try:
-                    data = json.loads(payload)
-                except ValueError:
-                    continue
-                usage = data.get("usage") if isinstance(data, dict) else None
-                if isinstance(usage, dict):
-                    if isinstance(usage.get("prompt_tokens"), int):
-                        prompt_tokens = usage["prompt_tokens"]
-                    if isinstance(usage.get("completion_tokens"), int):
-                        completion_tokens = usage["completion_tokens"]
-            t_end = time.perf_counter()
-    except (OSError, ValueError):
-        return None
-    if t_ttft is None or t_end is None:
-        return None
-    ttft_s = t_ttft - t_start
-    if ttft_s <= 0:
-        return None
-    prompt_tokens = prompt_tokens if prompt_tokens is not None else len("hi") // 4
-    completion_tokens = completion_tokens if completion_tokens is not None else 1
-    input_rate = round(prompt_tokens / ttft_s, 1)
-    decode_s = (t_end - t_start) - ttft_s
-    output_rate = round(completion_tokens / decode_s, 1) if decode_s > 0 else 0.0
-    return input_rate, output_rate, round(ttft_s * 1000)
+    url = f"http://127.0.0.1:{adapter.profile.port}/v1/chat/completions"
+    return benchmark_rates(url, adapter.upstream_api_key(), adapter.upstream_model_name())
 
 
 def _token_rate_data(profile, caps) -> dict:
@@ -359,6 +302,28 @@ def _token_rate_data(profile, caps) -> dict:
         return {"prompt_rate": None, "predicted_rate": None, "ttft_ms": None, "source": None}
     prompt_rate, predicted_rate, ttft_ms = result
     return {"prompt_rate": prompt_rate, "predicted_rate": predicted_rate, "ttft_ms": ttft_ms, "source": "bench"}
+
+
+def _stats_token_rate(profile) -> tuple[float, float] | None:
+    """只读 stats 服务的 Token 速率（不主动测速）：stats 不可用/无数据返回 None。
+
+    供 list 的速率列使用：stats 服务自身已有"窗口无流量时主动测速并缓存"的兜底，
+    这里直接复用其缓存值即可，避免 list 逐模型触发伪造请求。
+    """
+    port = int(os.environ.get("USAGE_PORT", "5002"))
+    url = f"http://127.0.0.1:{port}/api/usage?model={profile.name}"
+    try:
+        with urllib.request.urlopen(url, timeout=2) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or not data.get("isValid"):
+        return None
+    prompt_rate = data.get("prompt_rate")
+    predicted_rate = data.get("predicted_rate")
+    if isinstance(prompt_rate, (int, float)) and isinstance(predicted_rate, (int, float)):
+        return float(prompt_rate), float(predicted_rate)
+    return None
 
 
 def _cmd_status(args, models_dir: Path | None, caps) -> int:
@@ -438,7 +403,9 @@ def _cmd_list(args, models_dir: Path | None, caps) -> int:
     for members in grouped.values():
         members.sort(key=lambda p: (ENGINE_PRIORITY.get(p.engine, 99), p.variant, p.name))
 
-    for group_name in sorted(grouped):
+    for idx, group_name in enumerate(sorted(grouped)):
+        if idx > 0:
+            print()  # 家族块之间空一行，便于阅读
         members = grouped[group_name]
         target = _group_runtime_target(members)
         if target:
@@ -446,11 +413,16 @@ def _cmd_list(args, models_dir: Path | None, caps) -> int:
         else:
             route = f'输入 "{group_name}" 当前无运行成员'
         print(f"{group_name}（{len(members)} 配置）｜{route}")
-        rows = [
-            [p.engine, p.variant or "-", p.port, _instance_state(p.name), p.name]
-            for p in members
-        ]
-        _print_table(["引擎", "变体", "端口", "状态", "标识符"], rows)
+        rows = []
+        for p in members:
+            state = _instance_state(p.name)
+            rate = "-"
+            if state == "运行中":
+                r = _stats_token_rate(p)
+                if r is not None:
+                    rate = f"{r[0]:.1f}/{r[1]:.1f}"
+            rows.append([p.engine, p.variant or "-", p.port, state, rate, p.name])
+        _print_table(["引擎", "变体", "端口", "状态", "速率(入/出)", "标识符"], rows)
 
     default_model = os.environ.get("GATEWAY_DEFAULT_MODEL")
     if default_model:
