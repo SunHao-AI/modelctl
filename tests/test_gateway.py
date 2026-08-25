@@ -20,6 +20,11 @@ async def _post(app, path: str, json: dict | None = None):
         return await client.post(path, json=json or {})
 
 
+async def _post_headers(app, path: str, json: dict | None = None, headers: dict | None = None):
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers or {}) as client:
+        return await client.post(path, json=json or {})
+
+
 def test_build_registry(tmp_path):
     qwen_yaml = "name: qwen3.8\nengine: ollama\nport: 11434\n\nollama:\n  model: qwen3.8:27b\n"
     (tmp_path / "qwen.yaml").write_text(qwen_yaml, encoding="utf-8")
@@ -145,6 +150,65 @@ def test_proxy_404_when_no_default_matches():
     reg = {"ds": GatewayModel("deepseek-v4-flash", "llamacpp", "http://upstream", "deepseek-v4-flash", None, "http://upstream/")}
     app = create_app(reg, default_model=None, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
     resp = _run(_post(app, "/v1/chat/completions", json={"model": "ghost-model", "messages": []}))
+    assert resp.status_code == 404
+
+
+def test_anthropic_messages_passthrough():
+    """Anthropic /v1/messages：按 body.model 路由、改写模型名、透传 x-api-key。"""
+    captured = {}
+
+    def upstream(request):
+        captured["body"] = json.loads(request.content)
+        captured["x-api-key"] = request.headers.get("x-api-key")
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "hi"}],
+                "model": captured["body"]["model"],
+            },
+        )
+
+    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None, "http://upstream/", group="qwen3.8")}
+    app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
+    body = {"model": "qwen3.8", "max_tokens": 100, "messages": [{"role": "user", "content": "hi"}]}
+    resp = _run(_post_headers(app, "/v1/messages", json=body, headers={"x-api-key": "root123456"}))
+    assert resp.status_code == 200
+    assert captured["body"]["model"] == "qwen3.8-vllm"  # 改写为后端期望名
+    assert captured["x-api-key"] == "root123456"  # x-api-key 头透传
+    assert resp.json()["content"][0]["text"] == "hi"
+
+
+def test_anthropic_messages_streaming_passthrough():
+    """Anthropic 流式 SSE 必须保留 event: 行（与 OpenAI 的 data: 行解析不同）。"""
+    def upstream(request):
+        sse = (
+            "event: message_start\n"
+            "data: {\"type\":\"message_start\"}\n\n"
+            "event: content_block_delta\n"
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n"
+            "event: message_stop\n"
+            "data: {\"type\":\"message_stop\"}\n\n"
+        )
+        return httpx.Response(200, content=sse, headers={"content-type": "text/event-stream"})
+
+    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None, "http://upstream/", group="qwen3.8")}
+    app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
+    body = {"model": "qwen3.8", "stream": True, "messages": [{"role": "user", "content": "hi"}]}
+    resp = _run(_post(app, "/v1/messages", json=body))
+    assert resp.status_code == 200
+    assert "event: message_start" in resp.text
+    assert "event: content_block_delta" in resp.text
+    assert "event: message_stop" in resp.text
+    assert "text_delta" in resp.text
+
+
+def test_anthropic_messages_404_unknown_model():
+    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None, "http://upstream/", group="qwen3.8")}
+    app = create_app(reg, default_model=None, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    resp = _run(_post(app, "/v1/messages", json={"model": "ghost-model", "messages": []}))
     assert resp.status_code == 404
 
 

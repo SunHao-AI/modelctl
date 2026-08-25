@@ -367,6 +367,77 @@ def create_app(
                 data.append({"id": group_name, "object": "model", "created": 0, "owned_by": "modelctl"})
         return {"object": "list", "data": data}
 
+    @app.post("/v1/messages")
+    async def anthropic_proxy(request: Request):
+        """Anthropic Messages API（/v1/messages）兼容透传。
+
+        Trae CN 等客户端内置 Claude Agent SDK，使用 Anthropic 协议（POST
+        /v1/messages，x-api-key 认证，SSE 流带 event: 行）而非 OpenAI 格式。
+        vLLM 0.27+ 原生支持 /v1/messages，此处按 body.model 路由并原样透传；
+        流式必须保留 event: 行（不能复用 /v1/chat/completions 的 data: 行解析）。
+        """
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"message": "请求体必须是 JSON", "type": "invalid_request_error"}},
+            )
+        target = resolve_model(registry, body.get("model"), default_model, groups)
+        if target is None:
+            err_msg = f"model not found: {body.get('model')}"
+            return JSONResponse(
+                status_code=404,
+                content={"error": {"message": err_msg, "type": "invalid_request_error"}},
+            )
+        # 改写为后端期望的模型名（同 OpenAI 端点）
+        body["model"] = target.upstream_model
+        # 透传 Anthropic 认证头与版本头；unsloth 等自管 key 由适配器覆盖
+        headers = {
+            k: v
+            for k, v in request.headers.items()
+            if k.lower() in ("content-type", "authorization", "x-api-key", "anthropic-version", "anthropic-beta")
+        }
+        up_key = target.upstream_api_key()
+        if up_key and up_key != target.api_key:
+            headers["x-api-key"] = up_key
+            headers["Authorization"] = f"Bearer {up_key}"
+        url = f"{target.backend_url}/v1/messages"
+        client = httpx.AsyncClient(timeout=read_timeout, transport=transport)
+        try:
+            if body.get("stream"):
+                req = client.build_request("POST", url, json=body, headers=headers)
+                upstream = await client.send(req, stream=True)
+                ctype = upstream.headers.get("content-type")
+                if upstream.status_code >= 400:
+                    content = await upstream.aread()
+                    await client.aclose()
+                    return Response(status_code=upstream.status_code, content=content, media_type=ctype)
+
+                async def _raw_sse(upstream=upstream, client=client):
+                    """原始字节透传（保留 event:/data: 行），迭代结束关闭上游连接。"""
+                    try:
+                        async for chunk in upstream.aiter_bytes():
+                            if not isinstance(chunk, bytes):
+                                chunk = b"".join(chunk)
+                            yield chunk
+                    finally:
+                        await client.aclose()
+
+                return StreamingResponse(_raw_sse(), status_code=upstream.status_code, media_type=ctype)
+            upstream = await client.post(url, json=body, headers=headers)
+            resp = Response(
+                status_code=upstream.status_code,
+                content=upstream.content,
+                media_type=upstream.headers.get("content-type"),
+            )
+            await client.aclose()
+            return resp
+        except httpx.HTTPError as error:
+            await client.aclose()
+            err_msg = f"后端不可达：{error}"
+            return JSONResponse(status_code=502, content={"error": {"message": err_msg, "type": "upstream_error"}})
+
     @app.post("/v1/{path:path}")
     async def proxy(path: str, request: Request):
         if path not in ("chat/completions", "completions", "embeddings"):
