@@ -383,6 +383,12 @@ def create_app(
                 status_code=400,
                 content={"error": {"message": "请求体必须是 JSON", "type": "invalid_request_error"}},
             )
+        logger.info(
+            f"Anthropic 代理请求 model={body.get('model')!r} stream={body.get('stream')} "
+            f"max_tokens={body.get('max_tokens')} tools={'tools' in body} "
+            f"msgs={len(body.get('messages') or [])} thinking={'thinking' in body} "
+            f"auth_xkey={'x-api-key' in request.headers} auth={'Authorization' in request.headers}"
+        )
         target = resolve_model(registry, body.get("model"), default_model, groups)
         if target is None:
             err_msg = f"model not found: {body.get('model')}"
@@ -455,6 +461,12 @@ def create_app(
                 status_code=400,
                 content={"error": {"message": "请求体必须是 JSON", "type": "invalid_request_error"}},
             )
+        logger.info(
+            f"OpenAI 代理请求 {path} model={body.get('model')!r} stream={body.get('stream')} "
+            f"max_tokens={body.get('max_tokens')} tools={'tools' in body} "
+            f"resp_format={'response_format' in body} msgs={len(body.get('messages') or [])} "
+            f"auth={'Authorization' in request.headers} stream_options={'stream_options' in body}"
+        )
         target = resolve_model(registry, body.get("model"), default_model, groups)
         if target is None:
             err_msg = f"model not found: {body.get('model')}"
@@ -481,9 +493,9 @@ def create_app(
             body["chat_template_kwargs"] = {"enable_thinking": False}
         headers = {"Content-Type": "application/json"}
         up_key = target.upstream_api_key()
-        auth: str | None
-        if up_key and up_key != target.api_key:
-            # 运行时自动生成的 key（unsloth），客户端无从得知，必须覆盖请求头
+        if up_key:
+            # 用 profile 有效 key 认证（覆盖客户端自配 key）：客户端（如 Trae CN）
+            # 配置的 key 可能与后端不一致，透传会导致 vLLM 401；网关代劳认证更稳
             auth = f"Bearer {up_key}"
         else:
             auth = request.headers.get("Authorization") or (f"Bearer {target.api_key}" if target.api_key else None)
