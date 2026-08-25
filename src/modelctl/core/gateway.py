@@ -613,39 +613,40 @@ def create_app(
                     seen["completion"] = completion
 
                 async def _sse_stream(upstream=upstream, client=client):
-                    """透传后端 SSE 响应体，迭代结束（含异常）后关闭上游连接。"""
+                    """透传后端 SSE 响应体，迭代结束（含异常）后关闭上游连接。
+
+                    原始字节透传（保留 SSE 的空行事件分隔与 event/data 结构）；
+                    仅旁路解析 data: 行做用量统计与响应摘要，不改写输出——
+                    按行重组会丢失空行分隔符，导致严格解析的客户端（Trae CN）失败。
+                    """
                     pending = b""
                     collected: dict = {"content": [], "reasoning": [], "tool_calls": False}
                     try:
                         async for chunk in upstream.aiter_bytes():
-                            # 单 chunk 内可能含多条 data: 行，也可能一条被切成多个 chunk；
-                            # 先按行缓冲，整行再解析，防止流式 usage 增量被拆行漏统计。
                             if not isinstance(chunk, bytes):
                                 chunk = b"".join(chunk)  # 某些 httpx 版本整批 yield 列表
+                            yield chunk  # 原始透传，保留 SSE 格式
                             pending += chunk
-                            lines = pending.split(b"\n")
-                            pending = lines.pop()  # 末段可能是不完整行，留到下一轮
-                            for raw in lines:
-                                line = raw.strip()
+                            while b"\n" in pending:
+                                line, pending = pending.split(b"\n", 1)
+                                line = line.strip()
                                 if not line.startswith(b"data:"):
                                     continue
                                 payload = line[5:].strip()
-                                if not payload:
+                                if not payload or payload == b"[DONE]":
                                     continue
-                                if payload != b"[DONE]":
-                                    try:
-                                        data = json.loads(payload)
-                                    except ValueError:
-                                        continue
-                                    _record_usage(data, seen_tokens)
-                                    delta = ((data.get("choices") or [{}])[0].get("delta")) or {}
-                                    if delta.get("content"):
-                                        collected["content"].append(delta["content"])
-                                    if delta.get("reasoning") or delta.get("reasoning_content"):
-                                        collected["reasoning"].append(delta.get("reasoning") or delta.get("reasoning_content"))
-                                    if delta.get("tool_calls"):
-                                        collected["tool_calls"] = True
-                                yield raw + b"\n"
+                                try:
+                                    data = json.loads(payload)
+                                except ValueError:
+                                    continue
+                                _record_usage(data, seen_tokens)
+                                delta = ((data.get("choices") or [{}])[0].get("delta")) or {}
+                                if delta.get("content"):
+                                    collected["content"].append(delta["content"])
+                                if delta.get("reasoning") or delta.get("reasoning_content"):
+                                    collected["reasoning"].append(delta.get("reasoning") or delta.get("reasoning_content"))
+                                if delta.get("tool_calls"):
+                                    collected["tool_calls"] = True
                     finally:
                         if pending:
                             yield pending
