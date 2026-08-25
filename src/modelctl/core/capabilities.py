@@ -13,8 +13,8 @@ ENGINE_BINARIES = ["ollama", "vllm", "sglang", "unsloth", "llamacpp"]
 
 ENGINE_INSTALL_HINTS = {
     "ollama": "，建议执行：curl -fsSL https://ollama.com/install.sh | sh",
-    "vllm": "，建议执行：MAX_JOBS=4 uv pip install vllm",
-    "sglang": '，建议执行：MAX_JOBS=4 uv pip install "sglang[all]"',
+    "vllm": "，建议执行：MAX_JOBS=4 uv sync --extra vllm（锁定 vllm==0.27.*，torch 2.13）",
+    "sglang": '，建议执行：MAX_JOBS=4 uv pip install "sglang[all]==0.5.9"（与 vllm 的 torch/flashinfer 互斥，需独立 venv，勿与 --extra vllm 共存）',
     # 无头推理（studio run）依赖官方安装器搭建的运行时，仅 pip install 不够
     "unsloth": "，建议执行：curl -fsSL https://unsloth.ai/install.sh | sh",
     # llamacpp 提示较长（源码下载 + 编译命令），由 cli._cmd_probe 单独多行输出

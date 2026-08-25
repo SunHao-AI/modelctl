@@ -76,7 +76,7 @@ def _vllm_torch_abi_check(gpu: GpuSpec, env: EnvSpec, model: ModelSpec | None) -
         level="block",
         rule_id="vllm_torch_abi",
         reason=f"vllm 要求 torch{req}，当前已装 {installed}（ABI 不匹配）。"
-        f"建议执行：uv pip install \"torch{req}\"",
+        f"建议执行：MAX_JOBS=4 uv sync --extra vllm 以对齐依赖。",
     )
 
 
@@ -153,7 +153,7 @@ def _engine_dep_missing_check(gpu: GpuSpec, env: EnvSpec, model: ModelSpec | Non
     return CompatIssue(
         level="block",
         rule_id="engine_dep_missing",
-        reason="vllm 依赖版本不匹配：" + "；".join(problems) + "。建议执行：uv pip install vllm 对应版本以对齐依赖。",
+        reason="vllm 依赖版本不匹配：" + "；".join(problems) + "。建议执行：MAX_JOBS=4 uv sync --extra vllm 以对齐依赖。",
     )
 
 
