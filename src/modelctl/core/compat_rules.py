@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : src/modelctl/core/compat_rules.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : 能力检测规则注册
+# ===============================================================================
+
 """core/compat_rules.py — 内置能力检测规则注册（导入即注册）。"""
 
 from __future__ import annotations

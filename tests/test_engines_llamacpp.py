@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : tests/test_engines_llamacpp.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : llama.cpp 适配器测试
+# ===============================================================================
+
 from pathlib import Path
 
 import pytest

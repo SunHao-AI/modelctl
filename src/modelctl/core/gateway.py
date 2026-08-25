@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : src/modelctl/core/gateway.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : OpenAI 兼容网关服务
+# ===============================================================================
+
 """core/gateway.py — 轻量 OpenAI 兼容网关（按请求体 model 参数路由）。
 
 将本节点 models/*.yaml 中的模型注册为 OpenAI 兼容后端，按请求体中的 model 字段路由到对应引擎端口；

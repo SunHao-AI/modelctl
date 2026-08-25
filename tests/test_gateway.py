@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : tests/test_gateway.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : 网关路由测试
+# ===============================================================================
+
 """modelctl.core.gateway 单元测试（注册表构建 + model 解析 + 路由转发）。"""
 
 from __future__ import annotations

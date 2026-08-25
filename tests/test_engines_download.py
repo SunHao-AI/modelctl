@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : tests/test_engines_download.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : 模型下载工具测试
+# ===============================================================================
+
 """tests/test_engines_download.py — ModelScope 下载工具测试。"""
 
 import importlib.util

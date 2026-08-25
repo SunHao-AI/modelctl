@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : src/modelctl/core/process.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : 进程生命周期管理
+# ===============================================================================
+
 """core/process.py — 引擎无关的进程生命周期：后台启动、PID、停止、健康检查。"""
 
 from __future__ import annotations

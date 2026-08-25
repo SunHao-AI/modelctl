@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : tests/test_envfile.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : .env 解析注入测试
+# ===============================================================================
+
 import os
 
 from modelctl.core.envfile import PROJECT_ROOT, load_env, parse_env_file

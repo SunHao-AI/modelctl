@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : src/modelctl/core/compat.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : 能力检测框架
+# ===============================================================================
+
 """core/compat.py — 启动前能力检测框架（硬件 GpuSpec + 软件 EnvSpec + 规则库）。"""
 
 from __future__ import annotations

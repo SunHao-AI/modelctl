@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : src/modelctl/core/envfile.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : .env 解析与注入
+# ===============================================================================
+
 """core/envfile.py — .env 解析与注入（优先级：已存在环境变量 > .env）。"""
 
 from __future__ import annotations

@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : tests/test_vram_estimator.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : 显存估算模块测试
+# ===============================================================================
+
 """modelctl.core.vram_estimator（附录 B.4）单元测试。"""
 
 from __future__ import annotations

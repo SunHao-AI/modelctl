@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : src/modelctl/core/ufw.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : ufw 入站放行规则管理
+# ===============================================================================
+
 """core/ufw.py — ufw 入站放行规则的幂等管理（UI 控制台来源 IP 白名单）。"""
 
 from __future__ import annotations

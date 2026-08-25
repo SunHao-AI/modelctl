@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : tests/test_gateway_context_switch.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : 网关上下文切换测试
+# ===============================================================================
+
 """modelctl.core.gateway 上下文切换（附录 B.3）单元测试。"""
 
 from __future__ import annotations

@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : src/modelctl/core/all_service.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : 一键启停编排服务
+# ===============================================================================
+
 """core/all_service.py — 一键启停编排与单组件四动作原语（模型/网关/统计）。
 
 供 `modelctl all` 与 `modelctl gateway|stats <动作>` 共用；统一返回 ComponentResult，

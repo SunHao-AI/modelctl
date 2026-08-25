@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : src/modelctl/core/vram_estimator.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : KV cache 显存预检估算
+# ===============================================================================
+
 """core/vram_estimator.py — KV cache 显存预检估算（附录 B.4）。
 
 公式：KV cache 显存 ≈ 总上下文 token 数 × 每 token KV 字节数

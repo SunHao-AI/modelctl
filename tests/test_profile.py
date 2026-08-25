@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : tests/test_profile.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : Profile 加载校验测试
+# ===============================================================================
+
 """tests/test_profile.py — Profile 加载、插值与校验测试。"""
 
 import pytest

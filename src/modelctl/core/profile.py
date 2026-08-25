@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : src/modelctl/core/profile.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : 模型 profile 加载与校验
+# ===============================================================================
+
 """core/profile.py — 模型 profile（models/<name>.yaml）加载、${VAR} 插值与校验。"""
 
 from __future__ import annotations

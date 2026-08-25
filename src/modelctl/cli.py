@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : src/modelctl/cli.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : 多模型部署启动器 CLI 入口
+# ===============================================================================
+
 """modelctl.py — 多模型部署启动器 CLI 入口。
 
 子命令：start <name> [--timeout 300] / stop <name> / restart <name> /
@@ -595,7 +605,8 @@ def _cmd_ui_stop(args, models_dir: Path | None, caps) -> int:
 
 
 def _cmd_nginx_snippet(args, models_dir) -> int:
-    print(build_llm_map(list_profiles(models_dir), args.node, args.host), end="")
+    gateway_port = int(os.environ.get("GATEWAY_PORT", "5003"))
+    print(build_llm_map(list_profiles(models_dir), args.node, args.host, gateway_port), end="")
     return 0
 
 

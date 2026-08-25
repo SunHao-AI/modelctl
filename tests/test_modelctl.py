@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : tests/test_modelctl.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : CLI 主模块测试
+# ===============================================================================
+
 from modelctl import cli
 
 
@@ -142,6 +153,8 @@ def test_nginx_snippet_output(tmp_path, monkeypatch, capsys):
     rc = cli.main(["nginx-snippet", "--node", "240", "--host", "9.9.9.90", "--models-dir", str(tmp_path)])
     out = capsys.readouterr().out
     assert rc == 0
+    assert "~^/240/llm/v1/  http://9.9.9.90:5003;" in out
+    assert "~^/240/llm/v1$  http://9.9.9.90:5003;" in out
     assert "~^/240/llm/qwen3.8/  http://9.9.9.90:7000;" in out
 
 

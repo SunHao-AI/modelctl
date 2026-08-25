@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : src/modelctl/engines/_download.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : ModelScope 模型下载工具
+# ===============================================================================
+
 """engines/_download.py — 统一的 ModelScope 下载工具。"""
 
 from __future__ import annotations

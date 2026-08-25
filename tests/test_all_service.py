@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : tests/test_all_service.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : all_service 编排测试
+# ===============================================================================
+
 """all_service 单组件原语与默认模型解析测试。"""
 
 from __future__ import annotations

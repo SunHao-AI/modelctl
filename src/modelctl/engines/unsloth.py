@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : src/modelctl/engines/unsloth.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : Unsloth 推理服务适配器
+# ===============================================================================
+
 """engines/unsloth.py — Unsloth 无头推理服务（unsloth studio run --api-only）适配器。
 
 API key 说明：`unsloth studio run` 不支持指定 API key——每次加载模型时自动生成

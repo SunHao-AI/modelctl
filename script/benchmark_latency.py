@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : script/benchmark_latency.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : LLM 推理延迟基准测试
+# ===============================================================================
+
 """script/benchmark_latency.py — 本地 LLM 推理延迟/吞吐基准测试。
 
 用法示例：

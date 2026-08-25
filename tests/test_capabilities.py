@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : tests/test_capabilities.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : 硬件能力探测测试
+# ===============================================================================
+
 """modelctl/core/capabilities.py 单元测试。"""
 
 from modelctl.core.capabilities import (

@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : tests/test_engines_upstream.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : 上游模型名改写测试
+# ===============================================================================
+
 """引擎适配器 upstream_model_name() 单元测试（网关模型名改写依据）。"""
 
 from __future__ import annotations

@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : src/modelctl/core/gpu_utils.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : GPU 列表解析与校验
+# ===============================================================================
+
 """core/gpu_utils.py — GPU 列表解析与校验（引擎无关，避免与 engines.base 循环依赖）。"""
 
 from __future__ import annotations

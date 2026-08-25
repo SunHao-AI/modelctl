@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : src/modelctl/core/gpu_lock.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : GPU 占用文件锁
+# ===============================================================================
+
 """core/gpu_lock.py — GPU 占用文件锁（best-effort，拦截同卡争抢）。
 
 锁文件位于 data/cache/<name>.gpu-lock，内容为 JSON：{"gpus":[...], "pid":..., "updated_at":...}。

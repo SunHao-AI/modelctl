@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : src/modelctl/engines/base.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : 引擎适配器抽象基类
+# ===============================================================================
+
 """engines/base.py — 引擎适配器抽象基类。"""
 
 from __future__ import annotations

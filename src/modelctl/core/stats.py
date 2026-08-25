@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : src/modelctl/core/stats.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : 用量统计服务
+# ===============================================================================
+
 """core/stats.py — 用量统计服务（多引擎指标映射）。
 
 迁移自 script/usage_stats_server.py：把单一 llama-server 数据源改为

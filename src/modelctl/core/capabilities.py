@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : src/modelctl/core/capabilities.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/7/25 10:00
+# @Desc   : 硬件环境能力探测
+# ===============================================================================
+
 """core/capabilities.py — 启动前硬件/环境能力探测（GPU、CC、引擎二进制）。"""
 
 from __future__ import annotations
