@@ -1,3 +1,19 @@
+# modelctl 默认 PyPI 镜像：阿里（国内网络保障 Parse/Install 速度）。
 [[index]]
 url = "https://mirrors.aliyun.com/pypi/simple/"
 default = true
+
+# PyTorch 官方 cu130 index：显式 index（explicit = true 表示只有显式指名此 index 的依赖才路由过来，
+# 不影响默认 PyPI 路由）。当需要在 pyproject 中写
+#   torch @ https://download.pytorch.org/whl/cu130 （配合 [tool.uv.sources]）
+# 时才会走该 index；保留此条目是为了在工程内统一声明，避免依赖者在终端临时拼 --index-url。
+[[index]]
+name = "pytorch-cu13"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+# 官方 PyPI：作为阿里镜像的兜底（uv 多 index 解析：当包在 default 找不到时按声明顺序 fallback）。
+# 这是 PEP 658-style 隐式多 index：uv 同时查询所有 index，不存在或 404 时自动回退查询下一个，
+# 不需要在命令行临时拼 `uv sync --extra-index-url ...`。
+[[index]]
+url = "https://pypi.org/simple/"

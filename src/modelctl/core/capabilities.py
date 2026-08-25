@@ -13,7 +13,9 @@ ENGINE_BINARIES = ["ollama", "vllm", "sglang", "unsloth", "llamacpp"]
 
 ENGINE_INSTALL_HINTS = {
     "ollama": "，建议执行：curl -fsSL https://ollama.com/install.sh | sh",
-    "vllm": "，建议执行：MAX_JOBS=4 uv sync --extra vllm（锁定 vllm==0.27.*，torch 2.13）",
+    # 镜像策略由项目根 uv.toml 统一声明（阿里 PyPI 默认 + 官方 PyPI 兜底 + PyTorch 官方 cu130 显式 index），
+    # 因此用户终端只需 `uv sync --extra vllm`，无需再手动拼 --extra-index-url / --index-url。
+    "vllm": "，建议执行：MAX_JOBS=4 uv sync --extra vllm（锁定 vllm==0.27.*，torch 2.13 走 pytorch-cu13 index）",
     "sglang": '，建议执行：MAX_JOBS=4 uv pip install "sglang[all]==0.5.9"（与 vllm 的 torch/flashinfer 互斥，需独立 venv，勿与 --extra vllm 共存）',
     # 无头推理（studio run）依赖官方安装器搭建的运行时，仅 pip install 不够
     "unsloth": "，建议执行：curl -fsSL https://unsloth.ai/install.sh | sh",
