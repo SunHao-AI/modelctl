@@ -294,6 +294,12 @@ def test_thinking_effort_normalized_anthropic():
     assert resp.status_code == 200
     assert captured[-1]["reasoning"]["effort"] == "xhigh"
 
+    # Claude Code 新版协议：output_config.effort=high（QwenLM/Qwen3.8#217 场景）
+    body["output_config"] = {"effort": "high"}
+    resp = _run(_post(app, "/v1/messages", json=body))
+    assert resp.status_code == 200
+    assert captured[-1]["output_config"]["effort"] == "xhigh"
+
 
 def test_proxy_streaming_sse_passthrough():
     def upstream(request):

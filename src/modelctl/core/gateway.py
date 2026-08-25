@@ -61,8 +61,10 @@ def _normalize_reasoning_effort(body: dict) -> None:
     """就地改写不兼容的 reasoning_effort 枚举（vLLM 仅支持 xhigh/medium/low）。
 
     Claude Code 等客户端把 effort 放在顶层 reasoning_effort、Anthropic 的
-    thinking.effort 或 reasoning.effort 嵌套字段；Qwen3.8 的 chat template
-    会读取这些值并校验枚举，high/ultra 等会触发 500，统一映射为支持值。
+    thinking.effort / reasoning.effort 嵌套字段，或 Anthropic 新版协议的
+    output_config.effort（Claude Code 默认发送 {"effort": "high"}）；
+    Qwen3.8 的 chat template 会读取这些值并校验枚举，high/ultra 等会触发 500，
+    统一映射为支持值。参见 QwenLM/Qwen3.8#217。
     """
     for key in ("reasoning_effort",):
         effort = body.get(key)
@@ -77,6 +79,12 @@ def _normalize_reasoning_effort(body: dict) -> None:
         if isinstance(effort, str) and effort.lower() in _REASONING_EFFORT_MAP:
             block["effort"] = _REASONING_EFFORT_MAP[effort.lower()]
             logger.info(f"{key}.effort 兼容映射：{effort} -> {block['effort']}")
+    output_config = body.get("output_config")
+    if isinstance(output_config, dict):
+        effort = output_config.get("effort")
+        if isinstance(effort, str) and effort.lower() in _REASONING_EFFORT_MAP:
+            output_config["effort"] = _REASONING_EFFORT_MAP[effort.lower()]
+            logger.info(f"output_config.effort 兼容映射：{effort} -> {output_config['effort']}")
 
 
 @dataclass
@@ -423,6 +431,8 @@ def create_app(
             f"msgs={len(body.get('messages') or [])} "
             f"thinking={body.get('thinking')!r} reasoning={body.get('reasoning')!r} "
             f"effort={body.get('reasoning_effort')!r} "
+            f"top_keys={sorted(body.keys())} "
+            f"msg_blocks={[ [b.get('type') for b in (m.get('content') or []) if isinstance(b, dict)] if isinstance(m.get('content'), list) else type(m.get('content')).__name__ for m in (body.get('messages') or []) ]} "
             f"auth_xkey={'x-api-key' in request.headers} auth={'Authorization' in request.headers}"
         )
         target = resolve_model(registry, body.get("model"), default_model, groups)
@@ -446,11 +456,7 @@ def create_app(
         # 后端（vLLM 等）的 /v1/messages 认证头格式因实现而异（x-api-key /
         # Authorization Bearer），客户端自配 key 可能与后端不一致，故用
         # target 的有效 key 同时设置两种头，确保认证成功。
-        headers = {
-            k: v
-            for k, v in request.headers.items()
-            if k.lower() in ("content-type", "authorization", "x-api-key", "anthropic-version", "anthropic-beta")
-        }
+        headers = {k: v for k, v in request.headers.items() if k.lower() in ("content-type", "authorization", "x-api-key", "anthropic-version", "anthropic-beta")}
         up_key = target.upstream_api_key()
         if up_key:
             headers["x-api-key"] = up_key
@@ -500,28 +506,16 @@ def create_app(
                     finally:
                         if pending:
                             yield pending
-                        logger.info(
-                            f"Anthropic 流式响应摘要 content={''.join(texts)[:200]!r} thinking_len={thinking_len}"
-                        )
+                        logger.info(f"Anthropic 流式响应摘要 content={''.join(texts)[:200]!r} thinking_len={thinking_len}")
                         await client.aclose()
 
                 return StreamingResponse(_raw_sse(), status_code=upstream.status_code, media_type=ctype)
             upstream = await client.post(url, json=body, headers=headers)
             try:
                 _data = json.loads(upstream.content)
-                _texts = [
-                    b.get("text")
-                    for b in (_data.get("content") or [])
-                    if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
-                ]
-                _thinking_len = sum(
-                    len(b.get("thinking") or "")
-                    for b in (_data.get("content") or [])
-                    if isinstance(b, dict) and b.get("type") == "thinking"
-                )
-                logger.info(
-                    f"Anthropic 非流式响应摘要 content={''.join(_texts)[:200]!r} thinking_len={_thinking_len}"
-                )
+                _texts = [b.get("text") for b in (_data.get("content") or []) if isinstance(b, dict) and b.get("type") == "text" and b.get("text")]
+                _thinking_len = sum(len(b.get("thinking") or "") for b in (_data.get("content") or []) if isinstance(b, dict) and b.get("type") == "thinking")
+                logger.info(f"Anthropic 非流式响应摘要 content={''.join(_texts)[:200]!r} thinking_len={_thinking_len}")
             except ValueError:
                 pass
             resp = Response(
@@ -575,11 +569,7 @@ def create_app(
         _normalize_reasoning_effort(body)
         # 思考型模型家族默认关闭 thinking（见 _THINKING_DISABLED_GROUPS 注释）；
         # 请求显式传 chat_template_kwargs 时尊重调用方意图，不覆盖。
-        if (
-            target.group in _THINKING_DISABLED_GROUPS
-            and target.engine in _THINKING_DISABLED_ENGINES
-            and "chat_template_kwargs" not in body
-        ):
+        if target.group in _THINKING_DISABLED_GROUPS and target.engine in _THINKING_DISABLED_ENGINES and "chat_template_kwargs" not in body:
             body["chat_template_kwargs"] = {"enable_thinking": False}
         headers = {"Content-Type": "application/json"}
         up_key = target.upstream_api_key()
@@ -683,10 +673,7 @@ def create_app(
             try:
                 _data = json.loads(upstream.content)
                 _msg = ((_data.get("choices") or [{}])[0].get("message")) or {}
-                logger.info(
-                    f"OpenAI 非流式响应摘要 content={str(_msg.get('content'))[:200]!r} "
-                    f"tool_calls={bool(_msg.get('tool_calls'))} reasoning={bool(_msg.get('reasoning'))}"
-                )
+                logger.info(f"OpenAI 非流式响应摘要 content={str(_msg.get('content'))[:200]!r} " f"tool_calls={bool(_msg.get('tool_calls'))} reasoning={bool(_msg.get('reasoning'))}")
             except ValueError:
                 pass
             resp = Response(
