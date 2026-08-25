@@ -324,31 +324,6 @@ class UsageCollector:
             with urllib.request.urlopen(request, timeout=10) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
             metrics = parse_metrics(body, self.mapping)
-            now = time.monotonic()
-            new_prompt = max(metrics["prompt_total"], self._baseline["prompt_total"])
-            new_predicted = max(metrics["predicted_total"], self._baseline["predicted_total"])
-            changed = new_prompt != self._baseline["prompt_total"] or new_predicted != self._baseline["predicted_total"]
-            self._baseline["prompt_total"] = new_prompt
-            self._baseline["predicted_total"] = new_predicted
-
-            # 统一使用滑动窗口内 total 计数器差分计算平均速率，与市面主流监控一致
-            self._record_window(now, new_prompt, new_predicted)
-            prompt_rate, predicted_rate = self._compute_window_rate()
-            metrics["prompt_rate"] = prompt_rate
-            metrics["predicted_rate"] = predicted_rate
-
-            with self._lock:
-                self._snapshot = {
-                    "ok": True,
-                    "error": None,
-                    "prompt_total": new_prompt,
-                    "predicted_total": new_predicted,
-                    "prompt_rate": metrics["prompt_rate"],
-                    "predicted_rate": metrics["predicted_rate"],
-                }
-            if changed:
-                self._persist(new_prompt, new_predicted)
-            self._last = {"time": now, "predicted_total": metrics["predicted_total"]}
         except Exception as error:  # noqa: BLE001 —— 轮询失败仅记录，不中断服务
             with self._lock:
                 self._snapshot = {
@@ -359,6 +334,37 @@ class UsageCollector:
                     "prompt_rate": 0.0,
                     "predicted_rate": 0.0,
                 }
+            return
+        # 引擎 token 计数 gauge 可能恒为 0（如 vLLM 未启用 --enable-metrics），此时累计值
+        # 由网关按真实请求写入持久化文件；两者取更大者作为最新累计，窗口差分即真实速率。
+        persisted_prompt, persisted_predicted = self._load_persisted()
+        prompt_total = max(metrics["prompt_total"], persisted_prompt)
+        predicted_total = max(metrics["predicted_total"], persisted_predicted)
+        now = time.monotonic()
+        new_prompt = max(prompt_total, self._baseline["prompt_total"])
+        new_predicted = max(predicted_total, self._baseline["predicted_total"])
+        changed = new_prompt != self._baseline["prompt_total"] or new_predicted != self._baseline["predicted_total"]
+        self._baseline["prompt_total"] = new_prompt
+        self._baseline["predicted_total"] = new_predicted
+
+        # 统一使用滑动窗口内 total 计数器差分计算平均速率，与市面主流监控一致
+        self._record_window(now, new_prompt, new_predicted)
+        prompt_rate, predicted_rate = self._compute_window_rate()
+        metrics["prompt_rate"] = prompt_rate
+        metrics["predicted_rate"] = predicted_rate
+
+        with self._lock:
+            self._snapshot = {
+                "ok": True,
+                "error": None,
+                "prompt_total": new_prompt,
+                "predicted_total": new_predicted,
+                "prompt_rate": metrics["prompt_rate"],
+                "predicted_rate": metrics["predicted_rate"],
+            }
+        if changed:
+            self._persist(new_prompt, new_predicted)
+        self._last = {"time": now, "predicted_total": predicted_total}
 
     def snapshot(self) -> dict:
         with self._lock:

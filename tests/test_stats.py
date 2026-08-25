@@ -237,6 +237,72 @@ def test_usage_collector_record_tokens_ignores_zero_delta(tmp_path):
     assert collector.snapshot()["predicted_total"] == 0.0
 
 
+def test_poll_once_prefers_persisted_gateway_totals(tmp_path):
+    """回归：vLLM gauge 恒 0 时，stats 轮询须以网关写入的持久化累计为准并差分出真实速率。
+
+    场景：网关把真实请求累计写入 data/cache/<name>.json，stats 服务轮询引擎 /metrics
+    拿到的是 0；旧实现只看 metrics 导致累计/速率永远为 0。
+    """
+    data_dir = tmp_path / "cache"
+    data_dir.mkdir()
+    from modelctl.core.stats import UsageCollector
+
+    collector = UsageCollector(
+        name="demo",
+        base_url="http://127.0.0.1:8000",
+        poll_interval=5,
+        api_key=None,
+        data_dir=data_dir,
+        mode="on-demand",
+        mapping={
+            "prompt_total": ["prompt_tokens_total"],
+            "predicted_total": ["tokens_predicted_total"],
+            "prompt_rate": ["prompt_tokens_seconds"],
+            "predicted_rate": ["predicted_tokens_seconds"],
+        },
+    )
+
+    class FakeResp:
+        def __init__(self, body: str = "") -> None:
+            self._body = body.encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return self._body
+
+    def _write_json(prompt: float, predicted: float) -> None:
+        (data_dir / "demo.json").write_text(
+            json.dumps({"prompt_total": prompt, "predicted_total": predicted, "updated_at": time.time()}),
+            encoding="utf-8",
+        )
+
+    # 第一轮：网关已累计 1000/500；引擎 /metrics 空（恒 0）→ 应以持久化值为准
+    _write_json(1000.0, 500.0)
+    with patch("modelctl.core.stats.time.monotonic", return_value=100.0), patch.object(
+        urllib.request, "urlopen", return_value=FakeResp("")
+    ):
+        collector._poll_once()
+    snap = collector.snapshot()
+    assert snap["prompt_total"] == 1000.0
+    assert snap["predicted_total"] == 500.0
+
+    # 第二轮：网关继续累计到 1100/550（时间差 5s）→ 差分速率 20/10 tok/s
+    _write_json(1100.0, 550.0)
+    with patch("modelctl.core.stats.time.monotonic", return_value=105.0), patch.object(
+        urllib.request, "urlopen", return_value=FakeResp("")
+    ):
+        collector._poll_once()
+    snap = collector.snapshot()
+    assert snap["prompt_total"] == 1100.0
+    assert snap["prompt_rate"] == 20.0  # (1100-1000)/5
+    assert snap["predicted_rate"] == 10.0  # (550-500)/5
+
+
 def test_usage_collector_uses_window_rate_over_gauge(tmp_path):
     data_dir = tmp_path / "cache"
     data_dir.mkdir()
