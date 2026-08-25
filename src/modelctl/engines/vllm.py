@@ -123,8 +123,16 @@ class VllmAdapter(EngineAdapter):
         return {
             "prompt_total": ["vllm:prompt_tokens_total"],
             "predicted_total": ["vllm:generation_tokens_total"],
-            "prompt_rate": [],
-            "predicted_rate": [],
+            # 实时速率 gauge：vLLM 自带（内部滑动窗口），客户端直连模型端口（绕过网关）时
+            # 也能统计到真实吞吐；缺失/为 0 时 stats 退化为窗口差分
+            "prompt_rate": [
+                "vllm:prompt_tokens_seconds",
+                "vllm:avg_prompt_throughput_toks_per_sec",
+            ],
+            "predicted_rate": [
+                "vllm:generation_tokens_seconds",
+                "vllm:avg_generation_throughput_toks_per_sec",
+            ],
         }
 
     def upstream_model_name(self) -> str:

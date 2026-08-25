@@ -413,7 +413,8 @@ def test_benchmark_rates_returns_none_on_failure(monkeypatch):
     assert benchmark_rates("http://127.0.0.1:1/v1/chat/completions", None, "m") is None
 
 
-def test_usage_collector_uses_window_rate_over_gauge(tmp_path):
+def test_usage_collector_prefers_engine_rate_gauge(tmp_path):
+    """引擎自带实时速率 gauge（vLLM 等）优先于窗口差分：直连模型端口绕过网关也能统计到。"""
     data_dir = tmp_path / "cache"
     data_dir.mkdir()
     from modelctl.core.stats import UsageCollector
@@ -431,7 +432,7 @@ def test_usage_collector_uses_window_rate_over_gauge(tmp_path):
             "predicted_rate": ["predicted_tokens_seconds"],
         },
     )
-    # 预填窗口制造确定性的窗口速率
+    # 预填窗口制造一个与 gauge 不同的窗口速率（验证 gauge 优先）
     collector._record_window(1000.0, 0.0, 0.0)
     collector._record_window(1001.0, 60.0, 30.0)
 
@@ -460,7 +461,55 @@ def test_usage_collector_uses_window_rate_over_gauge(tmp_path):
         collector._poll_once()
 
     snap = collector.snapshot()
-    # 统一使用窗口差分速率：(2000-0)/(1005-1000)=400，(3000-0)/(1005-1000)=600
+    # 引擎 gauge 非 0 → 直接采用实时速率
+    assert snap["prompt_rate"] == 12.0
+    assert snap["predicted_rate"] == 42.0
+
+
+def test_usage_collector_falls_back_to_window_rate(tmp_path):
+    """引擎无速率 gauge（或为 0）时退化为滑动窗口差分速率。"""
+    data_dir = tmp_path / "cache"
+    data_dir.mkdir()
+    from modelctl.core.stats import UsageCollector
+    collector = UsageCollector(
+        name="demo",
+        base_url="http://127.0.0.1:8000",
+        poll_interval=5,
+        api_key=None,
+        data_dir=data_dir,
+        mode="on-demand",
+        mapping={
+            "prompt_total": ["prompt_tokens_total"],
+            "predicted_total": ["tokens_predicted_total"],
+            "prompt_rate": ["prompt_tokens_seconds"],
+            "predicted_rate": ["predicted_tokens_seconds"],
+        },
+    )
+    # 预填窗口制造确定性的窗口速率（引擎无 gauge，只能靠窗口差分）
+    collector._record_window(1000.0, 0.0, 0.0)
+    collector._record_window(1001.0, 60.0, 30.0)
+
+    class FakeResp:
+        def __init__(self, body: str) -> None:
+            self._body = body.encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return self._body
+
+    metrics_text = "prompt_tokens_total 2000\ntokens_predicted_total 3000\n"  # 无速率 gauge
+    with patch("modelctl.core.stats.time.monotonic", return_value=1005.0), patch.object(
+        urllib.request, "urlopen", return_value=FakeResp(metrics_text)
+    ):
+        collector._poll_once()
+
+    snap = collector.snapshot()
+    # 窗口差分：(2000-0)/(1005-1000)=400，(3000-0)/5=600
     assert snap["prompt_rate"] == 400.0
     assert snap["predicted_rate"] == 600.0
 

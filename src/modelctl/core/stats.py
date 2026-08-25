@@ -436,6 +436,10 @@ class UsageCollector:
         # 统一使用滑动窗口内 total 计数器差分计算平均速率，与市面主流监控一致
         self._record_window(now, new_prompt, new_predicted)
         prompt_rate, predicted_rate = self._compute_window_rate()
+        # 引擎自带实时速率 gauge（vLLM 等）优先——客户端直连模型端口绕过网关时也能
+        # 统计到真实吞吐；缺失/为 0 时退化为上面的窗口差分
+        if metrics["prompt_rate"] > 0 or metrics["predicted_rate"] > 0:
+            prompt_rate, predicted_rate = metrics["prompt_rate"], metrics["predicted_rate"]
         metrics["prompt_rate"] = prompt_rate
         metrics["predicted_rate"] = predicted_rate
 
