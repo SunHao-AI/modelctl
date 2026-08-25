@@ -75,6 +75,61 @@ def test_proxy_rewrites_model_to_upstream():
     assert resp.json()["model"] == "qwen3.8:27b"
 
 
+def test_proxy_injects_thinking_disable_for_qwen38_vllm():
+    """qwen3.8 家族 + 支持模板 kwargs 的引擎：默认注入 enable_thinking=false。"""
+    captured = {}
+
+    def upstream(request):
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"id": "1", "model": captured["body"]["model"]})
+
+    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None, "http://upstream/", group="qwen3.8")}
+    app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
+    resp = _run(_post(app, "/v1/chat/completions", json={"model": "qwen3.8", "messages": [{"role": "user", "content": "hi"}]}))
+    assert resp.status_code == 200
+    assert captured["body"]["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_proxy_respects_explicit_chat_template_kwargs():
+    """请求显式传 chat_template_kwargs 时不被网关覆盖。"""
+    captured = {}
+
+    def upstream(request):
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"id": "1", "model": captured["body"]["model"]})
+
+    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None, "http://upstream/", group="qwen3.8")}
+    app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
+    body = {"model": "qwen3.8", "messages": [{"role": "user", "content": "hi"}], "chat_template_kwargs": {"enable_thinking": True}}
+    resp = _run(_post(app, "/v1/chat/completions", json=body))
+    assert resp.status_code == 200
+    assert captured["body"]["chat_template_kwargs"] == {"enable_thinking": True}
+
+
+def test_proxy_no_inject_for_other_groups_or_engines():
+    """非 qwen3.8 家族、或引擎不支持模板 kwargs 时均不注入。"""
+    captured = {}
+
+    def upstream(request):
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"id": "1", "model": captured["body"]["model"]})
+
+    # 其他家族 + vllm：不注入
+    reg = {"ds": GatewayModel("ds-vllm", "vllm", "http://upstream", "ds-vllm", None, "http://upstream/", group="deepseek-v4-flash")}
+    app = create_app(reg, default_model="ds", transport=httpx.MockTransport(upstream))
+    resp = _run(_post(app, "/v1/chat/completions", json={"model": "ds", "messages": [{"role": "user", "content": "hi"}]}))
+    assert resp.status_code == 200
+    assert "chat_template_kwargs" not in captured["body"]
+
+    # qwen3.8 家族但引擎为 llama.cpp（不识别该字段）：不注入
+    captured.clear()
+    reg = {"q3": GatewayModel("q3-llamacpp", "llamacpp", "http://upstream", "q3-llamacpp", None, "http://upstream/", group="qwen3.8")}
+    app = create_app(reg, default_model="q3", transport=httpx.MockTransport(upstream))
+    resp = _run(_post(app, "/v1/chat/completions", json={"model": "q3", "messages": [{"role": "user", "content": "hi"}]}))
+    assert resp.status_code == 200
+    assert "chat_template_kwargs" not in captured["body"]
+
+
 def test_proxy_unknown_model_falls_back_to_default():
     def upstream(request):
         return httpx.Response(200, json={"id": "1", "model": json.loads(request.content)["model"]})

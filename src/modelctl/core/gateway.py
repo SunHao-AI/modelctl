@@ -35,6 +35,15 @@ GATEWAY_PORT = 5003
 # 家族路由引擎优先级（数值越小越优先）；未知引擎兜底 99
 ENGINE_PRIORITY = {"vllm": 0, "sglang": 1, "unsloth": 2, "ollama": 3, "llamacpp": 4}
 
+# 网关默认关闭 thinking 的模型家族（group）及其引擎。
+# 背景：Qwen3.5 家族 chat 模板强制把 <think> 放入 prompt，模型总是先思考，
+# 流式响应中思考过程全部路由到 delta.reasoning、delta.content 长时间为空；
+# 不识别 reasoning 通道的客户端（如 Trae CN）会表现为"有输入无输出"。
+# 注入 chat_template_kwargs.enable_thinking=false 后 content 从首个 token 开始输出。
+_THINKING_DISABLED_GROUPS: frozenset[str] = frozenset({"qwen3.8"})
+# 仅对原生支持 chat_template_kwargs 的引擎注入；llama.cpp 不识别该字段
+_THINKING_DISABLED_ENGINES: frozenset[str] = frozenset({"vllm", "sglang", "unsloth"})
+
 
 @dataclass
 class ContextSwitchRule:
@@ -113,6 +122,8 @@ class GatewayModel:
     health_url: str
     # 对外模型标识（/v1/models 返回的 id），缺省用 name
     aliases: list[str] = field(default_factory=list)
+    # 模型家族名（qwen3.8 / deepseek-v4-flash ...），用于家族路由与思考开关注入
+    group: str | None = None
     adapter: EngineAdapter | None = None
     # 用量收集器：vLLM 等引擎自带 token 计数 gauge 恒为 0，须由网关按真实请求累计；
     # 由 create_app 按引擎能力注入（None = 走引擎 /metrics 轮询统计）
@@ -167,6 +178,7 @@ def build_registry(models_dir: Path | None = None, host: str = "127.0.0.1") -> d
             api_key=profile.api_key,
             health_url=adapter.health_url(),
             aliases=profile.aliases,
+            group=profile.group,
             adapter=adapter,
         )
         for key in [profile.name, *profile.aliases]:
@@ -195,6 +207,7 @@ def build_groups(models_dir: Path | None = None, host: str = "127.0.0.1") -> dic
             api_key=profile.api_key,
             health_url=adapter.health_url(),
             aliases=profile.aliases,
+            group=profile.group,
             adapter=adapter,
         )
         groups.setdefault(profile.group, []).append(model)
@@ -384,6 +397,14 @@ def create_app(
                 target = switched
         # 改写为后端期望的模型名（ollama 严格校验，llamacpp 忽略）
         body["model"] = target.upstream_model
+        # 思考型模型家族默认关闭 thinking（见 _THINKING_DISABLED_GROUPS 注释）；
+        # 请求显式传 chat_template_kwargs 时尊重调用方意图，不覆盖。
+        if (
+            target.group in _THINKING_DISABLED_GROUPS
+            and target.engine in _THINKING_DISABLED_ENGINES
+            and "chat_template_kwargs" not in body
+        ):
+            body["chat_template_kwargs"] = {"enable_thinking": False}
         headers = {"Content-Type": "application/json"}
         up_key = target.upstream_api_key()
         auth: str | None
