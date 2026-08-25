@@ -269,6 +269,32 @@ def test_reasoning_effort_normalized_anthropic():
     assert captured[-1]["reasoning_effort"] == "medium"  # 支持的值不改变
 
 
+def test_thinking_effort_normalized_anthropic():
+    """Claude Code 的 thinking.effort=high 嵌套字段映射为 xhigh（Qwen3.8 模板校验枚举）。"""
+    captured = []
+
+    def upstream(request):
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": "msg_1", "type": "message", "role": "assistant", "content": [{"type": "text", "text": "hi"}], "model": "qwen3.8-vllm"})
+
+    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None, "http://upstream/", group="qwen3.8")}
+    app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
+
+    body = {
+        "model": "qwen3.8",
+        "messages": [{"role": "user", "content": "hi"}],
+        "thinking": {"type": "enabled", "budget_tokens": 10000, "effort": "high"},
+    }
+    resp = _run(_post(app, "/v1/messages", json=body))
+    assert resp.status_code == 200
+    assert captured[-1]["thinking"]["effort"] == "xhigh"  # 嵌套 effort 已映射
+
+    body["reasoning"] = {"effort": "ultra"}
+    resp = _run(_post(app, "/v1/messages", json=body))
+    assert resp.status_code == 200
+    assert captured[-1]["reasoning"]["effort"] == "xhigh"
+
+
 def test_proxy_streaming_sse_passthrough():
     def upstream(request):
         return httpx.Response(

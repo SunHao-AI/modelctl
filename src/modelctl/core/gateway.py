@@ -58,12 +58,25 @@ _REASONING_EFFORT_MAP: dict[str, str] = {
 
 
 def _normalize_reasoning_effort(body: dict) -> None:
-    """就地改写不兼容的 reasoning_effort 枚举（vLLM 仅支持 xhigh/medium/low）。"""
-    effort = body.get("reasoning_effort")
-    if isinstance(effort, str) and effort.lower() in _REASONING_EFFORT_MAP:
-        mapped = _REASONING_EFFORT_MAP[effort.lower()]
-        body["reasoning_effort"] = mapped
-        logger.info(f"reasoning_effort 兼容映射：{effort} -> {mapped}")
+    """就地改写不兼容的 reasoning_effort 枚举（vLLM 仅支持 xhigh/medium/low）。
+
+    Claude Code 等客户端把 effort 放在顶层 reasoning_effort、Anthropic 的
+    thinking.effort 或 reasoning.effort 嵌套字段；Qwen3.8 的 chat template
+    会读取这些值并校验枚举，high/ultra 等会触发 500，统一映射为支持值。
+    """
+    for key in ("reasoning_effort",):
+        effort = body.get(key)
+        if isinstance(effort, str) and effort.lower() in _REASONING_EFFORT_MAP:
+            body[key] = _REASONING_EFFORT_MAP[effort.lower()]
+            logger.info(f"reasoning_effort 兼容映射：{effort} -> {body[key]}")
+    for key in ("thinking", "reasoning"):
+        block = body.get(key)
+        if not isinstance(block, dict):
+            continue
+        effort = block.get("effort")
+        if isinstance(effort, str) and effort.lower() in _REASONING_EFFORT_MAP:
+            block["effort"] = _REASONING_EFFORT_MAP[effort.lower()]
+            logger.info(f"{key}.effort 兼容映射：{effort} -> {block['effort']}")
 
 
 @dataclass
@@ -407,7 +420,9 @@ def create_app(
         logger.info(
             f"Anthropic 代理请求 model={body.get('model')!r} stream={body.get('stream')} "
             f"max_tokens={body.get('max_tokens')} tools={'tools' in body} "
-            f"msgs={len(body.get('messages') or [])} thinking={'thinking' in body} "
+            f"msgs={len(body.get('messages') or [])} "
+            f"thinking={body.get('thinking')!r} reasoning={body.get('reasoning')!r} "
+            f"effort={body.get('reasoning_effort')!r} "
             f"auth_xkey={'x-api-key' in request.headers} auth={'Authorization' in request.headers}"
         )
         target = resolve_model(registry, body.get("model"), default_model, groups)
