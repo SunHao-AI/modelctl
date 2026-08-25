@@ -435,6 +435,13 @@ def create_app(
         # 改写为后端期望的模型名（同 OpenAI 端点）
         body["model"] = target.upstream_model
         _normalize_reasoning_effort(body)
+        # Claude Code 新版发 thinking: {"type": "adaptive"}（Anthropic 自动思考）；
+        # vLLM 0.27.1 不支持 adaptive，会映射出 effort=high 触发 Qwen3.8 模板 500，
+        # 转为 vLLM 支持的 disabled（关闭思考，与 OpenAI 端点 enable_thinking=false 策略一致）。
+        thinking = body.get("thinking")
+        if isinstance(thinking, dict) and thinking.get("type") == "adaptive":
+            thinking["type"] = "disabled"
+            logger.info("thinking.type adaptive -> disabled（vLLM 兼容）")
         # 透传 Anthropic 版本头等；认证头以 profile 有效 key 为准：
         # 后端（vLLM 等）的 /v1/messages 认证头格式因实现而异（x-api-key /
         # Authorization Bearer），客户端自配 key 可能与后端不一致，故用
@@ -462,16 +469,61 @@ def create_app(
 
                 async def _raw_sse(upstream=upstream, client=client):
                     """原始字节透传（保留 event:/data: 行），迭代结束关闭上游连接。"""
+                    pending = b""
+                    texts: list[str] = []
+                    thinking_len = 0
                     try:
                         async for chunk in upstream.aiter_bytes():
                             if not isinstance(chunk, bytes):
                                 chunk = b"".join(chunk)
-                            yield chunk
+                            pending += chunk
+                            lines = pending.split(b"\n")
+                            pending = lines.pop()
+                            for raw in lines:
+                                line = raw.strip()
+                                yield raw + b"\n"  # 始终透传所有行（保留 event:/data:）
+                                if not line.startswith(b"data:"):
+                                    continue
+                                payload = line[5:].strip()
+                                if not payload:
+                                    continue
+                                try:
+                                    data = json.loads(payload)
+                                except ValueError:
+                                    continue
+                                # content_block_delta：text_delta -> 正文，thinking_delta -> 思考
+                                delta = data.get("delta")
+                                if isinstance(delta, dict) and delta.get("type") == "text_delta" and delta.get("text"):
+                                    texts.append(delta["text"])
+                                elif isinstance(delta, dict) and delta.get("type") == "thinking_delta" and delta.get("thinking"):
+                                    thinking_len += len(delta["thinking"])
                     finally:
+                        if pending:
+                            yield pending
+                        logger.info(
+                            f"Anthropic 流式响应摘要 content={''.join(texts)[:200]!r} thinking_len={thinking_len}"
+                        )
                         await client.aclose()
 
                 return StreamingResponse(_raw_sse(), status_code=upstream.status_code, media_type=ctype)
             upstream = await client.post(url, json=body, headers=headers)
+            try:
+                _data = json.loads(upstream.content)
+                _texts = [
+                    b.get("text")
+                    for b in (_data.get("content") or [])
+                    if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
+                ]
+                _thinking_len = sum(
+                    len(b.get("thinking") or "")
+                    for b in (_data.get("content") or [])
+                    if isinstance(b, dict) and b.get("type") == "thinking"
+                )
+                logger.info(
+                    f"Anthropic 非流式响应摘要 content={''.join(_texts)[:200]!r} thinking_len={_thinking_len}"
+                )
+            except ValueError:
+                pass
             resp = Response(
                 status_code=upstream.status_code,
                 content=upstream.content,
@@ -573,6 +625,7 @@ def create_app(
                 async def _sse_stream(upstream=upstream, client=client):
                     """透传后端 SSE 响应体，迭代结束（含异常）后关闭上游连接。"""
                     pending = b""
+                    collected: dict = {"content": [], "reasoning": [], "tool_calls": False}
                     try:
                         async for chunk in upstream.aiter_bytes():
                             # 单 chunk 内可能含多条 data: 行，也可能一条被切成多个 chunk；
@@ -595,10 +648,22 @@ def create_app(
                                     except ValueError:
                                         continue
                                     _record_usage(data, seen_tokens)
+                                    delta = ((data.get("choices") or [{}])[0].get("delta")) or {}
+                                    if delta.get("content"):
+                                        collected["content"].append(delta["content"])
+                                    if delta.get("reasoning") or delta.get("reasoning_content"):
+                                        collected["reasoning"].append(delta.get("reasoning") or delta.get("reasoning_content"))
+                                    if delta.get("tool_calls"):
+                                        collected["tool_calls"] = True
                                 yield raw + b"\n"
                     finally:
                         if pending:
                             yield pending
+                        logger.info(
+                            f"OpenAI 流式响应摘要 content={''.join(collected['content'])[:200]!r} "
+                            f"reasoning_len={sum(len(x) for x in collected['reasoning'])} "
+                            f"tool_calls={collected['tool_calls']}"
+                        )
                         await client.aclose()
 
                 return StreamingResponse(_sse_stream(), status_code=upstream.status_code, media_type=ctype)
@@ -615,6 +680,15 @@ def create_app(
                             target.collector.record_tokens(prompt, completion)
                 except ValueError:
                     pass
+            try:
+                _data = json.loads(upstream.content)
+                _msg = ((_data.get("choices") or [{}])[0].get("message")) or {}
+                logger.info(
+                    f"OpenAI 非流式响应摘要 content={str(_msg.get('content'))[:200]!r} "
+                    f"tool_calls={bool(_msg.get('tool_calls'))} reasoning={bool(_msg.get('reasoning'))}"
+                )
+            except ValueError:
+                pass
             resp = Response(
                 status_code=upstream.status_code,
                 content=upstream.content,
