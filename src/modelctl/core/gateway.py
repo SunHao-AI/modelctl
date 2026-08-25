@@ -367,7 +367,16 @@ def create_app(
         groups = groups or {}
     default_model = default_model or os.environ.get("GATEWAY_DEFAULT_MODEL")
     context_rules = context_rules if context_rules is not None else load_context_switch_rules(_env_context_rules())
-    app = FastAPI(title="modelctl gateway", docs_url="/docs", openapi_url="/openapi.json")
+    # redirect_slashes=False：禁止把裸 /v1 自动重定向到 /v1/。
+    # FastAPI 默认重定向的 Location 是根相对路径（/v1/），经 B 机 nginx 前缀
+    # 路由后客户端跟随重定向会丢失 /<node>/llm 前缀，第二次请求落空（502）。
+    # 裸 /v1 由下方 @app.post("/v1") 直接处理，返回明确 404 而非 307。
+    app = FastAPI(
+        title="modelctl gateway",
+        docs_url="/docs",
+        openapi_url="/openapi.json",
+        redirect_slashes=False,
+    )
 
     # 用量收集：为注册表中"引擎 metrics 不可精确轮询"（vLLM token 计数恒 0）的模型注入
     # 收集器，网关按真实请求累计；其余模型走引擎 /metrics 轮询（stats 服务），无需注入。
@@ -540,8 +549,12 @@ def create_app(
             err_msg = f"后端不可达：{error}"
             return JSONResponse(status_code=502, content={"error": {"message": err_msg, "type": "upstream_error"}})
 
+    # /v1 与 /v1/{path:path} 共用同一处理器：redirect_slashes=False 后裸 /v1 不再
+    # 307 重定向（重定向 Location 为根路径 /v1/，经 nginx 前缀路由会丢 /<node>/llm），
+    # 直接在此返回 404 JSON，避免客户端二次请求落入 nginx 兜底 location。
+    @app.post("/v1")
     @app.post("/v1/{path:path}")
-    async def proxy(path: str, request: Request):
+    async def proxy(request: Request, path: str = ""):
         if path not in ("chat/completions", "completions", "embeddings"):
             return JSONResponse(
                 status_code=404,
