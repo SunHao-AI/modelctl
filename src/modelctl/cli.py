@@ -387,6 +387,13 @@ def _group_runtime_target(members: list[Profile]) -> Profile | None:
     return None
 
 
+def _highlight(text: str) -> str:
+    """终端高亮（加粗 + 青色）；非 TTY（重定向/管道/测试）时回退纯文本。"""
+    if not sys.stdout.isatty():
+        return text
+    return f"\x1b[1;36m{text}\x1b[0m"
+
+
 def _cmd_list(args, models_dir: Path | None, caps) -> int:
     """列出可用模型目录：按家族（group）分组，展示引擎/变体/端口/状态与网关路由映射。"""
     from modelctl.core.gateway import ENGINE_PRIORITY
@@ -427,7 +434,9 @@ def _cmd_list(args, models_dir: Path | None, caps) -> int:
 
     default_model = os.environ.get("GATEWAY_DEFAULT_MODEL")
     if default_model:
-        print(f"未匹配任何家族/标识符的请求将回退至默认模型：{default_model}")
+        # 与上方家族块空一行，并以高亮突出默认回退模型提示
+        print()
+        print(_highlight(f"未匹配任何家族/标识符的请求将回退至默认模型：{default_model}"))
     return 0
 
 

@@ -19,6 +19,7 @@ def test_list_grouped_catalog(tmp_path, monkeypatch, capsys):
         "group: deepseek-v4-flash\nengine: ollama\nport: 11434\nollama:\n  model: d\n", encoding="utf-8"
     )
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setenv("GATEWAY_DEFAULT_MODEL", "qwen3.8-vllm")
     rc = cli.main(["list", "--models-dir", str(tmp_path)])
     out = capsys.readouterr().out
     assert rc == 0
@@ -30,6 +31,8 @@ def test_list_grouped_catalog(tmp_path, monkeypatch, capsys):
     assert "速率(入/出)" in out
     # 家族块之间空一行（deepseek 块结束后、qwen3.8 标题前有空行）
     assert out.index("deepseek-v4-flash（1 配置）") < out.index("\n\nqwen3.8（2 配置）")
+    # 默认回退提示：与上方空一行、非 TTY 下为纯文本
+    assert out.index("qwen3.8（2 配置）") < out.index("\n\n未匹配任何家族/标识符的请求将回退至默认模型：qwen3.8-vllm")
 
 
 def test_list_group_route_mapping(tmp_path, monkeypatch, capsys):
