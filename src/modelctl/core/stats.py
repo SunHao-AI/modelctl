@@ -66,6 +66,10 @@ def benchmark_rates(completions_url: str, api_key: str | None, model: str) -> tu
             "max_tokens": 64,
             "stream": True,
             "stream_options": {"include_usage": True},
+            # Qwen3.5 家族直连测速时默认思考会占满 max_tokens，导致输出速率失真且慢；
+            # 显式关闭思考让测速请求直接输出正文。不识别该字段的引擎（llama.cpp 等）
+            # 忽略或报错——报错时 benchmark 失败返回 None，仅影响兜底，不影响主流程。
+            "chat_template_kwargs": {"enable_thinking": False},
         }
     ).encode("utf-8")
     headers = {"Content-Type": "application/json"}
@@ -522,12 +526,16 @@ class UsageHandler(BaseHTTPRequestHandler):
         if not snap["ok"]:
             return {"isValid": False, "invalidMessage": f"{target.name} 不可用：{snap['error'] or '未知错误'}"}
         tokens = dict(snap)
-        # 窗口无流量（速率为 0）时用一次伪造请求测速兜底，避免 cc-switch 一直显示 0
-        if tokens.get("prompt_rate", 0.0) == 0 and tokens.get("predicted_rate", 0.0) == 0:
+        # 任一速率缺失（窗口无流量 / 引擎无 throughput gauge，如 vLLM 0.27+）时，
+        # 用一次伪造请求测速兜底，避免 cc-switch 一直显示 0；各自独立覆盖，
+        # 避免"输入速率有值、输出速率为 0"时整体跳过兜底。
+        if tokens.get("prompt_rate", 0.0) == 0 or tokens.get("predicted_rate", 0.0) == 0:
             bench = _bench_cached(target)
             if bench is not None:
-                tokens["prompt_rate"] = bench[0]
-                tokens["predicted_rate"] = bench[1]
+                if tokens.get("prompt_rate", 0.0) == 0:
+                    tokens["prompt_rate"] = bench[0]
+                if tokens.get("predicted_rate", 0.0) == 0:
+                    tokens["predicted_rate"] = bench[1]
         payload = build_usage_payload(tokens, target.usage_cfg, self.start_time, time.time())
         payload["model"] = target.name
         # 覆盖默认 planName，避免多模型时卡片展开视图显示错误名称

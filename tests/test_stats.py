@@ -381,6 +381,45 @@ def test_build_target_payload_skips_bench_when_active(monkeypatch):
     assert payload["predicted_rate"] == 5.0
 
 
+def test_build_target_payload_bench_when_only_predicted_zero(monkeypatch):
+    """回归：输入速率有值但输出速率为 0（vLLM 0.27+ 无输出 throughput gauge）时，
+    只对缺失的输出速率做测速兜底，不得用伪造值覆盖真实输入速率。"""
+    import time
+    from unittest.mock import MagicMock
+
+    from modelctl.core.stats import StatsTarget, UsageHandler
+
+    target = StatsTarget(
+        name="a",
+        data_dir=None,
+        metrics_url="http://127.0.0.1:8000/metrics",
+        mapping={"predicted_total": ["x"]},
+        usage_cfg={"price_in": 1.0, "price_out": 2.0},
+        bench_url="http://127.0.0.1:8000/v1/chat/completions",
+    )
+    UsageHandler.targets = [target]
+    UsageHandler.start_time = time.time()
+    mock_collector = MagicMock()
+    mock_collector.get_snapshot.return_value = {
+        "ok": True,
+        "error": None,
+        "prompt_total": 100.0,
+        "predicted_total": 50.0,
+        "prompt_rate": 2906.3,
+        "predicted_rate": 0.0,
+    }
+    UsageHandler.collectors = {"a": mock_collector}
+    from modelctl.core.stats import _BENCH_CACHE
+
+    _BENCH_CACHE.clear()
+    monkeypatch.setattr("modelctl.core.stats._bench_cached", lambda t: (1.0, 88.0, 300))
+    handler = UsageHandler.__new__(UsageHandler)
+    payload = handler._resolve_payload("a")
+    assert payload["prompt_rate"] == 2906.3  # 真实输入速率保留
+    assert payload["predicted_rate"] == 88.0  # 输出速率被测速兜底覆盖
+    assert "输出速率 88.0 tok/s" in payload["extra"]
+
+
 def test_benchmark_rates_parses_streaming_usage(monkeypatch):
     """主动测速：从流式响应的 usage 计算输入/输出速率与 TTFT。"""
     import io

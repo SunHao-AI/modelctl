@@ -9,6 +9,7 @@ import modelctl.engines._download as dl
 
 
 def test_ensure_modelscope_uses_pip_when_available(monkeypatch):
+    """有 pip 时：先试阿里镜像，失败回退官方 PyPI。"""
     calls = []
 
     def fake_find_spec(name):
@@ -20,8 +21,11 @@ def test_ensure_modelscope_uses_pip_when_available(monkeypatch):
 
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
+        # 第一次 pip install（带阿里镜像）失败 → 触发回退
         if cmd[1:3] == ["-m", "pip"] and cmd[3] == "--version":
             return FakeResult(0)
+        if "-i" in cmd and "mirrors.aliyun.com" in " ".join(cmd):
+            return FakeResult(1)
         return FakeResult(0)
 
     monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
@@ -29,12 +33,39 @@ def test_ensure_modelscope_uses_pip_when_available(monkeypatch):
     dl.ensure_modelscope()
     assert calls == [
         [sys.executable, "-m", "pip", "--version"],
+        [sys.executable, "-m", "pip", "install", "-U", "-i", dl.ALIYUN_PYPI_MIRROR,
+         "--trusted-host", "mirrors.aliyun.com", "modelscope"],
         [sys.executable, "-m", "pip", "install", "-U", "modelscope"],
     ]
 
 
+def test_ensure_modelscope_pip_mirror_success_no_fallback(monkeypatch):
+    """阿里镜像直连成功：不触发回退。"""
+    calls = []
+
+    def fake_find_spec(name):
+        return None
+
+    class FakeResult:
+        def __init__(self, returncode: int) -> None:
+            self.returncode = returncode
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return FakeResult(0)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+    monkeypatch.setattr(dl.subprocess, "run", fake_run)
+    dl.ensure_modelscope()
+    assert calls == [
+        [sys.executable, "-m", "pip", "--version"],
+        [sys.executable, "-m", "pip", "install", "-U", "-i", dl.ALIYUN_PYPI_MIRROR,
+         "--trusted-host", "mirrors.aliyun.com", "modelscope"],
+    ]
+
+
 def test_ensure_modelscope_falls_back_to_uv_without_pip(monkeypatch):
-    """uv 虚拟环境无 pip 时回退 uv pip install（--python 指定当前解释器）。"""
+    """uv 虚拟环境无 pip 时回退 uv pip install；同样先镜像再官方源。"""
     calls = []
 
     def fake_find_spec(name):
@@ -47,15 +78,49 @@ def test_ensure_modelscope_falls_back_to_uv_without_pip(monkeypatch):
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
         if cmd[1:3] == ["-m", "pip"] and cmd[3] == "--version":
-            return FakeResult(1)  # 无 pip 模块
-        return FakeResult(0)  # uv pip install 成功
+            return FakeResult(1)  # 无 pip 模块 → 走 uv 分支
+        # 第一次 uv（带 --index-url 阿里）失败 → 回退
+        if "--index-url" in cmd and "mirrors.aliyun.com" in " ".join(cmd):
+            return FakeResult(1)
+        return FakeResult(0)
 
     monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
     monkeypatch.setattr(dl.subprocess, "run", fake_run)
     dl.ensure_modelscope()
     assert calls == [
         [sys.executable, "-m", "pip", "--version"],
+        ["uv", "pip", "install", "--python", sys.executable,
+         "--index-url", dl.ALIYUN_PYPI_MIRROR, "--allow-insecure-host", "mirrors.aliyun.com",
+         "-U", "modelscope"],
         ["uv", "pip", "install", "--python", sys.executable, "-U", "modelscope"],
+    ]
+
+
+def test_ensure_modelscope_uv_mirror_success_no_fallback(monkeypatch):
+    """uv 镜像直连成功：不触发回退。"""
+    calls = []
+
+    def fake_find_spec(name):
+        return None
+
+    class FakeResult:
+        def __init__(self, returncode: int) -> None:
+            self.returncode = returncode
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[1:3] == ["-m", "pip"] and cmd[3] == "--version":
+            return FakeResult(1)
+        return FakeResult(0)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+    monkeypatch.setattr(dl.subprocess, "run", fake_run)
+    dl.ensure_modelscope()
+    assert calls == [
+        [sys.executable, "-m", "pip", "--version"],
+        ["uv", "pip", "install", "--python", sys.executable,
+         "--index-url", dl.ALIYUN_PYPI_MIRROR, "--allow-insecure-host", "mirrors.aliyun.com",
+         "-U", "modelscope"],
     ]
 
 
