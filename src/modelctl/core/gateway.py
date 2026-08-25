@@ -392,14 +392,17 @@ def create_app(
             )
         # 改写为后端期望的模型名（同 OpenAI 端点）
         body["model"] = target.upstream_model
-        # 透传 Anthropic 认证头与版本头；unsloth 等自管 key 由适配器覆盖
+        # 透传 Anthropic 版本头等；认证头以 profile 有效 key 为准：
+        # 后端（vLLM 等）的 /v1/messages 认证头格式因实现而异（x-api-key /
+        # Authorization Bearer），客户端自配 key 可能与后端不一致，故用
+        # target 的有效 key 同时设置两种头，确保认证成功。
         headers = {
             k: v
             for k, v in request.headers.items()
             if k.lower() in ("content-type", "authorization", "x-api-key", "anthropic-version", "anthropic-beta")
         }
         up_key = target.upstream_api_key()
-        if up_key and up_key != target.api_key:
+        if up_key:
             headers["x-api-key"] = up_key
             headers["Authorization"] = f"Bearer {up_key}"
         url = f"{target.backend_url}/v1/messages"

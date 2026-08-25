@@ -181,6 +181,27 @@ def test_anthropic_messages_passthrough():
     assert resp.json()["content"][0]["text"] == "hi"
 
 
+def test_anthropic_messages_uses_target_api_key():
+    """网关以 profile 有效 key 认证（同时设置 x-api-key 与 Authorization Bearer）。"""
+    captured = {}
+
+    def upstream(request):
+        captured["x-api-key"] = request.headers.get("x-api-key")
+        captured["auth"] = request.headers.get("authorization")
+        return httpx.Response(
+            200,
+            json={"id": "msg_1", "type": "message", "role": "assistant", "content": [{"type": "text", "text": "hi"}], "model": "qwen3.8-vllm"},
+        )
+
+    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", "fly@@see", "http://upstream/", group="qwen3.8")}
+    app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
+    body = {"model": "qwen3.8", "max_tokens": 100, "messages": [{"role": "user", "content": "hi"}]}
+    resp = _run(_post_headers(app, "/v1/messages", json=body, headers={"x-api-key": "root123456"}))
+    assert resp.status_code == 200
+    assert captured["x-api-key"] == "fly@@see"  # 覆盖为 profile 有效 key
+    assert captured["auth"] == "Bearer fly@@see"  # 同时设置 Authorization
+
+
 def test_anthropic_messages_streaming_passthrough():
     """Anthropic 流式 SSE 必须保留 event: 行（与 OpenAI 的 data: 行解析不同）。"""
     def upstream(request):
