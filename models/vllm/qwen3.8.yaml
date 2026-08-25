@@ -46,12 +46,17 @@ vllm:
   # 官方 recipe 关键参数：reasoning 解析（非可选）+ 自动工具调用；MTP 投机与 batch 调优待实测：
   #   --speculative-config '{"method":"mtp","num_speculative_tokens":3}'
   #   --max-num-batched-tokens 8192 --max-num-seqs 256
+  # --default-chat-template-kwargs '{"enable_thinking": false}'：服务端默认关闭思考
+  #   （ModelScope 官方教程推荐）。Qwen3.5 家族模板强制 <think>，思考内容全部走
+  #   reasoning 通道，Trae CN 等客户端不渲染会显示"无输出"；下沉到服务端后
+  #   无论经网关还是直连 vLLM 都默认输出正文（请求显式传 chat_template_kwargs 仍可覆盖）。
+  # --max-num-seqs 4：官方推荐并发上限，避免长上下文下显存/调度压力过大
   # --generation-config vllm：让客户端传入的 temperature/top_k/top_p 生效，
   #   不被模型自带 generation_config.json（Qwen3.8 为 temperature=1.0, top_k=20, top_p=0.95）覆盖
   # --kv-cache-memory=<字节数>：手动指定每卡 KV cache。设置后 vLLM 跳过显存 profiling，
   #   必须与当前机器/vLLM 版本实测匹配，否则 CUDA graph 捕获阶段 OOM（2026-08-25 TP=8
   #   新 vLLM 下 27990797312 即因此崩溃），故默认不启用——由上方 gpu_memory_utilization 自动分配
-  extra_args: "--reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder --generation-config vllm"
+  extra_args: "--reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder --generation-config vllm --default-chat-template-kwargs '{\"enable_thinking\": false}' --max-num-seqs 4"
 
 usage:
   # price_in：每千输入 token 计价（元），供 cc-switch 用量统计
