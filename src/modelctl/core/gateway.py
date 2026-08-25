@@ -550,11 +550,14 @@ def create_app(
             return JSONResponse(status_code=502, content={"error": {"message": err_msg, "type": "upstream_error"}})
 
     # /v1 与 /v1/{path:path} 共用同一处理器：redirect_slashes=False 后裸 /v1 不再
-    # 307 重定向（重定向 Location 为根路径 /v1/，经 nginx 前缀路由会丢 /<node>/llm），
-    # 直接在此返回 404 JSON，避免客户端二次请求落入 nginx 兜底 location。
+    # 307 重定向（重定向 Location 为根路径 /v1/，经 nginx 前缀路由会丢 /<node>/llm）。
+    # 裸 /v1（连通性探测，如 hertz 客户端 POST baseUrl）直接返回 200 而非 404，
+    # 避免客户端把 404 当作端点不可用而中止；真实请求走 /v1/chat/completions 等子路径。
     @app.post("/v1")
     @app.post("/v1/{path:path}")
     async def proxy(request: Request, path: str = ""):
+        if not path:
+            return JSONResponse(status_code=200, content={"status": "ok"})
         if path not in ("chat/completions", "completions", "embeddings"):
             return JSONResponse(
                 status_code=404,
