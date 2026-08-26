@@ -7,8 +7,10 @@ port: 11434
 
 ollama:
   # model：ollama 模型名（<name>:<tag>），不存在时 pre_start 自动 `ollama pull`
-  # 注意：库名为 qwen3.8（qwen3 库无 27b tag）；MTP 变体可换 qwen3.8:27b-mtp-q4_K_M
-  model: qwen3.8:27b
+  # 注意：库名为 qwen3.8（qwen3 库无 27b tag）
+  # 默认启用 MTP 投机解码官方推荐 tag `27b-mtp-q4_K_M`（18GB，MTP 头 + Q4_K_M）；
+  #   实测 MTP 接受率为负或拉取失败（tag 不存在/带宽不足）可回退 `qwen3.8:27b`（无 MTP 头）
+  model: qwen3.8:27b-mtp-q4_K_M
   # keep_alive：模型驻留内存时长（秒）；-1 = 永久驻留，0 = 用完即卸载
   keep_alive: -1
   # num_parallel：并发请求数（OLLAMA_NUM_PARALLEL）

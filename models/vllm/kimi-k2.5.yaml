@@ -36,7 +36,14 @@ vllm:
   # kv_cache_dtype：KV cache 数据类型（fp8 / fp16 / bf16；fp8 可节省一半 KV 显存，精度损失 <1%）
   kv_cache_dtype: fp8
   # extra_args：透传给 `vllm serve` 的额外参数（空格分隔，按 shlex 拆分）
-  extra_args: ""
+  # ── 投机解码（默认启用）──
+  # 已启用：EAGLE3，官方 recipe 推荐；Kimi K2.5 无 MTP 头，必须走 EAGLE3 + draft 模型
+  # 配置项：draft=lightseekorg/kimi-k2.5-eagle3-mla；num=3（官方推荐值）
+  # 权衡：draft 模型额外显存（约数 GB）；首次启动自动下载 draft 权重（与主模型同 ModelScope 源）；
+  #   需 vLLM ≥ 0.11.x EAGLE3 完整支持；接受率负时删除 --speculative-config 回退
+  # 参考：recipes.vllm.ai 官方 recipe；vLLM EAGLE3 文档（docs.vllm.ai 搜索 "EAGLE3"）
+  # ⚠️ 本机 384GB 显存不足 909GB 需求，启用本 profile 需先扩容到 8×H200 等硬件
+  extra_args: "--speculative-config '{\"model\":\"lightseekorg/kimi-k2.5-eagle3-mla\",\"method\":\"eagle3\",\"num_speculative_tokens\":3}'"
 
 usage:
   # price_in：每千输入 token 计价（元），供 cc-switch 用量统计

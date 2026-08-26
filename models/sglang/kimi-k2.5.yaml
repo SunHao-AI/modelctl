@@ -31,8 +31,11 @@ sglang:
   # extra_args：透传给 `sglang.launch_server` 的额外参数（空格分隔，按 shlex 拆分）
   # 附录 A.2：显式启用 FP8 权重量化 + FP8 KV cache（Ada CC≥8.9 原生支持，精度损失 <1%）
   # 若引擎不支持权重 FP8，回退为仅保留 "--kv-cache-dtype fp8_e4m3"
-  # 注意：sglang 的 --kv-cache-dtype 不接受裸 "fp8"，必须写具体格式（fp8_e4m3/fp8_e5m2）
-  extra_args: "--quantization fp8 --kv-cache-dtype fp8_e4m3"
+  # 投机解码（默认启用）：EAGLE，官方 recipe 推荐（Kimi K2 系列无 MTP 头）
+  #   需额外 draft 模型（hf 格式 `Kimi-K2.5-eagle3-mla`，数千 MB，SGLang 自动下载）
+  #   本机 384GB 显存不足无法部署（本配置保留供未来 8×H200 参考），
+  #   部署后首次启动 SGLang 自动拉取 eagle 草稿权重
+  extra_args: "--quantization fp8 --kv-cache-dtype fp8_e4m3 --speculative-algorithm eagle --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --speculative-draft-model-path /raid5/sh/model/model-hf/Kimi-K2.5-eagle3-mla"
 
 usage:
   # price_in：每千输入 token 计价（元），供 cc-switch 用量统计

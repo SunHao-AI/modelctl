@@ -37,7 +37,9 @@ vllm:
   kv_cache_dtype: fp8
   # extra_args：透传给 `vllm serve` 的额外参数（空格分隔，按 shlex 拆分）
   # 附录 B.2：管线并行大小（与 tensor_parallel_size 乘积 = 总 GPU 数 = 4×2=8）
-  extra_args: "--pipeline-parallel-size 2"
+  # 投机解码（默认启用）：dspark，与主配置 deepseek-v4-flash-vllm 一致；
+  #   官方 recipe 推荐 num=7（EAGLE+MTP 混合，draft_sample_method=probabilistic 可选）
+  extra_args: "--pipeline-parallel-size 2 --reasoning-parser deepseek_v4 --reasoning-config '{\"reasoning_parser\":\"deepseek_v4\",\"reasoning_start_str\":\"\",\"reasoning_end_str\":\"\"}' --tool-call-parser deepseek_v4 --enable-auto-tool-choice --speculative-config '{\"method\":\"dspark\",\"num_speculative_tokens\":7}'"
 
 usage:
   # price_in：每千输入 token 计价（元），供 cc-switch 用量统计

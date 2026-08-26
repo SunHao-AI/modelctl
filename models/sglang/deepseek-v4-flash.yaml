@@ -29,7 +29,9 @@ sglang:
   # 附录 A.2：显式启用 FP8 权重量化 + FP8 KV cache（Ada CC≥8.9 原生支持，精度损失 <1%）
   # 若引擎不支持权重 FP8，回退为仅保留 "--kv-cache-dtype fp8_e4m3"
   # 注意：sglang 的 --kv-cache-dtype 不接受裸 "fp8"，必须写具体格式（fp8_e4m3/fp8_e5m2）
-  extra_args: "--quantization fp8 --kv-cache-dtype fp8_e4m3"
+  # 投机解码（默认启用）：DSA——DeepSeek 官方自研 sparse attention + MTP 头混合解码，
+  #   官方 recipe 默认值。Flash 架构（284B/13B active MoE，CSA+HCA 混合注意力）原生支持
+  extra_args: "--quantization fp8 --kv-cache-dtype fp8_e4m3 --speculative-algorithm dsa --speculative-eagle-topk 1 --speculative-num-draft-tokens 2"
 
 usage:
   # price_in：每千输入 token 计价（元），供 cc-switch 用量统计
