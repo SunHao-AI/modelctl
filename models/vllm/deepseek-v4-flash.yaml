@@ -35,7 +35,7 @@ vllm:
   kv_cache_dtype: fp8
   # extra_args：透传给 `vllm serve` 的额外参数（空格分隔，按 shlex 拆分）
   # 官方 recipe（H200 验证，vLLM 0.25+）：专家并行 + deepseek_v4 tokenizer/parser + DSpark 投机
-  extra_args: '--trust-remote-code --block-size 256 --enable-expert-parallel --tokenizer-mode deepseek_v4 --tool-call-parser deepseek_v4 --enable-auto-tool-choice --reasoning-parser deepseek_v4 --reasoning-config ''{"reasoning_parser":"deepseek_v4","reasoning_start_str":"","reasoning_end_str":""}'' --speculative-config ''{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'''
+  extra_args: '--trust-remote-code --block-size 256 --enable-expert-parallel --tokenizer-mode deepseek_v4 --tool-call-parser deepseek_v4 --enable-auto-tool-choice --reasoning-parser deepseek_v4 --speculative-config ''{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'''
 
 usage:
   # price_in：每千输入 token 计价（元），供 cc-switch 用量统计
