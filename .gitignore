@@ -16,6 +16,7 @@ temp.json
 __pycache__/
 *.py[cod]
 .venv/
+.venvs/
 venv/
 dist/
 build/

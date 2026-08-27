@@ -22,9 +22,11 @@ modelctl/
 ├── src/modelctl/
 │   ├── cli.py                      # 统一 CLI 入口（start/stop/restart/status/list/probe/stats）
 │   ├── __main__.py                 # python -m modelctl 入口
-│   ├── core/                       # 核心模块：envfile / profile / capabilities / process / stats
+│   ├── core/                       # 核心模块：envfile / profile / capabilities / process / stats / envs（引擎 venv 管理）
 │   ├── engines/                    # 引擎适配器：base / llamacpp / ollama / vllm / sglang / unsloth
 │   └── py.typed                    # PEP 561 类型标记
+├── envs/                           # vllm / sglang 引擎子项目（uv 独立工作区）
+├── .venvs/                         # 实际 venv 实体（state，gitignore）
 ├── script/
 │   ├── modelctl.sh                 # bash 薄封装（调用已安装的 modelctl 命令）
 │   └── modelctl-all.sh             # bash 薄封装（modelctl all 一键启停）
@@ -65,13 +67,15 @@ uv sync --extra dev
 uv run modelctl list
 ```
 
+> 引擎 venv 由 `modelctl env setup` 在首次启动前初始化，无需 `uv sync --extra vllm`。
+
 ## 快速开始
 
 ### 1. 安装依赖
 
 - Python 3.12+、PyYAML
 - `git`、`cmake`、CUDA 工具链、`nvidia-smi`（llamacpp 引擎编译用）
-- 各引擎二进制：`ollama` / `vllm` / `sglang`（按需安装）
+- 各引擎二进制：`ollama` / `unsloth` / `llamacpp`（按需安装）；`vllm` / `sglang` 通过 `modelctl env setup <engine>` 自动初始化（引擎 venv 在 `.venvs/<engine>/`，与主环境隔离）
 
 ### 2. 配置 .env 与 profile
 
@@ -466,3 +470,5 @@ bash script/modelctl-all.sh status
 - 模型级配置（模型路径、端口、并行度、量化、用量单价）在 `models/*.yaml` 中管理，全局配置（API 密钥、存储目录、日志目录、统计服务）在 `.env` 中管理
 - `.env` 含 API 密钥等敏感信息，已加入 `.gitignore`，请勿提交
 - 详细注意事项（KV cache 量化、DSpark 参数、NCCL 优化等）见上方文档
+
+> **迁移说明**：vllm / sglang 引擎已从主项目 `uv sync --extra vllm` 迁出，改用独立引擎 venv。原本执行 `uv sync --extra vllm` 的用户，请改为 `modelctl env setup vllm`（sglang 同理 `modelctl env setup sglang`），首次启动前会自动完成初始化并复用 `.venvs/<engine>/`。

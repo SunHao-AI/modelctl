@@ -21,8 +21,6 @@ dev = [
     "mypy>=1.10",
     "types-PyYAML>=6.0",
 ]
-# 推理引擎栈：vLLM（torch==2.13.0/cu13 由 vllm 元数据强约束自动带入）
-vllm = ["vllm==0.27.*"]
 
 [project.scripts]
 modelctl = "modelctl.cli:main"
