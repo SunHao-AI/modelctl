@@ -16,6 +16,7 @@ from modelctl.core.capabilities import Capabilities
 from modelctl.core.profile import load_profile
 from modelctl.engines import get_adapter
 from modelctl.engines.base import RequirementError
+from tests.test_engines_vllm import _stub_venv
 
 CAPS8 = Capabilities(gpu_count=8, compute_capability="8.9", binaries={"vllm": True})
 
@@ -25,7 +26,8 @@ def _write(tmp_path, text, name="m.yaml"):
     return load_profile(name[:-5], tmp_path)
 
 
-def test_vllm_preflight_blocks_deepseek_v4_before_download(tmp_path):
+def test_vllm_preflight_blocks_deepseek_v4_before_download(tmp_path, monkeypatch):
+    _stub_venv(tmp_path, monkeypatch, "vllm")
     p = _write(
         tmp_path,
         "name: ds4\nengine: vllm\nport: 8000\nvllm:\n  model: deepseek-ai/DeepSeek-V4-Flash\n",
@@ -53,6 +55,7 @@ def test_vllm_preflight_blocks_torch_mismatch(tmp_path, monkeypatch):
     monkeypatch.setattr(compat, "_current_site_packages", lambda: sp)
 
     p = _write(tmp_path, "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: Qwen/Qwen3-32B\n")
+    _stub_venv(tmp_path, monkeypatch, "vllm")
     adapter = get_adapter("vllm")(p, CAPS8)
     try:
         adapter.check_requirements()
@@ -61,7 +64,8 @@ def test_vllm_preflight_blocks_torch_mismatch(tmp_path, monkeypatch):
         assert "vllm_torch_abi" in str(e)
 
 
-def test_vllm_post_download_precise_check(tmp_path):
+def test_vllm_post_download_precise_check(tmp_path, monkeypatch):
+    _stub_venv(tmp_path, monkeypatch, "vllm")
     # 精检：目录名不含 DeepSeek 特征（预检 is_deepseek_v4=False 放行），
     # 但本地 config.json 的 architectures 暴露 DeepSeek-V4 → pre_start 精检拦截
     model_dir = tmp_path / "m1"

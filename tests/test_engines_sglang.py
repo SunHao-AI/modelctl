@@ -17,6 +17,7 @@ from modelctl.core.capabilities import Capabilities
 from modelctl.core.profile import load_profile
 from modelctl.engines import get_adapter
 from modelctl.engines.base import RequirementError
+from tests.test_engines_vllm import _stub_venv
 
 CAPS8 = Capabilities(gpu_count=8, compute_capability="8.9", binaries={"vllm": True, "sglang": True})
 
@@ -26,7 +27,8 @@ def _write(tmp_path, text, name="m.yaml"):
     return load_profile(name[:-5], tmp_path)
 
 
-def test_sglang_requirements_allow_download_only(tmp_path):
+def test_sglang_requirements_allow_download_only(tmp_path, monkeypatch):
+    _stub_venv(tmp_path, monkeypatch, "sglang")
     p = _write(
         tmp_path,
         "name: s\nengine: sglang\nport: 30000\nsglang:\n  model: ''\n  download:\n    modelscope_id: Qwen/Qwen3-32B\n",
@@ -99,6 +101,7 @@ def test_sglang_tp_mismatch_raises(tmp_path, monkeypatch):
         "name: s\nengine: sglang\nport: 30000\nsglang:\n"
         "  model: Qwen/Qwen3-32B\n  tensor_parallel_size: 4\n  gpu_list: '1,2'\n",
     )
+    _stub_venv(tmp_path, monkeypatch, "sglang")
     a = get_adapter("sglang")(p, _sgl_caps(4))
     with pytest.raises(RequirementError):
         a.check_requirements()
