@@ -47,8 +47,8 @@ def test_is_running_no_pidfile(monkeypatch, tmp_path):
 def test_launch_log_created(monkeypatch, tmp_path):
     monkeypatch.setenv("LOG_DIR", str(tmp_path))
     monkeypatch.setenv("CACHE_DIR", str(tmp_path))
-    process.start_detached("echoer", [sys.executable, "-c", "print('hello-log')"], {})
-    time.sleep(1)
+    _, proc = process.start_detached("echoer", [sys.executable, "-c", "print('hello-log')"], {})
+    proc.wait(timeout=10)
     log = process.launch_log("echoer")
     assert log is not None and "hello-log" in log.read_text(encoding="utf-8", errors="replace")
 
@@ -56,10 +56,10 @@ def test_launch_log_created(monkeypatch, tmp_path):
 def test_launch_log_overwrites_previous(monkeypatch, tmp_path):
     monkeypatch.setenv("LOG_DIR", str(tmp_path))
     monkeypatch.setenv("CACHE_DIR", str(tmp_path))
-    process.start_detached("echoer", [sys.executable, "-c", "print('first-run')"], {})
-    time.sleep(0.5)
-    process.start_detached("echoer", [sys.executable, "-c", "print('second-run')"], {})
-    time.sleep(0.5)
+    _, proc1 = process.start_detached("echoer", [sys.executable, "-c", "print('first-run')"], {})
+    proc1.wait(timeout=10)
+    _, proc2 = process.start_detached("echoer", [sys.executable, "-c", "print('second-run')"], {})
+    proc2.wait(timeout=10)
     log = process.launch_log("echoer")
     assert log is not None
     content = log.read_text(encoding="utf-8", errors="replace")
