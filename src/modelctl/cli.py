@@ -43,6 +43,13 @@ import modelctl.core.compat_rules  # noqa: F401 —— 导入即注册内置规�
 from modelctl.core import all_service
 from modelctl.core.capabilities import ENGINE_BINARIES, ENGINE_INSTALL_HINTS, probe
 from modelctl.core.envfile import load_env
+from modelctl.core.envs import (
+    MANAGED_ENGINES,
+    EngineEnvError,
+    remove as envs_remove,
+    setup as envs_setup,
+    status as envs_status,
+)
 from modelctl.core.logging import setup_logging
 from modelctl.core.nginx_snippet import build_llm_map
 from modelctl.core.process import (
@@ -120,6 +127,9 @@ def build_parser() -> argparse.ArgumentParser:
     ns = sub.add_parser("nginx-snippet", help="生成 nginx 多模型路由 map 片段")
     ns.add_argument("--node", required=True, help="节点编号（URL 前缀，如 210）")
     ns.add_argument("--host", required=True, help="节点 IP（如 192.168.77.210）")
+    ep = sub.add_parser("env", help="引擎专用虚拟环境管理（vllm / sglang）")
+    ep.add_argument("action", choices=["setup", "list", "remove"])
+    ep.add_argument("engine", nargs="?", default=None, help="引擎：vllm 或 sglang（list 不需要）")
     return parser
 
 
@@ -610,6 +620,62 @@ def _cmd_nginx_snippet(args, models_dir) -> int:
     return 0
 
 
+def _validate_engine(engine: str | None) -> bool:
+    """校验 engine 是否为托管引擎；返回是否通过。"""
+    if engine is None or engine not in MANAGED_ENGINES:
+        return False
+    return True
+
+
+def _cmd_env_setup(args, models_dir: Path | None, caps) -> int:
+    if not _validate_engine(args.engine):
+        logger.error(
+            f"请指定托管引擎（{' / '.join(MANAGED_ENGINES)}）：modelctl env setup <engine>"
+        )
+        return 2
+    try:
+        code = envs_setup(args.engine)
+    except EngineEnvError as exc:
+        logger.error(str(exc))
+        return 2
+    if code != 0:
+        logger.error(f"env setup {args.engine} 失败（退出码 {code}），请检查 uv 输出后重试")
+        return code
+    print(f"{args.engine} 环境安装完成")
+    return 0
+
+
+def _cmd_env_list(args, models_dir: Path | None, caps) -> int:
+    states = envs_status()
+    print("托管引擎环境：")
+    for engine in MANAGED_ENGINES:
+        st = states.get(engine, {"exists": False})
+        if st["exists"]:
+            detail = f"python {st.get('python', '?')}"
+            if st.get("packages"):
+                detail += "；" + "、".join(f"{k} {v}" for k, v in st["packages"].items())
+            print(f"  {engine}: 已创建（{detail}）")
+        else:
+            print(f"  {engine}: 未创建（执行 modelctl env setup {engine}）")
+    print("ollama / llamacpp / unsloth：原生或官方安装器，无需托管")
+    return 0
+
+
+def _cmd_env_remove(args, models_dir: Path | None, caps) -> int:
+    if not _validate_engine(args.engine):
+        logger.error(
+            f"请指定托管引擎（{' / '.join(MANAGED_ENGINES)}）：modelctl env remove <engine>"
+        )
+        return 2
+    try:
+        envs_remove(args.engine)
+    except ValueError as exc:
+        logger.error(str(exc))
+        return 2
+    print(f"{args.engine} 环境已移除")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     setup_logging()
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -658,6 +724,12 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_ui_stop(args, models_dir, caps)
         if args.command == "nginx-snippet":
             return _cmd_nginx_snippet(args, models_dir)
+        if args.command == "env":
+            if args.action == "setup":
+                return _cmd_env_setup(args, models_dir, caps)
+            if args.action == "list":
+                return _cmd_env_list(args, models_dir, caps)
+            return _cmd_env_remove(args, models_dir, caps)
     except (ProfileError, RequirementError) as error:
         logger.error(str(error))
         return 2
