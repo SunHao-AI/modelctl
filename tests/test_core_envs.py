@@ -18,14 +18,13 @@ from pathlib import Path
 
 import pytest
 
+import modelctl.core.envs as envs_mod
 from modelctl.core.envfile import PROJECT_ROOT
 
 
 def _redirect(tmp_path: Path, monkeypatch) -> Path:
     """把 envs.VENV_ROOT 重定向到 tmp_path/.venvs 并返回该根目录。"""
-    import modelctl.core.envs as envs
-
-    monkeypatch.setattr(envs, "VENV_ROOT", tmp_path / ".venvs")
+    monkeypatch.setattr(envs_mod, "VENV_ROOT", tmp_path / ".venvs")
     return tmp_path / ".venvs"
 
 
@@ -133,4 +132,145 @@ def test_unmanaged_engine_rejected():
         envs.ensure_env("unknown")
 
 
-# 注：status() 测试由 Task 2 的失败测试（Step 2.1）补回，届时再实现 status 函数。
+
+
+# === Task 2：setup / remove / status（外部命令层）===
+
+
+class _RunResult:
+    """模拟 subprocess.run 的返回值。"""
+
+    def __init__(self, returncode: int = 0):
+        self.returncode = returncode
+
+
+class _FakePipe:
+    """替换 envs_mod.subprocess.PIPE 的哨兵，用于断言调用参数。"""
+
+
+def test_setup_calls_uv_sync_windows(monkeypatch):
+    from modelctl.core.envs import ENVS_ROOT, VENV_ROOT, setup
+
+    assert os.name == "nt"
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append({"cmd": cmd, "kwargs": kwargs})
+        return _RunResult(0)
+
+    monkeypatch.setattr(envs_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(envs_mod.subprocess, "PIPE", _FakePipe)
+    monkeypatch.setattr(envs_mod.shutil, "which", lambda name: "uv")
+
+    code = setup("vllm")
+
+    assert code == 0
+    assert len(calls) == 1
+    call = calls[0]
+    # 断言调用了 ["uv", "sync", "--project", str(ENVS_ROOT / "vllm")]
+    assert call["cmd"] == ["uv", "sync", "--project", str(ENVS_ROOT / "vllm")]
+    # 断言环境变量含 UV_PROJECT_ENVIRONMENT=str(VENV_ROOT / "vllm")
+    assert call["kwargs"]["env"]["UV_PROJECT_ENVIRONMENT"] == str(VENV_ROOT / "vllm")
+
+
+def test_setup_unknown_engine_rejected():
+    from modelctl.core.envs import setup
+
+    with pytest.raises(ValueError):
+        setup("unknown")
+
+
+def test_setup_uv_not_found(tmp_path, monkeypatch):
+    from modelctl.core.envs import EngineEnvError, setup
+
+    _redirect(tmp_path, monkeypatch)
+    monkeypatch.setattr("modelctl.core.envs.shutil.which", lambda name: None)
+    with pytest.raises(EngineEnvError) as excinfo:
+        setup("vllm")
+    assert "uv" in str(excinfo.value)
+
+
+def test_remove_calls_rmtree(tmp_path, monkeypatch):
+    from modelctl.core.envs import remove
+
+    root = _redirect(tmp_path, monkeypatch)
+    calls = []
+
+    def spied_rmtree(path, **kwargs):
+        calls.append({"path": path, "kwargs": kwargs})
+
+    monkeypatch.setattr(envs_mod.shutil, "rmtree", spied_rmtree)
+    remove("vllm")
+    assert len(calls) == 1
+    # 断言参数是 (被重定向的) VENV_ROOT / "vllm"（Path）
+    assert calls[0]["path"] == envs_mod.VENV_ROOT / "vllm"
+    assert calls[0]["path"] == root / "vllm"
+    assert calls[0]["kwargs"]["ignore_errors"] is True
+
+
+def test_remove_unknown_engine_rejected():
+    from modelctl.core.envs import remove
+
+    with pytest.raises(ValueError):
+        remove("unknown")
+
+
+def test_status_reads_version_and_packages_windows(tmp_path, monkeypatch):
+    from modelctl.core.envs import status
+
+    assert os.name == "nt"
+    root = _redirect(tmp_path, monkeypatch)
+    venv = root / "vllm"
+    scripts = venv / "Scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "python.exe").write_bytes(b"fake")
+    (venv / "pyvenv.cfg").write_text(
+        "home = C:\\Python312\nversion = 3.12.1\ninclude-system-site-packages = false\n",
+        encoding="utf-8",
+    )
+    dist_info = venv / "Lib" / "site-packages" / "vllm-0.27.0.dist-info"
+    dist_info.mkdir(parents=True)
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: vllm\nVersion: 0.27.0\n",
+        encoding="utf-8",
+    )
+
+    result = status()
+    # vllm：已建环境，读出 python 版本与 vllm 包版本
+    assert result["vllm"] == {"exists": True, "python": "3.12.1", "packages": {"vllm": "0.27.0"}}
+    # sglang：未建环境
+    assert result["sglang"] == {"exists": False}
+
+
+def test_status_reads_version_and_packages_linux(tmp_path, monkeypatch):
+    from modelctl.core.envs import status
+
+    monkeypatch.setattr("os.name", "posix")
+    root = _redirect(tmp_path, monkeypatch)
+    venv = root / "sglang"
+    bin_dir = venv / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "python").write_bytes(b"fake")
+    (venv / "pyvenv.cfg").write_text(
+        "home = /usr/bin\nversion = 3.12.1\ninclude-system-site-packages = false\n",
+        encoding="utf-8",
+    )
+    dist_info = venv / "lib" / "python3.12" / "site-packages" / "sglang-0.5.9.dist-info"
+    dist_info.mkdir(parents=True)
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: sglang\nVersion: 0.5.9\n",
+        encoding="utf-8",
+    )
+
+    result = status()
+    assert result["sglang"] == {"exists": True, "python": "3.12.1", "packages": {"sglang": "0.5.9"}}
+    assert result["vllm"] == {"exists": False}
+
+
+def test_status_absent_engines_no_python_no_packages(tmp_path, monkeypatch):
+    from modelctl.core.envs import status
+
+    _redirect(tmp_path, monkeypatch)
+    result = status()
+    assert result["vllm"] == {"exists": False}
+    assert result["sglang"] == {"exists": False}
