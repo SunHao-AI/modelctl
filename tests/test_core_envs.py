@@ -301,8 +301,8 @@ def test_status_absent_engines_no_python_no_packages(tmp_path, monkeypatch):
 def test_engine_site_packages_vllm_no_env(tmp_path, monkeypatch):
     from modelctl.core.envs import engine_site_packages
 
+    # 仅重定向 VENV_ROOT 到缺失目录即可让 has_env 自然返回 False，无需再 patch has_env
     _redirect(tmp_path, monkeypatch)
-    monkeypatch.setattr("modelctl.core.envs.has_env", lambda e: False)
     assert engine_site_packages("vllm") is None
 
 
