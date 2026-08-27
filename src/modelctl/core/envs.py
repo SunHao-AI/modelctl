@@ -44,6 +44,21 @@ def has_env(engine: str) -> bool:
     return py.is_file()
 
 
+def engine_site_packages(engine: str) -> Path | None:
+    """返回引擎专用 venv 内 site-packages 目录;非托管或未建时返回 None。"""
+    if engine not in MANAGED_ENGINES:
+        return None
+    if not has_env(engine):
+        return None
+    root = VENV_ROOT / engine
+    if _is_windows():
+        sp = root / "Lib/site-packages"
+    else:
+        candidates = list(root.glob("lib/python*/site-packages"))
+        sp = candidates[0] if candidates else None
+    return sp if sp is not None and sp.is_dir() else None
+
+
 def ensure_env(engine: str) -> Path:
     if engine not in MANAGED_ENGINES:
         raise ValueError(f"非托管引擎：{engine}")

@@ -109,6 +109,7 @@ class EngineAdapter(ABC):
         函数内延迟 import 避免 core.compat 与 engines.base 的循环依赖。
         """
         from modelctl.core.compat import EnvSpec, GpuSpec, ModelSpec, apply_compat, run_compat
+        from modelctl.core.envs import engine_site_packages
 
         if model is None:
             download = self.profile.engine_config.get("download")
@@ -123,7 +124,8 @@ class EngineAdapter(ABC):
         # EnvSpec 单次进程内缓存：check_requirements 探测一次，pre_start 精检复用（spec 第 5 节）
         env = getattr(self, "_compat_env", None)
         if env is None:
-            env = EnvSpec.from_env()
+            sp = engine_site_packages(self.profile.engine)
+            env = EnvSpec.from_env(site_packages=sp)
             self._compat_env = env
         issues = run_compat(self.profile.engine, GpuSpec.from_caps(self.caps), env, model)
         apply_compat(self.profile.name, self.profile.engine, self.warnings, issues)

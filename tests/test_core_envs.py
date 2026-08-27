@@ -293,3 +293,46 @@ def test_status_absent_engines_no_python_no_packages(tmp_path, monkeypatch):
     result = status()
     assert result["vllm"] == {"exists": False}
     assert result["sglang"] == {"exists": False}
+
+
+# === Task 7：engine_site_packages ===
+
+
+def test_engine_site_packages_vllm_no_env(tmp_path, monkeypatch):
+    from modelctl.core.envs import engine_site_packages
+
+    _redirect(tmp_path, monkeypatch)
+    monkeypatch.setattr("modelctl.core.envs.has_env", lambda e: False)
+    assert engine_site_packages("vllm") is None
+
+
+def test_engine_site_packages_unmanaged():
+    from modelctl.core.envs import engine_site_packages
+
+    assert engine_site_packages("ollama") is None
+
+
+def test_engine_site_packages_vllm_env_present_linux(tmp_path, monkeypatch):
+    from modelctl.core.envs import engine_site_packages
+
+    monkeypatch.setattr("os.name", "posix")
+    root = _redirect(tmp_path, monkeypatch)
+    sp = root / "vllm" / "lib" / "python3.12" / "site-packages"
+    sp.mkdir(parents=True)
+    (sp / "x-1.0.dist-info").mkdir()
+    (sp / "x-1.0.dist-info" / "METADATA").write_text("Metadata-Version: 2.1\nName: x\nVersion: 1.0\n", encoding="utf-8")
+    _make_env(root, "vllm", windows=False)
+    assert engine_site_packages("vllm") == sp
+
+
+def test_engine_site_packages_vllm_env_present_windows(tmp_path, monkeypatch):
+    from modelctl.core.envs import engine_site_packages
+
+    monkeypatch.setattr("os.name", "nt")
+    root = _redirect(tmp_path, monkeypatch)
+    sp = root / "vllm" / "Lib" / "site-packages"
+    sp.mkdir(parents=True)
+    (sp / "x-1.0.dist-info").mkdir()
+    (sp / "x-1.0.dist-info" / "METADATA").write_text("Metadata-Version: 2.1\nName: x\nVersion: 1.0\n", encoding="utf-8")
+    _make_env(root, "vllm", windows=True)
+    assert engine_site_packages("vllm") == sp
