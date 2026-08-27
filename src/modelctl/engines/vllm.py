@@ -17,6 +17,7 @@ import os
 import shlex
 from pathlib import Path
 
+from modelctl.core import envs
 from modelctl.core.capabilities import all_vram_total_mb, selected_vram_total_mb
 from modelctl.core.envfile import PROJECT_ROOT
 from modelctl.core.gpu_lock import acquire_gpu_lock
@@ -28,8 +29,7 @@ from modelctl.engines.base import EngineAdapter, RequirementError
 
 class VllmAdapter(EngineAdapter):
     def check_requirements(self) -> None:
-        if not self.caps.binaries.get("vllm"):
-            raise RequirementError("未安装 vllm（PATH 中找不到 vllm 命令）")
+        envs.ensure_env("vllm")
         cfg = self.profile.engine_config
         if not cfg.get("model") and not cfg.get("download"):
             raise RequirementError(f"{self.profile.name}：vllm.model 必填（或配置 download 段自动下载）")
@@ -101,7 +101,7 @@ class VllmAdapter(EngineAdapter):
         gpus = self.selected_gpus()
         tp = len(gpus) if gpus else int(cfg.get("tensor_parallel_size", 1))
         cmd = [
-            "vllm",
+            str(envs.engine_bin("vllm", "vllm")),
             "serve",
             str(cfg["model"]),
             "--served-model-name",
@@ -128,6 +128,9 @@ class VllmAdapter(EngineAdapter):
         env = {"HF_HOME": os.environ["HF_HOME"]} if os.environ.get("HF_HOME") else {}
         if gpus:
             env.update(self.cuda_visible_devices(gpus))
+        # 注入引擎专用 venv：让 vllm 子进程显式感知虚拟环境
+        env["VIRTUAL_ENV"] = str(envs.VENV_ROOT / "vllm")
+        env["PATH"] = str(envs.engine_bin("vllm", "vllm").parent) + os.pathsep + env.get("PATH", os.environ["PATH"])
         return cmd, env
 
     def metrics_mapping(self) -> dict[str, list[str]]:
