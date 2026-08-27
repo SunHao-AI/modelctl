@@ -147,7 +147,7 @@ class _RunResult:
 def test_setup_calls_uv_sync_linux(tmp_path, monkeypatch):
     from modelctl.core.envs import ENVS_ROOT, setup
 
-    monkeypatch.setattr("os.name", "posix")
+    monkeypatch.setattr(envs_mod, "_is_linux", lambda: True)
     root = _redirect(tmp_path, monkeypatch)
     calls = []
 
@@ -169,27 +169,15 @@ def test_setup_calls_uv_sync_linux(tmp_path, monkeypatch):
     assert call["kwargs"]["env"]["UV_PROJECT_ENVIRONMENT"] == str(root / "vllm")
 
 
-def test_setup_calls_uv_sync_windows(tmp_path, monkeypatch):
-    from modelctl.core.envs import ENVS_ROOT, setup
+def test_setup_raises_on_non_linux(tmp_path, monkeypatch):
+    from modelctl.core.envs import EngineEnvError, setup
 
-    monkeypatch.setattr("os.name", "nt")
-    root = _redirect(tmp_path, monkeypatch)
-    calls = []
-
-    def fake_run(cmd, **kwargs):
-        calls.append({"cmd": cmd, "kwargs": kwargs})
-        return _RunResult(0)
-
-    monkeypatch.setattr(envs_mod.subprocess, "run", fake_run)
-    monkeypatch.setattr(envs_mod.shutil, "which", lambda name: "uv")
-
-    code = setup("vllm")
-
-    assert code == 0
-    assert len(calls) == 1
-    call = calls[0]
-    assert call["cmd"] == ["uv", "sync", "--project", str(ENVS_ROOT / "vllm")]
-    assert call["kwargs"]["env"]["UV_PROJECT_ENVIRONMENT"] == str(root / "vllm")
+    _redirect(tmp_path, monkeypatch)
+    monkeypatch.setattr(envs_mod, "_is_linux", lambda: False)
+    with pytest.raises(EngineEnvError) as excinfo:
+        setup("vllm")
+    assert "Linux" in str(excinfo.value)
+    assert "modelctl env setup vllm" in str(excinfo.value)
 
 
 def test_setup_unknown_engine_rejected():
@@ -203,6 +191,7 @@ def test_setup_uv_not_found(tmp_path, monkeypatch):
     from modelctl.core.envs import EngineEnvError, setup
 
     _redirect(tmp_path, monkeypatch)
+    monkeypatch.setattr(envs_mod, "_is_linux", lambda: True)
     monkeypatch.setattr("modelctl.core.envs.shutil.which", lambda name: None)
     with pytest.raises(EngineEnvError) as excinfo:
         setup("vllm")

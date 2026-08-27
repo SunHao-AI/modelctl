@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from modelctl.core.envfile import PROJECT_ROOT
@@ -20,6 +21,11 @@ class EngineEnvError(RuntimeError):
 
 def _is_windows() -> bool:
     return os.name == "nt"
+
+
+def _is_linux() -> bool:
+    """当前运行平台是否为 Linux（托管引擎的目标部署平台）。"""
+    return sys.platform.startswith("linux")
 
 
 def venv_bin_dir(engine: str) -> Path:
@@ -72,6 +78,11 @@ def ensure_env(engine: str) -> Path:
 def setup(engine: str) -> int:
     if engine not in MANAGED_ENGINES:
         raise ValueError(f"非托管引擎：{engine}")
+    if not _is_linux():
+        raise EngineEnvError(
+            f"引擎 {engine} 的目标平台为 Linux，当前平台为 {sys.platform}；"
+            f"请到 Linux 部署机上执行：modelctl env setup {engine}"
+        )
     exe = shutil.which("uv")
     if exe is None:
         raise EngineEnvError("未找到 uv，请先安装：pip install uv")
