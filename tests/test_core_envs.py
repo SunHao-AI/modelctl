@@ -144,14 +144,11 @@ class _RunResult:
         self.returncode = returncode
 
 
-class _FakePipe:
-    """替换 envs_mod.subprocess.PIPE 的哨兵，用于断言调用参数。"""
+def test_setup_calls_uv_sync_linux(tmp_path, monkeypatch):
+    from modelctl.core.envs import ENVS_ROOT, setup
 
-
-def test_setup_calls_uv_sync_windows(monkeypatch):
-    from modelctl.core.envs import ENVS_ROOT, VENV_ROOT, setup
-
-    assert os.name == "nt"
+    monkeypatch.setattr("os.name", "posix")
+    root = _redirect(tmp_path, monkeypatch)
     calls = []
 
     def fake_run(cmd, **kwargs):
@@ -159,7 +156,6 @@ def test_setup_calls_uv_sync_windows(monkeypatch):
         return _RunResult(0)
 
     monkeypatch.setattr(envs_mod.subprocess, "run", fake_run)
-    monkeypatch.setattr(envs_mod.subprocess, "PIPE", _FakePipe)
     monkeypatch.setattr(envs_mod.shutil, "which", lambda name: "uv")
 
     code = setup("vllm")
@@ -169,8 +165,31 @@ def test_setup_calls_uv_sync_windows(monkeypatch):
     call = calls[0]
     # 断言调用了 ["uv", "sync", "--project", str(ENVS_ROOT / "vllm")]
     assert call["cmd"] == ["uv", "sync", "--project", str(ENVS_ROOT / "vllm")]
-    # 断言环境变量含 UV_PROJECT_ENVIRONMENT=str(VENV_ROOT / "vllm")
-    assert call["kwargs"]["env"]["UV_PROJECT_ENVIRONMENT"] == str(VENV_ROOT / "vllm")
+    # 断言环境变量含 UV_PROJECT_ENVIRONMENT=str(重定向后的 VENV_ROOT / "vllm")
+    assert call["kwargs"]["env"]["UV_PROJECT_ENVIRONMENT"] == str(root / "vllm")
+
+
+def test_setup_calls_uv_sync_windows(tmp_path, monkeypatch):
+    from modelctl.core.envs import ENVS_ROOT, setup
+
+    monkeypatch.setattr("os.name", "nt")
+    root = _redirect(tmp_path, monkeypatch)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append({"cmd": cmd, "kwargs": kwargs})
+        return _RunResult(0)
+
+    monkeypatch.setattr(envs_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(envs_mod.shutil, "which", lambda name: "uv")
+
+    code = setup("vllm")
+
+    assert code == 0
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["cmd"] == ["uv", "sync", "--project", str(ENVS_ROOT / "vllm")]
+    assert call["kwargs"]["env"]["UV_PROJECT_ENVIRONMENT"] == str(root / "vllm")
 
 
 def test_setup_unknown_engine_rejected():
