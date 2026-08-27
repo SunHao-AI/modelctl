@@ -19,14 +19,15 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from modelctl.core.envs import MANAGED_ENGINES, engine_bin, has_env
+
 ENGINE_BINARIES = ["ollama", "vllm", "sglang", "unsloth", "llamacpp"]
 
 ENGINE_INSTALL_HINTS = {
     "ollama": "，建议执行：curl -fsSL https://ollama.com/install.sh | sh",
-    # 镜像策略由项目根 uv.toml 统一声明（阿里 PyPI 默认 + 官方 PyPI 兜底 + PyTorch 官方 cu130 显式 index），
-    # 因此用户终端只需 `uv sync --extra vllm`，无需再手动拼 --extra-index-url / --index-url。
-    "vllm": "，建议执行：MAX_JOBS=4 uv sync --extra vllm（锁定 vllm==0.27.*，torch 2.13 走 pytorch-cu13 index）",
-    "sglang": '，建议执行：MAX_JOBS=4 uv pip install "sglang[all]==0.5.9"（与 vllm 的 torch/flashinfer 互斥，需独立 venv，勿与 --extra vllm 共存）',
+    # 托管引擎统一走 modelctl env setup 创建引擎专用 venv，避免在主环境引入互斥依赖
+    "vllm": "，建议执行：modelctl env setup vllm",
+    "sglang": "，建议执行：modelctl env setup sglang（与 vllm 依赖互斥，需独立 venv）",
     # 无头推理（studio run）依赖官方安装器搭建的运行时，仅 pip install 不够
     "unsloth": "，建议执行：curl -fsSL https://unsloth.ai/install.sh | sh",
     # llamacpp 提示较长（源码下载 + 编译命令），由 cli._cmd_probe 单独多行输出
@@ -49,14 +50,43 @@ class Capabilities:
     binary_paths: dict[str, str | None] = field(default_factory=dict)
 
 
+def _managed_binary_path(engine: str, name: str) -> Path | None:
+    """托管引擎可执行文件路径；引擎专用 venv 未创建时返回 None。"""
+    if engine not in MANAGED_ENGINES:
+        return None
+    if not has_env(engine):
+        return None
+    return engine_bin(engine, name)
+
+
 def which_binaries(names: list[str]) -> dict[str, bool]:
-    """探测给定可执行文件在 PATH 中是否可用。"""
-    return {n: shutil.which(n) is not None for n in names}
+    """探测引擎二进制是否可用。
+
+    托管引擎（vllm / sglang）以专用 venv 是否创建（has_env）判定；
+    非托管引擎维持 PATH 探测（shutil.which）。
+    """
+    result: dict[str, bool] = {}
+    for n in names:
+        if n in MANAGED_ENGINES:
+            result[n] = _managed_binary_path(n, n) is not None
+        else:
+            result[n] = shutil.which(n) is not None
+    return result
 
 
 def binary_paths(names: list[str]) -> dict[str, str | None]:
-    """探测给定可执行文件在 PATH 中的完整路径；未找到时返回 None。"""
-    return {n: shutil.which(n) for n in names}
+    """探测引擎二进制完整路径；未找到时返回 None。
+
+    托管引擎返回 venv 内路径；非托管引擎返回 PATH 中的路径。
+    """
+    result: dict[str, str | None] = {}
+    for n in names:
+        if n in MANAGED_ENGINES:
+            path = _managed_binary_path(n, n)
+            result[n] = str(path) if path is not None else None
+        else:
+            result[n] = shutil.which(n)
+    return result
 
 
 def find_llamacpp_binary() -> str | None:
