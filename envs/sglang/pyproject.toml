@@ -1,0 +1,8 @@
+[project]
+name = "modelctl-venv-sglang"
+version = "0.1.0"
+description = "SGLang 引擎专属虚拟环境（由 modelctl env setup 管理）"
+requires-python = ">=3.12"
+dependencies = [
+    "sglang[all]>=0.5.9,<0.6",
+]
