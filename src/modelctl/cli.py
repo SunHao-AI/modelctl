@@ -730,7 +730,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.action == "list":
                 return _cmd_env_list(args, models_dir, caps)
             return _cmd_env_remove(args, models_dir, caps)
-    except (ProfileError, RequirementError) as error:
+    except (ProfileError, RequirementError, EngineEnvError) as error:
         logger.error(str(error))
         return 2
     return 0

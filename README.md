@@ -472,3 +472,5 @@ bash script/modelctl-all.sh status
 - 详细注意事项（KV cache 量化、DSpark 参数、NCCL 优化等）见上方文档
 
 > **迁移说明**：vllm / sglang 引擎已从主项目 `uv sync --extra vllm` 迁出，改用独立引擎 venv。原本执行 `uv sync --extra vllm` 的用户，请改为 `modelctl env setup vllm`（sglang 同理 `modelctl env setup sglang`），首次启动前会自动完成初始化并复用 `.venvs/<engine>/`。
+
+> **部署前必做**：`pyproject.toml` 自 vllm extra 迁出后 `uv.lock` 重新解析过，而仓库内 `uv.lock` 与部署机实际解析（Linux + CUDA 13 平台差异）存在差异。**部署到 Linux CUDA 机器前，务必在目标机器上重新执行 `uv lock` + `uv sync`**，由目标平台完成最终解析，避免直接沿用开发机（Windows）生成的锁文件。
