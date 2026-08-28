@@ -1,0 +1,59 @@
+# unsloth/qwen3.8-flash-next.yaml —— Qwen3.8-Flash-Next（Unsloth 引擎，无头 API，GGUF）
+# 学习要点：Unsloth 无头推理（unsloth studio run --api-only）支持 GGUF 动态量化；
+#   API key 运行时自动生成并打印到启动日志。
+# 模型背景：与 vllm 版相同——125B 总参 + 51B N-gram Embedding，GDN+QSA 混合注意力，MoE。
+#
+# 【重要】llama.cpp 子模块要求：Unsloth 底层的 llama.cpp 需要支持本模型（GGUF 的
+#   PR #27742 qwen4exp/qwen3.8-flash-next 分支），主线 llama.cpp 暂时不识别该架构。
+#   本机 unsloth 版本若过旧：
+#     pip install -U unsloth-llama-cpp   # 或使用 GitHub Release 中的 nightly
+#   或确认 `unsloth -v` / unsloth-studio release notes 已包含 Qwen4 架构支持。
+#
+# 【内存/显存需求】（Unsloth 官方口径，单位 = RAM + VRAM 总量或统一内存）
+#   UD-Q4_K_XL 量化：约 111GB / 1 bit 量化：约 75GB
+#   本机 8×RTX 5880（总 640GB 显存）+ 128GB 内存，UD-Q4_K_XL 完全够用；
+#   若想在 Mac/DGX Spark 这类统一内存机上跑，1-bit 已足够
+#
+# 【N-gram Embedding 离载】本模型 N-gram 表（51B 参数）可单独卸载到 Host Memory/SSD，
+#   通过异步 prefetch 与模型计算重叠——这一能力使 GGUF 路线也能接近 MFU 性能
+#   （取决于 unsloth 是否暴露对应 flag，启动时确认；未暴露就走显存路线）
+group: qwen3.8-flash-next
+# port：服务监听端口（健康检查 http://127.0.0.1:<port>/v1/models）
+port: 8010
+# api_key：仅兜底（上游实际使用 unsloth 每次启动自动生成的 key，见启动成功后打印的提示）
+api_key: ${UNSLOTH_API_KEY}
+
+unsloth:
+  # model：HF 模型 ID 或本地 GGUF 路径；留空则通过 download 段自动下载
+  model: unsloth/Qwen3.8-Flash-Next-GGUF
+  # gguf_variant：Unsloth 动态量化后缀；model 为本地路径时忽略
+  # 注：Unsloth 仓库内量化名为 Q4_K_XL / Q3_K_XL 等（非 UD- 前缀，UD- 仅为 Unsloth 文档命名）
+  gguf_variant: Q4_K_XL
+  # context_length：请求的上下文长度
+  # 注意：单请求完整可用（与并发无关）；KV 显存 ≈ 并发 × context_length
+  context_length: 65536
+  # tensor_parallel：多卡 GGUF tensor-parallel 加载（需至少 2 块 GPU）
+  # 本模型 MoE + 总权重 111GB（Q4_K_XL），2 卡 160GB 装得下，开启后吞吐提升
+  tensor_parallel: true
+  # gpu_list：指定使用的 GPU 设备编号（可选，默认不设=使用全部 GPU）
+  # 示例：gpu_list: "0,1"（tensor_parallel=true 时需 ≥2 块 GPU）
+  # load_in_4bit：非 GGUF HF 模型的 4bit 加载（本模型走 GGUF 路线，忽略）
+  load_in_4bit: false
+  # download：ModelScope 自动下载配置（model 不存在本地路径时触发）
+  download:
+    # modelscope_id：ModelScope 仓库 ID（GGUF 格式）
+    modelscope_id: unsloth/Qwen3.8-Flash-Next-GGUF
+    # quant：仓库内实际量化名（需与 GGUF 文件名量化段一致）
+    quant: Q4_K_XL
+  # extra_args：透传其他 unsloth 参数
+  # 留空；unsloth 默认会把已知 args 透传到 llama-server
+  # 如需 N-gram offload，请查 unsloth release notes / llama.cpp PR #27742 后才能开启
+  extra_args: ""
+
+usage:
+  # price_in：每千输入 token 计价（元），供 cc-switch 用量统计
+  price_in: 1.0
+  # price_out：每千输出 token 计价（元）
+  price_out: 3.0
+  # budget：预算上限（元，可选）；设置后 cc-switch 显示剩余金额并支持百分比徽章（?view=tier）
+  # budget: 50

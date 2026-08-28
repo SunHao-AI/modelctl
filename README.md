@@ -34,6 +34,7 @@ modelctl/
 │   ├── llamacpp/                   # llamacpp 引擎 profile 子目录
 │   │   ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（llamacpp + DSpark）
 │   │   ├── qwen3.8.yaml            # Qwen3.8-27B GGUF（llamacpp）
+│   │   ├── qwen3.8-flash-next.yaml # Qwen3.8-Flash-Next 111GB GGUF（llamacpp，需 PR 分支）
 │   │   ├── qwen3-coder.yaml        # Qwen3-Coder-480B MoE GGUF（llamacpp，8 卡全量）
 │   │   └── kimi-k2.5.yaml          # Kimi-K2.5 120B dense GGUF（llamacpp）
 │   ├── ollama/                     # ollama 引擎 profile 子目录
@@ -44,14 +45,17 @@ modelctl/
 │   ├── vllm/                       # vllm 引擎 profile 子目录
 │   │   ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（vllm）
 │   │   ├── qwen3.8.yaml            # Qwen3.8-27B（vllm）
+│   │   ├── qwen3.8-flash-next.yaml # Qwen3.8-Flash-Next 173GB FP8（vllm，多卡需≥4）
 │   │   └── kimi-k2.5.yaml          # Kimi-K2.5（vllm；qwen3-coder 无此变体：HF 权重超总显存）
 │   ├── sglang/                     # sglang 引擎 profile 子目录
 │   │   ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（sglang）
 │   │   ├── qwen3.8.yaml            # Qwen3.8-27B（sglang）
+│   │   ├── qwen3.8-flash-next.yaml # Qwen3.8-Flash-Next 173GB FP8（sglang）
 │   │   └── kimi-k2.5.yaml          # Kimi-K2.5（sglang；qwen3-coder 同上）
 │   └── unsloth/                    # unsloth 引擎 profile 子目录
 │       ├── deepseek-v4-flash.yaml  # DeepSeek-V4-Flash（unsloth）
 │       ├── qwen3.8.yaml            # Qwen3.8-27B（unsloth）
+│       ├── qwen3.8-flash-next.yaml # Qwen3.8-Flash-Next 111GB GGUF（unsloth，多卡或高内存）
 │       ├── qwen3-coder.yaml        # Qwen3-Coder-480B（unsloth，多卡 GGUF 分片）
 │       └── kimi-k2.5.yaml          # Kimi-K2.5（unsloth）
 ├── .env.example                    # 全局配置模板（复制为 .env 后修改）
@@ -177,7 +181,26 @@ qwen3.8（8 配置）｜输入 "qwen3.8" 路由至 qwen3.8-vllm（运行中）
 --------  -----  -----  ------  ----------------------
 vllm      -      8101   运行中  qwen3.8-vllm
 ...
+
+qwen3.8-flash-next（4 配置）｜输入 "qwen3.8-flash-next" 路由至该家族内运行中成员
+引擎      变体   端口   状态    标识符
+--------  -----  -----  ------  ---------------------------
+vllm      -      8110   已停止  qwen3.8-flash-next-vllm
+sglang    -      8210   已停止  qwen3.8-flash-next-sglang
+unsloth   -      8010   已停止  qwen3.8-flash-next-unsloth
+llamacpp  -      18909  已停止  qwen3.8-flash-next-llamacpp
 ```
+
+> **qwen3.8-flash-next 模型说明**（2026-08 阿里 Qwen 开源，Qwen4 架构早期预览）：
+> 125B 总参 + 51B N-gram Embedding，每 token 激活 6B；GDN + QSA 混合注意力，多模态
+> （图+文）。FP8 权重 172.78 GiB（BF16 335.28 GiB），原生 262144 token 上下文。
+> 四种部署路线对应此处 `qwen3.8-flash-next-{vllm|sglang|unsloth|llamacpp}`：
+> - **FP8 路线（vllm/sglang）**：≥ 4 卡（H200 / 8×RTX 5880 等满足 CC 8.9 即可），
+ >   `tensor_parallel_size` 推荐 8；Flash-Next 依赖 vLLM 较新版本/官方镜像
+ >   `vllm/vllm-openai:qwen38-flash-next`，PyPI 通用 vLLM 不保证 Day-0 支持
+ > - **GGUF 路线（unsloth/llamacpp）**：Unsloth 已发 GGUF 量化（UD-Q4_K_XL 约 111GB），
+ >   需 llama.cpp PR #27742（qwen4exp/qwen3.8-flash-next 分支）才识别该架构；
+ >   8×RTX 5880（640GB 显存）完全装得下，unsloth 2 卡以上 + tensor_parallel 即可
 
 路由规则（与网关一致）：组内按引擎优先级（vllm 优先）取第一个**运行中**的成员；组内成员全部停止时请求失败。`name` / `alias` 输入则精确路由到对应 profile。若设置了 `GATEWAY_DEFAULT_MODEL`，未匹配任何家族/标识符的请求回退至该默认模型。
 
@@ -237,6 +260,15 @@ bash script/modelctl.sh start deepseek-v4-flash-unsloth
 bash script/modelctl.sh start qwen3.8-unsloth
 bash script/modelctl.sh start qwen3-coder-unsloth
 bash script/modelctl.sh start kimi-k2.5-unsloth
+
+# Qwen3.8-Flash-Next（2026-08 新架构 Qwen4 预览版，家族名 qwen3.8-flash-next）
+# 注意：vllm/sglang 走 FP8（173GB）需 ≥ 4 卡；GGUF（unsloth/llamacpp）依赖 llama.cpp PR 分支
+# vllm/sglang FP8（多卡高显存机器）
+bash script/modelctl.sh start qwen3.8-flash-next-vllm
+bash script/modelctl.sh start qwen3.8-flash-next-sglang
+# unsloth/llamacpp GGUF（使用 UD-Q4_K_XL；llamacpp 需 PR #27742 编译的 llama-server）
+bash script/modelctl.sh start qwen3.8-flash-next-unsloth
+bash script/modelctl.sh start qwen3.8-flash-next-llamacpp
 ```
 
 也可直接调用已安装的 `modelctl` 命令：
@@ -285,6 +317,10 @@ curl http://127.0.0.1:8101/health    # qwen3.8-vllm
 curl http://127.0.0.1:8102/health    # kimi-k2.5-vllm
 curl http://127.0.0.1:8202/health    # kimi-k2.5-sglang
 curl http://127.0.0.1:8001/v1/models -H "Authorization: Bearer $UNSLOTH_API_KEY"   # unsloth 无头 API（deepseek-v4-flash / qwen3-coder / kimi-k2.5）
+curl http://127.0.0.1:8110/health    # qwen3.8-flash-next-vllm
+curl http://127.0.0.1:8210/health    # qwen3.8-flash-next-sglang
+curl http://127.0.0.1:8010/v1/models -H "Authorization: Bearer $API_KEY"   # qwen3.8-flash-next-unsloth
+curl http://127.0.0.1:18909/health   # qwen3.8-flash-next-llamacpp
 ```
 
 ### 5. 停止 / 重启 / 状态

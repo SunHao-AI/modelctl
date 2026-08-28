@@ -1,0 +1,56 @@
+# sglang/qwen3.8-flash-next.yaml —— Qwen3.8-Flash-Next（SGLang 引擎，HuggingFace 原始权重，FP8）
+# 学习要点：SGLang 与 vLLM 类似使用 HF 格式权重，通过 --tp 张量并行，适合高吞吐在线服务。
+# 模型背景：与 vllm/qwen3.8-flash-next.yaml 相同——125B 总参 + 51B N-gram Embedding，
+#   GDN+QSA 混合注意力，多模态。FP8 172.78 GiB，原生 262144 token 上下文（YaRN 扩至 1M）。
+#
+# 【SGLang 版本要求】v0.5.x 以上对 MoE 模型支持稳定；本模型若仅支持 vLLM 需注意
+#   SGLang 是否同步跟进。若启动失败请到 recipes.vllm.ai 与 github.com/sgl-project/sglang
+#   确认本模型支持矩阵。
+#
+# 【显存门槛】FP8 必须多卡，8×RTX 5880（总 640GB）可装下 FP8（172.78GB ≈ 4 卡），
+#   建议 TP=8 让 QSA 稀疏注意力更高效
+group: qwen3.8-flash-next
+# engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
+# port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
+port: 8210
+# api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值
+api_key: ${API_KEY}
+
+sglang:
+  # model：HuggingFace 模型 ID 或本地模型目录。
+  # 为空/不存在时通过 download 段从 ModelScope 下载并写回本地路径
+  model: Qwen/Qwen3.8-Flash-Next-FP8
+  # download：模型不存在时的自动下载配置（ModelScope，HF 格式仓库）
+  download:
+    # modelscope_id：ModelScope 仓库 ID（HF 格式，FP8 块量化）
+    modelscope_id: Qwen/Qwen3.8-Flash-Next-FP8
+  # tensor_parallel_size：张量并行 GPU 数（--tp，不得超过实际 GPU 数）
+  tensor_parallel_size: 8
+  # gpu_list：指定使用的 GPU 设备编号（可选，默认不设=使用全部 GPU）；配置后长度必须等于 tensor_parallel_size
+  # 示例：gpu_list: "0,1,2,3,4,5,6,7"
+  # context_length：最大上下文长度（token）
+  # 注意：单序列完整可用（与并发无关）；KV 显存 ≈ 并发 × context_length
+  # 本模型原生 262144 token；YaRN 扩到 1M 需加 --rope-scaling '{"rope_type":"yarn","factor":4}'
+  context_length: 262144
+  # mem_fraction_static：静态显存分配比例（0~1），预留 KV cache 空间
+  mem_fraction_static: 0.9
+  # extra_args：透传给 `sglang.launch_server` 的额外参数（空格分隔，按 shlex 拆分）
+  # 关键参数：
+  #   --trust-remote-code：Ada 一下/新架构 FMoE 模型必须带上，否则 flashattention 路径不识别
+  #   --quantization fp8：显式启用 FP8（SGLang 的 fp8 权重需 CC≥8.9；RTX 5880 满足）
+  #   --kv-cache-dtype fp8_e4m3：FP8 KV cache（节省一半 KV 显存，精度损失 <1%）
+  # 可选（按运行状况追加）：
+  #   --enable-ep-moe --ep 8：MoE 专家并行（适合长上下文，省显存）
+  #   --disable-cuda-graphs：避免新架构 CUDA graph 兼容风险
+  #   --speculative-algorithm mtp + --speculative-num-steps 3：开启内置 MTP 投机
+  #       # MTP 头依赖 SGLang 完整支持；启动报错就删除
+  # 注意：sglang 的 --kv-cache-dtype 不接受裸 "fp8"，必须写具体格式（fp8_e4m3/fp8_e5m2）
+  extra_args: "--trust-remote-code --quantization fp8 --kv-cache-dtype fp8_e4m3"
+
+usage:
+  # price_in：每千输入 token 计价（元），供 cc-switch 用量统计
+  price_in: 1.0
+  # price_out：每千输出 token 计价（元）
+  price_out: 3.0
+  # budget：预算上限（元，可选）；设置后 cc-switch 显示剩余金额并支持百分比徽章（?view=tier）
+  # budget: 50
