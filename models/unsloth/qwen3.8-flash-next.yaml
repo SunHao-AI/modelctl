@@ -4,7 +4,7 @@
 # 模型背景：与 vllm 版相同——125B 总参 + 51B N-gram Embedding，GDN+QSA 混合注意力，MoE。
 #
 # 【重要】llama.cpp 子模块要求：Unsloth 底层的 llama.cpp 需要支持本模型（GGUF 的
-#   PR #27742 qwen4exp/qwen3.8-flash-next 分支），主线 llama.cpp 暂时不识别该架构。
+#   PR #27793 qwen4exp/qwen3.8-flash-next 分支，由 #27742 重开），主线 llama.cpp 暂时不识别该架构。
 #   本机 unsloth 版本若过旧：
 #     pip install -U unsloth-llama-cpp   # 或使用 GitHub Release 中的 nightly
 #   或确认 `unsloth -v` / unsloth-studio release notes 已包含 Qwen4 架构支持。
@@ -47,7 +47,7 @@ unsloth:
     quant: Q4_K_XL
   # extra_args：透传其他 unsloth 参数
   # 留空；unsloth 默认会把已知 args 透传到 llama-server
-  # 如需 N-gram offload，请查 unsloth release notes / llama.cpp PR #27742 后才能开启
+  # 如需 N-gram offload，请查 unsloth release notes / llama.cpp PR #27793 后才能开启
   extra_args: ""
 
 usage:

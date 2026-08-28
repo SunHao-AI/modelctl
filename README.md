@@ -196,11 +196,11 @@ llamacpp  -      18909  已停止  qwen3.8-flash-next-llamacpp
 > （图+文）。FP8 权重 172.78 GiB（BF16 335.28 GiB），原生 262144 token 上下文。
 > 四种部署路线对应此处 `qwen3.8-flash-next-{vllm|sglang|unsloth|llamacpp}`：
 > - **FP8 路线（vllm/sglang）**：≥ 4 卡（H200 / 8×RTX 5880 等满足 CC 8.9 即可），
- >   `tensor_parallel_size` 推荐 8；Flash-Next 依赖 vLLM 较新版本/官方镜像
- >   `vllm/vllm-openai:qwen38-flash-next`，PyPI 通用 vLLM 不保证 Day-0 支持
- > - **GGUF 路线（unsloth/llamacpp）**：Unsloth 已发 GGUF 量化（UD-Q4_K_XL 约 111GB），
- >   需 llama.cpp PR #27742（qwen4exp/qwen3.8-flash-next 分支）才识别该架构；
- >   8×RTX 5880（640GB 显存）完全装得下，unsloth 2 卡以上 + tensor_parallel 即可
+>   `tensor_parallel_size` 推荐 8；Flash-Next 需要 vLLM 0.28.0+ 的专用构建，官方以镜像
+>   `vllm/vllm-openai:qwen38-flash-next` 提供 Day-0 支持（官方明确 PyPI 安装不支持本 recipe）
+> - **GGUF 路线（unsloth/llamacpp）**：Unsloth 已发 GGUF 量化（UD-Q4_K_XL 约 111GB），
+>   需 llama.cpp PR #27793（qwen4exp/qwen3.8-flash-next 分支）才识别该架构；
+>   8×RTX 5880（640GB 显存）完全装得下，unsloth 2 卡以上 + tensor_parallel 即可
 
 路由规则（与网关一致）：组内按引擎优先级（vllm 优先）取第一个**运行中**的成员；组内成员全部停止时请求失败。`name` / `alias` 输入则精确路由到对应 profile。若设置了 `GATEWAY_DEFAULT_MODEL`，未匹配任何家族/标识符的请求回退至该默认模型。
 
@@ -266,10 +266,36 @@ bash script/modelctl.sh start kimi-k2.5-unsloth
 # vllm/sglang FP8（多卡高显存机器）
 bash script/modelctl.sh start qwen3.8-flash-next-vllm
 bash script/modelctl.sh start qwen3.8-flash-next-sglang
-# unsloth/llamacpp GGUF（使用 UD-Q4_K_XL；llamacpp 需 PR #27742 编译的 llama-server）
+# unsloth/llamacpp GGUF（使用 UD-Q4_K_XL；llamacpp 需用 PR #27793 分支编译的 llama-server，见下）
 bash script/modelctl.sh start qwen3.8-flash-next-unsloth
 bash script/modelctl.sh start qwen3.8-flash-next-llamacpp
 ```
+
+#### llamacpp 需用 PR #27793（qwen4exp 分支）编译的 llama-server
+
+Qwen3.8-Flash-Next 的模型架构（`qwen4exp`）主线 llama.cpp 尚未识别，直接
+`modelctl start qwen3.8-flash-next-llamacpp` 会报
+`error loading model: unknown model architecture: 'qwen4exp'`。
+需在**独立目录**构建一份 PR 分支副本（不影响主线 `/raid5/sh/code/llama.cpp` 的构建）：
+
+```bash
+git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /raid5/sh/code/llama.cpp-qwen38-flash-next
+cd /raid5/sh/code/llama.cpp-qwen38-flash-next
+git fetch --depth 1 origin pull/27793/head:qwen4exp-flash-next
+git checkout qwen4exp-flash-next
+cmake -B build -DGGML_CUDA=ON -DGGML_AVX512=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release -j 4
+```
+
+再把副本路径写入 profile 的 `llamacpp.source_dir`（`models/llamacpp/qwen3.8-flash-next.yaml`）：
+
+```yaml
+llamacpp:
+  source_dir: /raid5/sh/code/llama.cpp-qwen38-flash-next
+```
+
+`source_dir` 留空时依次回退：环境变量 `LLAMACPP_SOURCE_DIR` → 默认主线。`modelctl` 会自动命中
+`<副本>/build/bin/llama-server`，跳过主线编译，直接用 PR 分支二进制启动。
 
 也可直接调用已安装的 `modelctl` 命令：
 

@@ -1,13 +1,22 @@
 # llamacpp/qwen3.8-flash-next.yaml —— Qwen3.8-Flash-Next（llama.cpp 引擎，GGUF）
 # 学习要点：llama.cpp 是统一的 GGUF 执行基座，多种推理栈（本机启动、云端推理、Ollama、Unsloth）共享
 #
-# 【警告】本模型需要 llama.cpp PR 分支才支持（Unsloth 官方指明）：
-#   ggml-org/llama.cpp PR #27793（danielhanchen:qwen4exp/qwen3.8-flash-next 分支，由 #27742 重开）
-#   主线 llama.cpp 尚未识别 Qwen3.8-Flash-Next 架构；需手动 checkout 该分支并编译。
-#   pre_start 会 clone 主线 master 然后编译，主线不识别本模型时启动会失败。
-#   如需走 PR 分支：把下方 source_dir 指到你本地已 checkout PR 分支的 llama.cpp 目录，
-#   并保证该目录下已有编译好的 build/bin/llama-server（否则 pre_start 会重新 cmake 主线）。
-#   build: cmake -DGGML_CUDA=ON -DGGML_AVX512=ON；编译后 build/bin/llama-server 即可
+# 【重要】本模型必须使用 llama.cpp PR #27793（qwen4exp 分支）才能支持：
+#   主线 llama.cpp 尚未识别 Qwen3.8-Flash-Next 的架构（qwen4exp），直接启动会报
+#   "error loading model: unknown model architecture: 'qwen4exp'"。
+#
+# 【推荐：独立副本构建，不动主线 /raid5/sh/code/llama.cpp】
+#   在单独目录生成一份 PR 分支副本并编译（GIT 远程以 pull/27793/head 为准，PR 后续更新也能拉到）：
+#     git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /raid5/sh/code/llama.cpp-qwen38-flash-next
+#     cd /raid5/sh/code/llama.cpp-qwen38-flash-next
+#     git fetch --depth 1 origin pull/27793/head:qwen4exp-flash-next
+#     git checkout qwen4exp-flash-next
+#     cmake -B build -DGGML_CUDA=ON -DGGML_AVX512=ON -DCMAKE_BUILD_TYPE=Release
+#     cmake --build build --config Release -j 4
+#   然后把下方 llamacpp.source_dir 指向该副本目录即可。
+#   modelctl 源码目录解析优先级：source_dir → 环境变量 LLAMACPP_SOURCE_DIR → 默认主线。
+#   指定 source_dir 后，若 <副本>/build/bin/llama-server 已存在则直接使用（不再编译）；
+#   若缺失，会用该副本源码自动补编译（同样是 PR 分支源码，不会用主线）。
 #
 # 【无 DSpark】本模型 MTP 头走 llama.cpp 的 EAGLE3 / 内置 MTP 路径，而非 dspark 拖影
 # 投机（与 Qwen3.8 系列一致）；dspark 必须 off
@@ -29,6 +38,9 @@ port: 18909
 api_key: ${API_KEY}
 
 llamacpp:
+  # source_dir：llama.cpp 源码目录（建议填上面头部注释里 PR 副本的绝对路径）。
+  #   留空=回退环境变量 LLAMACPP_SOURCE_DIR，再回退默认主线；point 到已编译副本时无需再动构建。
+  source_dir: /raid5/sh/code/llama.cpp-qwen38-flash-next
   # model：本地 GGUF 模型路径。为空/不存在时通过 download 段自动下载；
   # 下载成功后此字段会被覆盖为本地绝对路径（原文件备份 .yaml.bak）
   model: ""
