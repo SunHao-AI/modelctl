@@ -26,7 +26,8 @@
 # 投机（与 Qwen3.8 系列一致）；dspark 必须 off
 #
 # 【多模态】Flash-Next 为原生 VLM（图+文），相当于 Qwen3.8 的新一代；
-#   mmproj 文件需另行从 unsloth 仓库获取。当前仓库可能尚未同步，如需图输入请手动放置
+#   mmproj 文件位于 unsloth 仓库根目录（mmproj-BF16.gguf / mmproj-F16.gguf，
+#   Hugging Face 与 ModelScope 均已同步），vision: on 时启动时自动按 *mmproj*.gguf 发现
 #
 # 【采样参数】混合思考模型，官方推荐（Unsloth 文档）：
 #   思考模式：T=1.0, top_p=0.95, top_k=20
@@ -69,9 +70,9 @@ llamacpp:
   # 而非 dspark 拖影，必须 off
   dspark: off
   # vision：视觉能力开关（on/off）。Flash-Next 为原生 VLM，开启后启动时传入 --mmproj。
-  # 但 mmproj 可能尚未同步到 unsloth GGUF 仓库，未放好 mmproj 文件时保持 off 更安全；
-  # 等 mmproj 同步后再切 on
-  vision: off
+  #   模型目录已有 *mmproj*.gguf 时自动发现；模型已下载但缺 mmproj 时，
+  #   首次 start 会从 ModelScope 仓库补下。
+  vision: on
   # mmproj：视觉投影文件路径（可选）。留空 = 自动在模型目录查找 *mmproj*.gguf；
   # 找不到且配置了 download 段时，从同一 ModelScope 仓库补下
   mmproj: ""
