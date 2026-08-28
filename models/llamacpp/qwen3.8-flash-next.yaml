@@ -11,8 +11,12 @@
 #     cd /raid5/sh/code/llama.cpp-qwen38-flash-next
 #     git fetch --depth 1 origin pull/27793/head:qwen4exp-flash-next
 #     git checkout qwen4exp-flash-next
-#     cmake -B build -DGGML_CUDA=ON -DGGML_AVX512=ON -DCMAKE_BUILD_TYPE=Release
+#     cmake -B build -DGGML_CUDA=ON -DGGML_AVX512=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=89
 #     cmake --build build --config Release -j 4
+#   【务必指定 CUDA 算力】RTX 5880 为 Ada 架构(sm_89)，必须带 -DCMAKE_CUDA_ARCHITECTURES=89，
+#   否则编译出的内核不含 sm_89，启动模型时报：
+#     "CUDA error: no kernel image is available for execution on the device"
+#   若已用未指定算力的旧 build 目录编过，请 rm -rf build 后重新执行上面两条 cmake 命令。
 #   然后把下方 llamacpp.source_dir 指向该副本目录即可。
 #   modelctl 源码目录解析优先级：source_dir → 环境变量 LLAMACPP_SOURCE_DIR → 默认主线。
 #   指定 source_dir 后，若 <副本>/build/bin/llama-server 已存在则直接使用（不再编译）；
@@ -49,7 +53,7 @@ llamacpp:
     # modelscope_id：ModelScope 仓库 ID（unsloth 生成的 GGUF）
     modelscope_id: unsloth/Qwen3.8-Flash-Next-GGUF
     # quant：仓库内实际量化名（需与 GGUF 文件名量化段一致），如 Q4_K_XL / Q3_K_XL / Q2_K_XL
-    # 111GB 量化下 8×RTX 5880（640GB）完全装得下
+    # 111GB 量化下 8×RTX 5880（48GB/卡，共 384GB）完全装得下
     quant: Q4_K_XL
   # parallel：并发槽位数（同时处理多少请求），显存占用随其增长
   parallel: 1

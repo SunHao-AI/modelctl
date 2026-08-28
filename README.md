@@ -200,7 +200,7 @@ llamacpp  -      18909  已停止  qwen3.8-flash-next-llamacpp
 >   `vllm/vllm-openai:qwen38-flash-next` 提供 Day-0 支持（官方明确 PyPI 安装不支持本 recipe）
 > - **GGUF 路线（unsloth/llamacpp）**：Unsloth 已发 GGUF 量化（UD-Q4_K_XL 约 111GB），
 >   需 llama.cpp PR #27793（qwen4exp/qwen3.8-flash-next 分支）才识别该架构；
->   8×RTX 5880（640GB 显存）完全装得下，unsloth 2 卡以上 + tensor_parallel 即可
+>   8×RTX 5880（48GB/卡，共 384GB）完全装得下，unsloth 2 卡以上 + tensor_parallel 即可
 
 路由规则（与网关一致）：组内按引擎优先级（vllm 优先）取第一个**运行中**的成员；组内成员全部停止时请求失败。`name` / `alias` 输入则精确路由到对应 profile。若设置了 `GATEWAY_DEFAULT_MODEL`，未匹配任何家族/标识符的请求回退至该默认模型。
 
@@ -283,9 +283,14 @@ git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /raid5/sh/code/lla
 cd /raid5/sh/code/llama.cpp-qwen38-flash-next
 git fetch --depth 1 origin pull/27793/head:qwen4exp-flash-next
 git checkout qwen4exp-flash-next
-cmake -B build -DGGML_CUDA=ON -DGGML_AVX512=ON -DCMAKE_BUILD_TYPE=Release
+# 注意：必须指定 CUDA 算力（RTX 5880 为 Ada / sm_89），否则编译出的内核与设备不匹配，
+# 启动模型时会报 "CUDA error: no kernel image is available for execution on the device"。
+cmake -B build -DGGML_CUDA=ON -DGGML_AVX512=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=89
 cmake --build build --config Release -j 4
 ```
+
+> 若此前已经用**未指定算力**的旧 `build` 目录编过并出现上述 CUDA PDL 报错，请先清空重编：
+> `rm -rf build` 后再执行上面的 cmake 命令（`-DCMAKE_CUDA_ARCHITECTURES=89` 对应 8×RTX 5880 的 Ada 架构）。
 
 再把副本路径写入 profile 的 `llamacpp.source_dir`（`models/llamacpp/qwen3.8-flash-next.yaml`）：
 
