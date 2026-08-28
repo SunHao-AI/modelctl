@@ -3,12 +3,15 @@
 # 模型背景：与 vllm/qwen3.8-flash-next.yaml 相同——125B 总参 + 51B N-gram Embedding，
 #   GDN+QSA 混合注意力，多模态。FP8 172.78 GiB，原生 262144 token 上下文（YaRN 扩至 1M）。
 #
-# 【SGLang 版本要求】v0.5.x 以上对 MoE 模型支持稳定；本模型若仅支持 vLLM 需注意
-#   SGLang 是否同步跟进。若启动失败请到 recipes.vllm.ai 与 github.com/sgl-project/sglang
-#   确认本模型支持矩阵。
+# 【SGLang 版本要求】本模型（架构 Qwen4ExpForConditionalGeneration）属于 SGLang 官方 cookbook
+#   的 day-0 模型，稳定 PyPI 版可能尚未包含该架构。modelctl 的 sglang 走 venv(envs/sglang，PyPI 版)，
+#   若启动报 "architectures are not supported"，说明 PyPI 版尚未跟进，需改用官方专用镜像
+#   lmsysorg/sglang:qwen38flashnext（AMD 用 lmsysorg/sglang-rocm:qwen38flashnext），
+#   或改用 models/llamacpp/qwen3.8-flash-next.yaml（当前 modelctl 内唯一可用引擎）。
+#   支持矩阵可查 github.com/sgl-project/sglang 与 recipes.vllm.ai。
 #
 # 【显存门槛】FP8 必须多卡，8×RTX 5880（总 640GB）可装下 FP8（172.78GB ≈ 4 卡），
-#   建议 TP=8 让 QSA 稀疏注意力更高效
+#   建议 TP=8 让 QSA 稀疏注意力更高效；8 卡若遇 MoE 量化块不匹配，加 --enable-ep-moe --ep 8
 group: qwen3.8-flash-next
 # engine：引擎类型，决定启动命令与参数映射（llamacpp / ollama / vllm / sglang / unsloth）
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）

@@ -6,17 +6,24 @@
 #   - 残差分支 ×4 + N-gram 查表（可卸载至 Host Memory，Mac/DGX Spark 等统一内存机尤为友好）
 #   - 格式：FP8 172.78 GiB / BF16 335.28 GiB；原生 262144 token 上下文（YaRN 扩至 1M）
 #
-# 【重要】vLLM 版本要求：
-#   本模型依赖 qwen3-v4/mtp/eagle3 等较新特性，PyPI 通用 vLLM 不保证
-#   Day-0 支持。官方提供专用镜像 vllm/vllm-openai:qwen38-flash-next，
-#   启动前请先升级到该镜像，或删除 --speculative-config 等高端参数回退 CFLoRA 模式
+# 【重要】vLLM 版本要求 —— 本配置经 modelctl 的 venv 路径(envs/vllm，PyPI vllm>=0.27,<0.28)无法运行本模型！
+#   官方 recipe 明确注明："PyPI installation is not supported for this recipe"——
+#   本模型（架构 Qwen4ExpForConditionalGeneration，model_type: qwen4_exp）需要 vLLM 0.28.0+
+#   的专用构建，官方以镜像 vllm/vllm-openai:qwen38-flash-next 提供 Day-0 支持。
+#   因此直接 `modelctl start qwen3.8-flash-next-vllm` 会报：
+#     "Value error, Model architectures ['Qwen4ExpForConditionalGeneration'] are not supported for now"
+# 解决路径（二选一）：
+#   1. 目前唯一能在 modelctl 内跑通本模型的引擎是 llamacpp（GGUF），见 models/llamacpp/qwen3.8-flash-next.yaml，
+#      需用 llama.cpp PR #27793（qwen4exp/qwen3.8-flash-next 分支）编译。
+#   2. 若必须用 vLLM：需让 modelctl 以 docker 方式拉起 vllm/vllm-openai:qwen38-flash-next
+#      （当前 vllm 适配器不支持 docker，需改造），或手工 docker run 该镜像。下方参数已对齐官方 recipe。
 #
-# 【显存门槛】FP8 必须多卡，8×H200 节点需 TEP8（专家并行），普通 TP8 与该 128 宽
-#   量化块不兼容。本机 8 卡 RTX 5880（Ada, CC 8.9，单卡 80G，总 640GB）装得下
-#   FP8（172.78GB ≈ 4 卡），但需评估 vLLM 版本是否支持 FP8 与 MoE 调度：
-#   - 若 vLLM ≥ 0.10.x 且支持 Qwen3.8-Flash-Next，按下方推荐 TP=8 / FP8 权重运行
-#   - 若 vLLM 不支持本模型，请使用官方镜像或降级 BF16 + TP≥4，并限制 max_model_len
-#   - 若 FP8 量化块对齐不匹配，回退 BF16（去掉 quantization 字段，model 改回 Qwen/Qwen3.8-Flash-Next）
+# 【显存/QSA 门槛】FP8 必须多卡；官方 recipe 明确 8 卡 H200 需 TEP8（专家并行），
+#   普通 TP8 与该 FP8 检查点的 128 宽量化块不兼容 → 8 卡场景务必加
+#   --enable-expert-parallel --moe-backend triton。本机 8 卡 RTX 5880(CC 8.9，单卡 80G，总 640GB)
+#   装得下 FP8(172.78GB)，但需评估 vLLM 版本对 FP8+MoE 调度的支持：
+#   - 若 vLLM 不支持本模型(0.27.x)，改用 llamacpp 或官方镜像
+#   - 若 FP8 量化块对齐不匹配，回退 BF16（去掉 quantization，model 改回 Qwen/Qwen3.8-Flash-Next，TP≥4）
 #
 # 官方 recipe（recipes.vllm.ai/Qwen/Qwen3.8-Flash-Next）：
 #   GB300 FP8 最低 TP2、推荐 TP4；H200 FP8 必须 TEP8；BF16 GB300 TP2 每卡约 190GB
@@ -57,18 +64,17 @@ vllm:
   # kv_cache_dtype：KV cache 数据类型（fp8 / fp16 / bf16；fp8 可节省一半 KV 显存，精度损失 <1%）
   kv_cache_dtype: fp8
   # extra_args：透传给 `vllm serve` 的额外参数（空格分隔，按 shlex 拆分）
-  # 关键参数（与 Qwen3.8 通用 recipe 一致）：
+  # 关键参数（与官方 recipe Qwen3.8-Flash-Next 一致）：
   #   --reasoning-parser qwen3：推理块解析（混合思考模型）
-  #   --enable-auto-tool-choice + --tool-call-parser qwen3_xml：官方推荐 xml 工具 schema
-  #   （Qwen3.8 系列历史配置使用 qwen3_coder，本代模型与 Qwen3.8-27B 解析器是否复用需实测）
-  # 可选（默认注释掉，启动 vLLM 后再按运行情况追加）：
-  #   --enable-expert-parallel                        # MoE 专家并行（H200 TEP8 同思路）
-  #   --moe-backend triton                            # MoE 后端（官方 recipe 用；默认 fused）
-  #   --enable-prefix-caching                         # 多 agent 场景命中率高
-  #   --no-enable-flashinfer-autotune                 # H200 上官方 recipe 注释；Ada 上可启用
-  #   --speculative-config '{"method":"eagle3","num_speculative_tokens":3}'
-  #       # 投机解码，MTP 头在 vLLM ≥ 0.10.x 才完整支持
-  extra_args: "--reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_xml"
+  #   --enable-auto-tool-choice + --tool-call-parser qwen3_coder：官方推荐工具 schema
+  #   --enable-expert-parallel + --moe-backend triton：8 卡必须 TEP8（普通 TP8 与 128 宽量化块不兼容）
+  #   --enable-prefix-caching：多 agent 场景命中率高
+  #   --no-enable-flashinfer-autotune：官方 recipe 在 Hopper 上注释；Ada 上可启用
+  # 可选（按运行情况追加）：
+  #   --max-model-len 262144：默认即原生 262K；扩 1M 需 VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 + YaRN rope-scaling
+  #   --speculative-config '{"method":"mtp","num_speculative_tokens":3}'
+  #       # 内置 MTP 投机解码，需 vLLM 完整支持；启动报错就删除
+  extra_args: "--reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder --enable-expert-parallel --moe-backend triton --enable-prefix-caching --no-enable-flashinfer-autotune"
 
 usage:
   # price_in：每千输入 token 计价（元），供 cc-switch 用量统计

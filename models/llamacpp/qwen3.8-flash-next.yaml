@@ -2,8 +2,8 @@
 # 学习要点：llama.cpp 是统一的 GGUF 执行基座，多种推理栈（本机启动、云端推理、Ollama、Unsloth）共享
 #
 # 【警告】本模型需要 llama.cpp PR 分支才支持（Unsloth 官方指明）：
-#   ggml-org/llama.cpp PR #27742（qwen4exp/qwen3.8-flash-next 分支）
-#   主线 llama.cpp 尚未识别 Qwen3.8-Flash-Next 架构；需手动 git checkout -f <PR base> 并编译。
+#   ggml-org/llama.cpp PR #27793（danielhanchen:qwen4exp/qwen3.8-flash-next 分支，由 #27742 重开）
+#   主线 llama.cpp 尚未识别 Qwen3.8-Flash-Next 架构；需手动 checkout 该分支并编译。
 #   pre_start 会 clone 主线 master 然后编译，主线不识别本模型时启动会失败。
 #   如需走 PR 分支：把下方 source_dir 指到你本地已 checkout PR 分支的 llama.cpp 目录，
 #   并保证该目录下已有编译好的 build/bin/llama-server（否则 pre_start 会重新 cmake 主线）。
