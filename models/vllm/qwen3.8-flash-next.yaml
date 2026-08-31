@@ -6,17 +6,19 @@
 #   - 残差分支 ×4 + N-gram 查表（可卸载至 Host Memory，Mac/DGX Spark 等统一内存机尤为友好）
 #   - 格式：FP8 172.78 GiB / BF16 335.28 GiB；原生 262144 token 上下文（YaRN 扩至 1M）
 #
-# 【重要】vLLM 版本要求 —— 本配置经 modelctl 的 venv 路径(envs/vllm，PyPI vllm>=0.27,<0.28)无法运行本模型！
-#   官方 recipe 明确注明："PyPI installation is not supported for this recipe"——
-#   本模型（架构 Qwen4ExpForConditionalGeneration，model_type: qwen4_exp）需要 vLLM 0.28.0+
-#   的专用构建，官方以镜像 vllm/vllm-openai:qwen38-flash-next 提供 Day-0 支持。
-#   因此直接 `modelctl start qwen3.8-flash-next-vllm` 会报：
-#     "Value error, Model architectures ['Qwen4ExpForConditionalGeneration'] are not supported for now"
-# 解决路径（二选一）：
-#   1. 目前唯一能在 modelctl 内跑通本模型的引擎是 llamacpp（GGUF），见 models/llamacpp/qwen3.8-flash-next.yaml，
-#      需用 llama.cpp PR #27793（qwen4exp/qwen3.8-flash-next 分支）编译。
-#   2. 若必须用 vLLM：需让 modelctl 以 docker 方式拉起 vllm/vllm-openai:qwen38-flash-next
-#      （当前 vllm 适配器不支持 docker，需改造），或手工 docker run 该镜像。下方参数已对齐官方 recipe。
+# 【已支持】本配置现在可用 docker 方式走 modelctl 启动：
+#   vllm.docker_image: vllm/vllm-openai:qwen38-flash-next
+# 行为：
+#   1. 首次启动前 docker 自动 pull 该镜像（21.8GB）
+#   2. 模型从 hf/modelscope 下载到 $MODEL_ROOT（默认 /raid5/sh/model-hf），
+#      modelctl 写回 yaml model 字段为本地绝对路径
+#   3. 容器启动使用 nvidia-container-toolkit 透传同卡（8 卡 RTX 5880，TP8）
+#   4. 容器内 vLLM 绑定 8000，宿主端口 = yaml 顶层 port（默认 8110）
+#   5. modelctl stop 通过 start_detached PID→fuser→pkill 三层 stop 容器
+#      （关键单点 = fuser 命中端口对应容器 userland 进程 vLLM）
+#
+# 背景：本模型（架构 Qwen4ExpForConditionalGeneration，model_type: qwen4_exp）
+#   PyPI vllm>=0.27,<0.28 不支持，官方镜像提供 Day-0 支持。
 #
 # 【显存/QSA 门槛】FP8 必须多卡；官方 recipe 明确 8 卡 H200 需 TEP8（专家并行），
 #   普通 TP8 与该 FP8 检查点的 128 宽量化块不兼容 → 8 卡场景务必加
@@ -43,6 +45,10 @@ vllm:
   # model：HuggingFace 模型 ID 或本地模型目录。
   # 为空/不存在时通过 download 段从 ModelScope 下载并写回本地路径
   model: Qwen/Qwen3.8-Flash-Next-FP8
+  # docker_image：Day-0 vLLM 专用镜像（仅 qwen3.8-flash-next 需要）
+  #   留空 = 走 .venvs/vllm 托管 venv（现状）
+  #   镜像内预装 FlashQLA 与 8 个融合算子，支持 Qwen4ExpForConditionalGeneration
+  docker_image: vllm/vllm-openai:qwen38-flash-next
   # download：模型不存在时的自动下载配置（ModelScope，HF 格式仓库）
   download:
     # modelscope_id：ModelScope 仓库 ID（HF 格式，FP8 块量化）

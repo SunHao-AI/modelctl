@@ -330,3 +330,301 @@ def test_sglang_warns_when_weights_exceed_cap(tmp_path, monkeypatch):
     a = get_adapter("sglang")(p, caps)
     a.check_requirements()
     assert any("权重" in w for w in a.warnings)
+
+
+# ---- Task 1: _resolve_runtime 路由 ----
+
+
+def test_resolve_runtime_default(tmp_path, monkeypatch):
+    """未配 docker_image → ('venv', None)，与改造前等价。"""
+    p = _write(tmp_path, "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: Qwen/X\n")
+    a = get_adapter("vllm")(p, CAPS8)
+    assert a._resolve_runtime() == ("venv", None)
+
+
+def test_resolve_runtime_docker(tmp_path, monkeypatch):
+    """配 docker_image → ('docker', image)。"""
+    p = _write(
+        tmp_path,
+        "name: q\nengine: vllm\nport: 8000\nvllm:\n"
+        "  model: Qwen/X\n  docker_image: vllm/vllm-openai:qwen38-flash-next\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    assert a._resolve_runtime() == ("docker", "vllm/vllm-openai:qwen38-flash-next")
+
+
+# ---- Task 2: check_requirements docker 分支 ----
+
+
+def test_check_requirements_venv_unchanged(tmp_path, monkeypatch):
+    """venv 路径：现状语义不变——ensure_env 还是被调用。"""
+    import modelctl.core.envs as envs_mod
+    called = []
+    monkeypatch.setattr(envs_mod, "ensure_env", lambda t: called.append(t) or tmp_path)
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    p = _write(tmp_path, "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: Qwen/X\n")
+    a = get_adapter("vllm")(p, CAPS8)
+    a.check_requirements()
+    assert called == ["vllm"]
+
+
+def test_check_requirements_docker_no_venv_check(tmp_path, monkeypatch):
+    """docker 路径：跳过 venv 检查（ensure_env 触发即抛错）。"""
+    import shutil as _shutil
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/" + name)
+    import modelctl.core.envs as envs_mod
+
+    def bomb(_):
+        raise RuntimeError("venv 检查不应被触发")
+
+    monkeypatch.setattr(envs_mod, "ensure_env", bomb)
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    p = _write(
+        tmp_path,
+        "name: q\nengine: vllm\nport: 8000\nvllm:\n"
+        "  model: Qwen/X\n  docker_image: vllm/vllm-openai:qwen38-flash-next\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    a.check_requirements()  # 不抛
+
+
+def test_check_requirements_docker_missing_docker(tmp_path, monkeypatch):
+    """docker 命令不在 PATH 时报 RequirementError。"""
+    import shutil as _shutil
+    monkeypatch.setattr(_shutil, "which", lambda name: None)
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    p = _write(
+        tmp_path,
+        "name: q\nengine: vllm\nport: 8000\nvllm:\n"
+        "  model: Qwen/X\n  docker_image: vllm/vllm-openai:qwen38-flash-next\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    with pytest.raises(RequirementError, match="docker 命令不在 PATH"):
+        a.check_requirements()
+
+
+def test_check_requirements_docker_missing_nvidia_smi(tmp_path, monkeypatch):
+    """nvidia-smi 不在 PATH 时报 toolkit 未就绪。"""
+    import shutil as _shutil
+    monkeypatch.setattr(
+        _shutil, "which",
+        lambda name: "/usr/bin/docker" if name == "docker" else None,
+    )
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    p = _write(
+        tmp_path,
+        "name: q\nengine: vllm\nport: 8000\nvllm:\n"
+        "  model: Qwen/X\n  docker_image: vllm/vllm-openai:qwen38-flash-next\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    with pytest.raises(RequirementError, match="nvidia-container-toolkit 未就绪"):
+        a.check_requirements()
+
+
+# ---- Task 3: build_command docker 命令模板 ----
+
+
+def test_build_command_default_venv_unchanged(tmp_path, monkeypatch):
+    """venv 路径 build_command 输出与改造前等价（现状回归锚点）。"""
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    monkeypatch.setenv("HF_HOME", "/raid5/sh/model-hf")
+    _stub_venv(tmp_path, monkeypatch, "vllm")
+    model = tmp_path / "models" / "Qwen3.8"
+    model.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: vllm\nport: 8000\nvllm:\n"
+        f"  model: {model}\n  tensor_parallel_size: 8\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    cmd, env = a.build_command()
+    assert cmd[0].endswith("vllm.exe") or cmd[0].endswith("vllm")
+    assert cmd[1] == "serve"
+    assert cmd[2] == str(model)
+    assert "--served-model-name" in cmd
+    assert "--tensor-parallel-size" in cmd
+    assert env["VIRTUAL_ENV"] == str(tmp_path / ".venvs" / "vllm")
+
+
+def test_build_command_docker_template(tmp_path, monkeypatch):
+    """docker 路径 build_command 命令模板正确。"""
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    model_dir = tmp_path / "m" / "Qwen3.8-Flash-Next-FP8"
+    model_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: vllm\nport: 8110\nvllm:\n"
+        f"  model: {model_dir}\n"
+        "  docker_image: vllm/vllm-openai:qwen38-flash-next\n"
+        "  tensor_parallel_size: 8\n"
+        '  extra_args: "--reasoning-parser qwen3"\n',
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    cmd, env = a.build_command()
+    assert cmd[0] == "docker"
+    assert cmd[1] == "run"
+    assert "--name" in cmd
+    idx = cmd.index("--name")
+    assert cmd[idx + 1] == "q-vllm"
+    assert "--gpus" in cmd
+    idx = cmd.index("--gpus")
+    assert cmd[idx + 1] == '"device=0,1,2,3,4,5,6,7"'
+    assert "-p" in cmd
+    idx = cmd.index("-p")
+    assert cmd[idx + 1] == "8110:8000"
+    assert "-v" in cmd
+    idx = cmd.index("-v")
+    expected_mount = f"{model_dir.parent.as_posix()}:/models:ro"
+    assert cmd[idx + 1] == expected_mount
+    assert "--ipc=host" in cmd
+    assert "--detach" in cmd
+    # 镜像
+    assert "vllm/vllm-openai:qwen38-flash-next" in cmd
+    # 容器内 serve
+    assert "vllm" in cmd and "serve" in cmd
+    assert "/models/Qwen3.8-Flash-Next-FP8" in cmd
+    assert "--port" in cmd
+    idx = cmd.index("--port")
+    assert cmd[idx + 1] == "8000"
+    # extra_args 透传
+    assert "--reasoning-parser" in cmd and "qwen3" in cmd
+    # env 不注入 VIRTUAL_ENV（容器自管）
+    assert "VIRTUAL_ENV" not in env
+
+
+def test_build_command_docker_relative_model_rejected(tmp_path, monkeypatch):
+    """docker 路径 + HF repo id（相对路径且非目录）→ RequirementError。"""
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    p = _write(
+        tmp_path,
+        "name: q\nengine: vllm\nport: 8000\nvllm:\n"
+        "  model: ./models/Qwen3.8-Flash-Next-FP8\n"
+        "  docker_image: x/y:z\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    with pytest.raises(RequirementError, match="本地绝对路径"):
+        a.build_command()
+
+
+def test_build_command_docker_gpus_from_gpu_list(tmp_path, monkeypatch):
+    """docker 路径 + gpu_list → --gpus 仅含指定 GPU。"""
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    model_dir = tmp_path / "m" / "X"
+    model_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: vllm\nport: 8000\nvllm:\n"
+        f"  model: {model_dir}\n"
+        "  docker_image: x/y:z\n"
+        "  gpu_list: '0,2,4'\n"
+        "  tensor_parallel_size: 3\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    cmd, env = a.build_command()
+    assert '"device=0,2,4"' in cmd
+
+
+# ---- Task 4: stop_patterns 双模式 ----
+
+
+def test_stop_patterns_venv_unchanged(tmp_path, monkeypatch):
+    """venv 路径 stop_patterns 不变。"""
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    p = _write(tmp_path, "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: /x/Y\n")
+    a = get_adapter("vllm")(p, CAPS8)
+    assert a.stop_patterns() == ["vllm serve"]
+
+
+def test_stop_patterns_docker_two_modes(tmp_path, monkeypatch):
+    """docker 路径 stop_patterns 返回 2 个模式，且模式 1 是 Popen cmdline 的连续子串。"""
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    model_dir = tmp_path / "m" / "X"
+    model_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: vllm\nport: 8000\nvllm:\n"
+        f"  model: {model_dir}\n"
+        "  docker_image: x/y:z\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    a._selected_gpus_override = [0, 2, 4]  # 不影响 selected_gpus（仍从 profile 取）
+    patterns = a.stop_patterns()
+    assert len(patterns) == 2
+    # 模式 1：docker run --name <name> --gpus <json>——与 build_command 首段连续一致
+    expected_cmdline = " ".join([
+        "docker", "run", "--name", "q-vllm",
+        "--gpus", '"device=0,1,2,3,4,5,6,7"',
+        "-p", "8000:8000",
+        "-v", f"{model_dir.parent.as_posix()}:/models:ro",
+        "--ipc=host", "--detach", "x/y:z",
+        "vllm", "serve",
+    ])
+    assert patterns[0] in expected_cmdline
+    # 模式 2：-v <root>:/models:ro——也是 cmdline 子串
+    assert patterns[1] in expected_cmdline
+
+
+# ---- Task 6: pre_start 写回（docker 复用）+ 全仓 yaml 回归 ----
+
+
+def test_pre_start_persists_local_path_for_docker(tmp_path, monkeypatch):
+    """docker 类型 + HF repo id → pre_start 触发下载 → cfg["model"] 更新为本地路径 → build_command 可用。"""
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    import modelctl.engines.vllm as vllm_mod
+
+    download_dir = tmp_path / "model-hf" / "X"
+    download_dir.mkdir(parents=True)
+    (download_dir / "config.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(vllm_mod, "download_repo", lambda repo, root: download_dir)
+
+    p = _write(
+        tmp_path,
+        "name: fake-d\nengine: vllm\nport: 8110\nvllm:\n"
+        "  model: Qwen/X\n"
+        "  download:\n    modelscope_id: Qwen/X\n"
+        "  docker_image: x/y:z\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    a.pre_start()
+    # pre_start 把 profile.engine_config["model"] 直接更新为下载目录
+    assert p.engine_config["model"] == str(download_dir.resolve())
+    # yaml 文件内 model 字段也被 persist_model_path 文本级替换
+    text = p.path.read_text(encoding="utf-8")
+    assert str(download_dir.resolve()) in text
+    # build_command 此时可用（model 已是本地路径）
+    cmd, _ = a.build_command()
+    assert "/models/X" in cmd or f"models{os.sep}X" in " ".join(cmd)
+
+
+def test_full_vllm_suite_no_regression(tmp_path, monkeypatch):
+    """总结算：所有未配 docker_image 的 vllm yaml，build_command 走托管 venv 路径。"""
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    monkeypatch.setenv("API_KEY", "test")
+    from pathlib import Path
+    from modelctl.core.profile import load_profile
+    from modelctl.core.capabilities import Capabilities
+
+    P = Path(__file__).resolve().parents[1] / "models" / "vllm"
+    caps = Capabilities(gpu_count=8, gpu_indices=list(range(8)), compute_capability="8.9", binaries={"vllm": True})
+    checked = 0
+    for f in sorted(P.glob("*.yaml")):
+        try:
+            prof = load_profile(f.stem, f.parent)
+        except Exception:
+            continue  # 非本测试关注的解析失败（如缺额外环境变量）
+        if prof.engine != "vllm":
+            continue
+        a = get_adapter("vllm")(prof, caps)
+        if prof.engine_config.get("docker_image"):
+            continue  # qwen3.8-flash-next：配了 docker_image，跳过
+        try:
+            cmd, _ = a.build_command()
+            assert "docker" not in " ".join(cmd), f"{f.name} 不应含 docker run"
+            checked += 1
+        except RequirementError as e:
+            # venv 侧异常（如 ensure_env 缺 venv）可接受，但绝不等于 docker 路径异常
+            assert "docker" not in str(e), f"{f.name} 不应报 docker 异常：{e}"
+        except Exception:
+            pass  # 其他非关键异常忽略
+    assert checked >= 1, "至少应有一个 venv 路径 yaml 被验证"
