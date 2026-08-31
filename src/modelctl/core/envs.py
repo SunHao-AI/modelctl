@@ -10,9 +10,18 @@ from pathlib import Path
 
 from modelctl.core.envfile import PROJECT_ROOT
 
+# 托管引擎（仅 Linux 部署，venv 落在 .venvs/<engine>，子项目锁定在 envs/<engine>/pyproject.toml）
 MANAGED_ENGINES = ("vllm", "sglang")
+# 独立 venv 子项目（差异：项目内 gateway/ 自带 pyproject，模型引擎在 envs/ 目录且仅 Linux）
+GATEWAY_SUBPROJECT: str | None = "gateway"
 ENVS_ROOT = PROJECT_ROOT / "envs"
+GATEWAY_ROOT = PROJECT_ROOT / "gateway"
 VENV_ROOT = PROJECT_ROOT / ".venvs"
+
+
+def known_targets() -> tuple[str, ...]:
+    """所有受 modelctl env 管理的 target。"""
+    return MANAGED_ENGINES + ((GATEWAY_SUBPROJECT,) if GATEWAY_SUBPROJECT else ())
 
 
 class EngineEnvError(RuntimeError):
@@ -28,35 +37,41 @@ def _is_linux() -> bool:
     return sys.platform.startswith("linux")
 
 
-def venv_bin_dir(engine: str) -> Path:
-    return VENV_ROOT / engine / ("Scripts" if _is_windows() else "bin")
+def _is_target(target: str) -> bool:
+    return target in MANAGED_ENGINES or (GATEWAY_SUBPROJECT is not None and target == GATEWAY_SUBPROJECT)
 
 
-def engine_python(engine: str) -> Path:
-    if engine not in MANAGED_ENGINES:
-        raise ValueError(f"非托管引擎：{engine}")
-    return venv_bin_dir(engine) / ("python.exe" if _is_windows() else "python")
+def venv_bin_dir(target: str) -> Path:
+    return VENV_ROOT / target / ("Scripts" if _is_windows() else "bin")
 
 
-def engine_bin(engine: str, name: str) -> Path:
-    if engine not in MANAGED_ENGINES:
-        raise ValueError(f"非托管引擎：{engine}")
+def engine_python(target: str) -> Path:
+    if not _is_target(target):
+        raise ValueError(f"非受管环境：{target}")
+    return venv_bin_dir(target) / ("python.exe" if _is_windows() else "python")
+
+
+def engine_bin(target: str, name: str) -> Path:
+    if target not in MANAGED_ENGINES:
+        raise ValueError(f"非托管引擎：{target}")
     exe = name + (".exe" if _is_windows() else "")
-    return venv_bin_dir(engine) / exe
+    return venv_bin_dir(target) / exe
 
 
-def has_env(engine: str) -> bool:
-    py = engine_python(engine)
+def has_env(target: str) -> bool:
+    if not _is_target(target):
+        return False
+    py = engine_python(target)
     return py.is_file()
 
 
-def engine_site_packages(engine: str) -> Path | None:
-    """返回引擎专用 venv 内 site-packages 目录;非托管或未建时返回 None。"""
-    if engine not in MANAGED_ENGINES:
+def engine_site_packages(target: str) -> Path | None:
+    """返回受管 venv 内 site-packages 目录;非受管或未建时返回 None。"""
+    if not _is_target(target):
         return None
-    if not has_env(engine):
+    if not has_env(target):
         return None
-    root = VENV_ROOT / engine
+    root = VENV_ROOT / target
     if _is_windows():
         sp = root / "Lib/site-packages"
     else:
@@ -65,51 +80,54 @@ def engine_site_packages(engine: str) -> Path | None:
     return sp if sp is not None and sp.is_dir() else None
 
 
-def ensure_env(engine: str) -> Path:
-    if engine not in MANAGED_ENGINES:
-        raise ValueError(f"非托管引擎：{engine}")
-    if not has_env(engine):
+def ensure_env(target: str) -> Path:
+    if not _is_target(target):
+        raise ValueError(f"非受管环境：{target}")
+    if not has_env(target):
         raise EngineEnvError(
-            f"引擎 {engine} 的专用环境未创建，请先执行：modelctl env setup {engine}"
+            f"{target} 的专用环境未创建，请先执行：modelctl env setup {target}"
         )
-    return VENV_ROOT / engine
+    return VENV_ROOT / target
 
 
-def setup(engine: str) -> int:
-    if engine not in MANAGED_ENGINES:
-        raise ValueError(f"非托管引擎：{engine}")
-    if not _is_linux():
+def setup(target: str) -> int:
+    if not _is_target(target):
+        raise ValueError(f"非受管环境：{target}")
+    # 托管引擎限定 Linux（CUDA 推理）；gateway 子项目跨 Linux/Windows 通用
+    if target in MANAGED_ENGINES and not _is_linux():
         raise EngineEnvError(
-            f"引擎 {engine} 的目标平台为 Linux，当前平台为 {sys.platform}；"
-            f"请到 Linux 部署机上执行：modelctl env setup {engine}"
+            f"引擎 {target} 的目标平台为 Linux，当前平台为 {sys.platform}；"
+            f"请到 Linux 部署机上执行：modelctl env setup {target}"
         )
     exe = shutil.which("uv")
     if exe is None:
         raise EngineEnvError("未找到 uv，请先安装：pip install uv")
+    # 子项目定位：网关在 <repo>/gateway；托管引擎在 <repo>/envs/<engine>
+    project_root = GATEWAY_ROOT if target == GATEWAY_SUBPROJECT else ENVS_ROOT / target
     env = {
         **os.environ,
-        "UV_PROJECT_ENVIRONMENT": str(VENV_ROOT / engine),
+        "UV_PROJECT_ENVIRONMENT": str(VENV_ROOT / target),
     }
     proc = subprocess.run(
-        [exe, "sync", "--project", str(ENVS_ROOT / engine)],
+        [exe, "sync", "--project", str(project_root)],
         env=env,
     )
     return proc.returncode
 
 
-def remove(engine: str) -> None:
-    if engine not in MANAGED_ENGINES:
-        raise ValueError(f"非托管引擎：{engine}")
-    shutil.rmtree(VENV_ROOT / engine, ignore_errors=True)
+def remove(target: str) -> None:
+    if not _is_target(target):
+        raise ValueError(f"非受管环境：{target}")
+    shutil.rmtree(VENV_ROOT / target, ignore_errors=True)
 
 
 def status() -> dict[str, dict]:
     result: dict[str, dict] = {}
-    for engine in MANAGED_ENGINES:
-        root = VENV_ROOT / engine
+    for target in known_targets():
+        root = VENV_ROOT / target
         entry: dict = {"exists": False}
-        if not has_env(engine):
-            result[engine] = entry
+        if not has_env(target):
+            result[target] = entry
             continue
         entry["exists"] = True
         python = _read_pyvenv_version(root)
@@ -118,7 +136,7 @@ def status() -> dict[str, dict]:
         packages = _read_installed_packages(root)
         if packages:
             entry["packages"] = packages
-        result[engine] = entry
+        result[target] = entry
     return result
 
 

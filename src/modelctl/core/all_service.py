@@ -148,19 +148,73 @@ def restart_profile(profile: Profile, caps: Capabilities, timeout: float) -> Com
     return start_profile(profile, caps, timeout)
 
 
-def _detached_script(module: str) -> tuple[list[str], dict[str, str]]:
-    """后台启动 python -m 模块（gateway/stats）的公共 (命令, 环境变量)。"""
+def _detached_script(module: str, interpreter: str | None = None) -> tuple[list[str], dict[str, str]]:
+    """后台启动 `python -m <module>` 子进程，返回 (命令, 环境变量)。
+
+    - `interpreter`：使用的 Python 解释器绝对路径。
+      * `None` → 用当前 sys.executable（适合 stats 等纯 stdlib 子进程）
+      * 给定 → 用该 venv 解释器（gateway 走 `.venvs/gateway/` 子环境的解释器）
+    - PYTHONPATH 始终注入主项目 src/，让子进程能 import modelctl.core.*
+    """
+    interp = interpreter or sys.executable
     extra_env = {"PYTHONPATH": _SRC_DIR + os.pathsep + os.environ.get("PYTHONPATH", "")}
-    return [sys.executable, "-m", module], extra_env
+    return [interp, "-m", module], extra_env
+
+
+def _gateway_venv_python() -> Path | None:
+    """返回 gateway 子环境解释器路径（存在则 Path，缺失则 None）。"""
+    from modelctl.core import envs as _envs
+    inter = _envs.engine_python("gateway")
+    return inter if inter.is_file() else None
+
+
+def _ensure_gateway_venv() -> bool:
+    """确保 gateway 子环境（.venvs/gateway）已创建。
+
+    - 已创建 → True（首次 0 成本）
+    - 未创建 → 调用 `uv sync --project gateway/` 自动搭建；成功 True，失败 False
+    """
+    from modelctl.core import envs as _envs
+    if _envs.has_env("gateway"):
+        return True
+    logger.info("检测到 gateway 专用 venv 缺失，正在自动创建（`modelctl env setup gateway`） ...")
+    try:
+        rc = _envs.setup("gateway")
+    except _envs.EngineEnvError as error:
+        logger.error(str(error))
+        return False
+    if rc != 0:
+        return False
+    return _envs.has_env("gateway")
 
 
 def start_gateway() -> ComponentResult:
     if is_running("llm-gateway"):
         return ComponentResult("gateway", "skipped", "网关已在运行")
-    if not ensure_packages("gateway"):
-        return ComponentResult("gateway", "error",
-                               "网关依赖补齐失败（fastapi/uvicorn/httpx），请手动 `uv sync --extra gateway` 后重试")
-    cmd, env = _detached_script("modelctl.core.gateway")
+    # 优先走独立子环境：gateway 依赖不再随主 lockfile 同步，主 `uv sync` 不会清理它
+    vendor = _gateway_venv_python()
+    if vendor is None:
+        if not _ensure_gateway_venv():
+            # 子环境自动创建失败时回退到"主 venv 上 uv pip install 单包"
+            logger.warning("gateway 独立 venv 创建失败，回退主 venv 单包补齐模式")
+            if not ensure_packages("gateway"):
+                return ComponentResult(
+                    "gateway", "error",
+                    "网关依赖补齐失败，请手动 `modelctl env setup gateway` 后重试",
+                )
+        else:
+            vendor = _gateway_venv_python()
+    if vendor is None:
+        # 强制回退路径：vendor 仍为 None 表示 _ensure_gateway_venv 返回 True 但 venv 又丢了
+        # （极端情况：uv 在 on-the-fly 改了环境）。这种情况用主 env 解释器但单包必须补齐
+        if not ensure_packages("gateway"):
+            return ComponentResult(
+                "gateway", "error",
+                "网关依赖补齐失败（fastapi/uvicorn/httpx），请手动 `uv sync --project gateway` 后重试",
+            )
+        cmd, env = _detached_script("modelctl.core.gateway")
+    else:
+        cmd, env = _detached_script("modelctl.core.gateway", interpreter=str(vendor))
     # 与 stats 服务共用用量持久化目录（USAGE_DATA_DIR 缺省 data/cache），
     # 网关累计的 token 由 stats 服务读出，费率/预算计算保持一致
     data_dir = os.environ.get("USAGE_DATA_DIR")

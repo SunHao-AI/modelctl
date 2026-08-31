@@ -9,15 +9,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-modelscope = ["modelscope>=1.0"]
-gateway = [
-    "fastapi>=0.110",
-    "uvicorn>=0.29",
-    "httpx>=0.27",
-]
+# gateway 的依赖（fastapi/uvicorn/httpx）已迁出主 lockfile，移至独立子项目 `gateway/`，
+# `modelctl gateway start` 时自动经 `uv sync --project gateway` 创建专属 venv；
+# 这样主 `uv sync` 不会再清理 gateway 相关包，二者可独立演进/审计。
 dev = [
     "pytest>=8.0",
-    "ruff>=0.5",
+    "ruff>=0.4",
     "mypy>=1.10",
     "types-PyYAML>=6.0",
 ]

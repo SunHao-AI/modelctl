@@ -45,8 +45,8 @@ from modelctl.core.capabilities import ENGINE_BINARIES, ENGINE_INSTALL_HINTS, pr
 from modelctl.core.deps import ensure_packages
 from modelctl.core.envfile import load_env
 from modelctl.core.envs import (
-    MANAGED_ENGINES,
     EngineEnvError,
+    known_targets,
     remove as envs_remove,
     setup as envs_setup,
     status as envs_status,
@@ -64,6 +64,10 @@ from modelctl.core.profile import Profile, ProfileError, list_profiles, load_pro
 from modelctl.core.ufw import ensure_ufw_allow
 from modelctl.engines import get_adapter
 from modelctl.engines.base import RequirementError
+
+# 受管虚拟环境目标：托管引擎（vllm / sglang）+ 独立子项目（gateway）。
+# 与 core.envs.known_targets() 保持单一事实来源；改 envs 配置这里自动跟着变。
+ENV_TARGETS: list[str] = list(known_targets())
 
 
 def _extract_models_dir(argv: list[str]) -> tuple[Path | None, list[str]]:
@@ -128,9 +132,15 @@ def build_parser() -> argparse.ArgumentParser:
     ns = sub.add_parser("nginx-snippet", help="生成 nginx 多模型路由 map 片段")
     ns.add_argument("--node", required=True, help="节点编号（URL 前缀，如 210）")
     ns.add_argument("--host", required=True, help="节点 IP（如 192.168.77.210）")
-    ep = sub.add_parser("env", help="引擎专用虚拟环境管理（vllm / sglang）")
+    ep = sub.add_parser("env", help="专用虚拟环境管理（vllm / sglang / gateway）")
     ep.add_argument("action", choices=["setup", "list", "remove"])
-    ep.add_argument("engine", nargs="?", default=None, help="引擎：vllm 或 sglang（list 不需要）")
+    ep.add_argument(
+        "engine",
+        nargs="?",
+        default=None,
+        choices=ENV_TARGETS,
+        help=f"受管目标：{' / '.join(ENV_TARGETS)}（list 不需要）",
+    )
     return parser
 
 
@@ -621,17 +631,15 @@ def _cmd_nginx_snippet(args, models_dir) -> int:
     return 0
 
 
-def _validate_engine(engine: str | None) -> bool:
-    """校验 engine 是否为托管引擎；返回是否通过。"""
-    if engine is None or engine not in MANAGED_ENGINES:
-        return False
-    return True
+def _validate_target(target: str | None) -> bool:
+    """校验 target 是否属于受管目标（托管引擎 + 独立 gateway 子项目）。"""
+    return target is not None and target in ENV_TARGETS
 
 
 def _cmd_env_setup(args, models_dir: Path | None, caps) -> int:
-    if not _validate_engine(args.engine):
+    if not _validate_target(args.engine):
         logger.error(
-            f"请指定托管引擎（{' / '.join(MANAGED_ENGINES)}）：modelctl env setup <engine>"
+            f"请指定受管目标（{' / '.join(ENV_TARGETS)}）：modelctl env setup <target>"
         )
         return 2
     try:
@@ -648,24 +656,28 @@ def _cmd_env_setup(args, models_dir: Path | None, caps) -> int:
 
 def _cmd_env_list(args, models_dir: Path | None, caps) -> int:
     states = envs_status()
-    print("托管引擎环境：")
-    for engine in MANAGED_ENGINES:
-        st = states.get(engine, {"exists": False})
+    print("受管虚拟环境（.venvs/）：")
+    for target in ENV_TARGETS:
+        st = states.get(target, {"exists": False})
         if st["exists"]:
             detail = f"python {st.get('python', '?')}"
             if st.get("packages"):
-                detail += "；" + "、".join(f"{k} {v}" for k, v in st["packages"].items())
-            print(f"  {engine}: 已创建（{detail}）")
+                pkgs = st["packages"]
+                head = list(pkgs.items())[:6]
+                detail += "；" + "、".join(f"{k} {v}" for k, v in head)
+                if len(pkgs) > 6:
+                    detail += f" …（共 {len(pkgs)} 个包）"
+            print(f"  {target}: 已创建（{detail}）")
         else:
-            print(f"  {engine}: 未创建（执行 modelctl env setup {engine}）")
+            print(f"  {target}: 未创建（执行 modelctl env setup {target}）")
     print("ollama / llamacpp / unsloth：原生或官方安装器，无需托管")
     return 0
 
 
 def _cmd_env_remove(args, models_dir: Path | None, caps) -> int:
-    if not _validate_engine(args.engine):
+    if not _validate_target(args.engine):
         logger.error(
-            f"请指定托管引擎（{' / '.join(MANAGED_ENGINES)}）：modelctl env remove <engine>"
+            f"请指定受管目标（{' / '.join(ENV_TARGETS)}）：modelctl env remove <target>"
         )
         return 2
     try:

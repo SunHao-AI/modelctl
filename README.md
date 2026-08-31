@@ -71,7 +71,7 @@ uv sync --extra dev
 uv run modelctl list
 ```
 
-> 引擎 venv 由 `modelctl env setup` 在首次启动前初始化，无需 `uv sync --extra vllm`。
+> 引擎 venv（vllm / sglang）与网关 venv（gateway）均独立于主项目，由 `modelctl env setup <target>` 在首次启动前自动初始化（也可手动执行），无需 `uv sync --extra ...`。
 
 ## 快速开始
 
@@ -478,10 +478,12 @@ modelctl gateway status
 modelctl gateway stop
 ```
 
-网关依赖 `fastapi/uvicorn/httpx`（optional extra）：
+网关依赖 `fastapi/uvicorn/httpx` 已迁出主项目 lockfile，独立在 `gateway/` 子项目；
+首次 `modelctl gateway start` 时自动通过 `uv sync --project gateway` 落到 `.venvs/gateway`，
+无需手动 `uv sync`。如需手动重建：
 
 ```bash
-uv sync --extra dev --extra gateway
+modelctl env setup gateway
 ```
 
 `.env` 中新增 `NODE_ID`、`NODE_HOST`、`GATEWAY_HOST`、`GATEWAY_PORT`、`GATEWAY_DEFAULT_MODEL`、`GATEWAY_READ_TIMEOUT`（见 `.env.example`）。
@@ -538,6 +540,8 @@ bash script/modelctl-all.sh status
 - `.env` 含 API 密钥等敏感信息，已加入 `.gitignore`，请勿提交
 - 详细注意事项（KV cache 量化、DSpark 参数、NCCL 优化等）见上方文档
 
-> **迁移说明**：vllm / sglang 引擎已从主项目 `uv sync --extra vllm` 迁出，改用独立引擎 venv。原本执行 `uv sync --extra vllm` 的用户，请改为 `modelctl env setup vllm`（sglang 同理 `modelctl env setup sglang`），首次启动前会自动完成初始化并复用 `.venvs/<engine>/`。
+> **迁移说明**：
+> - vllm / sglang 引擎已从主项目 `uv sync --extra vllm` 迁出，改用独立引擎 venv（`.venvs/<engine>/`）。原本执行 `uv sync --extra vllm` 的用户，请改为 `modelctl env setup vllm`（sglang 同理 `modelctl env setup sglang`），首次启动前会自动完成初始化并复用 `.venvs/<engine>/`。
+> - gateway 的 fastapi/uvicorn/httpx 已从主项目 `uv sync --extra gateway` 迁出，独立在 `gateway/` 子项目（`.venvs/gateway/`）。原本执行 `uv sync --extra gateway` 的用户，请改为 `modelctl env setup gateway`；`modelctl gateway start` 在首次执行时会自动初始化。
 
 > **部署前必做**：`pyproject.toml` 自 vllm extra 迁出后 `uv.lock` 重新解析过，而仓库内 `uv.lock` 与部署机实际解析（Linux + CUDA 13 平台差异）存在差异。**部署到 Linux CUDA 机器前，务必在目标机器上重新执行 `uv lock` + `uv sync`**，由目标平台完成最终解析，避免直接沿用开发机（Windows）生成的锁文件。

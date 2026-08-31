@@ -103,7 +103,7 @@ def test_ensure_uses_uv_when_available(monkeypatch):
     """uv 可用 + 镜像成功 + 装后命中 → 走 uv 路径且仅 1 次安装。"""
     installed: list[str] = []
     _patch_find_spec(monkeypatch, existing=frozenset(), installed_now=installed)
-    calls = _patch_subprocess(monkeypatch, uv_ok=True, pip_ok=True)
+    _patch_subprocess(monkeypatch, uv_ok=True, pip_ok=True)
     monkeypatch.setitem(deps.PACKAGE_CHECKLISTS, "_m", {"modelscope": "modelscope"})
 
     def fake_install(req):
