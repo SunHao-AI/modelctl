@@ -60,14 +60,16 @@ llamacpp:
   parallel: 4
   # ctx_size：单槽（每并发请求）完整可用的上下文；留空 = 1,048,576（1M）
   # 注意：llama-server 的 --ctx-size 是总量，实际启动总量 = ctx_size × parallel
-  # 本配置 131072 × 4 = 524288 总上下文：
+  # 本配置 524288 × 4 = 2,097,152 总上下文（每请求可吃满 512k）：
   #   - full-attention 口径估算（项目 vram_estimator 保守算法，按 48 层 × 2 条 KV × q8_0）
-  #     总量 ≈ 256GB → 32GB/卡；
+  #     总量 ≈ 512GB → 64GB/卡，超过单卡 48GB 上限；
   #   - 本模型实为 GDN/QSA hybrid（48 层里仅 12 层 QSA，36 层 GDN 为固定状态），
-  #     真实 KV 估算 ≈ 64GB（8GB/卡），实际压力高见保守值为主；
-  #   - 叠加权重（111GB ÷ 8 卡 ≈ 14GB/卡）后，全量估算档每卡约 38GB、hybrid 档每卡约 22GB；
-  # 若实测 OOM 可降 ctx_size 到 65536（full-attention 档减半至 128GB）。
-  ctx_size: 131072
+  #     真实 KV 估算 ≈ 128GB（16GB/卡），压力按保守值评估；
+  #   - 叠加权重（111GB ÷ 8 卡 ≈ 14GB/卡）后，全量估算档每卡约 78GB（必然 OOM），
+  #     hybrid 档每卡约 30GB（能跑但紧）；
+  # ⚠️ 本配置按"单槽 512k + 并发 4"需求排布，启动时 KV 预分配约 512GB，
+  #   大概率 OOM；若失败可降 parallel 到 2（总量 1M，full 档 256GB）或降到 1。
+  ctx_size: 524288
   # reasoning：是否输出推理过程内容（on/off）
   reasoning: on
   # reasoning_format：推理内容格式（deepseek / qwen3 / none 等）
