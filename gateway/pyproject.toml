@@ -3,20 +3,24 @@ name = "modelctl-venv-gateway"
 version = "0.1.0"
 description = "modelctl LLM 网关独立虚拟环境（由 modelctl env setup gateway / modelctl gateway start 维护）"
 requires-python = ">=3.12"
-# 主包以 editable 引用：从 gateway/ 子项目目录视角，../ = 项目根（pyproject.toml 所在）。
-# hatchling 构建会让 modelctl.core.gateway 直接命中 ../src/modelctl/，
-# 不依赖主项目的 .venv（即主 uv sync 不会污染本环境的状态）。
+# 主包 modelctl 不在此写 URL/路径——靠下方 [tool.uv.sources] 指向 ../(项目根);
+# hatchling 构建后,modelctl.core.gateway 直接命中 ../src/modelctl/。
+# 注意:`modelctl[dev] @ file:///../` 这种 inline URL 会被 uv 拒绝(path 无法规范化)。
 dependencies = [
-    "modelctl[dev] @ file:///../",
+    "modelctl[dev]",
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "httpx>=0.27",
-    # loguru/PyYAML 经 modelctl 主包传递，不在此重复声明
 ]
 
+[tool.uv.sources]
+# 把 "modelctl" 要求替换为本地 path 源(相对本 pyproject.toml 的 ../ 即项目根);
+# 主包自带 [project.optional-dependencies],dev extra 随 path 源传递安装。
+modelctl = { path = ".." }
+
 [tool.uv]
-# 与主项目 uv.toml 对齐：阿里 PyPI 镜像（default，显式优先，可被 --index-url 覆盖）；
-# torch cu13 / cpu-cu13 explicit 留给未来若需要直接装 torch 时使用（当前 gateway 不装）。
+# 与主项目 uv.toml 对齐:阿里 PyPI 镜像(default)。
+# torch 等 explicit index 留给未来需要时再添加(当前 gateway 不装 torch)。
 [[tool.uv.index]]
 name = "aliyun-pypi"
 url = "https://mirrors.aliyun.com/pypi/simple"
