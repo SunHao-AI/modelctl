@@ -28,6 +28,7 @@ from typing import Literal
 from loguru import logger
 
 from modelctl.core.capabilities import Capabilities, probe
+from modelctl.core.deps import ensure_packages
 from modelctl.core.gateway import GATEWAY_PORT
 from modelctl.core.process import (
     is_running,
@@ -156,6 +157,9 @@ def _detached_script(module: str) -> tuple[list[str], dict[str, str]]:
 def start_gateway() -> ComponentResult:
     if is_running("llm-gateway"):
         return ComponentResult("gateway", "skipped", "网关已在运行")
+    if not ensure_packages("gateway"):
+        return ComponentResult("gateway", "error",
+                               "网关依赖补齐失败（fastapi/uvicorn/httpx），请手动 `uv sync --extra gateway` 后重试")
     cmd, env = _detached_script("modelctl.core.gateway")
     # 与 stats 服务共用用量持久化目录（USAGE_DATA_DIR 缺省 data/cache），
     # 网关累计的 token 由 stats 服务读出，费率/预算计算保持一致
@@ -192,6 +196,9 @@ def status_gateway() -> ComponentResult:
 def start_stats() -> ComponentResult:
     if is_running("usage-stats"):
         return ComponentResult("stats", "skipped", "用量统计服务已在运行")
+    # stats 服务理论上纯 stdlib，但仍过一遍"core" 清单兜底（loguru/yaml 缺失）
+    if not ensure_packages("core") or not ensure_packages("stats"):
+        return ComponentResult("stats", "error", "统计服务依赖补齐失败，请手动 `uv sync` 后重试")
     cmd, env = _detached_script("modelctl.core.stats")
     pid, _ = start_detached("usage-stats", cmd, env)
     port = int(os.environ.get("USAGE_PORT", str(USAGE_PORT)))

@@ -42,6 +42,7 @@ from loguru import logger
 import modelctl.core.compat_rules  # noqa: F401 —— 导入即注册内置规则
 from modelctl.core import all_service
 from modelctl.core.capabilities import ENGINE_BINARIES, ENGINE_INSTALL_HINTS, probe
+from modelctl.core.deps import ensure_packages
 from modelctl.core.envfile import load_env
 from modelctl.core.envs import (
     MANAGED_ENGINES,
@@ -681,12 +682,19 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     models_dir, rest = _extract_models_dir(argv)
     load_env()
-    caps = probe()
+    # 命令路由前先做一次"CLI 自身"缺失依赖检测（loguru/yaml）。
+    # 缺失时自动经 uv/pip 多源回退补齐；补不齐则直接退出 2（后续命令也没法跑）。
+    # 启动类命令（start/restart/all+start）进入对应 handler 时，handler 会
+    # 按服务（gateway/stats/llama-cpp 等）再 ensure 一次自己的依赖。
+    if not ensure_packages("core"):
+        logger.error("CLI 核心依赖（PyYAML/loguru）缺失且自动安装失败，请手动 `uv sync` 后重试")
+        return 2
     parser = build_parser()
     args = parser.parse_args(rest)
     models_dir = models_dir or args.models_dir
     if getattr(args, "gpus", None):
         os.environ["MODELCTL_GPUS"] = args.gpus
+    caps = probe()
     try:
         if args.command == "start":
             return _cmd_start(args, models_dir, caps)
