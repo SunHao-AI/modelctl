@@ -66,7 +66,7 @@ vllm:
   #   已把预算吃穿，Available KV cache memory = -1.6 GiB（与 max_model_len 无关，降 len 无效）。
   #   0.85→0.92 补 3.36 GiB（覆盖 -1.6 GiB + 1.7 GiB 余量），必须在 warmup 前预留。
   #   ⚠ 若告警 JIT/激活瞬时 OOM，优先减 max_num_batched_tokens（8192→4096）而非回退 len。
-  gpu_memory_utilization: 0.92
+  gpu_memory_utilization: 0.95
   # quantization：量化方式（FP8 块级）
   # 硬件要求：CC ≥ 8.9（A6000=8.6 不支持，本配置不用于 A6000）
   # 切换 BF16：删掉本字段，并把 model/modelscope_id 改回 Qwen/Qwen3.8-Flash-Next（335.28GiB，5880 装不下）
