@@ -66,6 +66,7 @@ def test_tensorrt_llm_venv_command(tmp_path, monkeypatch):
     assert cmd[cmd.index("--max_output_len") + 1] == "8192"
     assert cmd[cmd.index("--max_batch_size") + 1] == "64"
     assert "--use_fused_mlp" in cmd
+    assert "--api-key" not in cmd
 
 
 def test_tensorrt_llm_docker_command(tmp_path, monkeypatch):
