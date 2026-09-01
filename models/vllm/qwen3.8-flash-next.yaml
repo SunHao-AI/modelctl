@@ -62,8 +62,9 @@ vllm:
   # 注意：单序列完整可用（与并发无关）；KV 显存按 max_num_seqs × max_model_len 估算
   max_model_len: 262144
   # gpu_memory_utilization：显存利用率上限（0~1）
-  # 注意：vLLM ≥0.21 默认启用 CUDA graph memory profiling，0.92 实际等效旧版的 0.8525
-  gpu_memory_utilization: 0.92
+  # 0.95 = 官方 recipe（vllm 0.21+ 自带 CUDA graph memory profiling）
+  # 留 5% 余量给激活 / NCCL buffer / N-gram 重缓存
+  gpu_memory_utilization: 0.95
   # quantization：量化方式（可选，如 fp8；FP8 需要 CC ≥ 8.9）
   # RTX 5880 为 Ada，CC 8.9，正好越过 FP8 最低门槛
   quantization: fp8
@@ -73,17 +74,23 @@ vllm:
   # 必须留默认（BF16 main KV）。后续 vLLM 若稳定支持该模型的 fp8 kv，再恢复。
   # kv_cache_dtype: fp8
   # extra_args：透传给 `vllm serve` 的额外参数（空格分隔，按 shlex 拆分）
-  # 关键参数（与官方 recipe Qwen3.8-Flash-Next 一致）：
-  #   --reasoning-parser qwen3：推理块解析（混合思考模型）
-  #   --enable-auto-tool-choice + --tool-call-parser qwen3_coder：官方推荐工具 schema
-  #   --enable-expert-parallel + --moe-backend triton：8 卡必须 TEP8（普通 TP8 与 128 宽量化块不兼容）
-  #   --enable-prefix-caching：多 agent 场景命中率高
-  #   --no-enable-flashinfer-autotune：官方 recipe 在 Hopper 上注释；Ada 上可启用
-  # 可选（按运行情况追加）：
-  #   --max-model-len 262144：默认即原生 262K；扩 1M 需 VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 + YaRN rope-scaling
-  #   --speculative-config '{"method":"mtp","num_speculative_tokens":3}'
-  #       # 内置 MTP 投机解码，需 vLLM 完整支持；启动报错就删除
-  extra_args: "--reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder --enable-expert-parallel --moe-backend triton --enable-prefix-caching --no-enable-flashinfer-autotune"
+  # 【与官方 recipe 对齐的 7 项参数】（blog.csdn 2026-08-27 选源代码 + vllm recipe 标注）：
+  #   --max-num-seqs 256              限制并发数，640GB 显存可全 KV cache，256 是吞吐/显存平衡点
+  #   --enable-prefix-caching         多 agent 场景命中率高
+  #   --no-enable-flashinfer-autotune 官方 recipe 在 Hopper 上注释，本机 Ada 同样不开
+  #   --enable-auto-tool-choice       工具调用支持
+  #   --tool-call-parser qwen3_coder  官方推荐（与思源 / DeepSeek 不同）
+  #   --reasoning-parser qwen3        混合思考模型拆 reasoning_content
+  # 【刻意不传的参数】：
+  #   --enable-expert-parallel --moe-backend triton  当前 ModelScope 下载的模型
+  #   实际不依赖 128 宽量化块，旧版 TEP8 是多此一举；普通 TP8 即可（官方 4×GB300 recipe 也是普通 TP）
+  #   --kv-cache-dtype fp8            Day-0 镜像 qsa.py:187 硬抛 NotImplementedError
+  #   --mtp（speculative-config）      vLLM Day-0 镜像不一定内置 MTP 内核，先保守
+  #   --rope-scaling yarn             不需要 262144 之外的更大上下文
+  # 可选（OOM / 长上下文时追加）：
+  #   --max-model-len 32768/65536     OOM 时回退
+  #   --speculative-config '{"method":"mtp","num_speculative_tokens":3}'  必须 VLLM 完全支持
+  extra_args: "--max-num-seqs 256 --enable-prefix-caching --no-enable-flashinfer-autotune --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3"
 
 usage:
   # price_in：每千输入 token 计价（元），供 cc-switch 用量统计
