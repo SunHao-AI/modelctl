@@ -53,6 +53,15 @@ class EngineAdapter(ABC):
     def metrics_mapping(self) -> dict[str, list[str]] | None:
         """Prometheus 指标名映射；None 表示该引擎不支持精确统计。"""
 
+    def native_metrics_mapping(self) -> dict[str, str] | None:
+        """per-request 原生指标字段名映射（网关喂 stats collector 时用）。
+
+        键固定为 {rate, ttft_ms, gen_time_ms, prompt_tokens, completion_tokens}，
+        值为该引擎 SSE 末块 / 响应根级 "metrics" 对象中真实字段名。
+        默认 None 表示该引擎不提供 per-request 原生指标（stats 侧短路）。
+        """
+        return None
+
     def health_url(self) -> str:
         return f"http://127.0.0.1:{self.profile.port}/health"
 

@@ -258,11 +258,16 @@ def get_collector(profile: Profile, adapter: EngineAdapter, data_dir: Path) -> "
     其余引擎返回 on-demand 收集器（由调用方注入 GatewayModel.collector）。
     """
     from modelctl.core.process import cache_dir
+    from modelctl.core.stats import _parse_env_bool
 
     mapping = adapter.metrics_mapping()
     if mapping is None:
         return None
     data = data_dir or cache_dir()
+    try:
+        native_mapping = adapter.native_metrics_mapping()
+    except (NotImplementedError, AttributeError):
+        native_mapping = None
     return UsageCollector(
         profile.name,
         f"http://127.0.0.1:{profile.port}",
@@ -271,6 +276,8 @@ def get_collector(profile: Profile, adapter: EngineAdapter, data_dir: Path) -> "
         data,
         mode="on-demand",
         mapping=mapping,
+        native_mapping=native_mapping,
+        bench_fallback=_parse_env_bool(os.environ.get("USAGE_BENCH_FALLBACK")),
     )
 
 
@@ -806,6 +813,12 @@ def create_app(
                     seen["prompt"] = prompt
                     seen["completion"] = completion
 
+                def _record_native_metrics(m: dict | None) -> None:
+                    try:
+                        collector.record_native_metrics(m)
+                    except Exception as exc:
+                        logger.warning(f"stats 记录 native metrics 异常（SSE 不中断）: {exc}")
+
                 async def _sse_stream(upstream=upstream, client=client):
                     """透传后端 SSE 响应体，迭代结束（含异常）后关闭上游连接。
 
@@ -861,6 +874,8 @@ def create_app(
                             f"reasoning_len={sum(len(x) for x in collected['reasoning'])} "
                             f"tool_calls={collected['tool_calls']}"
                         )
+                        if seen_metrics is not None:
+                            _record_native_metrics(seen_metrics)
                         # 审计差分终点：aclose 之前取，确保所有 chunk 的 record_tokens 已完成
                         _snap_after = collector.snapshot() if collector is not None and hasattr(collector, "snapshot") else None
                         if _snap_before is not None and _snap_after is not None:
@@ -906,6 +921,13 @@ def create_app(
             upstream = await client.post(url, json=body, headers=headers)
             _t1 = time.monotonic()
             # 非流式：响应体完整读回，直接统计 usage（后端未回 usage 时静默跳过）
+            _ns_data: dict | None
+            try:
+                _parsed = json.loads(upstream.content)
+                _ns_data = _parsed if isinstance(_parsed, dict) else None
+            except ValueError:
+                _ns_data = None
+            _ns_native: dict | None = _ns_data.get("metrics") if isinstance(_ns_data, dict) else None
             if target.collector is not None:
                 try:
                     data = json.loads(upstream.content)
@@ -915,6 +937,11 @@ def create_app(
                         completion = usage.get("completion_tokens")
                         if isinstance(prompt, int) and isinstance(completion, int):
                             target.collector.record_tokens(prompt, completion)
+                            if _ns_native is not None:
+                                try:
+                                    target.collector.record_native_metrics(_ns_native)
+                                except Exception as exc:
+                                    logger.warning(f"stats 记录 native metrics 异常（转发不受影响）: {exc}")
                 except ValueError:
                     pass
             # 审计差分终点：record_tokens 完成后取；无 usage 时差分即 0（确无 token 可记）

@@ -550,7 +550,7 @@ def test_status_output_shows_benchmark_rates_and_ttft(monkeypatch, capsys):
         "list_profiles",
         lambda models_dir=None: [SimpleNamespace(name="qwen3.8-vllm", engine="vllm", port=8101)],
     )
-    monkeypatch.setattr(cli, "_instance_state", lambda name: "运行中")  # 运行中 → 门控放行测速；mock get_adapter 跳过健康检查
+    monkeypatch.setattr(cli, "_instance_state", lambda **kw: "运行中")  # 运行中 → 门控放行测速；mock get_adapter 跳过健康检查
     monkeypatch.setattr(
         cli,
         "get_adapter",
@@ -597,7 +597,7 @@ def test_status_output_hides_rates_when_not_running(monkeypatch, capsys):
         "list_profiles",
         lambda models_dir=None: [SimpleNamespace(name="qwen3.8-vllm", engine="vllm", port=8101)],
     )
-    monkeypatch.setattr(cli, "_instance_state", lambda name: "已停止")
+    monkeypatch.setattr(cli, "_instance_state", lambda **kw: "已停止")
     monkeypatch.setattr(
         cli,
         "_agent_config_info",
@@ -629,7 +629,7 @@ def test_list_rate_column_shows_stats_rates(tmp_path, monkeypatch, capsys):
         "group: qwen3.8\nengine: vllm\nport: 8101\nvllm:\n  model: q\n", encoding="utf-8"
     )
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
-    monkeypatch.setattr("modelctl.cli._instance_state", lambda name: "运行中")
+    monkeypatch.setattr("modelctl.cli._instance_state", lambda **kw: "运行中")
     monkeypatch.setattr("modelctl.cli._stats_token_rate", lambda p: (12.3, 45.6))
     rc = cli.main(["list", "--models-dir", str(tmp_path)])
     out = capsys.readouterr().out
@@ -643,7 +643,7 @@ def test_list_rate_column_zero_rates_shown_as_dash(tmp_path, monkeypatch, capsys
         "group: qwen3.8\nengine: vllm\nport: 8101\nvllm:\n  model: q\n", encoding="utf-8"
     )
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
-    monkeypatch.setattr("modelctl.cli._instance_state", lambda name: "运行中")
+    monkeypatch.setattr("modelctl.cli._instance_state", lambda **kw: "运行中")
     monkeypatch.setattr("modelctl.cli._stats_token_rate", lambda p: (0.0, 0.0))
     rc = cli.main(["list", "--models-dir", str(tmp_path)])
     out = capsys.readouterr().out

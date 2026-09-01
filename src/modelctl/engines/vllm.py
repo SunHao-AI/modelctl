@@ -97,6 +97,14 @@ class VllmAdapter(EngineAdapter):
             if self.caps.gpu_count and tp > self.caps.gpu_count:
                 raise RequirementError(f"tensor_parallel_size={tp} 超过实际 GPU 数 {self.caps.gpu_count}")
         self._check_vram_advisory(cfg, gpus)
+        # per-request 双 flag 告警（venv / docker 两条运行路径均覆盖；仅写告警、不硬拦截）
+        per_request_on = bool(cfg.get("enable_per_request_metrics"))
+        force_on = bool(cfg.get("enable_force_include_usage"))
+        if per_request_on and not force_on:
+            self.warnings.append(
+                f"{self.profile.name}：enable_per_request_metrics=true 但 enable_force_include_usage=false，"
+                "流式中间块缺 usage 会使 stats.record_tokens 仅末块入账；建议同时开启"
+            )
         self.run_compat_checks()  # 预检：软件规则 + 模型 id 特征
         if gpus is not None:
             acquire_gpu_lock(self.profile.name, gpus)
@@ -203,6 +211,20 @@ class VllmAdapter(EngineAdapter):
         if gpus:
             env.update(self.cuda_visible_devices(gpus))
         return cmd, env
+
+    def native_metrics_mapping(self) -> dict[str, str]:
+        """vLLM per-request 原生指标字段映射（vLLM 0.13+ 对应双 flag：--enable-per-request-metrics
+        与 --enable-force-include-usage，后者使流式中间块携带 usage 字段）。
+
+        键固定 5 项 → vLLM OpenAI 兼容响应根级 "metrics"/SSE 末块真实字段名。
+        """
+        return {
+            "rate": "tokens_per_second",
+            "ttft_ms": "time_to_first_token_ms",
+            "gen_time_ms": "generation_time_ms",
+            "prompt_tokens": "num_prompt_tokens",
+            "completion_tokens": "num_generation_tokens",
+        }
 
     def metrics_mapping(self) -> dict[str, list[str]]:
         return {

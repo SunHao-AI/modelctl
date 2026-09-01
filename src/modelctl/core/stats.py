@@ -46,6 +46,43 @@ from modelctl.core.envfile import PROJECT_ROOT, load_env
 USAGE_PORT = 5002
 
 
+def _parse_env_bool(value: str | None, default: bool = True) -> bool:
+    """env 开关解析：{"1","true","yes","on"} → True；{"0","false","no","off"} → False。
+    空串/None/未知字符串回退到 default（保持现状行为，避免误关）。"""
+    if value is None or value.strip() == "":
+        return default
+    low = value.strip().lower()
+    if low in ("1", "true", "yes", "on"):
+        return True
+    if low in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
+@dataclass
+class _NativeSample:
+    """vLLM per-request 原生指标单样本（60s/20 请求滑窗口径）。"""
+    ts: float                    # time.monotonic 入账时
+    tokens_per_second: float     # vLLM 原生 decode 速率（仅 decode 段）
+    prompt_inflight_rate: float  # num_prompt_tokens / ttft_s（与 vLLM avg_prompt gauge 同量纲）
+    ttft_ms: float               # time_to_first_token_ms
+    ttft_s: float                # 同上（秒）
+
+
+def _percentile(values: list[float], p: float) -> float | None:
+    """线性插值法百分位；空列表返回 None；单元素 P50/P95 都返回该元素。"""
+    if not values:
+        return None
+    s = sorted(values)
+    if len(s) == 1:
+        return s[0]
+    idx = (len(s) - 1) * (p / 100.0)
+    lo = int(idx)
+    hi = min(lo + 1, len(s) - 1)
+    frac = idx - lo
+    return s[lo] * (1.0 - frac) + s[hi] * frac
+
+
 def _fmt_tokens(value: float) -> str:
     """token 数量换算为 k/m/g 单位缩写（648532 -> 648.5k），减少显示长度。
 
@@ -183,6 +220,14 @@ def build_usage_payload(tokens: dict[str, float], usage_cfg: dict, start_time: f
     predicted = tokens.get("predicted_total", 0.0)
     prompt_rate = tokens.get("prompt_rate", 0.0)
     predicted_rate = tokens.get("predicted_rate", 0.0)
+    ttft_ms_val = tokens.get("ttft_ms") or 0.0
+    ttft_p95_val = tokens.get("ttft_ms_p95") or 0.0
+    if ttft_ms_val <= 0:
+        ttft_suffix = ""
+    else:
+        ttft_suffix = f"| 首 Token P50 = {round(ttft_ms_val)} ms"
+        if ttft_p95_val > 0:
+            ttft_suffix += "（P95 = " + str(round(ttft_p95_val)) + " ms）"
     used = round(calc_cost(prompt, predicted, price_in, price_out), 2)
     payload = {
         "isValid": True,
@@ -194,6 +239,7 @@ def build_usage_payload(tokens: dict[str, float], usage_cfg: dict, start_time: f
             f"（输入 {_fmt_tokens(prompt)}/输出 {_fmt_tokens(predicted)}）"
             f"| 输入速率 {prompt_rate:.1f} tok/s"
             f"| 输出速率 {predicted_rate:.1f} tok/s"
+            f"{ttft_suffix}"
         ),
         "prompt_rate": prompt_rate,
         "predicted_rate": predicted_rate,
@@ -257,6 +303,8 @@ class StatsTarget:
     # 主动测速配置（bench_url 为 None = 窗口无流量时不做兜底测速）
     bench_url: str | None = None
     bench_model: str | None = None
+    # per-request 原生指标字段映射（仅 vLLM 双 flag 均开才非 None；其他引擎 None）
+    native_mapping: dict[str, str] | None = None
 
 
 # 主动测速结果缓存：cc-switch 约每 30-60s 轮询 /api/usage，节流避免每次都伪造请求
@@ -294,6 +342,8 @@ class UsageCollector:
         data_dir: Path,
         mode: str = "poll",
         mapping: dict[str, list[str]] | None = None,
+        native_mapping: dict[str, str] | None = None,
+        bench_fallback: bool = True,
     ) -> None:
         self.name = name
         self.data_dir = data_dir
@@ -302,6 +352,14 @@ class UsageCollector:
         self.api_key = api_key
         self.mode = mode
         self.mapping = mapping or {}
+        self.native_mapping = native_mapping
+        if "USAGE_BENCH_FALLBACK" in os.environ:
+            self.bench_fallback = _parse_env_bool(os.environ["USAGE_BENCH_FALLBACK"])
+        else:
+            self.bench_fallback = bench_fallback
+        self._native_window: list[_NativeSample] = []
+        self._native_window_ttl = 60.0
+        self._native_window_cap = 20
         self._lock = threading.Lock()
         self._monotonic = time.monotonic  # 网关注入与轮询共用的速率计算时钟基准
         self._snapshot: dict[str, object] = {
@@ -311,6 +369,9 @@ class UsageCollector:
             "predicted_total": 0.0,
             "prompt_rate": 0.0,
             "predicted_rate": 0.0,
+            "ttft_ms": 0.0,
+            "ttft_ms_p95": 0.0,
+            "rate_source": "none",
         }
         self._last = {"time": None, "predicted_total": 0.0}
         self._rate_window: list[tuple[float, float, float]] = []
@@ -379,6 +440,65 @@ class UsageCollector:
             self._snapshot["prompt_rate"] = prompt_rate
             self._snapshot["predicted_rate"] = predicted_rate
             self._persist(new_prompt, new_predicted)
+            # rate_source 提示：轮询失败/无值后网关端首次写入累积值时，标注窗口差分来源，
+            # 供前端区分"网关实测"与"引擎 gauge"两条速率链路
+            if self._snapshot["rate_source"] == "none" and prompt_rate > 0:
+                self._snapshot["rate_source"] = "window_diff"
+
+    def record_native_metrics(self, metric_dict: dict | None) -> None:
+        """网关 mesh 回调注入 vLLM per-request 原生指标（单请求粒度滑窗口径）。
+
+        metric_dict 的键由 native_mapping 指明（vLLM：tokens_per_second /
+        time_to_first_token_ms / num_prompt_tokens）。native_mapping 为 None
+        （非 vLLM 引擎）或入参非法时静默返回，不影响现有 /metrics 链路。
+        """
+        if not self.native_mapping or not isinstance(metric_dict, dict):
+            return
+        try:
+            tps = float(metric_dict[self.native_mapping["rate"]])
+            ttft_ms = float(metric_dict[self.native_mapping["ttft_ms"]])
+            prompt_tk = int(metric_dict.get(self.native_mapping["prompt_tokens"]) or 0)
+        except (KeyError, TypeError, ValueError):
+            return
+        if tps <= 0 or ttft_ms <= 0:
+            return
+        ttft_s = ttft_ms / 1000.0
+        prompt_rate = (prompt_tk / ttft_s) if ttft_s > 1e-6 else 0.0
+        sample = _NativeSample(
+            ts=self._monotonic(),
+            tokens_per_second=tps,
+            prompt_inflight_rate=prompt_rate,
+            ttft_ms=ttft_ms,
+            ttft_s=ttft_s,
+        )
+        with self._lock:
+            self._native_window.append(sample)
+            now = self._monotonic()
+            while (
+                now - self._native_window[0].ts > self._native_window_ttl
+                or len(self._native_window) > self._native_window_cap
+            ):
+                self._native_window.pop(0)
+
+    def _compute_native_row(self) -> dict:
+        """由原生样本滑窗计算 ttft_ms P50/P95 与速率 P50（窗口内最近请求级统计）。"""
+        with self._lock:
+            samples = list(self._native_window)
+        if not samples:
+            return {
+                "ttft_ms": 0.0,
+                "ttft_ms_p95": 0.0,
+                "prompt_rate": 0.0,
+                "predicted_rate": 0.0,
+                "has_any": False,
+            }
+        return {
+            "ttft_ms": round(_percentile([s.ttft_ms for s in samples], 50) or 0.0, 2),
+            "ttft_ms_p95": round(_percentile([s.ttft_ms for s in samples], 95) or 0.0, 2),
+            "prompt_rate": round(_percentile([s.prompt_inflight_rate for s in samples], 50) or 0.0, 2),
+            "predicted_rate": round(_percentile([s.tokens_per_second for s in samples], 50) or 0.0, 2),
+            "has_any": True,
+        }
 
     def _compute_window_rate(self) -> tuple[float, float]:
         if len(self._rate_window) < 2:
@@ -433,6 +553,9 @@ class UsageCollector:
                     "predicted_total": 0.0,
                     "prompt_rate": 0.0,
                     "predicted_rate": 0.0,
+                    "ttft_ms": 0.0,
+                    "ttft_ms_p95": 0.0,
+                    "rate_source": "none",
                 }
             return
         # 引擎 token 计数 gauge 可能恒为 0（如 vLLM 未启用 --enable-metrics），此时累计值
@@ -457,6 +580,12 @@ class UsageCollector:
         metrics["prompt_rate"] = prompt_rate
         metrics["predicted_rate"] = predicted_rate
 
+        # rate_source 反映当前快照速率数据的实际来源：引擎 gauge > 窗口差分 > 无
+        source = (
+            "engine_gauge"
+            if (metrics["prompt_rate"] > 0 or metrics["predicted_rate"] > 0)
+            else ("window_diff" if (prompt_rate > 0 or predicted_rate > 0) else "none")
+        )
         with self._lock:
             self._snapshot = {
                 "ok": True,
@@ -465,6 +594,9 @@ class UsageCollector:
                 "predicted_total": new_predicted,
                 "prompt_rate": metrics["prompt_rate"],
                 "predicted_rate": metrics["predicted_rate"],
+                "ttft_ms": 0.0,
+                "ttft_ms_p95": 0.0,
+                "rate_source": source,
             }
         if changed:
             self._persist(new_prompt, new_predicted)
@@ -472,7 +604,25 @@ class UsageCollector:
 
     def snapshot(self) -> dict:
         with self._lock:
-            return dict(self._snapshot)
+            base = dict(self._snapshot)
+        # vLLM 原生指标融进快照：rate 桶仅原生值为真时覆盖引擎/窗口值（窗口无流量时
+        # 仍给出测速真值）；ttft 时间桶覆写（原生注入是唯一数据源；引擎/窗口均置 0）。
+        native_row = self._compute_native_row()
+        base["prompt_rate"] = native_row["prompt_rate"] or base.get("prompt_rate") or 0.0
+        base["predicted_rate"] = native_row["predicted_rate"] or base.get("predicted_rate") or 0.0
+        base["ttft_ms"] = native_row["ttft_ms"]
+        base["ttft_ms_p95"] = native_row["ttft_ms_p95"]
+        if (
+            base.get("rate_source") == "none"
+            and native_row["has_any"]
+            and (
+                native_row["prompt_rate"]
+                or native_row["predicted_rate"]
+                or native_row["ttft_ms"]
+            )
+        ):
+            base["rate_source"] = "native"
+        return base
 
 
 class UsageHandler(BaseHTTPRequestHandler):
@@ -536,20 +686,40 @@ class UsageHandler(BaseHTTPRequestHandler):
         if not snap["ok"]:
             return {"isValid": False, "invalidMessage": f"{target.name} 不可用：{snap['error'] or '未知错误'}"}
         tokens = dict(snap)
-        # 任一速率缺失（窗口无流量 / 引擎无 throughput gauge，如 vLLM 0.27+）时，
-        # 用一次伪造请求测速兜底，避免 cc-switch 一直显示 0；各自独立覆盖，
-        # 避免"输入速率有值、输出速率为 0"时整体跳过兜底。
-        if tokens.get("prompt_rate", 0.0) == 0 or tokens.get("predicted_rate", 0.0) == 0:
+        # 原生指标（vLLM per-request）已给出速率/TTFT 时无需兜底测速；
+        # 仅当速率全为 0 且 bench_fallback 开关打开时才伪造请求测速，避免 cc-switch 一直显示 0。
+        native_has_any = (
+            (tokens.get("prompt_rate") or 0) > 0
+            or (tokens.get("predicted_rate") or 0) > 0
+            or (tokens.get("ttft_ms") or 0) > 0
+        )
+        bench_fallback_enabled = getattr(collector, "bench_fallback", True) is True
+        should_bench = (
+            not native_has_any
+            and bench_fallback_enabled
+            and (tokens.get("prompt_rate", 0) == 0 or tokens.get("predicted_rate", 0) == 0)
+        )
+        if should_bench:
             bench = _bench_cached(target)
             if bench is not None:
                 if tokens.get("prompt_rate", 0.0) == 0:
                     tokens["prompt_rate"] = bench[0]
                 if tokens.get("predicted_rate", 0.0) == 0:
                     tokens["predicted_rate"] = bench[1]
+                if tokens.get("ttft_ms", 0.0) == 0:
+                    tokens["ttft_ms"] = float(bench[2])
+            tokens["rate_source"] = "bench"
         payload = build_usage_payload(tokens, target.usage_cfg, self.start_time, time.time())
         payload["model"] = target.name
         # 覆盖默认 planName，避免多模型时卡片展开视图显示错误名称
         payload["planName"] = f"{target.name} 本地部署"
+        # TTFT / 速率来源仅在非零/非空时透传，避免 cc-switch 卡片展开视图出现 0 噪音
+        if (tokens.get("ttft_ms") or 0) > 0:
+            payload["ttft_ms"] = tokens["ttft_ms"]
+        if (tokens.get("ttft_ms_p95") or 0) > 0:
+            payload["ttft_ms_p95"] = tokens["ttft_ms_p95"]
+        if tokens.get("rate_source"):
+            payload["rate_source"] = tokens["rate_source"]
         return payload
 
     def _aggregate_payload(self) -> dict:
@@ -690,6 +860,8 @@ def run_server(targets: list[StatsTarget] | None = None) -> None:
                 target.data_dir,
                 mode=mode,
                 mapping=target.mapping,
+                native_mapping=target.native_mapping,
+                bench_fallback=_parse_env_bool(os.environ.get("USAGE_BENCH_FALLBACK")),
             )
             collector.start()
             collectors[target.name] = collector
@@ -724,6 +896,10 @@ def _targets_from_profiles(data_dir: Path) -> list[StatsTarget]:
     for profile in list_profiles():
         # 统计服务仅调用 metrics_mapping()，无需真实硬件探测
         adapter = get_adapter(profile.engine)(profile, Capabilities())
+        try:
+            native_mapping = adapter.native_metrics_mapping()
+        except (NotImplementedError, AttributeError):
+            native_mapping = None
         targets.append(
             StatsTarget(
                 name=profile.name,
@@ -736,6 +912,7 @@ def _targets_from_profiles(data_dir: Path) -> list[StatsTarget]:
                 # 窗口无流量时主动测速兜底（复用与 cli 测速相同的请求构造）
                 bench_url=f"http://127.0.0.1:{profile.port}/v1/chat/completions",
                 bench_model=adapter.upstream_model_name(),
+                native_mapping=native_mapping,
             )
         )
     return targets

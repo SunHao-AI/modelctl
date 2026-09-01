@@ -341,6 +341,7 @@ def test_build_target_payload_benchmarks_when_idle(monkeypatch):
         "prompt_rate": 0.0,
         "predicted_rate": 0.0,
     }
+    mock_collector.bench_fallback = True
     UsageHandler.collectors = {"a": mock_collector}
     from modelctl.core.stats import _BENCH_CACHE
 
@@ -392,9 +393,10 @@ def test_build_target_payload_skips_bench_when_active(monkeypatch):
     assert payload["predicted_rate"] == 5.0
 
 
-def test_build_target_payload_bench_when_only_predicted_zero(monkeypatch):
-    """回归：输入速率有值但输出速率为 0（vLLM 0.27+ 无输出 throughput gauge）时，
-    只对缺失的输出速率做测速兜底，不得用伪造值覆盖真实输入速率。"""
+def test_build_target_payload_no_bench_when_native_rate_present(monkeypatch):
+    """回归（Task 5 新行为）：任一原生速率/TTFT 已有值（native_has_any=True）时，
+    不做伪造测速兜底，避免覆盖或混入真实原生数据。
+    仅当速率与 TTFT 全为 0 且开关打开时才触发 bench。"""
     import time
     from unittest.mock import MagicMock
 
@@ -419,16 +421,20 @@ def test_build_target_payload_bench_when_only_predicted_zero(monkeypatch):
         "prompt_rate": 2906.3,
         "predicted_rate": 0.0,
     }
+    mock_collector.bench_fallback = True
     UsageHandler.collectors = {"a": mock_collector}
     from modelctl.core.stats import _BENCH_CACHE
 
     _BENCH_CACHE.clear()
-    monkeypatch.setattr("modelctl.core.stats._bench_cached", lambda t: (1.0, 88.0, 300))
+
+    def _should_not_call(t):
+        raise AssertionError("原生已有速率时不应触发伪造测速")
+
+    monkeypatch.setattr("modelctl.core.stats._bench_cached", _should_not_call)
     handler = UsageHandler.__new__(UsageHandler)
     payload = handler._resolve_payload("a")
     assert payload["prompt_rate"] == 2906.3  # 真实输入速率保留
-    assert payload["predicted_rate"] == 88.0  # 输出速率被测速兜底覆盖
-    assert "输出速率 88.0 tok/s" in payload["extra"]
+    assert payload["predicted_rate"] == 0.0  # 输出速率保持 0（无原生数据也不兜底）
 
 
 def test_benchmark_rates_parses_streaming_usage(monkeypatch):

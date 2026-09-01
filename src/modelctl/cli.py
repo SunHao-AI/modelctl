@@ -401,12 +401,20 @@ def _token_rate_data(profile, caps) -> dict:
         prompt_rate = data.get("prompt_rate")
         predicted_rate = data.get("predicted_rate")
         if isinstance(prompt_rate, (int, float)) and isinstance(predicted_rate, (int, float)) and (prompt_rate > 0 or predicted_rate > 0):
+            native_ttft = data.get("ttft_ms")
+            if isinstance(native_ttft, (int, float)) and native_ttft > 0:
+                ttft_out = int(native_ttft)
+            else:
+                ttft_out = None
             return {
                 "prompt_rate": float(prompt_rate),
                 "predicted_rate": float(predicted_rate),
-                "ttft_ms": None,
+                "ttft_ms": ttft_out,
                 "source": "stats",
             }
+    # USAGE_BENCH_FALLBACK 显式关闭时跳过 bench 兜底
+    if os.environ.get("USAGE_BENCH_FALLBACK", "true").strip().lower() in {"0", "false", "no", "off"}:
+        return {"prompt_rate": None, "predicted_rate": None, "ttft_ms": None, "source": None}
     # stats 无效/速率为 0 → 主动测速
     try:
         adapter = get_adapter(profile.engine)(profile, caps)
