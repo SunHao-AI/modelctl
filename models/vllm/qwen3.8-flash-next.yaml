@@ -56,11 +56,11 @@ vllm:
   # gpu_list：物理 GPU 编号；长度必须等于 tensor_parallel_size
   gpu_list: "0,1,2,3,4,5,6,7"
   # max_model_len：最大上下文长度（token），原生 262144
-  # 【工程量调整】上游模型论文在 1M 验证但不推荐单序列跑满 → 本任务锁定 262144（官方原生）
-  # 显存预算：262144 × 256 seq × 60 layer × 1 (FP8) 系统估算 ~28.5 GiB/卡，
-  # 加 172.78 / 8 ≈ 21.6GB 权重 → ~51.5 GiB / 48GB ≈ OOM，
-  # 因此实际可用上下文 = 显存峰值回退点，启动后可按情况把 max_model_len 降到 131072 / 65536
-  max_model_len: 262144
+  # ★ 8 卡 RTX 5880 当前实测：262144 启动失败（Available KV cache memory: -1.6 GiB）
+  #   原因：262144 × 256 seq × 60 layer 全月估算 > 实际显存余量
+  #   降档阶梯：131072（首推） → 65536（多 agent 并发） → 32768（短问答）
+  # 改完此字段必须 modelctl stop + start 重新走 init_engine_core
+  max_model_len: 131072
   # gpu_memory_utilization：显存利用率上限（0~1）
   # 8 卡 RTX 5880: 设 0.85（比 0.9 紧一点防 JIT/kernel 编译瞬时爆，比 0.80 松一点保 KV）
   gpu_memory_utilization: 0.85
