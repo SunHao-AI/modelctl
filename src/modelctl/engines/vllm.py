@@ -171,8 +171,11 @@ class VllmAdapter(EngineAdapter):
             "-v", f"{model_local.parent.as_posix()}:/models:ro",
             "--ipc=host",
             "--detach",
+            # 镜像 ENTRYPOINT 已是 ["vllm"]，CMD 仅传 serve 剩余部分；
+            # 不重复 "vllm" 避免被拼成 `vllm vllm serve ...` 触发 argparse
+            # "unrecognized arguments: serve /models/..." 退出 (exit code 2)
             image,
-            "vllm", "serve", f"/models/{model_local.name}",
+            "serve", f"/models/{model_local.name}",
         ] + model_args + ["--port", "8000"]
         env = {"HF_HOME": os.environ["HF_HOME"]} if os.environ.get("HF_HOME") else {}
         if gpus:

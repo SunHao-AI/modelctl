@@ -479,10 +479,15 @@ def test_build_command_docker_template(tmp_path, monkeypatch):
     assert "--ipc=host" in cmd
     assert "--detach" in cmd
     # 镜像
-    assert "vllm/vllm-openai:qwen38-flash-next" in cmd
-    # 容器内 serve
-    assert "vllm" in cmd and "serve" in cmd
-    assert "/models/Qwen3.8-Flash-Next-FP8" in cmd
+    image = "vllm/vllm-openai:qwen38-flash-next"
+    assert image in cmd
+    # CMD 段（image 之后）必须紧跟 serve + 容器内模型路径
+    # 不能含 "vllm" 作为独立 token——否则 docker ENTRYPOINT=["vllm"] 会拼成 `vllm vllm serve ...`，
+    # argparse 报 "unrecognized arguments: serve /models/..." 退出 (exit code 2)
+    image_pos = cmd.index(image)
+    assert cmd[image_pos + 1] == "serve"
+    assert cmd[image_pos + 2] == "/models/Qwen3.8-Flash-Next-FP8"
+    assert "vllm" not in cmd[image_pos + 1:]
     assert "--port" in cmd
     idx = cmd.index("--port")
     assert cmd[idx + 1] == "8000"
@@ -557,7 +562,7 @@ def test_stop_patterns_docker_two_modes(tmp_path, monkeypatch):
         "-p", "8000:8000",
         "-v", f"{model_dir.parent.as_posix()}:/models:ro",
         "--ipc=host", "--detach", "x/y:z",
-        "vllm", "serve",
+        "serve",
     ])
     assert patterns[0] in expected_cmdline
     # 模式 2：-v <root>:/models:ro——也是 cmdline 子串
