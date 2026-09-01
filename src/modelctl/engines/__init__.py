@@ -21,6 +21,7 @@ from modelctl.engines.sglang import SglangAdapter
 from modelctl.engines.aphrodite import AphroditeAdapter
 from modelctl.engines.lmdeploy import LmdeployAdapter
 from modelctl.engines.tensorrt_llm import TensorRtLlmAdapter
+from modelctl.engines.tokenspeed import TokenSpeedAdapter
 from modelctl.engines.unsloth import UnslothAdapter
 from modelctl.engines.vllm import VllmAdapter
 
@@ -33,6 +34,7 @@ _REGISTRY: dict[str, type[EngineAdapter]] = {
     "aphrodite": AphroditeAdapter,
     "lmdeploy": LmdeployAdapter,
     "tensorrt_llm": TensorRtLlmAdapter,
+    "tokenspeed": TokenSpeedAdapter,
 }
 
 
