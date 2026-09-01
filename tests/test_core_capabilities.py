@@ -47,8 +47,11 @@ def _venv_bin_name(engine: str, name: str) -> str:
 
 
 def test_engine_binaries_list_kept():
-    """ENGINE_BINARIES 保持 5 项（Task 8 收尾前维持旧 API 兼容）。"""
-    assert ENGINE_BINARIES == ["ollama", "vllm", "sglang", "unsloth", "llamacpp"]
+    """ENGINE_BINARIES 保持已注册引擎列表（新增 aphrodite/lmdeploy/tensorrt_llm/tokenspeed）。"""
+    assert ENGINE_BINARIES == [
+        "ollama", "vllm", "sglang", "unsloth", "llamacpp",
+        "aphrodite", "lmdeploy", "tensorrt_llm", "tokenspeed",
+    ]
 
 
 def test_which_binaries_vllm_env_present(tmp_path, monkeypatch):
