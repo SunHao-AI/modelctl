@@ -125,6 +125,11 @@ def test_engine_install_hints_vllm_sglang():
     assert "modelctl env setup" in ENGINE_INSTALL_HINTS["sglang"]
 
 
+def test_engine_install_hints_tensorrt_llm():
+    """tensorrt_llm 提示语指向 modelctl env setup tensorrt_llm。"""
+    assert "modelctl env setup tensorrt_llm" in ENGINE_INSTALL_HINTS["tensorrt_llm"]
+
+
 def test_probe_managed_engines_absent_by_default(tmp_path, monkeypatch):
     """未建设 venv 时，probe() 默认对托管引擎返回 False，与现状（5 项全 False）一致。"""
     _redirect(tmp_path, monkeypatch)

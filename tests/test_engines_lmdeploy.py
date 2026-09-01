@@ -64,6 +64,20 @@ def test_lmdeploy_command(tmp_path, monkeypatch):
     assert cmd[cmd.index("--cache-max-entry-count") + 1] == "0.8"
     assert cmd[cmd.index("--quant-policy") + 1] == "4"
     assert "--enable-prefix-caching" in cmd
+    assert cmd[cmd.index("--api-keys") + 1] == "sk-test"
+    assert cmd[cmd.index("--model-name") + 1] == "q"
+
+
+def test_lmdeploy_metrics(tmp_path):
+    p = _write(tmp_path, "name: q\nengine: lmdeploy\nport: 8130\nlmdeploy:\n  model: m\n")
+    a = get_adapter("lmdeploy")(p, CAPS8)
+    mapping = a.metrics_mapping()
+    assert mapping == {
+        "prompt_total": ["lmdeploy:prompt_tokens_total"],
+        "predicted_total": ["lmdeploy:generation_tokens_total"],
+        "prompt_rate": ["lmdeploy:avg_prompt_throughput_toks_per_sec"],
+        "predicted_rate": ["lmdeploy:avg_generation_throughput_toks_per_sec"],
+    }
 
 
 def test_lmdeploy_gpu_tp_mismatch(tmp_path, monkeypatch):

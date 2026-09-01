@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+import subprocess
 from pathlib import Path
 
 from modelctl.core import envs
@@ -41,6 +42,12 @@ class TokenSpeedAdapter(EngineAdapter):
                 raise RequirementError("docker 命令不在 PATH")
             if shutil.which("nvidia-smi") is None:
                 raise RequirementError("docker 模式需要 nvidia-container-toolkit")
+            # 清冲突残留容器（幂等）
+            try:
+                subprocess.run(["docker", "rm", "-f", f"{self.profile.name}-tokenspeed"],
+                               capture_output=True, timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                pass
         else:
             envs.ensure_env("tokenspeed")
         if not cfg.get("model") and not cfg.get("download"):

@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+import subprocess
 from pathlib import Path
 
 from modelctl.core import envs
@@ -39,6 +40,12 @@ class TensorRtLlmAdapter(EngineAdapter):
                 raise RequirementError("docker 命令不在 PATH")
             if shutil.which("nvidia-smi") is None:
                 raise RequirementError("docker 模式需要 nvidia-container-toolkit")
+            # 清冲突残留容器（幂等）
+            try:
+                subprocess.run(["docker", "rm", "-f", f"{self.profile.name}-trtllm"],
+                               capture_output=True, timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                pass
         else:
             envs.ensure_env("tensorrt_llm")
         if not cfg.get("model"):
@@ -124,7 +131,7 @@ class TensorRtLlmAdapter(EngineAdapter):
             cmd += ["--max_output_len", str(cfg["max_output_len"])]
         if cfg.get("max_batch_size"):
             cmd += ["--max_batch_size", str(cfg["max_batch_size"])]
-        cmd += self.api_key_args() + extra
+        cmd += extra
         env = {}
         if gpus:
             env.update(self.cuda_visible_devices(gpus))
@@ -134,7 +141,7 @@ class TensorRtLlmAdapter(EngineAdapter):
 
     def metrics_mapping(self) -> dict[str, list[str]]:
         return {
-            "prompt_total": ["nv_inference_request_success", "trtllm:prompt_tokens_total"],
+            "prompt_total": ["trtllm:prompt_tokens_total"],
             "predicted_total": ["trtllm:generation_tokens_total"],
         }
 

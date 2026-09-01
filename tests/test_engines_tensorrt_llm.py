@@ -102,6 +102,9 @@ def test_tensorrt_llm_metrics(tmp_path):
     mapping = a.metrics_mapping()
     assert "prompt_total" in mapping
     assert "predicted_total" in mapping
+    assert mapping["prompt_total"] == ["trtllm:prompt_tokens_total"]
+    assert "nv_inference_request_success" not in mapping["prompt_total"]
+    assert mapping["predicted_total"] == ["trtllm:generation_tokens_total"]
 
 
 def test_tensorrt_llm_missing_model_raises(tmp_path, monkeypatch):

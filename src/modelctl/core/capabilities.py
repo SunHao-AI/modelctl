@@ -33,6 +33,7 @@ ENGINE_INSTALL_HINTS = {
     "unsloth": "，建议执行：curl -fsSL https://unsloth.ai/install.sh | sh",
     "aphrodite": "，建议执行：modelctl env setup aphrodite",
     "lmdeploy": "，建议执行：modelctl env setup lmdeploy",
+    "tensorrt_llm": "，建议执行：modelctl env setup tensorrt_llm",
     "tokenspeed": "，建议执行：modelctl env setup tokenspeed",
     # llamacpp 提示较长（源码下载 + 编译命令），由 cli._cmd_probe 单独多行输出
 }

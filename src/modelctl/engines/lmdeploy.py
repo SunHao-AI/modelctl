@@ -66,6 +66,9 @@ class LmdeployAdapter(EngineAdapter):
             cmd += ["--cache-max-entry-count", str(cfg["cache_max_entry_count"])]
         if cfg.get("quant_policy"):
             cmd += ["--quant-policy", str(cfg["quant_policy"])]
+        if self.profile.api_key:
+            cmd += ["--api-keys", self.profile.api_key]
+        cmd += ["--model-name", self.upstream_model_name()]
         cmd += extra
         env = {}
         if gpus:
@@ -78,4 +81,6 @@ class LmdeployAdapter(EngineAdapter):
         return {
             "prompt_total": ["lmdeploy:prompt_tokens_total"],
             "predicted_total": ["lmdeploy:generation_tokens_total"],
+            "prompt_rate": ["lmdeploy:avg_prompt_throughput_toks_per_sec"],
+            "predicted_rate": ["lmdeploy:avg_generation_throughput_toks_per_sec"],
         }
