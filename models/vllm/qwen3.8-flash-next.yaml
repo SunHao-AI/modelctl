@@ -67,8 +67,11 @@ vllm:
   # quantization：量化方式（可选，如 fp8；FP8 需要 CC ≥ 8.9）
   # RTX 5880 为 Ada，CC 8.9，正好越过 FP8 最低门槛
   quantization: fp8
-  # kv_cache_dtype：KV cache 数据类型（fp8 / fp16 / bf16；fp8 可节省一半 KV 显存，精度损失 <1%）
-  kv_cache_dtype: fp8
+  # 【重要】不要设置 kv_cache_dtype: fp8
+  # 因为 qwen3.8-flash-next 的 QSA 混合注意力层在 vLLM Day-0 镜像中硬校验：
+  #   NotImplementedError: Qwen3.8-Flash-Next QSA requires a BF16 main KV cache
+  # 必须留默认（BF16 main KV）。后续 vLLM 若稳定支持该模型的 fp8 kv，再恢复。
+  # kv_cache_dtype: fp8
   # extra_args：透传给 `vllm serve` 的额外参数（空格分隔，按 shlex 拆分）
   # 关键参数（与官方 recipe Qwen3.8-Flash-Next 一致）：
   #   --reasoning-parser qwen3：推理块解析（混合思考模型）
