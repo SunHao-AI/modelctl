@@ -1,0 +1,14 @@
+group: qwen3.8
+port: 8140
+api_key: ${API_KEY}
+
+aphrodite:
+  model: /raid5/sh/model-gguf/Qwen3.8-27B-Q4_K_M.gguf
+  tensor_parallel_size: 1
+  quantization: gguf
+  max_model_len: 32768
+  extra_args: "--disable-log-requests"
+
+usage:
+  price_in: 0.5
+  price_out: 1.0
