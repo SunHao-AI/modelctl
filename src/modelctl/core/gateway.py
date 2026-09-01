@@ -928,10 +928,9 @@ def create_app(
             except ValueError:
                 _ns_data = None
             _ns_native: dict | None = _ns_data.get("metrics") if isinstance(_ns_data, dict) else None
-            if target.collector is not None:
-                try:
-                    data = json.loads(upstream.content)
-                    usage = data.get("usage")
+            if _ns_data is not None:
+                if target.collector is not None:
+                    usage = _ns_data.get("usage")
                     if isinstance(usage, dict):
                         prompt = usage.get("prompt_tokens")
                         completion = usage.get("completion_tokens")
@@ -942,21 +941,15 @@ def create_app(
                                     target.collector.record_native_metrics(_ns_native)
                                 except Exception as exc:
                                     logger.warning(f"stats 记录 native metrics 异常（转发不受影响）: {exc}")
-                except ValueError:
-                    pass
-            # 审计差分终点：record_tokens 完成后取；无 usage 时差分即 0（确无 token 可记）
-            _snap_after = target.collector.snapshot() if target.collector is not None and hasattr(target.collector, "snapshot") else None
-            if _snap_before is not None and _snap_after is not None:
-                _diff_prompt = max(0, int(round(_snap_after["prompt_total"] - _snap_before["prompt_total"])))
-                _diff_completion = max(0, int(round(_snap_after["predicted_total"] - _snap_before["predicted_total"])))
-            else:
-                _diff_prompt = _diff_completion = 0
-            try:
-                _data = json.loads(upstream.content)
-                _msg = ((_data.get("choices") or [{}])[0].get("message")) or {}
+                # 审计差分终点：record_tokens 完成后取；无 usage 时差分即 0（确无 token 可记）
+                _snap_after = target.collector.snapshot() if target.collector is not None and hasattr(target.collector, "snapshot") else None
+                if _snap_before is not None and _snap_after is not None:
+                    _diff_prompt = max(0, int(round(_snap_after["prompt_total"] - _snap_before["prompt_total"])))
+                    _diff_completion = max(0, int(round(_snap_after["predicted_total"] - _snap_before["predicted_total"])))
+                else:
+                    _diff_prompt = _diff_completion = 0
+                _msg = ((_ns_data.get("choices") or [{}])[0].get("message")) or {}
                 logger.info(f"OpenAI 非流式响应摘要 content={str(_msg.get('content'))[:200]!r} " f"tool_calls={bool(_msg.get('tool_calls'))} reasoning={bool(_msg.get('reasoning'))}")
-            except ValueError:
-                pass
             # 审计：旁路读取 metrics / usage / finish_reason，写入必须包裹，异常不得影响转发
             try:
                 if self_audit_log is not None:
