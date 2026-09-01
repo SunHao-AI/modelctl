@@ -765,3 +765,86 @@ def test_full_vllm_suite_no_regression(tmp_path, monkeypatch):
         except Exception:
             pass  # 其他非关键异常忽略
     assert checked >= 1, "至少应有一个 venv 路径 yaml 被验证"
+
+
+# ---- 方案 C：docker 分支 wait_ready 不传 alive_check（客户端早退是预期）----
+
+
+class _FakeProc:
+    def __init__(self, done: bool = False):
+        self._done = done
+
+    def poll(self):
+        return 0 if self._done else None
+
+
+def test_wait_ready_docker_ignores_client_early_exit(tmp_path, monkeypatch):
+    """docker 分支：客户端 daemonize 后立刻退出是预期，不能传 alive_check →
+    否则 600s 超时被 1 秒中断，roll 不出权重加载进度。"""
+    import modelctl.engines.vllm as vllm_mod
+
+    captured = {}
+
+    def fake_wait_health(url, timeout, api_key=None, alive_check=None):
+        captured["alive_check"] = alive_check
+        captured["timeout"] = timeout
+        return True
+
+    monkeypatch.setattr(vllm_mod, "wait_health", fake_wait_health)
+    model_dir = tmp_path / "m" / "X"
+    model_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: vllm\nport: 8000\nvllm:\n"
+        f"  model: {model_dir}\n  docker_image: x/y:z\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    a.spawned_proc = _FakeProc(done=True)  # docker run 客户端已退出（daemonize 后）
+    assert a.wait_ready(30) is True
+    assert captured["alive_check"] is None
+    assert captured["timeout"] == 30
+
+
+def test_wait_ready_venv_early_exit_uses_alive_check(tmp_path, monkeypatch):
+    """venv 分支（无 docker_image）：客户端早退 → alive_check 被传入并返回 False
+    → wait_health 中止返回 False（现状行为，不改变）。
+
+    注意：venv 分支走 `super().wait_ready(timeout)`（base.EngineAdapter 的方法），
+    必须 patch base 模块的 `wait_health`（base.from process import wait_health）。
+    """
+    import modelctl.engines.base as base_mod
+
+    calls = []
+
+    def fake_wait_health(url, timeout, api_key=None, alive_check=None):
+        calls.append(alive_check)
+        if alive_check is not None and not alive_check():
+            return False  # 模拟 wait_health 在 alive_check False 时早退
+        return True
+
+    monkeypatch.setattr(base_mod, "wait_health", fake_wait_health)
+    p = _write(tmp_path, "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: /x\n")
+    a = get_adapter("vllm")(p, CAPS8)
+    a.spawned_proc = _FakeProc(done=True)
+    assert a.wait_ready(5) is False
+    assert calls and calls[0] is not None
+    assert calls[0]() is False
+
+
+def test_wait_ready_venv_alive_proc_passes_check(tmp_path, monkeypatch):
+    """venv 分支：客户端活着 → alive_check 返回 True → wait_health 继续等待返回 True。"""
+    import modelctl.engines.base as base_mod
+
+    calls = []
+
+    def fake_wait_health(url, timeout, api_key=None, alive_check=None):
+        calls.append(alive_check)
+        return True
+
+    monkeypatch.setattr(base_mod, "wait_health", fake_wait_health)
+    p = _write(tmp_path, "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: /x\n")
+    a = get_adapter("vllm")(p, CAPS8)
+    a.spawned_proc = _FakeProc(done=False)  # 客户端活着
+    assert a.wait_ready(42) is True
+    assert calls and calls[0] is not None
+    assert calls[0]() is True

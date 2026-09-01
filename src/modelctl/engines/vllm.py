@@ -26,6 +26,7 @@ from modelctl.core.capabilities import all_vram_total_mb, selected_vram_total_mb
 from modelctl.core.envfile import PROJECT_ROOT
 from modelctl.core.gpu_lock import acquire_gpu_lock
 from modelctl.core.gpu_utils import GPUValidationError
+from modelctl.core.process import wait_health
 from modelctl.engines._download import download_repo
 from modelctl.engines._persist import persist_model_path
 from modelctl.engines.base import EngineAdapter, RequirementError
@@ -260,6 +261,19 @@ class VllmAdapter(EngineAdapter):
         env["PATH"] = str(envs.engine_bin("vllm", "vllm").parent) + os.pathsep + \
             os.environ.get("PATH", os.environ["PATH"])
         return env
+
+    def wait_ready(self, timeout: float) -> bool:
+        """docker 分支：`docker run` 客户端 daemonize 后立刻退出，容器在 daemon 后台持续运行。
+
+        与现状 venv 路径不同——客户端早退(1 秒内 poll() != None)是**预期行为**而非异常，
+        不能传给 wait_health 的 alive_check（否则 600s 超时被 1 秒中断，roll 不出权重加载进度）。
+        容器死亡由模型自身的 /health 失败兜底；用户可 `docker ps -a --filter name=qwen3.8`
+        排查容器退出（OOM / GPU 不够 / 架构不识别等）。
+        """
+        if self._resolve_runtime()[0] == "docker":
+            return wait_health(self.health_url(), timeout, self.upstream_api_key(), alive_check=None)
+        # venv 分支：保持现状行为（本工具拉起的 venv 进程早退 → 中止健康检查）
+        return super().wait_ready(timeout)
 
     def stop_patterns(self) -> list[str]:
         # 用启动命令特征而非引擎短名：`modelctl stop qwen3.8-vllm` 自身命令行

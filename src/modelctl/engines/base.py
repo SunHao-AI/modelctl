@@ -131,7 +131,12 @@ class EngineAdapter(ABC):
         apply_compat(self.profile.name, self.profile.engine, self.warnings, issues)
 
     def wait_ready(self, timeout: float) -> bool:
-        """等待后端就绪（默认：以上游 API key 探测 health_url；本工具拉起的进程早退则立即失败）。"""
+        """等待后端就绪（默认：以上游 API key 探测 health_url；本工具拉起的进程早退则立即失败）。
+
+        docker 分支（spawned_proc 是 `docker run` 客户端）客户端 daemonize 后立刻退出，
+        但容器在 daemon 后台持续运行——此时不能把客户端早退当作早退，否则 600s 超时被
+        1 秒中断，必须等待 /health ready。子类（VllmAdapter）覆盖此方法注入路径判定。
+        """
         alive_check = (lambda: self.spawned_proc.poll() is None) if self.spawned_proc else None
         return wait_health(self.health_url(), timeout, self.upstream_api_key(), alive_check=alive_check)
 
