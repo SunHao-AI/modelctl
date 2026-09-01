@@ -181,6 +181,7 @@ class Color:
 _STYLE_MAP: dict[str, Color] = {
     # 基础状态
     "STATUS_RUNNING": Color("STATUS_RUNNING", fg="32", bold=True),
+    "STATUS_EXTERNAL": Color("STATUS_EXTERNAL", fg="36", bold=True),
     "STATUS_STOPPED": Color("STATUS_STOPPED", fg="90"),
     "STATUS_ERROR": Color("STATUS_ERROR", fg="31", bold=True),
     "STATUS_WARNING": Color("STATUS_WARNING", fg="33"),
@@ -373,6 +374,7 @@ def status_color(state: str) -> str:
     """
     mapping = {
         "运行中": "STATUS_RUNNING",
+        "已外部启动": "STATUS_EXTERNAL",
         "已停止": "STATUS_STOPPED",
         "未就绪": "STATUS_NA",
         "正常": "STATUS_HEALTHY",

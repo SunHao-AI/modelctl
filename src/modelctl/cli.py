@@ -59,6 +59,7 @@ from modelctl.core.nginx_snippet import build_llm_map
 from modelctl.core.process import (
     is_running,
     launch_log,
+    open_local,
     pid_file,
     start_detached,
     stop_instance,
@@ -200,7 +201,7 @@ def _print_table(headers: list[str], rows: list[list], *, dim_indices: tuple[int
     # 分隔线（灰色）
     print(_table_paint("  ".join("-" * w for w in widths), "TABLE_SEP"))
     # 数据行（状态列按值着色，次要列灰色）
-    state_words = {"运行中", "已停止", "正常", "无响应", "PID 异常", "未就绪"}
+    state_words = {"运行中", "已外部启动", "已停止", "正常", "无响应", "PID 异常", "未就绪"}
     for row in rows:
         cells: list[str] = []
         for i in range(col_count):
@@ -231,14 +232,45 @@ def _table_paint(text: str, style: str) -> str:
     return _apply(text, style)
 
 
-def _instance_state(name: str) -> str:
-    """依据 PID 文件与进程存活判断实例状态。"""
+def _port_health_ok(profile: Profile, timeout: float = 2.0) -> bool:
+    """探测实例端口 /health 是否响应（带上游 API key），用于发现非 modelctl 拉起的运行实例。
+
+    绕过代理（open_local）以适配设置了系统代理的机器；任何异常（连接拒绝/超时等）
+    均视为"未运行"，不阻断状态输出。
+    """
+    try:
+        params = profile.engine_config or {}
+        key = params.get("api_key") or profile.api_key
+    except Exception:  # noqa: BLE001
+        key = profile.api_key
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{profile.port}/health", headers=headers)
+        with open_local(req, timeout=timeout) as resp:
+            return 200 <= resp.status < 300
+    except Exception:  # noqa: BLE001 —— 连接失败/超时/HTTP 错误均视为未运行
+        return False
+
+
+def _instance_state(profile: Profile | None = None, name: str | None = None) -> str:
+    """判断实例状态（PID 文件优先，无 PID 时按端口兜底探测"外部运行"）。
+
+    状态取值：
+    - 运行中       PID 文件存在且进程存活（modelctl 拉起或受管实例）
+    - PID 异常     PID 文件存在但进程已退出
+    - 已外部启动   无 PID 文件，但端口 /health 响应正常（如 docker 容器拉起）
+    - 已停止       无 PID 文件且端口无响应
+    """
+    if name is None and profile is not None:
+        name = profile.name
+    assert name is not None
     pf = pid_file(name)
-    if not pf.is_file():
-        return "已停止"
-    if is_running(name):
-        return "运行中"
-    return "PID 异常"
+    if pf.is_file():
+        return "运行中" if is_running(name) else "PID 异常"
+    # 无 PID 文件：兜底探测端口是否由外部服务（docker/supervise 等）撑起
+    if profile is not None and _port_health_ok(profile):
+        return "已外部启动"
+    return "已停止"
 
 
 def _cmd_start(args, models_dir: Path | None, caps) -> int:
@@ -421,9 +453,9 @@ def _cmd_status(args, models_dir: Path | None, caps) -> int:
             return 0
     rows = []
     for p in profiles:
-        state = _instance_state(p.name)
+        state = _instance_state(profile=p)
         health = "-"
-        if state == "运行中":
+        if state in ("运行中", "已外部启动"):
             try:
                 adapter = get_adapter(p.engine)(p, caps)
                 ok = adapter.wait_ready(3.0)
@@ -444,7 +476,7 @@ def _cmd_status(args, models_dir: Path | None, caps) -> int:
         print(f"  Top P：{info['top_p']}")
         print(f"  Top K：{info['top_k']}")
         print(f"  Token 计费：{_price_rate_text(profiles[0])}")
-        if _instance_state(profiles[0].name) == "运行中":
+        if _instance_state(profile=profiles[0]) in ("运行中", "已外部启动"):
             rate = _token_rate_data(profiles[0], caps)
             if rate["source"] is None:
                 rate_text = "输入 -，输出 -（测速失败）"
@@ -509,9 +541,9 @@ def _cmd_list(args, models_dir: Path | None, caps) -> int:
         print(_table_paint(header, "SECTION") + "｜" + route)
         rows = []
         for p in members:
-            state = _instance_state(p.name)
+            state = _instance_state(profile=p)
             rate = "-"
-            if state == "运行中":
+            if state in ("运行中", "已外部启动"):
                 r = _stats_token_rate(p)
                 # 仅显示非零速率：0/0（空闲且无兜底数据）无信息量，统一显示 -
                 if r is not None and (r[0] > 0 or r[1] > 0):
