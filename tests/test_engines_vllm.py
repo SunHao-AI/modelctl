@@ -484,10 +484,13 @@ def test_build_command_docker_template(tmp_path, monkeypatch):
     # CMD 段（image 之后）必须紧跟 serve + 容器内模型路径
     # 不能含 "vllm" 作为独立 token——否则 docker ENTRYPOINT=["vllm"] 会拼成 `vllm vllm serve ...`，
     # argparse 报 "unrecognized arguments: serve /models/..." 退出 (exit code 2)
+    # 镜像 ENTRYPOINT 是 ["vllm", "serve"]，CMD 段（image 之后）第 1 项必须直接是模型路径
+    # 不允许出现独立的 "serve" token（会拼成 `vllm serve serve /models/...` argparse 报错）
+    # 也不允许出现独立的 "vllm" token（会拼成 `vllm vllm serve ...` argparse 报错）
     image_pos = cmd.index(image)
-    assert cmd[image_pos + 1] == "serve"
-    assert cmd[image_pos + 2] == "/models/Qwen3.8-Flash-Next-FP8"
+    assert cmd[image_pos + 1] == "/models/Qwen3.8-Flash-Next-FP8"
     assert "vllm" not in cmd[image_pos + 1:]
+    assert "serve" not in cmd[image_pos + 1:]
     assert "--port" in cmd
     idx = cmd.index("--port")
     assert cmd[idx + 1] == "8000"
@@ -556,13 +559,14 @@ def test_stop_patterns_docker_two_modes(tmp_path, monkeypatch):
     patterns = a.stop_patterns()
     assert len(patterns) == 2
     # 模式 1：docker run --name <name> --gpus <json>——与 build_command 首段连续一致
+    # 镜像 ENTRYPOINT=["vllm", "serve"]：CMD 首项是模型路径（CMD 段不含 "vllm" 或 "serve" token）
     expected_cmdline = " ".join([
         "docker", "run", "--name", "q-vllm",
         "--gpus", '"device=0,1,2,3,4,5,6,7"',
         "-p", "8000:8000",
         "-v", f"{model_dir.parent.as_posix()}:/models:ro",
         "--ipc=host", "--detach", "x/y:z",
-        "serve",
+        "/models/X",
     ])
     assert patterns[0] in expected_cmdline
     # 模式 2：-v <root>:/models:ro——也是 cmdline 子串
