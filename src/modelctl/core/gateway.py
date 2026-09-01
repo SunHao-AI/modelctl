@@ -928,6 +928,7 @@ def create_app(
             except ValueError:
                 _ns_data = None
             _ns_native: dict | None = _ns_data.get("metrics") if isinstance(_ns_data, dict) else None
+            _diff_prompt = _diff_completion = 0
             if _ns_data is not None:
                 if target.collector is not None:
                     usage = _ns_data.get("usage")
@@ -946,30 +947,22 @@ def create_app(
                 if _snap_before is not None and _snap_after is not None:
                     _diff_prompt = max(0, int(round(_snap_after["prompt_total"] - _snap_before["prompt_total"])))
                     _diff_completion = max(0, int(round(_snap_after["predicted_total"] - _snap_before["predicted_total"])))
-                else:
-                    _diff_prompt = _diff_completion = 0
                 _msg = ((_ns_data.get("choices") or [{}])[0].get("message")) or {}
                 logger.info(f"OpenAI 非流式响应摘要 content={str(_msg.get('content'))[:200]!r} " f"tool_calls={bool(_msg.get('tool_calls'))} reasoning={bool(_msg.get('reasoning'))}")
             # 审计：旁路读取 metrics / usage / finish_reason，写入必须包裹，异常不得影响转发
             try:
                 if self_audit_log is not None:
-                    _usage_a: dict | None = None
-                    _native: dict | None = None
+                    _usage_a: dict | None = _ns_data.get("usage") if _ns_data else None
+                    _native: dict | None = _ns_data.get("metrics") if _ns_data else None
                     _finish: str | None = None
-                    try:
-                        _upstream_data = json.loads(upstream.content)
-                        if isinstance(_upstream_data, dict):
-                            _usage_a = _upstream_data.get("usage")
-                            _native = _upstream_data.get("metrics")
-                            _choices_a = _upstream_data.get("choices")
-                            if isinstance(_choices_a, list) and _choices_a:
-                                _c0 = _choices_a[0]
-                                if isinstance(_c0, dict):
-                                    _fr = _c0.get("finish_reason")
-                                    if _fr is not None:
-                                        _finish = _fr
-                    except ValueError:
-                        pass
+                    if _ns_data:
+                        _choices_a = _ns_data.get("choices")
+                        if isinstance(_choices_a, list) and _choices_a:
+                            _c0 = _choices_a[0]
+                            if isinstance(_c0, dict):
+                                _fr = _c0.get("finish_reason")
+                                if _fr is not None:
+                                    _finish = _fr
                     _delta = max(_t1 - _t0, 1e-9)
                     _completion = (_usage_a.get("completion_tokens") or 0) if isinstance(_usage_a, dict) else 0
                     _gm = {
