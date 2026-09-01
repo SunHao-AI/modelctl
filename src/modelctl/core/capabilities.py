@@ -21,7 +21,8 @@ from pathlib import Path
 
 from modelctl.core.envs import MANAGED_ENGINES, engine_bin, has_env
 
-ENGINE_BINARIES = ["ollama", "vllm", "sglang", "unsloth", "llamacpp"]
+ENGINE_BINARIES = ["ollama", "vllm", "sglang", "unsloth", "llamacpp",
+                   "aphrodite", "lmdeploy", "tensorrt_llm", "tokenspeed"]
 
 ENGINE_INSTALL_HINTS = {
     "ollama": "，建议执行：curl -fsSL https://ollama.com/install.sh | sh",
@@ -30,6 +31,10 @@ ENGINE_INSTALL_HINTS = {
     "sglang": "，建议执行：modelctl env setup sglang（与 vllm 依赖互斥，需独立 venv）",
     # 无头推理（studio run）依赖官方安装器搭建的运行时，仅 pip install 不够
     "unsloth": "，建议执行：curl -fsSL https://unsloth.ai/install.sh | sh",
+    "aphrodite": "，建议执行：modelctl env setup aphrodite",
+    "lmdeploy": "，建议执行：modelctl env setup lmdeploy",
+    "tensorrt_llm": "，建议执行：modelctl env setup tensorrt_llm",
+    "tokenspeed": "，建议执行：modelctl env setup tokenspeed",
     # llamacpp 提示较长（源码下载 + 编译命令），由 cli._cmd_probe 单独多行输出
 }
 

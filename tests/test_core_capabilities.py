@@ -47,8 +47,11 @@ def _venv_bin_name(engine: str, name: str) -> str:
 
 
 def test_engine_binaries_list_kept():
-    """ENGINE_BINARIES 保持 5 项（Task 8 收尾前维持旧 API 兼容）。"""
-    assert ENGINE_BINARIES == ["ollama", "vllm", "sglang", "unsloth", "llamacpp"]
+    """ENGINE_BINARIES 保持已注册引擎列表（新增 aphrodite/lmdeploy/tensorrt_llm/tokenspeed）。"""
+    assert ENGINE_BINARIES == [
+        "ollama", "vllm", "sglang", "unsloth", "llamacpp",
+        "aphrodite", "lmdeploy", "tensorrt_llm", "tokenspeed",
+    ]
 
 
 def test_which_binaries_vllm_env_present(tmp_path, monkeypatch):
@@ -120,6 +123,11 @@ def test_engine_install_hints_vllm_sglang():
     """vllm / sglang 提示语包含 modelctl env setup。"""
     assert "modelctl env setup" in ENGINE_INSTALL_HINTS["vllm"]
     assert "modelctl env setup" in ENGINE_INSTALL_HINTS["sglang"]
+
+
+def test_engine_install_hints_tensorrt_llm():
+    """tensorrt_llm 提示语指向 modelctl env setup tensorrt_llm。"""
+    assert "modelctl env setup tensorrt_llm" in ENGINE_INSTALL_HINTS["tensorrt_llm"]
 
 
 def test_probe_managed_engines_absent_by_default(tmp_path, monkeypatch):

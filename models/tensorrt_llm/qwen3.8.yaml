@@ -1,0 +1,18 @@
+group: qwen3.8
+port: 8120
+api_key: ${API_KEY}
+
+tensorrt_llm:
+  model: /raid5/sh/model-hf/Qwen/Qwen3.8-27B
+  engine_dir: /raid5/sh/trt_engines/qwen3.8-tp4-fp8
+  tensor_parallel_size: 4
+  quantization: fp8
+  max_input_len: 32768
+  max_output_len: 8192
+  max_batch_size: 64
+  # docker_image: nvcr.io/nvidia/tensorrt-llm:tag  # 可选，配置后优先 docker 模式
+  extra_args: "--use_fused_mlp --enable_chunked_context"
+
+usage:
+  price_in: 0.5
+  price_out: 1.0

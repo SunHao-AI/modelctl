@@ -1,0 +1,16 @@
+group: qwen3.5-397b
+port: 8150
+api_key: ${API_KEY}
+
+tokenspeed:
+  model: Qwen/Qwen3.5-397B-A17B
+  tensor_parallel_size: 8
+  max_model_len: 131072
+  docker_image: lightseekorg/tokenspeed:latest
+  download:
+    modelscope_id: Qwen/Qwen3.5-397B-A17B
+  extra_args: "--enable-prefix-caching"
+
+usage:
+  price_in: 1.0
+  price_out: 3.0

@@ -1,0 +1,15 @@
+group: qwen3.8
+port: 8130
+api_key: ${API_KEY}
+
+lmdeploy:
+  model: /raid5/sh/model-hf/Qwen/Qwen3.8-27B
+  tensor_parallel_size: 1
+  session_len: 32768
+  cache_max_entry_count: 0.8
+  quant_policy: 4
+  extra_args: "--enable-prefix-caching"
+
+usage:
+  price_in: 0.5
+  price_out: 1.0
