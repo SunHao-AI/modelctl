@@ -40,7 +40,7 @@ def _make_env(venv_root: Path, engine: str, windows: bool) -> Path:
 def test_managed_engines_constant():
     from modelctl.core.envs import MANAGED_ENGINES
 
-    assert MANAGED_ENGINES == ("vllm", "sglang")
+    assert MANAGED_ENGINES == ("vllm", "sglang", "aphrodite", "lmdeploy", "tokenspeed")
 
 
 def test_path_constants():
@@ -248,6 +248,10 @@ def test_status_reads_version_and_packages_windows(tmp_path, monkeypatch):
     assert result["vllm"] == {"exists": True, "python": "3.12.1", "packages": {"vllm": "0.27.0"}}
     # sglang：未建环境
     assert result["sglang"] == {"exists": False}
+    # 新增托管引擎：未建环境
+    assert result["aphrodite"] == {"exists": False}
+    assert result["lmdeploy"] == {"exists": False}
+    assert result["tokenspeed"] == {"exists": False}
 
 
 def test_status_reads_version_and_packages_linux(tmp_path, monkeypatch):
@@ -273,6 +277,10 @@ def test_status_reads_version_and_packages_linux(tmp_path, monkeypatch):
     result = status()
     assert result["sglang"] == {"exists": True, "python": "3.12.1", "packages": {"sglang": "0.5.9"}}
     assert result["vllm"] == {"exists": False}
+    # 新增托管引擎：未建环境
+    assert result["aphrodite"] == {"exists": False}
+    assert result["lmdeploy"] == {"exists": False}
+    assert result["tokenspeed"] == {"exists": False}
 
 
 def test_status_absent_engines_no_python_no_packages(tmp_path, monkeypatch):
@@ -282,6 +290,9 @@ def test_status_absent_engines_no_python_no_packages(tmp_path, monkeypatch):
     result = status()
     assert result["vllm"] == {"exists": False}
     assert result["sglang"] == {"exists": False}
+    assert result["aphrodite"] == {"exists": False}
+    assert result["lmdeploy"] == {"exists": False}
+    assert result["tokenspeed"] == {"exists": False}
 
 
 # === Task 7：engine_site_packages ===

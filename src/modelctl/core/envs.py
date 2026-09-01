@@ -13,7 +13,7 @@ from pathlib import Path
 from modelctl.core.envfile import PROJECT_ROOT
 
 # 托管引擎（仅 Linux 部署，venv 落在 .venvs/<engine>，子项目锁定在 envs/<engine>/pyproject.toml）
-MANAGED_ENGINES = ("vllm", "sglang")
+MANAGED_ENGINES = ("vllm", "sglang", "aphrodite", "lmdeploy", "tokenspeed")
 # 独立 venv 子项目（差异：项目内 gateway/ 自带 pyproject，模型引擎在 envs/ 目录且仅 Linux）
 GATEWAY_SUBPROJECT: str | None = "gateway"
 ENVS_ROOT = PROJECT_ROOT / "envs"

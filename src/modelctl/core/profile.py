@@ -24,7 +24,8 @@ from loguru import logger
 
 from modelctl.core.envfile import PROJECT_ROOT
 
-KNOWN_ENGINES = {"llamacpp", "ollama", "vllm", "sglang", "unsloth"}
+KNOWN_ENGINES = {"llamacpp", "ollama", "vllm", "sglang", "unsloth",
+                 "aphrodite", "lmdeploy", "tensorrt_llm", "tokenspeed"}
 _VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
