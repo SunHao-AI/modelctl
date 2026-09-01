@@ -40,7 +40,7 @@ def _make_env(venv_root: Path, engine: str, windows: bool) -> Path:
 def test_managed_engines_constant():
     from modelctl.core.envs import MANAGED_ENGINES
 
-    assert MANAGED_ENGINES == ("vllm", "sglang", "aphrodite", "lmdeploy", "tokenspeed")
+    assert MANAGED_ENGINES == ("vllm", "sglang", "aphrodite", "lmdeploy", "tokenspeed", "tensorrt_llm")
 
 
 def test_path_constants():
