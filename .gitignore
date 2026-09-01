@@ -33,3 +33,5 @@ model-gguf/
 *.swp
 .python-header.yaml
 data/
+
+/data/audit/

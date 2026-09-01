@@ -597,6 +597,134 @@ def test_pre_start_persists_local_path_for_docker(tmp_path, monkeypatch):
     assert "/models/X" in cmd or f"models{os.sep}X" in " ".join(cmd)
 
 
+# ---- Task 3 (per-request-audit): build_command 新 flag + 版本探测 ----
+
+
+def test_build_command_with_per_request_metrics_flag(tmp_path, monkeypatch):
+    """venv 路径：yaml 两字段同时 true → cmd 含两个 flag。"""
+    monkeypatch.setenv("HF_HOME", "/raid5/sh/model/huggingface")
+    _stub_venv(tmp_path, monkeypatch, "vllm")
+    p = _write(
+        tmp_path,
+        "name: q\nengine: vllm\nport: 8000\nvllm:\n"
+        "  model: Qwen/Qwen3-32B\n"
+        "  enable_per_request_metrics: true\n"
+        "  enable_force_include_usage: true\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    a.check_requirements()
+    cmd, _ = a.build_command()
+    assert "--enable-per-request-metrics" in cmd
+    assert "--enable-force-include-usage" in cmd
+
+
+def test_build_command_default_unchanged(tmp_path, monkeypatch):
+    """关键守门：未配置两个新字段 → cmd 不含新 flag，且既有字段与改造前一致。"""
+    monkeypatch.setenv("HF_HOME", "/raid5/sh/model/huggingface")
+    _stub_venv(tmp_path, monkeypatch, "vllm")
+    p = _write(
+        tmp_path,
+        "name: q\nengine: vllm\nport: 8000\nvllm:\n"
+        "  model: Qwen/Qwen3-32B\n  tensor_parallel_size: 2\n  max_model_len: 32768\n"
+        '  extra_args: "--enable-prefix-caching"\n',
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    a.check_requirements()
+    cmd, _ = a.build_command()
+    assert "--enable-per-request-metrics" not in cmd
+    assert "--enable-force-include-usage" not in cmd
+    assert cmd[cmd.index("--tensor-parallel-size") + 1] == "2"
+    assert cmd[cmd.index("--max-model-len") + 1] == "32768"
+    assert cmd[cmd.index("--served-model-name") + 1] == "q"
+    assert "--enable-prefix-caching" in cmd
+
+
+def test_build_command_only_force_include_usage(tmp_path, monkeypatch):
+    """venv 路径：只开 enable_force_include_usage=true → 仅含该 flag。"""
+    monkeypatch.setenv("HF_HOME", "/raid5/sh/model/huggingface")
+    _stub_venv(tmp_path, monkeypatch, "vllm")
+    p = _write(
+        tmp_path,
+        "name: q\nengine: vllm\nport: 8000\nvllm:\n"
+        "  model: Qwen/Qwen3-32B\n"
+        "  enable_force_include_usage: true\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    cmd, _ = a.build_command()
+    assert "--enable-force-include-usage" in cmd
+    assert "--enable-per-request-metrics" not in cmd
+
+
+def test_requirement_version_guard(tmp_path, monkeypatch):
+    """venv 路径：开启 flag + 版本 < 0.13.0 → RequirementError。"""
+    monkeypatch.setenv("HF_HOME", "/raid5/sh/model/huggingface")
+    _stub_venv(tmp_path, monkeypatch, "vllm")
+    monkeypatch.setattr("modelctl.core.envs.vllm_version", lambda: (0, 12, 0))
+    p = _write(
+        tmp_path,
+        "name: q\nengine: vllm\nport: 8000\nvllm:\n"
+        "  model: Qwen/Qwen3-32B\n"
+        "  enable_per_request_metrics: true\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    with pytest.raises(RequirementError):
+        a.check_requirements()
+
+
+def test_requirement_version_missing_warns_not_raises(tmp_path, monkeypatch):
+    """venv 路径：版本探测失败（None）→ 仅 warning，放行。"""
+    monkeypatch.setenv("HF_HOME", "/raid5/sh/model/huggingface")
+    _stub_venv(tmp_path, monkeypatch, "vllm")
+    monkeypatch.setattr("modelctl.core.envs.vllm_version", lambda: None)
+    p = _write(
+        tmp_path,
+        "name: q\nengine: vllm\nport: 8000\nvllm:\n"
+        "  model: Qwen/Qwen3-32B\n"
+        "  enable_per_request_metrics: true\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    a.check_requirements()  # 不 raise
+
+
+def test_requirement_not_flagged_no_version_check(tmp_path, monkeypatch):
+    """venv 路径：两字段均缺省 → check_requirements 不调 vllm_version。"""
+    calls = []
+    monkeypatch.setenv("HF_HOME", "/raid5/sh/model/huggingface")
+    _stub_venv(tmp_path, monkeypatch, "vllm")
+
+    def tracker():
+        calls.append(1)
+        return (0, 27, 0)
+
+    monkeypatch.setattr("modelctl.core.envs.vllm_version", tracker)
+    p = _write(
+        tmp_path,
+        "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: Qwen/Qwen3-32B\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    a.check_requirements()
+    assert calls == []  # 未触发版本探测
+
+
+def test_build_command_docker_with_per_request_metrics_flag(tmp_path, monkeypatch):
+    """docker 路径：yaml 配 docker_image + 两字段 true → docker run 的 vllm 参数含两个 flag。"""
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    model_dir = tmp_path / "m" / "Qwen3.8"
+    model_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: vllm\nport: 8000\nvllm:\n"
+        f"  model: {model_dir}\n"
+        "  docker_image: vllm/vllm-openai:qwen38-flash-next\n"
+        "  enable_per_request_metrics: true\n"
+        "  enable_force_include_usage: true\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    cmd, _ = a.build_command()
+    assert "--enable-per-request-metrics" in cmd
+    assert "--enable-force-include-usage" in cmd
+
+
 def test_full_vllm_suite_no_regression(tmp_path, monkeypatch):
     """总结算：所有未配 docker_image 的 vllm yaml，build_command 走托管 venv 路径。"""
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)

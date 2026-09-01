@@ -66,6 +66,10 @@ vllm:
   # 回退方式：从 extra_args 删除 --speculative-config '{\"method\":\"mtp\",\"num_speculative_tokens\":3}' 即可
   # 参考：recipes.vllm.ai 官方 recipe；vLLM MTP 文档（docs.vllm.ai 搜索 "MTP"）
   # batch 调优（可选，与 MTP 正交）：--max-num-batched-tokens 8192 --max-num-seqs 256
+  # 请求级审计（网关侧记录每请求 TTFT/tps；见 .env 的 AUDIT_* 与 README「请求级审计」）
+  enable_per_request_metrics: true
+  # 保证流式末块回传 usage（否则网关侧走 collector 差分估算 token 数）
+  enable_force_include_usage: true
 
 usage:
   # price_in：每千输入 token 计价（元），供 cc-switch 用量统计
