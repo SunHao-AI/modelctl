@@ -23,15 +23,19 @@
 """
 
 import asyncio
+import datetime as _dt
 import json
 import os
+import time
 import urllib.error
 import urllib.request
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from loguru import logger
 
+from modelctl.core.audit import NoopAuditLog, RequestAuditLog, _new_audit_log
 from modelctl.core.capabilities import Capabilities
 from modelctl.core.envfile import load_env
 from modelctl.core.process import is_running, open_local
@@ -180,6 +184,8 @@ class GatewayModel:
     # 用量收集器：vLLM 等引擎自带 token 计数 gauge 恒为 0，须由网关按真实请求累计；
     # 由 create_app 按引擎能力注入（None = 走引擎 /metrics 轮询统计）
     collector: UsageCollector | None = None
+    # 请求级审计日志：create_app 统一注入（None 表示仅静态信息，handler 跳过写入）
+    audit_log: RequestAuditLog | NoopAuditLog | None = None
 
     def upstream_api_key(self) -> str | None:
         """上游 Bearer key：unsloth 等自管认证引擎的 key 每次启动自动生成，
@@ -187,6 +193,61 @@ class GatewayModel:
         if self.adapter is not None:
             return self.adapter.upstream_api_key()
         return self.api_key
+
+
+def _build_audit_entry(
+    *,
+    model_name: str,
+    profile_name: str,
+    profile_engine: str,
+    path: str,
+    stream: bool,
+    native_metrics: dict | None,
+    usage: dict | None,
+    gateway_metrics: dict | None,
+    status_code: int,
+    error: str | None,
+    finish_reason: str | None,
+    input_char_len: int,
+    collector_diff_prompt: int = 0,
+    collector_diff_completion: int = 0,
+) -> dict:
+    """统一 build 入口（纯函数，无副作用）；token 取值优先级见 spec §2 / §4.2。
+
+    source：上游返回原生 per-request metrics 时为 vllm_native，否则 gateway_estimate。
+    tokens_source：响应含 usage 为 response-usage，否则 collector-diff（取 collector
+    snapshot 差分 collector_diff_*/已 max(0) 保护负值）；usage 字段名兼容 OpenAI
+    （prompt/completion_tokens）与 Anthropic（input/output_tokens）。
+    """
+    source = "vllm_native" if native_metrics else "gateway_estimate"
+    if usage:
+        tokens_source = "response-usage"
+        prompt = usage.get("prompt_tokens", usage.get("input_tokens", 0))
+        completion = usage.get("completion_tokens", usage.get("output_tokens", 0))
+        total = usage.get("total_tokens") or ((prompt or 0) + (completion or 0) or None)
+    else:
+        tokens_source = "collector-diff"
+        prompt = max(0, int(collector_diff_prompt))
+        completion = max(0, int(collector_diff_completion))
+        total = prompt + completion if (prompt or completion) else None
+    return {
+        "ts": _dt.datetime.now().astimezone().isoformat(timespec="milliseconds"),
+        "model": profile_name or model_name,
+        "engine": profile_engine,
+        "path": path,
+        "stream": stream,
+        "source": source,
+        "tokens_source": tokens_source,
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total,
+        "input_char_len": input_char_len,
+        "native_metrics": native_metrics,
+        "gateway_metrics": gateway_metrics,
+        "status_code": status_code,
+        "error": error,
+        "finish_reason": finish_reason,
+    }
 
 
 def get_collector(profile: Profile, adapter: EngineAdapter, data_dir: Path) -> "UsageCollector | None":
@@ -346,11 +407,13 @@ def create_app(
     context_rules: dict[str, list[ContextSwitchRule]] | None = None,
     groups: dict[str, list[GatewayModel]] | None = None,
     stats_data_dir: Path | None = None,
+    audit_log: RequestAuditLog | NoopAuditLog | None = None,
 ):
     """构建 FastAPI 网关应用（transport 供测试注入 httpx.MockTransport）。
 
     环境变量：GATEWAY_DEFAULT_MODEL（默认模型，缺省/未知 model 回退目标）；
     GATEWAY_CONTEXT_SWITCH（JSON 上下文切换规则，见 load_context_switch_rules）。
+    audit_log：请求级审计日志；缺省时按 AUDIT_DIR（默认 data/audit）从 env 构造。
     groups：家族索引（group -> 成员列表）；调用方注入 registry 时缺省为空 dict，
     未注入时自动从 models/*.yaml 构建。
     stats_data_dir：用量持久化目录（与 stats 服务共用，使网关累计的 token 跨进程保留）。
@@ -371,12 +434,30 @@ def create_app(
     # FastAPI 默认重定向的 Location 是根相对路径（/v1/），经 B 机 nginx 前缀
     # 路由后客户端跟随重定向会丢失 /<node>/llm 前缀，第二次请求落空（502）。
     # 裸 /v1 由下方 @app.post("/v1") 直接处理，返回明确 404 而非 307。
+    # 请求级审计日志：缺省从 AUDIT_DIR（默认 data/audit）构造；启动幂等的后台清理线程，
+    # 应用关闭时 destroy 回收（绝不阻塞请求路径）。lifespan 管理线程生命周期。
+    audit_log = audit_log or _new_audit_log(Path(os.environ.get("AUDIT_DIR", "data/audit")))
+
+    @asynccontextmanager
+    async def _lifespan(_app: "FastAPI"):
+        """应用生命周期：启动审计清理线程；关闭时 destroy 回收。"""
+        audit_log.ensure_cleanup_thread()
+        try:
+            yield
+        finally:
+            try:
+                audit_log.destroy()
+            except Exception as exc:  # noqa: BLE001 — 关闭阶段异常不得冒泡
+                logger.warning(f"审计日志关闭异常：{exc}")
+
     app = FastAPI(
         title="modelctl gateway",
         docs_url="/docs",
         openapi_url="/openapi.json",
         redirect_slashes=False,
+        lifespan=_lifespan,
     )
+    app.state.audit_log = audit_log
 
     # 用量收集：为注册表中"引擎 metrics 不可精确轮询"（vLLM token 计数恒 0）的模型注入
     # 收集器，网关按真实请求累计；其余模型走引擎 /metrics 轮询（stats 服务），无需注入。
@@ -387,6 +468,7 @@ def create_app(
                 model.adapter,
                 stats_data_dir,
             )
+        model.audit_log = audit_log
 
     @app.get("/v1/models")
     async def list_models() -> dict:
@@ -444,6 +526,8 @@ def create_app(
                 status_code=400,
                 content={"error": {"message": "请求体必须是 JSON", "type": "invalid_request_error"}},
             )
+        # 审计：请求体字节长度（从 body 计算，request.content 在 Starlette 里可能已被消费）
+        body_char_len = len(json.dumps(body, ensure_ascii=False, separators=(",", ":")))
         logger.info(
             f"Anthropic 代理请求 model={body.get('model')!r} stream={body.get('stream')} "
             f"max_tokens={body.get('max_tokens')} tools={'tools' in body} "
@@ -461,6 +545,8 @@ def create_app(
                 status_code=404,
                 content={"error": {"message": err_msg, "type": "invalid_request_error"}},
             )
+        # 审计：每次请求取目标模型的 audit_log（create_app 已统一注入；短路判断避免 502/404 无谓兜底）
+        self_audit_log = target.audit_log
         # 改写为后端期望的模型名（同 OpenAI 端点）
         body["model"] = target.upstream_model
         _normalize_reasoning_effort(body)
@@ -482,10 +568,13 @@ def create_app(
             headers["Authorization"] = f"Bearer {up_key}"
         url = f"{target.backend_url}/v1/messages"
         client = httpx.AsyncClient(timeout=read_timeout, transport=transport)
+        # 审计用计时基线（Anthropic 全路径；native_metrics 恒 None）
+        _t0 = time.monotonic()
         try:
             if body.get("stream"):
                 req = client.build_request("POST", url, json=body, headers=headers)
                 upstream = await client.send(req, stream=True)
+                _t_first = time.monotonic()
                 ctype = upstream.headers.get("content-type")
                 if upstream.status_code >= 400:
                     content = await upstream.aread()
@@ -497,6 +586,7 @@ def create_app(
                     pending = b""
                     texts: list[str] = []
                     thinking_len = 0
+                    seen_usage: dict | None = None  # 审计：message_delta.usage（流式最终用量）
                     try:
                         async for chunk in upstream.aiter_bytes():
                             if not isinstance(chunk, bytes):
@@ -516,6 +606,11 @@ def create_app(
                                     data = json.loads(payload)
                                 except ValueError:
                                     continue
+                                # 审计：取 message_delta 的 usage（增量累计，末次即最终）
+                                if data.get("type") == "message_delta":
+                                    _u = data.get("usage")
+                                    if isinstance(_u, dict):
+                                        seen_usage = _u
                                 # content_block_delta：text_delta -> 正文，thinking_delta -> 思考
                                 delta = data.get("delta")
                                 if isinstance(delta, dict) and delta.get("type") == "text_delta" and delta.get("text"):
@@ -526,6 +621,31 @@ def create_app(
                         if pending:
                             yield pending
                         logger.info(f"Anthropic 流式响应摘要 content={''.join(texts)[:200]!r} thinking_len={thinking_len}")
+                        # 审计：写入必须包裹，异常不得中断客户端流
+                        try:
+                            if self_audit_log is not None:
+                                _gen_ms = (time.monotonic() - _t0) * 1000.0
+                                _gm = {
+                                    "ttft_ms": round((_t_first - _t0) * 1000.0, 2),
+                                    "generation_time_ms": round(_gen_ms, 2),
+                                    "tokens_per_second": None,  # Anthropic usage 不保证累计，无法可靠折算速率
+                                }
+                                self_audit_log.record(_build_audit_entry(
+                                    model_name=target.name,
+                                    profile_name=target.name,
+                                    profile_engine=target.engine,
+                                    path="messages",
+                                    stream=True,
+                                    native_metrics=None,  # Anthropic 响应无原生 metrics
+                                    usage=seen_usage,
+                                    gateway_metrics=_gm,
+                                    status_code=upstream.status_code,
+                                    error=None,
+                                    finish_reason=None,
+                                    input_char_len=body_char_len,
+                                ))
+                        except Exception as exc:
+                            logger.warning(f"审计写盘异常（SSE 不中断）: {exc}")
                         await client.aclose()
 
                 return StreamingResponse(_raw_sse(), status_code=upstream.status_code, media_type=ctype)
@@ -537,6 +657,43 @@ def create_app(
                 logger.info(f"Anthropic 非流式响应摘要 content={''.join(_texts)[:200]!r} thinking_len={_thinking_len}")
             except ValueError:
                 pass
+            # 审计：Anthropic 非流式 usage 在响应根级，无原生 metrics
+            try:
+                if self_audit_log is not None:
+                    _t1 = time.monotonic()
+                    _usage = None
+                    try:
+                        _d = json.loads(upstream.content)
+                        if isinstance(_d, dict):
+                            _usage = _d.get("usage")
+                    except ValueError:
+                        pass
+                    _delta = max(_t1 - _t0, 1e-9)
+                    _gm = {
+                        "ttft_ms": None,  # 非流式无首延迟
+                        "generation_time_ms": round(_delta * 1000.0, 2),
+                        "tokens_per_second": (
+                            round((_usage.get("output_tokens") or 0) / _delta, 1)
+                            if _usage and _usage.get("output_tokens")
+                            else None
+                        ),
+                    }
+                    self_audit_log.record(_build_audit_entry(
+                        model_name=target.name,
+                        profile_name=target.name,
+                        profile_engine=target.engine,
+                        path="messages",
+                        stream=False,
+                        native_metrics=None,  # Anthropic 响应无原生 metrics
+                        usage=_usage if isinstance(_usage, dict) else None,
+                        gateway_metrics=_gm,
+                        status_code=upstream.status_code,
+                        error=None,
+                        finish_reason=None,  # Anthropic 非流式无 finish_reason 字段
+                        input_char_len=body_char_len,
+                    ))
+            except Exception as exc:
+                logger.warning(f"审计写盘异常（转发不受影响）: {exc}")
             resp = Response(
                 status_code=upstream.status_code,
                 content=upstream.content,
@@ -570,6 +727,8 @@ def create_app(
                 status_code=400,
                 content={"error": {"message": "请求体必须是 JSON", "type": "invalid_request_error"}},
             )
+        # 审计：请求体字节长度（从 body 计算，request.content 在 Starlette 里可能已被消费）
+        body_char_len = len(json.dumps(body, ensure_ascii=False, separators=(",", ":")))
         logger.info(
             f"OpenAI 代理请求 {path} model={body.get('model')!r} stream={body.get('stream')} "
             f"max_tokens={body.get('max_tokens')} tools={'tools' in body} "
@@ -590,6 +749,8 @@ def create_app(
             if switched is not None and switched.name != target.name:
                 logger.info(f"上下文切换：{target.name} -> {switched.name}（估算输入 {prompt_tokens} tokens）")
                 target = switched
+        # 审计：每次请求取目标模型的 audit_log（create_app 已统一注入）
+        self_audit_log = target.audit_log
         # 改写为后端期望的模型名（ollama 严格校验，llamacpp 忽略）
         body["model"] = target.upstream_model
         _normalize_reasoning_effort(body)
@@ -612,10 +773,17 @@ def create_app(
         # 返回时立即关闭，而 SSE 是惰性迭代的，真实 uvicorn 下连接会被提前切断。
         # 因此手动管理生命周期：非流式读完即关；流式由生成器在迭代结束后关闭。
         client = httpx.AsyncClient(timeout=read_timeout, transport=transport)
+        # 审计用计时基线：t0=发送前；t_first=上游流式首包（TTFT 用，流式分支赋值）
+        _t0 = time.monotonic()
+        _t_first: float | None = None
         try:
             if body.get("stream"):
+                # 审计差分基线：发送前取 snapshot（无副作用；禁止用 get_snapshot 触发 HTTP）
+                _collector = target.collector
+                _snap_before = _collector.snapshot() if _collector is not None and hasattr(_collector, "snapshot") else None
                 req = client.build_request("POST", url, json=body, headers=headers)
                 upstream = await client.send(req, stream=True)  # stream=True：连接保持打开，逐块读 SSE
+                _t_first = time.monotonic()
                 ctype = upstream.headers.get("content-type")
                 if upstream.status_code >= 400:
                     content = await upstream.aread()
@@ -647,6 +815,10 @@ def create_app(
                     """
                     pending = b""
                     collected: dict = {"content": [], "reasoning": [], "tool_calls": False}
+                    # 审计旁路状态：末块 metrics / usage 沿用（vLLM 仅在末块回带）
+                    seen_metrics: dict | None = None
+                    seen_usage: dict | None = None
+                    seen_finish: str | None = None
                     try:
                         async for chunk in upstream.aiter_bytes():
                             if not isinstance(chunk, bytes):
@@ -666,6 +838,12 @@ def create_app(
                                 except ValueError:
                                     continue
                                 _record_usage(data, seen_tokens)
+                                _m = data.get("metrics")
+                                if isinstance(_m, dict):
+                                    seen_metrics = _m
+                                _u = data.get("usage")
+                                if isinstance(_u, dict):
+                                    seen_usage = _u
                                 delta = ((data.get("choices") or [{}])[0].get("delta")) or {}
                                 if delta.get("content"):
                                     collected["content"].append(delta["content"])
@@ -673,6 +851,8 @@ def create_app(
                                     collected["reasoning"].append(delta.get("reasoning") or delta.get("reasoning_content"))
                                 if delta.get("tool_calls"):
                                     collected["tool_calls"] = True
+                                if delta.get("finish_reason"):
+                                    seen_finish = delta.get("finish_reason")
                     finally:
                         if pending:
                             yield pending
@@ -681,10 +861,50 @@ def create_app(
                             f"reasoning_len={sum(len(x) for x in collected['reasoning'])} "
                             f"tool_calls={collected['tool_calls']}"
                         )
+                        # 审计差分终点：aclose 之前取，确保所有 chunk 的 record_tokens 已完成
+                        _snap_after = collector.snapshot() if collector is not None and hasattr(collector, "snapshot") else None
+                        if _snap_before is not None and _snap_after is not None:
+                            _diff_prompt = max(0, int(round(_snap_after["prompt_total"] - _snap_before["prompt_total"])))
+                            _diff_completion = max(0, int(round(_snap_after["predicted_total"] - _snap_before["predicted_total"])))
+                        else:
+                            _diff_prompt = _diff_completion = 0
+                        # 审计：写入必须包裹，异常不得中断客户端流（在 aclose 之前记录）
+                        try:
+                            if self_audit_log is not None:
+                                _elapsed = time.monotonic() - _t0
+                                _gm = {
+                                    "ttft_ms": round((_t_first - _t0) * 1000.0, 2) if _t_first is not None else None,
+                                    "generation_time_ms": round(_elapsed * 1000.0, 2),
+                                    "tokens_per_second": (
+                                        round((seen_usage.get("completion_tokens") or 0) / _elapsed, 1)
+                                        if seen_usage and _elapsed > 0 else None
+                                    ),
+                                }
+                                self_audit_log.record(_build_audit_entry(
+                                    model_name=target.name,
+                                    profile_name=target.name,
+                                    profile_engine=target.engine,
+                                    path=path,
+                                    stream=True,
+                                    native_metrics=seen_metrics,
+                                    usage=seen_usage,
+                                    gateway_metrics=_gm,
+                                    status_code=upstream.status_code,
+                                    error=None,
+                                    finish_reason=seen_finish,
+                                    input_char_len=body_char_len,
+                                    collector_diff_prompt=_diff_prompt,
+                                    collector_diff_completion=_diff_completion,
+                                ))
+                        except Exception as exc:
+                            logger.warning(f"审计写盘异常（SSE 不中断）: {exc}")
                         await client.aclose()
 
                 return StreamingResponse(_sse_stream(), status_code=upstream.status_code, media_type=ctype)
+            # 审计差分基线：发送前取 snapshot（无副作用；禁止用 get_snapshot 触发 HTTP）
+            _snap_before = target.collector.snapshot() if target.collector is not None and hasattr(target.collector, "snapshot") else None
             upstream = await client.post(url, json=body, headers=headers)
+            _t1 = time.monotonic()
             # 非流式：响应体完整读回，直接统计 usage（后端未回 usage 时静默跳过）
             if target.collector is not None:
                 try:
@@ -697,12 +917,66 @@ def create_app(
                             target.collector.record_tokens(prompt, completion)
                 except ValueError:
                     pass
+            # 审计差分终点：record_tokens 完成后取；无 usage 时差分即 0（确无 token 可记）
+            _snap_after = target.collector.snapshot() if target.collector is not None and hasattr(target.collector, "snapshot") else None
+            if _snap_before is not None and _snap_after is not None:
+                _diff_prompt = max(0, int(round(_snap_after["prompt_total"] - _snap_before["prompt_total"])))
+                _diff_completion = max(0, int(round(_snap_after["predicted_total"] - _snap_before["predicted_total"])))
+            else:
+                _diff_prompt = _diff_completion = 0
             try:
                 _data = json.loads(upstream.content)
                 _msg = ((_data.get("choices") or [{}])[0].get("message")) or {}
                 logger.info(f"OpenAI 非流式响应摘要 content={str(_msg.get('content'))[:200]!r} " f"tool_calls={bool(_msg.get('tool_calls'))} reasoning={bool(_msg.get('reasoning'))}")
             except ValueError:
                 pass
+            # 审计：旁路读取 metrics / usage / finish_reason，写入必须包裹，异常不得影响转发
+            try:
+                if self_audit_log is not None:
+                    _usage_a: dict | None = None
+                    _native: dict | None = None
+                    _finish: str | None = None
+                    try:
+                        _upstream_data = json.loads(upstream.content)
+                        if isinstance(_upstream_data, dict):
+                            _usage_a = _upstream_data.get("usage")
+                            _native = _upstream_data.get("metrics")
+                            _choices_a = _upstream_data.get("choices")
+                            if isinstance(_choices_a, list) and _choices_a:
+                                _c0 = _choices_a[0]
+                                if isinstance(_c0, dict):
+                                    _fr = _c0.get("finish_reason")
+                                    if _fr is not None:
+                                        _finish = _fr
+                    except ValueError:
+                        pass
+                    _delta = max(_t1 - _t0, 1e-9)
+                    _completion = (_usage_a.get("completion_tokens") or 0) if isinstance(_usage_a, dict) else 0
+                    _gm = {
+                        "ttft_ms": None,  # 非流式无首延迟
+                        "generation_time_ms": round(_delta * 1000.0, 2),
+                        "tokens_per_second": (
+                            round(_completion / _delta, 1) if (_completion and _delta > 0) else None
+                        ),
+                    }
+                    self_audit_log.record(_build_audit_entry(
+                        model_name=target.name,
+                        profile_name=target.name,
+                        profile_engine=target.engine,
+                        path=path,
+                        stream=False,
+                        native_metrics=_native if isinstance(_native, dict) else None,
+                        usage=_usage_a if isinstance(_usage_a, dict) else None,
+                        gateway_metrics=_gm,
+                        status_code=upstream.status_code,
+                        error=None,
+                        finish_reason=_finish,
+                        input_char_len=body_char_len,
+                        collector_diff_prompt=_diff_prompt,
+                        collector_diff_completion=_diff_completion,
+                    ))
+            except Exception as exc:
+                logger.warning(f"审计写盘异常（转发不受影响）: {exc}")
             resp = Response(
                 status_code=upstream.status_code,
                 content=upstream.content,

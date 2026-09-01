@@ -19,6 +19,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from loguru import logger
+
 from modelctl.core import envs
 from modelctl.core.capabilities import all_vram_total_mb, selected_vram_total_mb
 from modelctl.core.envfile import PROJECT_ROOT
@@ -27,6 +29,9 @@ from modelctl.core.gpu_utils import GPUValidationError
 from modelctl.engines._download import download_repo
 from modelctl.engines._persist import persist_model_path
 from modelctl.engines.base import EngineAdapter, RequirementError
+
+# per-request metrics flag 所需最低 vLLM 版本（2026-08 实测值；>= 该版本 --enable-per-request-metrics 可用）
+MIN_VLLM_PER_REQUEST = (0, 13, 0)
 
 
 class VllmAdapter(EngineAdapter):
@@ -63,6 +68,17 @@ class VllmAdapter(EngineAdapter):
             envs.ensure_env("vllm")
             if not cfg.get("model") and not cfg.get("download"):
                 raise RequirementError(f"{self.profile.name}：vllm.model 必填（或配置 download 段自动下载）")
+            # per-request 版本门控（仅开启任一 flag 时才探测；docker 路径跳过——版本真相在 docker 镜像 tag）
+            if cfg.get("enable_per_request_metrics") or cfg.get("enable_force_include_usage"):
+                v = envs.vllm_version()  # 经模块属性访问，test 可 monkeypatch 该属性
+                if v is None:
+                    logger.warning("无法探测 vLLM 版本（将放行；若启动报错请人工确认 ≥ 0.13.0）")
+                elif v < MIN_VLLM_PER_REQUEST:
+                    raise RequirementError(
+                        f"enable_per_request_metrics 需 vLLM ≥ {'.'.join(map(str, MIN_VLLM_PER_REQUEST))}，"
+                        f"当前 {v[0]}.{v[1]}.{v[2]}；"
+                        "可升级（uv sync --project envs/vllm --upgrade vllm）或在 yaml 中关闭该项"
+                    )
         # 共享部分：GPU / TP / VRAM / compat / gpu lock
         try:
             gpus = self.selected_gpus()
@@ -148,6 +164,11 @@ class VllmAdapter(EngineAdapter):
             model_args += ["--quantization", str(cfg["quantization"])]
         if cfg.get("kv_cache_dtype"):
             model_args += ["--kv-cache-dtype", str(cfg["kv_cache_dtype"])]
+        # per-request metrics：两 flag 独立（任一为 True 则追加），未配置时 model_args 与改造前一致
+        if cfg.get("enable_per_request_metrics"):
+            model_args.append("--enable-per-request-metrics")
+        if cfg.get("enable_force_include_usage"):
+            model_args.append("--enable-force-include-usage")
         model_args += self.api_key_args() + extra
 
         if runtime == "venv":

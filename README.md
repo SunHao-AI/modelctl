@@ -445,6 +445,39 @@ cc-switch 推荐 extractor 片段：
 tail -f ../logs/launch-deepseek-v4-flash-llamacpp-*.log   # 最近一次启动日志
 ```
 
+### 请求级审计
+
+需要**单次请求**的 token 数 / 性能指标（TTFT, tps, queue time）时，启用本功能：
+
+1. 在 `.env` 配置 `AUDIT_DIR`（默认 `data/audit`）、`AUDIT_RETENTION_DAYS`（默认 30）、
+   `AUDIT_MAX_SIZE_MB`（默认 512）。
+2. 在目标 vLLM profile 的 `vllm:` 段加：
+   ```yaml
+   enable_per_request_metrics: true
+   enable_force_include_usage: true   # 保证流式末块回 usage
+   ```
+3. 重启该模型 + 网关（`modelctl restart <name> && modelctl gateway restart`）。
+4. 查询 / 统计 / 清理：
+   ```bash
+   modelctl audit                                # 最近 20 条（表格）
+   modelctl audit --model qwen3.8-vllm --limit 50
+   modelctl audit --json | jq 'select(.source=="vllm_native")'
+   modelctl audit stats                          # 目录统计
+   modelctl audit --cleanup --dry-run            # 预览清理
+   modelctl audit --cleanup                      # 执行清理
+   modelctl audit path                           # 打印 AUDIT_DIR
+   ```
+
+**与 stats 服务的分工**：
+- `modelctl stats`：趋势 / 聚合（每秒速率、累计），适合大盘监控
+- `modelctl audit`：单次请求明细（TTFT, tps, 队列耗时），适合 debug / 审计
+
+**注意**：
+- 直连引擎端口的流量（绕过网关）**不**产生审计记录
+- `endpoint` 字段值包括 `chat/completions` / `completions` / `embeddings` / `messages`
+- 非 vLLM 引擎（llamacpp/sglang/ollama/unsloth）：`source=gateway_estimate`，`native_metrics` 为 null
+- 流式不开 `--enable-force-include-usage` 时：token 数走聚合 collector 差分（`tokens_source=collector-diff`）
+
 ### 7. 多模型路由与统一网关
 
 B 机 nginx 通过 URL 路径把请求路由到不同模型；同时提供按 `model` 参数的统一网关。

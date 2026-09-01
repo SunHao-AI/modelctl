@@ -32,9 +32,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re as _re
 import sys
 import time
 import urllib.request
+from datetime import datetime as _dt_dt, timedelta
 from pathlib import Path
 
 from loguru import logger
@@ -116,6 +118,18 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--model", default=None, help="默认模型 profile（缺省解析 GATEWAY_DEFAULT_MODEL）")
     ap.add_argument("--timeout", type=float, default=600, help="模型健康检查超时秒数（默认 600）")
     ap.add_argument("--gpus", default=None, help="逗号分隔的 GPU 索引，如 0,1,2（覆盖环境变量 MODELCTL_GPUS）")
+    au = sub.add_parser("audit", help="请求级审计日志查询/统计/清理")
+    au.add_argument("sub", nargs="?", choices=["path", "stats"], default=None,
+                    help="子命令：path | stats（缺省=查询最近 N 条；--cleanup 走清理）")
+    au.add_argument("--model", default=None, help="按 model 字段过滤")
+    au.add_argument("--endpoints", default=None,
+                    help="逗号分隔端点列表，如 chat/completions,messages")
+    au.add_argument("--since", default=None, dest="since_str",
+                    help="起始时间：1h / 24h / 7d / ISO，如 \"2026-08-31T08:00:00\"")
+    au.add_argument("--limit", type=int, default=20, help="条数上限，默认 20")
+    au.add_argument("--json", action="store_true", help="JSONL 输出")
+    au.add_argument("--cleanup", action="store_true", help="清理过期审计文件")
+    au.add_argument("--dry-run", action="store_true", help="配合 --cleanup：仅打印不删除")
     up = sub.add_parser("ui", help="Web 管理控制台控制（unsloth studio UI）")
     up.add_argument("action", choices=["start", "stop"])
     up.add_argument("name", help="profile 名称（实例记为 ui-<name>，与推理服务独立）")
@@ -689,6 +703,194 @@ def _cmd_env_remove(args, models_dir: Path | None, caps) -> int:
     return 0
 
 
+# ----------------------------------------------------------------------
+# audit 子命令族（请求级审计日志：查询/统计/清理）
+# 与网关/硬件探测解耦：audit handler 不使用 caps / models_dir / probe 结果。
+# ----------------------------------------------------------------------
+
+
+def _audit_dir_from_env() -> Path:
+    """从 env 读 AUDIT_DIR，缺省 data/audit。"""
+    return Path(os.environ.get("AUDIT_DIR", "data/audit"))
+
+
+def _read_audit_entries(
+    audit_dir: Path,
+    limit: int,
+    *,
+    since: _dt_dt | None = None,
+    model: str | None = None,
+    endpoints: frozenset[str] | None = None,
+) -> list[dict]:
+    """读 JSONL（按天从新到旧、文件内行倒序），应用过滤，返回最多 limit 条。
+
+    JSON 解析失败的行静默跳过；since 越过时立即停止读取更早文件（时间窗短路）。
+    """
+    if not audit_dir.is_dir():
+        return []
+    all_files = sorted(
+        (
+            p
+            for p in audit_dir.iterdir()
+            if p.is_file()
+            and p.name.startswith("modelctl-")
+            and p.name.endswith(".jsonl")
+            and not p.name.startswith("modelctl-deleting")
+        ),
+        key=lambda p: p.name,
+        reverse=True,  # 天倒序：新 → 旧
+    )
+    out: list[dict] = []
+    for f in all_files:
+        try:
+            lines = f.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in reversed(lines):  # 文件内倒序：新 → 旧
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ts_raw = rec.get("ts") or ""
+            try:
+                rec_ts = _dt_dt.fromisoformat(ts_raw)
+            except ValueError:
+                rec_ts = None
+            if since is not None and rec_ts is not None and rec_ts < since:
+                return out  # 时间窗已过，停止读更早文件
+            if model is not None and rec.get("model") != model:
+                continue
+            if endpoints is not None and rec.get("path") not in endpoints:
+                continue
+            out.append(rec)
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def _parse_since_arg(s: str) -> _dt_dt:
+    """解析 --since：相对（1h / 24h / 7d）或 ISO 8601 绝对时间。"""
+    m = _re.match(r"^(\d+)([hd])$", s)
+    if m:
+        n = int(m.group(1))
+        delta = timedelta(hours=n) if m.group(2) == "h" else timedelta(days=n)
+        return _dt_dt.now().astimezone() - delta
+    try:
+        return _dt_dt.fromisoformat(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"无法解析 --since: {s!r}（可用：1h / 24h / 7d / ISO）") from None
+
+
+def _format_audit_table(records: list[dict]) -> list[str]:
+    """审计记录表格化输出（固定列 + ljust 对齐，不依赖终端宽度）。"""
+    if not records:
+        return []
+    headers = ["ts", "model", "endpoint", "stream", "src", "tokens (in/out)", "ttft_ms", "tps", "status"]
+
+    def _field(rec: dict, key: str) -> str:
+        val = (rec.get("gateway_metrics") or {}).get(key)
+        return str(val) if val is not None else "-"
+
+    rows = [
+        [
+            (r.get("ts") or "")[:19],
+            (r.get("model") or "")[:18],
+            (r.get("path") or "")[:16],
+            str(bool(r.get("stream", False))).lower(),
+            (r.get("source") or "")[:12],
+            f'{r.get("prompt_tokens", 0)}/{r.get("completion_tokens", 0)}',
+            _field(r, "ttft_ms"),
+            _field(r, "tokens_per_second"),
+            str(r.get("status_code", "-")),
+        ]
+        for r in records
+    ]
+    widths = [
+        max(len(headers[i]), max((len(rows[j][i]) for j in range(len(rows))), default=0))
+        for i in range(len(headers))
+    ]
+    out: list[str] = ["  ".join(h.ljust(widths[i]) for i, h in enumerate(headers))]
+    for r in rows:
+        out.append("  ".join(c.ljust(widths[i]) for i, c in enumerate(r)))
+    return out
+
+
+def _cmd_audit_query(args) -> int:
+    """查询审计记录（默认表格 / --json 输出 JSONL）。"""
+    audit_dir = _audit_dir_from_env()
+    filters_model = getattr(args, "model", None)
+    endpoints_raw = getattr(args, "endpoints", None)
+    endpoints = frozenset(e.strip() for e in endpoints_raw.split(",") if e.strip()) if endpoints_raw else None
+    since_str = getattr(args, "since_str", None)
+    since = _parse_since_arg(since_str) if since_str else None
+    limit = int(getattr(args, "limit", 0) or 20)
+    records = _read_audit_entries(audit_dir, limit, since=since, model=filters_model, endpoints=endpoints)
+    if not records:
+        print("no audit records / 暂无审计记录")
+        return 0
+    if getattr(args, "json", False):
+        for r in records:
+            print(json.dumps(r, ensure_ascii=False))
+        return 0
+    for line in _format_audit_table(records):
+        print(line)
+    return 0
+
+
+def _cmd_audit_path() -> int:
+    """打印 AUDIT_DIR 绝对路径。"""
+    print(_audit_dir_from_env().resolve())
+    return 0
+
+
+def _cmd_audit_stats() -> int:
+    """输出审计目录统计（stats_summary）。"""
+    from modelctl.core.audit import _new_audit_log
+
+    audit_log = _new_audit_log(_audit_dir_from_env())
+    s = audit_log.stats_summary()
+    print(f"file_count: {s['file_count']}")
+    print(f"total_bytes: {s['total_bytes']}")
+    print(f"oldest_day: {s['oldest_day']}")
+    print(f"newest_day: {s['newest_day']}")
+    if s["by_day"]:
+        print("by_day:")
+        for day, sz in sorted(s["by_day"].items()):
+            print(f"  {day}: {sz} bytes")
+    return 0
+
+
+def _cmd_audit_cleanup(args) -> int:
+    """清理过期审计文件：--dry-run 仅打印预览；否则 staged rename + unlink 删除。"""
+    from modelctl.core.audit import _new_audit_log
+
+    audit_dir = _audit_dir_from_env()
+    audit_log = _new_audit_log(audit_dir)
+    dead = audit_log.collect_dead_files()
+    total_freed = sum(p.stat().st_size if p.exists() else 0 for p in dead)
+    freed_mb = total_freed / (1024 * 1024)
+    if getattr(args, "dry_run", False):
+        names = ", ".join(p.name for p in dead[:10]) + ("..." if len(dead) > 10 else "")
+        print(f"Would delete {len(dead)} files ({freed_mb:.1f} MB): {names}")
+        return 0
+    deleted = 0
+    for p in dead:
+        if not p.exists():
+            continue
+        # 先改名到 staging 再 unlink，避免读取方在删除中途打开已被清空的文件
+        staged = audit_dir / f".audit-deleting-{int(time.time() * 1000)}-{p.name}"
+        try:
+            p.rename(staged)
+            staged.unlink()
+            deleted += 1
+        except OSError as exc:
+            logger.warning(f"删除 {p.name} 失败: {exc}")
+    print(f"Deleted {deleted} files, freed {freed_mb:.1f} MB")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     setup_logging()
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -728,6 +930,18 @@ def main(argv: list[str] | None = None) -> int:
             if args.action == "restart":
                 return _cmd_stats_restart(args, models_dir, caps)
             return _cmd_stats_status(args, models_dir, caps)
+        if args.command == "audit":
+            if getattr(args, "cleanup", False):
+                # 与 query/path/stats 三态互斥：--cleanup 必须单独使用
+                if args.sub is not None:
+                    parser.error("audit: --cleanup 与 sub(path/stats) 互斥")
+                return _cmd_audit_cleanup(args)
+            if getattr(args, "sub", None) == "path":
+                return _cmd_audit_path()
+            if getattr(args, "sub", None) == "stats":
+                return _cmd_audit_stats()
+            # 默认 query（sub=None）
+            return _cmd_audit_query(args)
         if args.command == "gateway":
             if args.action == "start":
                 return _cmd_gateway_start()

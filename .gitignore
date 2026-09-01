@@ -34,4 +34,7 @@ model-gguf/
 .python-header.yaml
 data/
 
+# vllm 请求级审计日志 (按天 JSONL 分片, 含 token 用量, 不入库)
+/data/audit/
+# dev/integration worktree 工作区
 .worktrees/

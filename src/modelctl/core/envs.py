@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import functools
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -88,6 +90,23 @@ def ensure_env(target: str) -> Path:
             f"{target} 的专用环境未创建，请先执行：modelctl env setup {target}"
         )
     return VENV_ROOT / target
+
+
+@functools.lru_cache(maxsize=1)
+def vllm_version() -> tuple[int, int, int] | None:
+    """探测 vLLM 版本（subprocess vllm --version 解析首 token）；失败 / 未安装返回 None。"""
+    bin_path = engine_bin("vllm", "vllm")
+    if not bin_path.is_file():
+        return None
+    try:
+        r = subprocess.run([str(bin_path), "--version"], capture_output=True, text=True, timeout=5)
+        out = (r.stdout or "").strip()
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", out)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)), int(m.group(3))
 
 
 def setup(target: str) -> int:
