@@ -44,6 +44,7 @@ from loguru import logger
 import modelctl.core.compat_rules  # noqa: F401 —— 导入即注册内置规则
 from modelctl.core import all_service
 from modelctl.core.capabilities import ENGINE_BINARIES, ENGINE_INSTALL_HINTS, probe
+from modelctl.core.colors import _apply, color_enabled, format_status
 from modelctl.core.deps import ensure_packages
 from modelctl.core.envfile import load_env
 from modelctl.core.envs import (
@@ -99,6 +100,7 @@ def _extract_models_dir(argv: list[str]) -> tuple[Path | None, list[str]]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="modelctl", description="多模型部署启动器")
     parser.add_argument("--models-dir", type=Path, default=None, help="models 目录（默认项目根 models/，测试用）")
+    parser.add_argument("--no-color", action="store_true", help="禁用彩色输出（等同 MODELCTL_NO_COLOR=1）")
     sub = parser.add_subparsers(dest="command", required=True)
     for cmd in ("start", "stop", "restart", "status"):
         p = sub.add_parser(cmd)
@@ -174,20 +176,59 @@ def _ljust_width(text: str, width: int) -> str:
     return text + " " * max(width - _display_width(text), 0)
 
 
-def _print_table(headers: list[str], rows: list[list]) -> None:
-    """按动态列宽打印类 Excel 对齐表格（表头 + 分隔线 + 数据行）。"""
+def _print_table(headers: list[str], rows: list[list], *, dim_indices: tuple[int, ...] = ()) -> None:
+    """按动态列宽打印类 Excel 对齐表格（表头 + 分隔线 + 数据行）。
+
+    颜色规则（非 TTY 自动回退纯文本）：
+    - 表头：青色加粗（TABLE_HEADER）
+    - dim_indices 中列索引：灰色（DIM）—— 用于端口/速率/标识符等次要列。
+    - 状态列（值为已知状态字符串自动识别）：按状态着色。
+    """
     if not rows:
-        print("  ".join(headers))
+        # 空表也输出表头（带颜色），让结构可见
+        print(_table_paint("  ".join(headers), "TABLE_HEADER"))
         return
     col_count = len(headers)
     widths = [_display_width(h) for h in headers]
     for row in rows:
         for i in range(col_count):
             widths[i] = max(widths[i], _display_width(str(row[i])))
-    print("  ".join(_ljust_width(headers[i], widths[i]) for i in range(col_count)))
-    print("  ".join("-" * w for w in widths))
+
+    # 表头（彩色）
+    header_cells = [_table_paint(_ljust_width(str(headers[i]), widths[i]), "TABLE_HEADER") for i in range(col_count)]
+    print("  ".join(header_cells))
+    # 分隔线（灰色）
+    print(_table_paint("  ".join("-" * w for w in widths), "TABLE_SEP"))
+    # 数据行（状态列按值着色，次要列灰色）
+    state_words = {"运行中", "已停止", "正常", "无响应", "PID 异常", "未就绪"}
     for row in rows:
-        print("  ".join(_ljust_width(str(row[i]), widths[i]) for i in range(col_count)))
+        cells: list[str] = []
+        for i in range(col_count):
+            value = str(row[i])
+            cell_pad = _ljust_width(value, widths[i])
+            if value in state_words:
+                # 状态值按语义着色；用空格补齐剩余宽度（padding 不参与着色）
+                padding = " " * max(widths[i] - _display_width(value), 0)
+                cells.append(_status_paint(value) + padding)
+            elif i in dim_indices:
+                cells.append(_table_paint(cell_pad, "DIM"))
+            else:
+                cells.append(cell_pad)
+        print("  ".join(cells))
+
+
+def _status_paint(value: str) -> str:
+    """状态值 → 语义色 ANSI 字符串（非 TTY 原样返回）。"""
+    if not color_enabled():
+        return value
+    return format_status(value, value)
+
+
+def _table_paint(text: str, style: str) -> str:
+    """按表格样式 ANSI 上色（非 TTY 原样返回）。"""
+    if not color_enabled() or not text:
+        return text
+    return _apply(text, style)
 
 
 def _instance_state(name: str) -> str:
@@ -390,10 +431,10 @@ def _cmd_status(args, models_dir: Path | None, caps) -> int:
             except Exception:  # noqa: BLE001 —— 健康检查失败不阻塞表格输出
                 health = "未知"
         rows.append([p.name, p.engine, p.port, state, health])
-    _print_table(["名称", "引擎", "端口", "状态", "健康"], rows)
+    _print_table(["名称", "引擎", "端口", "状态", "健康"], rows, dim_indices=(1, 2))
     if args.name and profiles:
         info = _agent_config_info(profiles[0])
-        print("\n智能体配置参考：")
+        print(f"\n{_table_paint('智能体配置参考：', 'SECTION')}")
         print(f"  上下文长度：{info['context_length']}")
         print(f"  输入上下文长度：{info['input_context']}")
         print(f"  输出上下文长度：{info['output_context']}")
@@ -464,7 +505,8 @@ def _cmd_list(args, models_dir: Path | None, caps) -> int:
             route = f'输入 "{group_name}" 路由至 {target.name}（运行中）'
         else:
             route = f'输入 "{group_name}" 当前无运行成员'
-        print(f"{group_name}（{len(members)} 配置）｜{route}")
+        header = f"{group_name}（{len(members)} 配置）"
+        print(_table_paint(header, "SECTION") + "｜" + route)
         rows = []
         for p in members:
             state = _instance_state(p.name)
@@ -475,7 +517,7 @@ def _cmd_list(args, models_dir: Path | None, caps) -> int:
                 if r is not None and (r[0] > 0 or r[1] > 0):
                     rate = f"{r[0]:.1f}/{r[1]:.1f}"
             rows.append([p.engine, p.variant or "-", p.port, state, rate, p.name])
-        _print_table(["引擎", "变体", "端口", "状态", "速率(入/出)", "标识符"], rows)
+        _print_table(["引擎", "变体", "端口", "状态", "速率(入/出)", "标识符"], rows, dim_indices=(0, 1, 4))
 
     default_model = os.environ.get("GATEWAY_DEFAULT_MODEL")
     if default_model:
@@ -487,40 +529,46 @@ def _cmd_list(args, models_dir: Path | None, caps) -> int:
 
 def _cmd_probe(args, models_dir: Path | None, caps) -> int:
     free_mb = sum(caps.vram_free_mb)
-    print(f"GPU 数量：{caps.gpu_count}")
-    print(f"GPU 型号：{caps.gpu_name or '未知'}")
-    print(f"单卡显存：{caps.vram_total_mb} MB" if caps.vram_total_mb else "单卡显存：未知")
-    print(f"剩余显存总量：{free_mb} MB")
-    print(f"CUDA 驱动：{caps.cuda_driver or '未知'}")
-    print(f"计算能力（CC）：{caps.compute_capability or '未知'}")
-    print("引擎二进制可用性：")
+    print(f"{_table_paint('GPU 数量：', 'SECTION')}{caps.gpu_count}")
+    print(f"{_table_paint('GPU 型号：', 'SECTION')}{caps.gpu_name or _table_paint('未知', 'DIM')}")
+    if caps.vram_total_mb:
+        print(f"{_table_paint('单卡显存：', 'SECTION')}{caps.vram_total_mb} MB")
+    else:
+        print(f"{_table_paint('单卡显存：', 'SECTION')}{_table_paint('未知', 'DIM')}")
+    print(f"{_table_paint('剩余显存总量：', 'SECTION')}{free_mb} MB")
+    print(f"{_table_paint('CUDA 驱动：', 'SECTION')}{caps.cuda_driver or _table_paint('未知', 'DIM')}")
+    print(f"{_table_paint('计算能力（CC）：', 'SECTION')}{caps.compute_capability or _table_paint('未知', 'DIM')}")
+    print(_table_paint("引擎二进制可用性：", "SECTION"))
     for name in ENGINE_BINARIES:
         path = caps.binary_paths.get(name)
         if path:
-            print(f"  {name}: 可用（{path}）")
+            print(f"  {name}: {_table_paint('可用', 'SUCCESS')}（{path}）")
         elif name == "llamacpp":
             print(
-                "  llamacpp: 不可用（未找到编译产物 llama-server）\n"
+                f"  {name}: {_table_paint('不可用', 'ERROR')}（未找到编译产物 llama-server）\n"
                 "    源码下载：git clone https://github.com/ggml-org/llama.cpp.git\n"
                 "    编译（保守并行度，避免 OOM）：cmake -B build -DGGML_CUDA=ON && cmake --build build -j 4"
             )
         else:
             hint = ENGINE_INSTALL_HINTS.get(name, "")
-            print(f"  {name}: 不可用（未在 PATH 中找到 {name} 可执行文件{hint}）")
+            print(f"  {name}: {_table_paint('不可用', 'ERROR')}（未在 PATH 中找到 {name} 可执行文件{hint}）")
     # 软件能力摘要（EnvSpec：静态元数据 + 文件检查，不导入引擎）
     from modelctl.core.compat import EnvSpec
 
     env = EnvSpec.from_env()
-    print(f"site-packages：{env.site_packages or '未知'}")
-    print(f"已安装包：{len(env.packages)} 个")
-    print(f"nvidia .so 文件：{len(env.nvidia_so)} 个")
+    print(f"{_table_paint('site-packages：', 'SECTION')}{env.site_packages or _table_paint('未知', 'DIM')}")
+    print(f"{_table_paint('已安装包：', 'SECTION')}{len(env.packages)} 个")
+    print(f"{_table_paint('nvidia .so 文件：', 'SECTION')}{len(env.nvidia_so)} 个")
     resolvable_note = ""
     if env.libs_resolvable_known and env.cuda_libs_resolvable:
         resolvable_note = "（" + ", ".join(sorted(env.cuda_libs_resolvable))[:120] + "）"
-    print(f"CUDA 库可解析：{'是' if env.libs_resolvable_known else '未知'}{resolvable_note}")
-    print("关键环境变量：")
+    resolvable_val = "是" if env.libs_resolvable_known else "未知"
+    print(f"{_table_paint('CUDA 库可解析：', 'SECTION')}{_table_paint(resolvable_val, 'SUCCESS' if resolvable_val == '是' else 'DIM')}{resolvable_note}")
+    print(_table_paint("关键环境变量：", "SECTION"))
     for key in ("HF_HOME", "MODEL_ROOT", "MODELSCOPE_CACHE"):
-        print(f"  {key}={env.env_vars.get(key) or '（未设置）'}")
+        val = env.env_vars.get(key) or "（未设置）"
+        val_color = "DIM" if "未设置" in val else "INFO"
+        print(f"  {key}={_table_paint(val, val_color)}")
     return 0
 
 
@@ -664,13 +712,13 @@ def _cmd_env_setup(args, models_dir: Path | None, caps) -> int:
     if code != 0:
         logger.error(f"env setup {args.engine} 失败（退出码 {code}），请检查 uv 输出后重试")
         return code
-    print(f"{args.engine} 环境安装完成")
+    print(_table_paint(f"{args.engine} 环境安装完成", "SUCCESS"))
     return 0
 
 
 def _cmd_env_list(args, models_dir: Path | None, caps) -> int:
     states = envs_status()
-    print("受管虚拟环境（.venvs/）：")
+    print(_table_paint("受管虚拟环境（.venvs/）：", "SECTION"))
     for target in ENV_TARGETS:
         st = states.get(target, {"exists": False})
         if st["exists"]:
@@ -681,10 +729,10 @@ def _cmd_env_list(args, models_dir: Path | None, caps) -> int:
                 detail += "；" + "、".join(f"{k} {v}" for k, v in head)
                 if len(pkgs) > 6:
                     detail += f" …（共 {len(pkgs)} 个包）"
-            print(f"  {target}: 已创建（{detail}）")
+            print(f"  {target}: {_table_paint('已创建', 'SUCCESS')}（{detail}）")
         else:
-            print(f"  {target}: 未创建（执行 modelctl env setup {target}）")
-    print("ollama / llamacpp / unsloth：原生或官方安装器，无需托管")
+            print(f"  {target}: {_table_paint('未创建', 'DIM')}（执行 modelctl env setup {target}）")
+    print(_table_paint("ollama / llamacpp / unsloth：", "DIM") + _table_paint("原生或官方安装器，无需托管", "DIM"))
     return 0
 
 
@@ -828,7 +876,7 @@ def _cmd_audit_query(args) -> int:
     limit = int(getattr(args, "limit", 0) or 20)
     records = _read_audit_entries(audit_dir, limit, since=since, model=filters_model, endpoints=endpoints)
     if not records:
-        print("no audit records / 暂无审计记录")
+        print(_table_paint("no audit records / 暂无审计记录", "DIM"))
         return 0
     if getattr(args, "json", False):
         for r in records:
@@ -892,8 +940,11 @@ def _cmd_audit_cleanup(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    setup_logging()
     argv = list(sys.argv[1:] if argv is None else argv)
+    # 先扫描 --no-color（在全局 argparse 之前），以便 setup_logging 同步禁用颜色
+    if "--no-color" in argv:
+        os.environ["MODELCTL_NO_COLOR"] = "1"
+    setup_logging()
     models_dir, rest = _extract_models_dir(argv)
     load_env()
     # 命令路由前先做一次"CLI 自身"缺失依赖检测（loguru/yaml）。
