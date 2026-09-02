@@ -575,48 +575,91 @@ def _cmd_list(args, models_dir: Path | None, caps) -> int:
     return 0
 
 
+def _fmt_mb(mb: int) -> str:
+    """MB 显存 → "48.0 GB (49140 MB)"。0 时仅 "0 MB"。"""
+    if not mb:
+        return "0 MB"
+    gb = mb / 1024
+    return f"{gb:.1f} GB ({mb} MB)"
+
+
 def _cmd_probe(args, models_dir: Path | None, caps) -> int:
+    """输出硬件/软件能力摘要，分四区块：GPU 硬件、引擎二进制、软件环境、关键环境变量。"""
     free_mb = sum(caps.vram_free_mb)
-    print(f"{_table_paint('GPU 数量：', 'SECTION')}{caps.gpu_count}")
-    print(f"{_table_paint('GPU 型号：', 'SECTION')}{caps.gpu_name or _table_paint('未知', 'DIM')}")
-    if caps.vram_total_mb:
-        print(f"{_table_paint('单卡显存：', 'SECTION')}{caps.vram_total_mb} MB")
-    else:
-        print(f"{_table_paint('单卡显存：', 'SECTION')}{_table_paint('未知', 'DIM')}")
-    print(f"{_table_paint('剩余显存总量：', 'SECTION')}{free_mb} MB")
-    print(f"{_table_paint('CUDA 驱动：', 'SECTION')}{caps.cuda_driver or _table_paint('未知', 'DIM')}")
-    print(f"{_table_paint('计算能力（CC）：', 'SECTION')}{caps.compute_capability or _table_paint('未知', 'DIM')}")
-    print(_table_paint("引擎二进制可用性：", "SECTION"))
+
+    def unknown() -> str:
+        return _table_paint("未知", "DIM")
+
+    def section(title: str) -> None:
+        print(_table_paint(f"== {title} ==", "SECTION"))
+
+    def kv(key: str, value: str) -> None:
+        print(f"  {key:<14}  {value}")
+
+    # ── 区域一：GPU 硬件 ──
+    section("GPU 硬件")
+    kv("GPU 数量", str(caps.gpu_count))
+    kv("GPU 型号", caps.gpu_name or unknown())
+    kv("单卡显存", _fmt_mb(caps.vram_total_mb) if caps.vram_total_mb else unknown())
+    kv("总显存", _fmt_mb(sum(caps.vram_total_mb_per_gpu)) if caps.vram_total_mb_per_gpu else unknown())
+    kv("剩余显存", _fmt_mb(free_mb))
+    kv("CUDA 驱动", caps.cuda_driver or unknown())
+    kv("计算能力", caps.compute_capability or unknown())
+
+    # ── 区域二：引擎二进制 ──
+    print()
+    section("引擎二进制")
+    name_w = max(len(n) for n in ENGINE_BINARIES)
     for name in ENGINE_BINARIES:
         path = caps.binary_paths.get(name)
         if path:
-            print(f"  {name}: {_table_paint('可用', 'SUCCESS')}（{path}）")
+            status = _table_paint("可用", "SUCCESS") + "   "
+            suffix = _table_paint(path, "DIM")
         elif name == "llamacpp":
-            print(
-                f"  {name}: {_table_paint('不可用', 'ERROR')}（未找到编译产物 llama-server）\n"
-                "    源码下载：git clone https://github.com/ggml-org/llama.cpp.git\n"
-                "    编译（保守并行度，避免 OOM）：cmake -B build -DGGML_CUDA=ON && cmake --build build -j 4"
-            )
+            status = _table_paint("不可用", "ERROR")
+            suffix = "(未找到编译产物 llama-server)"
         else:
-            hint = ENGINE_INSTALL_HINTS.get(name, "")
-            print(f"  {name}: {_table_paint('不可用', 'ERROR')}（未在 PATH 中找到 {name} 可执行文件{hint}）")
-    # 软件能力摘要（EnvSpec：静态元数据 + 文件检查，不导入引擎）
-    from modelctl.core.compat import EnvSpec
+            status = _table_paint("不可用", "ERROR")
+            suffix = f"(缺失 {name} 可执行文件" + (ENGINE_INSTALL_HINTS.get(name, "") or "") + ")"
+        print(f"  {name:<{name_w}}  {status}{suffix}")
+        # llamacpp 额外两行安装提示，进一步缩进
+        if not path and name == "llamacpp":
+            pad2 = " " * (2 + name_w + 2 + 3)  # 对齐到 status 之后
+            print(f"{pad2}源码:  git clone https://github.com/ggml-org/llama.cpp.git")
+            print(f"{pad2}编译:  cmake -B build -DGGML_CUDA=ON && cmake --build build -j 4")
+    available_count = sum(1 for n in ENGINE_BINARIES if caps.binaries.get(n))
+    total = len(ENGINE_BINARIES)
+    print()
+    print(_table_paint(f"  共 {total} 项，可用 {available_count} 项，缺失 {total - available_count} 项", "DIM"))
 
+    # ── 区域三：软件环境 ──
+    print()
+    section("软件环境")
+    from modelctl.core.compat import EnvSpec
     env = EnvSpec.from_env()
-    print(f"{_table_paint('site-packages：', 'SECTION')}{env.site_packages or _table_paint('未知', 'DIM')}")
-    print(f"{_table_paint('已安装包：', 'SECTION')}{len(env.packages)} 个")
-    print(f"{_table_paint('nvidia .so 文件：', 'SECTION')}{len(env.nvidia_so)} 个")
-    resolvable_note = ""
-    if env.libs_resolvable_known and env.cuda_libs_resolvable:
-        resolvable_note = "（" + ", ".join(sorted(env.cuda_libs_resolvable))[:120] + "）"
-    resolvable_val = "是" if env.libs_resolvable_known else "未知"
-    print(f"{_table_paint('CUDA 库可解析：', 'SECTION')}{_table_paint(resolvable_val, 'SUCCESS' if resolvable_val == '是' else 'DIM')}{resolvable_note}")
-    print(_table_paint("关键环境变量：", "SECTION"))
+    kv("site-packages", env.site_packages or unknown())
+    kv("已安装包", f"{len(env.packages)} 个")
+    kv("nvidia .so", f"{len(env.nvidia_so)} 个")
+    if env.libs_resolvable_known:
+        if env.cuda_libs_resolvable:
+            res_val = _table_paint("是", "SUCCESS")
+            res_note = _table_paint(f"（{len(env.cuda_libs_resolvable)} 个 .so 可解析）", "DIM")
+        else:
+            res_val = _table_paint("否", "ERROR")
+            res_note = ""
+        kv("CUDA 可解析", res_val + res_note)
+    else:
+        kv("CUDA 可解析", unknown())
+
+    # ── 区域四：关键环境变量 ──
+    print()
+    section("关键环境变量")
     for key in ("HF_HOME", "MODEL_ROOT", "MODELSCOPE_CACHE"):
-        val = env.env_vars.get(key) or "（未设置）"
-        val_color = "DIM" if "未设置" in val else "INFO"
-        print(f"  {key}={_table_paint(val, val_color)}")
+        val = env.env_vars.get(key)
+        if val:
+            kv(key, _table_paint(val, "INFO"))
+        else:
+            kv(key, _table_paint("(未设置)", "DIM"))
     return 0
 
 

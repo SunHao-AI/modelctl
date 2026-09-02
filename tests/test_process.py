@@ -296,13 +296,13 @@ def test_is_pid_alive_dead_pid(dead_pid):
 
 # ---- docker_container_alive：容器存活探测 ----
 
-def _fake_run(stdout: str, returncode: int = 0, exc: Exception | None = None):
+def _fake_run(stdout: str = "", returncode: int = 0, stderr: str = "", exc: Exception | None = None):
     def _run(cmd, **kwargs):
         assert cmd[:3] == ["docker", "inspect", "--format"]
         assert cmd[3] == "{{.State.Running}}"
         if exc is not None:
             raise exc
-        return type("R", (), {"returncode": returncode, "stdout": stdout})()
+        return type("R", (), {"returncode": returncode, "stdout": stdout, "stderr": stderr})()
     return _run
 
 
@@ -312,17 +312,37 @@ def test_docker_container_alive_running_true(monkeypatch):
 
 
 def test_docker_container_alive_stopped_false(monkeypatch):
+    """容器存在但已退出（Running=false）——docker run -d 后 vllm 起不了立刻退出。"""
     monkeypatch.setattr(process.subprocess, "run", _fake_run(stdout="false\n"))
     assert process.docker_container_alive("q-vllm") is False
 
 
 def test_docker_container_alive_missing_container_false(monkeypatch):
-    # docker inspect 对不存在的容器返回非零退出码
-    monkeypatch.setattr(process.subprocess, "run", _fake_run(stdout="", returncode=1))
-    assert process.docker_container_alive("ghost") is False
+    """docker inspect 对不存在的容器：exit 1 + stderr 含 'No such object' → 视为已死。
 
-
-def test_docker_container_alive_subprocess_error_false(monkeypatch):
-    # OSError（docker 不在 PATH）/ SubprocessError（超时）一律视为不存活
-    monkeypatch.setattr(process.subprocess, "run", _fake_run(stdout="", exc=OSError("no docker")))
+    这也是 --rm 容器崩溃后被 daemon 自动回收的形态：inspect 找不到对象。
+    """
+    monkeypatch.setattr(
+        process.subprocess, "run",
+        _fake_run(returncode=1, stderr="Error: No such object: q-vllm\n"),
+    )
     assert process.docker_container_alive("q-vllm") is False
+
+
+def test_docker_container_alive_subprocess_error_true(monkeypatch):
+    """docker 不在 PATH / inspect 超时：未知→保守当存活，保留健康检查兜底。
+
+    设计克制：探针误报（容器其实活着却判死了）比探针漏报
+    （容器真死了但空转到超时）代价更高——前者会假死 + 不建议。
+    """
+    monkeypatch.setattr(process.subprocess, "run", _fake_run(exc=OSError("docker not found")))
+    assert process.docker_container_alive("q-vllm") is True
+
+
+def test_docker_container_alive_docker_daemon_down_true(monkeypatch):
+    """docker 命令存在但 daemon 查不到/拒访问（非 'No such object'）→ 保守当存活。"""
+    monkeypatch.setattr(
+        process.subprocess, "run",
+        _fake_run(returncode=1, stderr="Cannot connect to the Docker daemon\n"),
+    )
+    assert process.docker_container_alive("q-vllm") is True

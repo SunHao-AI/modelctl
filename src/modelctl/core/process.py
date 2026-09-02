@@ -200,12 +200,17 @@ def wait_health(url: str, timeout: float, api_key: str | None = None, alive_chec
 def docker_container_alive(container_name: str) -> bool:
     """探测 docker 容器是否仍在运行（docker inspect 容器 Running 状态）。
 
-    容器不存在（含 --rm 容器崩溃后被 daemon 自动回收）、已退出、或 docker 查询失败
-    （PATH / daemon 不可用）均返回 False。供 wait_health 的 alive_check 与失败诊断共用。
+    **保守语义**：只有 `docker inspect` 明确返回「容器不存在 / 容器已退出（Running=false）」
+    才返回 False；其它任何情况（docker 不在 PATH / daemon 不可用 / inspect 超时 /
+    解析异常 / 返回非预期值）一律返回 True（视为存活）。
 
-    与客户端进程探针不同：`docker run --detach` 客户端 daemonize 后立刻退出是**预期行为**，
-    真正的服务存活由容器状态衡量——容器死亡（OOM / GPU 初始化失败 / 架构不识别）时
-    允许 wait_health 立即中止，不再空转到超时。
+    设计动机：docker 分支的 fail-fast 是 *nice-to-have*（能少等不写得到），但误报
+    （容器其实活着却判死了）*must-avoid*（跨 Engine / 权限问题会导致健康检查被 1 秒
+    截断、提示「进程提前退出」且不是准确原因）。保守侧把 any 不确定性当存活，
+    探针只在 daemon 与 Engine 在同一台主机、且容器真实死亡时才触发 fail-fast——
+    跨 Engine 调用（如 Win 自检 Linux 容器）时 docker inspect 查不到 → 探针
+    返回 True → 不触发假死，仍走 /health 600s 兜底。
+    返回 True 不等于服务已就绪，只是「没有证据说它死了」。
     """
     try:
         out = subprocess.run(
@@ -214,9 +219,17 @@ def docker_container_alive(container_name: str) -> bool:
             text=True,
             timeout=5,
         )
-        return out.returncode == 0 and out.stdout.strip() == "true"
     except (OSError, subprocess.SubprocessError):
-        return False
+        # docker 不可用 / 超时——保守视为存活，保留健康检查兜底
+        return True
+    if out.returncode != 0:
+        # inspect 非零退出 = 容器不存在（含 --rm 容器崩溃后已被 daemon 回收）
+        # 或 docker 拒绝访问。区分对待：不存在才是「后端已死」，其余守 True
+        err = (out.stderr or "").strip()
+        # docker 容器不存在会给 exit 1 且 stderr 为 "No such object: <name>"
+        return "No such object" not in err
+    # 容器存在——看 Running 标志
+    return out.stdout.strip() != "false"
 
 
 def tail_file(path: Path, lines: int) -> str:
