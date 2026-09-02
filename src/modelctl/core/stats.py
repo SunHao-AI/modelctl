@@ -390,6 +390,7 @@ class UsageCollector:
         mapping: dict[str, list[str]] | None = None,
         native_mapping: dict[str, str] | None = None,
         bench_fallback: bool = True,
+        bench_ttft_only: bool = True,
     ) -> None:
         self.name = name
         self.data_dir = data_dir
@@ -403,6 +404,10 @@ class UsageCollector:
             self.bench_fallback = _parse_env_bool(os.environ["USAGE_BENCH_FALLBACK"])
         else:
             self.bench_fallback = bench_fallback
+        if "USAGE_BENCH_TTFT_ONLY" in os.environ:
+            self.bench_ttft_only = _parse_env_bool(os.environ["USAGE_BENCH_TTFT_ONLY"])
+        else:
+            self.bench_ttft_only = bench_ttft_only
         self._native_window: list[_NativeSample] = []
         self._native_window_ttl = 60.0
         self._native_window_cap = 20

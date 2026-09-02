@@ -979,3 +979,67 @@ def test_snapshot_keeps_gauge_ttft_when_native_window_empty(monkeypatch, tmp_pat
     snap = c.snapshot()
     assert snap["ttft_ms"] == 0.25
     assert snap["ttft_ms_p95"] == 0.0
+
+
+# ---------- Task 4: bench_ttft_only 形参 ----------
+
+
+def _mk_bench_ttft_only_collector(tmp_path):
+    from modelctl.core.stats import UsageCollector
+    return UsageCollector(
+        name="t",
+        base_url="http://127.0.0.1:8000",
+        poll_interval=999,
+        api_key=None,
+        data_dir=tmp_path,
+        mode="on-demand",
+        mapping={},
+    )
+
+
+def test_bench_ttft_only_env_read_true_false(tmp_path, monkeypatch):
+    import os
+    from modelctl.core.stats import UsageCollector
+
+    kwargs = dict(
+        name="t",
+        base_url="http://127.0.0.1:8000",
+        poll_interval=999,
+        api_key=None,
+        data_dir=tmp_path,
+        mode="on-demand",
+        mapping={},
+    )
+    monkeypatch.setenv("USAGE_BENCH_TTFT_ONLY", "true")
+    assert UsageCollector(bench_ttft_only=True, **kwargs).bench_ttft_only is True
+    monkeypatch.setenv("USAGE_BENCH_TTFT_ONLY", "false")
+    assert UsageCollector(bench_ttft_only=True, **kwargs).bench_ttft_only is False
+
+
+def test_bench_ttft_only_env_unset_defaults_true(tmp_path, monkeypatch):
+    import os
+    from modelctl.core.stats import UsageCollector
+
+    monkeypatch.delenv("USAGE_BENCH_TTFT_ONLY", raising=False)
+    c = UsageCollector(
+        name="t",
+        base_url="http://127.0.0.1:8000",
+        poll_interval=999,
+        api_key=None,
+        data_dir=tmp_path,
+        mode="on-demand",
+        mapping={},
+    )
+    assert c.bench_ttft_only is True
+    # 显式形参 False 时 env 未设仍为 False
+    c2 = UsageCollector(
+        name="t",
+        base_url="http://127.0.0.1:8000",
+        poll_interval=999,
+        api_key=None,
+        data_dir=tmp_path,
+        mode="on-demand",
+        mapping={},
+        bench_ttft_only=False,
+    )
+    assert c2.bench_ttft_only is False
