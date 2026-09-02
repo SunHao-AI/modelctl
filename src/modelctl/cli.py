@@ -44,7 +44,7 @@ from loguru import logger
 import modelctl.core.compat_rules  # noqa: F401 —— 导入即注册内置规则
 from modelctl.core import all_service
 from modelctl.core.capabilities import ENGINE_BINARIES, ENGINE_INSTALL_HINTS, probe
-from modelctl.core.colors import _apply, color_enabled, format_status
+from modelctl.core.colors import _apply, color_enabled, display_width, format_status, pad_width
 from modelctl.core.deps import ensure_packages
 from modelctl.core.envfile import load_env
 from modelctl.core.envs import (
@@ -584,7 +584,10 @@ def _fmt_mb(mb: int) -> str:
 
 
 def _cmd_probe(args, models_dir: Path | None, caps) -> int:
-    """输出硬件/软件能力摘要，分四区块：GPU 硬件、引擎二进制、软件环境、关键环境变量。"""
+    """输出硬件/软件能力摘要，分四区块：GPU 硬件、引擎二进制、软件环境、关键环境变量。
+
+    列对齐基于 display_width（CJK 字符按 2 列），避免中英混排键错位。
+    """
     free_mb = sum(caps.vram_free_mb)
 
     def unknown() -> str:
@@ -593,23 +596,27 @@ def _cmd_probe(args, models_dir: Path | None, caps) -> int:
     def section(title: str) -> None:
         print(_table_paint(f"== {title} ==", "SECTION"))
 
-    def kv(key: str, value: str) -> None:
-        print(f"  {key:<14}  {value}")
+    def kv(key: str, value: str, key_w: int = 14) -> None:
+        """按 display_width 全角对齐键值；key_w 以展示列宽计（默认 14 覆盖所有键）。"""
+        print(f"  {pad_width(key, key_w)}  {value}")
+
+    # 区域一/三/四 共用 KEY_W=16（覆盖最长键 MODELSCOPE_CACHE 的 display_width）
+    KEY_W = 16
 
     # ── 区域一：GPU 硬件 ──
     section("GPU 硬件")
-    kv("GPU 数量", str(caps.gpu_count))
-    kv("GPU 型号", caps.gpu_name or unknown())
-    kv("单卡显存", _fmt_mb(caps.vram_total_mb) if caps.vram_total_mb else unknown())
-    kv("总显存", _fmt_mb(sum(caps.vram_total_mb_per_gpu)) if caps.vram_total_mb_per_gpu else unknown())
-    kv("剩余显存", _fmt_mb(free_mb))
-    kv("CUDA 驱动", caps.cuda_driver or unknown())
-    kv("计算能力", caps.compute_capability or unknown())
+    kv("GPU 数量", str(caps.gpu_count), KEY_W)
+    kv("GPU 型号", caps.gpu_name or unknown(), KEY_W)
+    kv("单卡显存", _fmt_mb(caps.vram_total_mb) if caps.vram_total_mb else unknown(), KEY_W)
+    kv("总显存", _fmt_mb(sum(caps.vram_total_mb_per_gpu)) if caps.vram_total_mb_per_gpu else unknown(), KEY_W)
+    kv("剩余显存", _fmt_mb(free_mb), KEY_W)
+    kv("CUDA 驱动", caps.cuda_driver or unknown(), KEY_W)
+    kv("计算能力", caps.compute_capability or unknown(), KEY_W)
 
     # ── 区域二：引擎二进制 ──
     print()
     section("引擎二进制")
-    name_w = max(len(n) for n in ENGINE_BINARIES)
+    name_w = max(display_width(n) for n in ENGINE_BINARIES)
     for name in ENGINE_BINARIES:
         path = caps.binary_paths.get(name)
         if path:
@@ -617,16 +624,17 @@ def _cmd_probe(args, models_dir: Path | None, caps) -> int:
             suffix = _table_paint(path, "DIM")
         elif name == "llamacpp":
             status = _table_paint("不可用", "ERROR")
-            suffix = "(未找到编译产物 llama-server)"
+            suffix = _table_paint("(未找到编译产物 llama-server)", "DIM")
         else:
             status = _table_paint("不可用", "ERROR")
-            suffix = f"(缺失 {name} 可执行文件" + (ENGINE_INSTALL_HINTS.get(name, "") or "") + ")"
-        print(f"  {name:<{name_w}}  {status}{suffix}")
-        # llamacpp 额外两行安装提示，进一步缩进
+            hint = ENGINE_INSTALL_HINTS.get(name, "") or ""
+            suffix = _table_paint(f"(缺失 {name} 可执行文件{hint})", "DIM")
+        print(f"  {pad_width(name, name_w)}  {status}{suffix}")
+        # llamacpp 额外两行安装提示，对齐到 status 起始列
         if not path and name == "llamacpp":
-            pad2 = " " * (2 + name_w + 2 + 3)  # 对齐到 status 之后
-            print(f"{pad2}源码:  git clone https://github.com/ggml-org/llama.cpp.git")
-            print(f"{pad2}编译:  cmake -B build -DGGML_CUDA=ON && cmake --build build -j 4")
+            pad2 = " " * (2 + name_w + 2)
+            print(f"{pad2}{_table_paint('源码:  ', 'DIM')}git clone https://github.com/ggml-org/llama.cpp.git")
+            print(f"{pad2}{_table_paint('编译:  ', 'DIM')}cmake -B build -DGGML_CUDA=ON && cmake --build build -j 4")
     available_count = sum(1 for n in ENGINE_BINARIES if caps.binaries.get(n))
     total = len(ENGINE_BINARIES)
     print()
@@ -637,9 +645,9 @@ def _cmd_probe(args, models_dir: Path | None, caps) -> int:
     section("软件环境")
     from modelctl.core.compat import EnvSpec
     env = EnvSpec.from_env()
-    kv("site-packages", env.site_packages or unknown())
-    kv("已安装包", f"{len(env.packages)} 个")
-    kv("nvidia .so", f"{len(env.nvidia_so)} 个")
+    kv("site-packages", env.site_packages or unknown(), KEY_W)
+    kv("已安装包", f"{len(env.packages)} 个", KEY_W)
+    kv("nvidia .so", f"{len(env.nvidia_so)} 个", KEY_W)
     if env.libs_resolvable_known:
         if env.cuda_libs_resolvable:
             res_val = _table_paint("是", "SUCCESS")
@@ -647,19 +655,20 @@ def _cmd_probe(args, models_dir: Path | None, caps) -> int:
         else:
             res_val = _table_paint("否", "ERROR")
             res_note = ""
-        kv("CUDA 可解析", res_val + res_note)
+        kv("CUDA 可解析", res_val + res_note, KEY_W)
     else:
-        kv("CUDA 可解析", unknown())
+        kv("CUDA 可解析", unknown(), KEY_W)
 
     # ── 区域四：关键环境变量 ──
     print()
     section("关键环境变量")
     for key in ("HF_HOME", "MODEL_ROOT", "MODELSCOPE_CACHE"):
+        # 用 KEY_W 统一对齐，使最宽的 MODELSCOPE_CACHE 与其他键等长
         val = env.env_vars.get(key)
         if val:
-            kv(key, _table_paint(val, "INFO"))
+            kv(key, _table_paint(val, "INFO"), KEY_W)
         else:
-            kv(key, _table_paint("(未设置)", "DIM"))
+            kv(key, _table_paint("(未设置)", "DIM"), KEY_W)
     return 0
 
 

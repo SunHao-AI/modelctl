@@ -36,7 +36,7 @@ vllm:
   # gpu_memory_utilization：显存利用率上限（0~1）
   # 注意：vLLM ≥0.21 默认启用 CUDA graph memory profiling，0.92 实际等效旧版的 0.8525；
   # 若想完全吃满显存，可在 extra_args 手动指定 --kv-cache-memory（见其注释，需按环境实测）
-  gpu_memory_utilization: 0.92
+  gpu_memory_utilization: 0.95
   # quantization：量化方式（可选，如 fp8；FP8 需要 CC ≥ 8.9）
   # 默认 BF16；官方 FP8 检查点可用时改 quantization: fp8（见文件头注释）
   quantization: ""
@@ -57,7 +57,7 @@ vllm:
   # --kv-cache-memory=<字节数>：手动指定每卡 KV cache。设置后 vLLM 跳过显存 profiling，
   #   必须与当前机器/vLLM 版本实测匹配，否则 CUDA graph 捕获阶段 OOM（2026-08-25 TP=8
   #   新 vLLM 下 27990797312 即因此崩溃），故默认不启用——由上方 gpu_memory_utilization 自动分配
-  extra_args: "--reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder --generation-config vllm --default-chat-template-kwargs '{\"enable_thinking\": false}' --max-num-seqs 8 --speculative-config '{\"method\":\"mtp\",\"num_speculative_tokens\":3}'"
+  extra_args: '--reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder --generation-config vllm --default-chat-template-kwargs ''{"enable_thinking": false}'' --max-num-seqs 8 --speculative-config ''{"method":"mtp","num_speculative_tokens":3}'''
   # ── 投机解码（默认启用）──
   # 已启用：MTP，模型自带 MTP 头无需 draft；官方推荐 num=3
   # 配置项：num_speculative_tokens=3（官方 recipe 推荐值，3~5 接受率最高，>5 收益递减）

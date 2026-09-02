@@ -36,6 +36,8 @@ from typing import TextIO
 __all__ = [
     "ColorScheme",
     "Color",
+    "display_width",
+    "pad_width",
     "style_of",
     "color_enabled",
     "set_color_enabled",
@@ -56,6 +58,58 @@ __all__ = [
     "red",
     "green",
 ]
+
+
+# ═══════════════════════════════════════════════════
+# 终端显示宽度（CJK 字符按 2 列、ASCII 按 1 列）
+# ═══════════════════════════════════════════════════
+
+
+def _is_wide(ord: int) -> bool:
+    """判断 Unicode codepoint 在等宽终端是否占 2 列（全角/中文）。
+
+    覆盖常见 CJK 区段（未尝试区分窄角变体，CLI 输出现实中不会出现）：
+    CJK 统一表意文字、扩展 A/B、谚文音节、全角符号、象形文字补充、CJK 康熙部首。
+    """
+    return (
+        0x1100 <= ord <= 0x115F        # Hangul 兼容 Jamo
+        or 0x2E80 <= ord <= 0x303E      # CJK 部首补充
+        or 0x3041 <= ord <= 0x33FF      # 日文/韩文/中文标点+假名
+        or 0x3400 <= ord <= 0x4DBF      # CJK 扩展 A
+        or 0x4E00 <= ord <= 0x9FFF      # CJK 统一表意文字
+        or 0xA000 <= ord <= 0xA4CF      # 彝文
+        or 0xAC00 <= ord <= 0xD7A3      # 谚文音节
+        or 0xF900 <= ord <= 0xFAFF      # CJK 兼容表意文字
+        or 0xFE30 <= ord <= 0xFE4F      # CJK 兼容形式
+        or 0xFF00 <= ord <= 0xFF60      # 全角 ASCII
+        or 0xFFE0 <= ord <= 0xFFE6      # 全角符号
+        or 0x20000 <= ord <= 0x3FFFD    # CJK 扩展 B+（含 B-H）
+    )
+
+
+def display_width(text: str) -> int:
+    """返回文本在等宽终端的显示列数（含 CJK 双宽调整）。"""
+    w = 0
+    for ch in text:
+        w += 2 if _is_wide(ord(ch)) else 1
+    return w
+
+
+def pad_width(text: str, width: int, *, align: str = "left") -> str:
+    """按显示宽度填充/截断文本。
+
+    - align="left":  左侧对齐，右侧补空格到 width 列
+    - align="right": 右侧对齐，左侧补空格到 width 列
+    若 display_width(text) > width，原样返回（不截断，避免破坏路径）。
+    """
+    gap = max(0, width - display_width(text))
+    if align == "right":
+        return " " * gap + text
+    if align == "center":
+        left = gap // 2
+        return " " * left + text + " " * (gap - left)
+    return text + " " * gap
+
 
 #: 日志级别名称 → ANSI 颜色（供 loguru console format 的 {level} 使用）。
 #: 键为转换后的 hex key，如 {TRACE}、{DEBUG}、{INFO}、{SUCCESS}、{WARNING}、{ERROR}、{CRITICAL}。
