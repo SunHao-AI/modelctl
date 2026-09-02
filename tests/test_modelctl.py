@@ -9,6 +9,9 @@
 # @Desc   : CLI 主模块测试
 # ===============================================================================
 
+import os
+from pathlib import Path
+
 from modelctl import cli
 
 
@@ -58,13 +61,38 @@ def test_list_group_route_mapping(tmp_path, monkeypatch, capsys):
         "group: deepseek-v4-flash\nengine: ollama\nport: 11434\nollama:\n  model: d\n", encoding="utf-8"
     )
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
-    # 仅 qwen3.8-vllm 运行中 → 输入 qwen3.8 路由至它
+    # 仅 qwen3.8-vllm 运行中 → 输入 qwen3.8 路由至它（状态列口径：PID 文件存在且进程存活）
     monkeypatch.setattr("modelctl.cli.is_running", lambda name: name == "qwen3.8-vllm")
+    pid_dir = Path(os.environ["CACHE_DIR"])
+    pid_dir.mkdir(parents=True, exist_ok=True)
+    (pid_dir / "qwen3.8-vllm.pid").write_text("4242", encoding="utf-8")
+    monkeypatch.setattr("modelctl.cli._stats_token_rate", lambda p: None)
     rc = cli.main(["list", "--models-dir", str(tmp_path)])
     out = capsys.readouterr().out
     assert rc == 0
     assert '输入 "qwen3.8" 路由至 qwen3.8-vllm' in out
     assert '输入 "deepseek-v4-flash" 当前无运行成员' in out
+
+
+def test_list_group_route_mapping_counts_external_started(tmp_path, monkeypatch, capsys):
+    """外部启动成员（无 PID 文件、端口健康）须计入路由成员，与状态列"已外部启动"一致。
+
+    回归：qwen3.8-flash-next-vllm 由 docker 拉起时状态列显示"已外部启动"，
+    但家族标题仍报"当前无运行成员"（旧口径只看 PID 文件）。
+    """
+    (tmp_path / "flash-next.yaml").write_text(
+        "group: qwen3.8-flash-next\nengine: vllm\nport: 8110\nvllm:\n  model: q\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr("modelctl.cli.is_running", lambda name: False)
+    monkeypatch.setattr("modelctl.cli._port_health_ok", lambda p, timeout=2.0: p.port == 8110)
+    monkeypatch.setattr("modelctl.cli._stats_token_rate", lambda p: None)
+    rc = cli.main(["list", "--models-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "已外部启动" in out
+    # 路由提示括号内取状态列原值，不得谎报为"运行中"
+    assert '输入 "qwen3.8-flash-next" 路由至 qwen3.8-flash-next-vllm（已外部启动）' in out
 
 
 def test_profile_error_exit_code(tmp_path, capsys):

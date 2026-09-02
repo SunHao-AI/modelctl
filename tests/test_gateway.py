@@ -418,9 +418,32 @@ def test_list_models_uses_alias_as_id():
     assert [m["id"] for m in resp.json()["data"]] == ["deepseek-v4-flash"]
 
 
-def test_list_models_excludes_unmanaged_but_alive():
-    """回归：modelctl 未管理（is_running False）但端口有响应（如遗留 ollama serve 占用 11434）
-    的模型不得出现在 /v1/models——仅健康探测会将其误判为可用。"""
+def test_list_models_includes_external_started():
+    """外部启动（无 PID 文件、端口健康，如 docker 拉起）的模型须出现在 /v1/models。
+
+    口径与 CLI 状态列的"已外部启动"一致：modelctl 未接管不影响其可用性。
+    """
+    reg = {
+        "qwen3.8-flash-next-vllm": GatewayModel(
+            "qwen3.8-flash-next-vllm", "vllm", "http://upstream", "x", None, "http://upstream/"
+        )
+    }
+    app = create_app(reg, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    with (
+        patch("modelctl.core.gateway.is_model_healthy", return_value=True),
+        patch("modelctl.core.gateway.is_running", return_value=False),
+    ):
+        resp = _run(_get(app, "/v1/models"))
+    assert resp.status_code == 200
+    assert [m["id"] for m in resp.json()["data"]] == ["qwen3.8-flash-next-vllm"]
+
+
+def test_list_models_excludes_stale_pid_but_alive():
+    """回归：PID 文件残留（受管进程已退出）但端口被其他进程占用时不得视为可用。
+
+    仅凭端口响应会把遗留进程占用的端口误判为该模型可用，故以 PID 文件是否存在
+    区分"外部启动"与"PID 异常"。
+    """
     reg = {
         "deepseek-v4-flash-ollama": GatewayModel(
             "deepseek-v4-flash-ollama", "ollama", "http://upstream", "x", None, "http://upstream/"
@@ -430,7 +453,9 @@ def test_list_models_excludes_unmanaged_but_alive():
     with (
         patch("modelctl.core.gateway.is_model_healthy", return_value=True),
         patch("modelctl.core.gateway.is_running", return_value=False),
+        patch("modelctl.core.gateway.pid_file") as pf,
     ):
+        pf.return_value.is_file.return_value = True
         resp = _run(_get(app, "/v1/models"))
     assert resp.status_code == 200
     assert resp.json()["data"] == []
@@ -513,10 +538,10 @@ def test_resolve_model_group_prefers_running_member():
     groups = {"qwen3.8": members}
     with (
         patch("modelctl.core.gateway.is_running", side_effect=lambda n: n == "qwen3.8-llamacpp"),
-        patch("modelctl.core.gateway.is_model_healthy", return_value=True),
+        patch("modelctl.core.gateway.is_model_healthy", side_effect=lambda m: m.name == "qwen3.8-llamacpp"),
     ):
         target = resolve_model(reg, "qwen3.8", None, groups=groups)
-    assert target is members[1]  # vllm 不健康（未运行）→ 落到 llamacpp
+    assert target is members[1]  # vllm 不可用（未运行且端口不通）→ 落到 llamacpp
 
 
 def test_resolve_model_group_none_running_returns_none():
@@ -524,10 +549,25 @@ def test_resolve_model_group_none_running_returns_none():
     groups = {"qwen3.8": [reg["qwen3.8"]]}
     with (
         patch("modelctl.core.gateway.is_running", return_value=False),
+        patch("modelctl.core.gateway.is_model_healthy", return_value=False),
+    ):
+        # 裸名 qwen3.8 同时是 llamacpp alias 与 group 名：group 优先，无可用成员 → None（不回退 alias）
+        assert resolve_model(reg, "qwen3.8", None, groups=groups) is None
+
+
+def test_resolve_model_group_routes_external_started_member():
+    """家族内唯一成员为外部启动（无 PID 文件、端口健康）时应能解析到它。
+
+    回归：qwen3.8-flash-next-vllm 由 docker 外部拉起，旧口径（is_running 且健康）
+    会让裸名请求直接 404。
+    """
+    members = [GatewayModel("qwen3.8-flash-next-vllm", "vllm", "http://127.0.0.1:8110", "q", None, "http://127.0.0.1:8110/")]
+    groups = {"qwen3.8-flash-next": members}
+    with (
+        patch("modelctl.core.gateway.is_running", return_value=False),
         patch("modelctl.core.gateway.is_model_healthy", return_value=True),
     ):
-        # 裸名 qwen3.8 同时是 llamacpp alias 与 group 名：group 优先，无健康成员 → None（不回退 alias）
-        assert resolve_model(reg, "qwen3.8", None, groups=groups) is None
+        assert resolve_model({}, "qwen3.8-flash-next", None, groups=groups) is members[0]
 
 
 def test_resolve_model_group_as_default():
@@ -581,11 +621,11 @@ def test_proxy_group_routes_to_running_member():
     app = create_app({}, groups=groups, transport=httpx.MockTransport(upstream))
     with (
         patch("modelctl.core.gateway.is_running", side_effect=lambda n: n == "qwen3.8-vllm"),
-        patch("modelctl.core.gateway.is_model_healthy", return_value=True),
+        patch("modelctl.core.gateway.is_model_healthy", side_effect=lambda m: m.name == "qwen3.8-vllm"),
     ):
         resp = _run(_post(app, "/v1/chat/completions", json={"model": "qwen3.8", "messages": []}))
     assert resp.status_code == 200
-    assert captured["body"]["model"] == "q3-vllm"  # 已改写为运行成员的上游模型名
+    assert captured["body"]["model"] == "q3-vllm"  # 已改写为可用成员的上游模型名
 
 
 def test_create_app_auto_builds_registry_and_groups():

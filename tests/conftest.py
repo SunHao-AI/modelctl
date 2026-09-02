@@ -21,6 +21,21 @@ import time
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def isolated_runtime_dirs(tmp_path, monkeypatch):
+    """PID 文件与日志目录默认指向 tmp_path，杜绝测试触碰项目外的真实运行目录。
+
+    CACHE_DIR：可用口径（is_model_available / _instance_state）会读 pid_file(name)
+      区分"外部启动"与"PID 异常"，不隔离会让测试结论依赖仓库 data/cache 的真实内容。
+    LOG_DIR：缺省值落到项目外的 <项目根>/../logs（见 core/logging.py）。未显式设置的
+      用例调 cli.main() → setup_logging() 时，loguru 文件 sink 会在该路径打开句柄；
+      该句柄跨用例存活，被 pytest 的 gc.collect() 析构时 close() 抛 OSError(EBADF)，
+      表现为"当时正在跑的用例"莫名失败（与用例自身逻辑无关）。
+    """
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+
+
 @pytest.fixture()
 def dead_pid() -> int:
     """一个确定已死的 PID：派生短命子进程、退出后释放本端全部句柄，并轮询确认探测为死。

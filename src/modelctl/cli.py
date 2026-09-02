@@ -505,15 +505,16 @@ def _cmd_status(args, models_dir: Path | None, caps) -> int:
     return 0
 
 
-def _group_runtime_target(members: list[Profile]) -> Profile | None:
-    """返回组内第一个运行中的 profile。
+def _group_runtime_target(members: list[Profile], states: list[str]) -> tuple[Profile, str] | None:
+    """返回组内第一个可用的成员及其状态（"运行中"或"已外部启动"）。
 
-    成员已按引擎优先级排序（vllm 优先），与网关家族路由 _resolve_group 一致
-    （网关额外做健康检查，此处仅以运行状态作答，与状态列口径统一）。
+    states 为调用方已探得的各成员状态（避免重复端口探测）。成员已按引擎优先级
+    排序（vllm 优先），与网关家族路由 _resolve_group 一致——两者按同一可用口径判定
+    （受管运行中，或无 PID 文件但端口健康的外部启动实例）。
     """
-    for p in members:
-        if is_running(p.name):
-            return p
+    for p, state in zip(members, states, strict=False):
+        if state in ("运行中", "已外部启动"):
+            return p, state
     return None
 
 
@@ -544,13 +545,6 @@ def _cmd_list(args, models_dir: Path | None, caps) -> int:
         if idx > 0:
             print()  # 家族块之间空一行，便于阅读
         members = grouped[group_name]
-        target = _group_runtime_target(members)
-        if target:
-            route = f'输入 "{group_name}" 路由至 {target.name}（运行中）'
-        else:
-            route = f'输入 "{group_name}" 当前无运行成员'
-        header = f"{group_name}（{len(members)} 配置）"
-        print(_table_paint(header, "SECTION") + "｜" + route)
         rows = []
         for p in members:
             state = _instance_state(profile=p)
@@ -561,6 +555,16 @@ def _cmd_list(args, models_dir: Path | None, caps) -> int:
                 if r is not None and (r[0] > 0 or r[1] > 0):
                     rate = f"{r[0]:.1f}/{r[1]:.1f}"
             rows.append([p.engine, p.variant or "-", p.port, state, rate, p.name])
+        # 路由映射提示复用上方已探得的状态列，与网关家族路由的可用口径一致；
+        # 括号内直接取状态列原值（运行中 / 已外部启动），避免与表格自相矛盾
+        target = _group_runtime_target(members, [r[3] for r in rows])
+        if target:
+            target_profile, target_state = target
+            route = f'输入 "{group_name}" 路由至 {target_profile.name}（{target_state}）'
+        else:
+            route = f'输入 "{group_name}" 当前无运行成员'
+        header = f"{group_name}（{len(members)} 配置）"
+        print(_table_paint(header, "SECTION") + "｜" + route)
         _print_table(["引擎", "变体", "端口", "状态", "速率(入/出)", "标识符"], rows, dim_indices=(0, 1, 4))
 
     default_model = os.environ.get("GATEWAY_DEFAULT_MODEL")

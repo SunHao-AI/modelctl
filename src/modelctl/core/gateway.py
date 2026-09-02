@@ -38,7 +38,7 @@ from loguru import logger
 from modelctl.core.audit import NoopAuditLog, RequestAuditLog, _new_audit_log
 from modelctl.core.capabilities import Capabilities
 from modelctl.core.envfile import load_env
-from modelctl.core.process import is_running, open_local
+from modelctl.core.process import is_running, open_local, pid_file
 from modelctl.core.profile import Profile, list_profiles
 from modelctl.core.stats import UsageCollector
 from modelctl.engines import get_adapter
@@ -387,10 +387,24 @@ def apply_context_switch(
     return None
 
 
+def is_model_available(model: GatewayModel) -> bool:
+    """模型是否可路由：受管运行中，或无 PID 文件但端口健康（外部启动，如 docker 拉起）。
+
+    与 CLI 状态列口径一致（运行中 / 已外部启动）。区分"外部启动"与"PID 异常"的
+    依据是 PID 文件是否存在：残留 PID 文件说明进程已退出，端口即便被其他进程占用
+    也不算该模型可用（避免遗留进程被误判为可用）。
+    """
+    if is_running(model.name):
+        return True
+    if pid_file(model.name).is_file():
+        return False
+    return is_model_healthy(model)
+
+
 def _resolve_group(groups: dict[str, list[GatewayModel]], name: str) -> GatewayModel | None:
-    """家族解析：按引擎优先级顺序返回第一个运行中且健康的成员；无则 None。"""
+    """家族解析：按引擎优先级顺序返回第一个可用（运行中或外部启动且健康）的成员；无则 None。"""
     for m in groups.get(name, []):
-        if is_running(m.name) and is_model_healthy(m):
+        if is_model_available(m):
             return m
     return None
 
@@ -516,11 +530,10 @@ def create_app(
                 seen.add(m.name)
                 models.append(m)
 
-        # 并发健康探测：串行会让未运行模型各耗 timeout 秒，10 个模型累积到十几秒。
-        # 过滤条件：modelctl 判定运行中（PID 文件 + 进程存活）且端口健康——
-        # 仅端口响应不够（如遗留进程占用端口会被误判为"已停止"模型可用）。
+        # 并发可用性探测：串行会让未运行模型各耗 timeout 秒，10 个模型累积到十几秒。
+        # 过滤条件见 is_model_available：受管运行中，或无 PID 文件但端口健康（外部启动）。
         def _available(m: GatewayModel) -> bool:
-            return is_running(m.name) and is_model_healthy(m)
+            return is_model_available(m)
 
         results = await asyncio.gather(*(asyncio.to_thread(_available, m) for m in models))
         data = [
@@ -537,7 +550,7 @@ def create_app(
         existing_ids = {item["id"] for item in data}
 
         def _group_healthy(members: list[GatewayModel]) -> bool:
-            return any(is_running(m.name) and is_model_healthy(m) for m in members)
+            return any(is_model_available(m) for m in members)
 
         for group_name, members in groups.items():
             if group_name in existing_ids:
