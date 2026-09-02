@@ -116,17 +116,19 @@ def is_running(name: str) -> bool:
 
 
 def is_running_any(name: str, profile: Profile | None) -> bool:
-    """统一运行态判定：端口 /health 2xx 优先，PID 文件机器兜底（venv 路径残留清理 / dead PID 清理）。
+    """统一运行态判定：端口 /health 2xx 优先，PID 文件机器兜底。
 
-    profile 缺省：gateway.stats 等无 Profile 场景退回纯 PID 探测，与原 is_running(name) 行为一致。
-    profile 存在（通常 venv/docker 都能获取 port）：先探测 127.0.0.1:{profile.port}/health
-    （单次 2s 超时，不重试），2xx 直接 True；失败/不可达再回到 PID 文件探测。
-    任何异常（端口不通 / PID 文件损坏 / profile.short 访问异常）一律 False，绝不抛错。
-    命中 dead-PID 路径时会顺手 unlink PID 文件并发出一次 warning，把"PID 残留"语义
-    交由更上层（cli._instance_state）判定——本函数只负责"还活着吗"。
+    **判定无副作用**：只读不写——绝不 unlink PID 文件、绝不释放 GPU 锁。dead / 损坏的
+    PID 文件原样保留，由 stop 路径（stop_instance / stop_docker_instance）负责清理；
+    CLI 的 "PID 残留" 状态依赖判定返回 False 后回看 pid_file(name).is_file() 才能识别。
+
+    profile 缺省（gateway.stats / ui-* 等不持有 Profile 的调用点）退回纯 PID 探测，
+    与原 is_running(name) 的判定结果等价。
+    profile 存在时先探测 127.0.0.1:{profile.port}/health（单次 2s 超时，不重试），
+    2xx 即 True；失败/不可达再回到 PID 文件探测。
+    任何异常（端口不通 / PID 文件损坏 / profile 字段缺失）一律 False，绝不抛错。
     """
-    # 1. 端口健康探测（仅 profile 非 None 时）
-    port_ok = False
+    # 1. 端口健康探测（仅 profile 非 None 时）——2xx 直接判定存活，不再看 PID 文件
     if profile is not None:
         port: int | None = getattr(profile, "port", None)
         if port is not None:
@@ -142,24 +144,18 @@ def is_running_any(name: str, profile: Profile | None) -> bool:
                 req = urllib.request.Request(f"http://127.0.0.1:{port}/health", headers=headers)
                 with open_local(req, timeout=2.0) as resp:
                     if 200 <= resp.status < 300:
-                        port_ok = True
+                        return True
             except (urllib.error.URLError, OSError, ValueError):
                 pass
-    # 2. PID 文件探测（无论端口是否健康都执行：端口健康时顺带清理 dead/损坏的残留 PID 文件）
-    pid_ok = False
+    # 2. PID 文件探测（只读；dead / 损坏都返回 False 且保留文件）
     pf = pid_file(name)
-    if pf.is_file():
-        try:
-            pid = int(pf.read_text(encoding="utf-8").strip())
-        except ValueError:
-            pf.unlink(missing_ok=True)
-            logger.warning(f"{name}：PID 文件无法解析，已清理")
-        else:
-            if is_pid_alive(pid):
-                pid_ok = True
-            else:
-                pf.unlink(missing_ok=True)
-    return port_ok or pid_ok
+    if not pf.is_file():
+        return False
+    try:
+        pid = int(pf.read_text(encoding="utf-8").strip())
+    except ValueError:
+        return False
+    return is_pid_alive(pid)
 
 
 def stop_docker_instance(name: str, container_name: str) -> bool:
