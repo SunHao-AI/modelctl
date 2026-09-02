@@ -32,6 +32,7 @@ from modelctl.core.deps import ensure_packages
 from modelctl.core.gateway import GATEWAY_PORT
 from modelctl.core.process import (
     is_running,
+    is_running_any,
     launch_log,
     log_excerpt,
     pid_file,
@@ -74,7 +75,7 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float) -> Compo
     逻辑迁移自 cli._cmd_start。
     """
     tag = f"model:{profile.name}"
-    if is_running(profile.name):
+    if is_running_any(profile.name, profile):
         return ComponentResult(tag, "skipped", "已在运行")
     adapter = get_adapter(profile.engine)(profile, caps)
     adapter.check_requirements()  # RequirementError 向上抛
@@ -84,7 +85,10 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float) -> Compo
         logger.warning(warning)
     adapter.pre_start()
     cmd, env = adapter.build_command()
-    pid, proc = start_detached(profile.name, cmd, env)
+    # docker runtime（is_docker_runtime True）走 `docker run --detach`：容器在 daemon 后台续
+    # 不会随 client 早退，PID 文件不写（write_pid=False）；venv runtime 维持默认 write_pid=True。
+    pid, proc = start_detached(profile.name, cmd, env,
+                               write_pid=not adapter.is_docker_runtime())
     adapter.spawned_proc = proc  # 供 wait_ready 在进程早退时 fail-fast
     try:
         from modelctl.core.gpu_lock import update_gpu_lock_owner
@@ -138,14 +142,18 @@ def stop_profile(profile: Profile, caps: Capabilities, models_dir: Path | None) 
             adapter.unload_model()
             pid_file(profile.name).unlink(missing_ok=True)
     else:
-        stop_instance(profile.name, profile.port, adapter.stop_patterns())
+        adapter.stop_backend()
     logger.info(f"已停止：{profile.name}")
     return ComponentResult(tag, "ok", "已停止")
 
 
 def restart_profile(profile: Profile, caps: Capabilities, timeout: float) -> ComponentResult:
-    """重启单个模型 profile：运行中先停后启，未运行直接启。"""
-    if is_running(profile.name):
+    """重启单个模型 profile：运行中先停后启，未运行直接启。
+
+    运行态判定改走 `is_running_any(name, profile)`（端口 /health 2xx 优先 + PID 文件机器
+    兜底），docker 路径下 PID 文件不存在时仍能据端口探测判定为运行中。
+    """
+    if is_running_any(profile.name, profile):
         stop_profile(profile, caps, None)
     return start_profile(profile, caps, timeout)
 
@@ -313,7 +321,8 @@ def stop_all(models_dir: Path | None) -> list[ComponentResult]:
     caps = probe()
     results: list[ComponentResult] = [stop_stats(), stop_gateway()]
     for profile in list_profiles(models_dir):
-        if is_running(profile.name):
+        # 用 is_running_any 判定（docker 容器 PID 文件不写，端口探测可识别运行中）
+        if is_running_any(profile.name, profile):
             results.append(stop_profile(profile, caps, models_dir))
     return results
 
