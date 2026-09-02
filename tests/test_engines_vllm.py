@@ -778,19 +778,27 @@ class _FakeProc:
         return 0 if self._done else None
 
 
-def test_wait_ready_docker_ignores_client_early_exit(tmp_path, monkeypatch):
-    """docker 分支：客户端 daemonize 后立刻退出是预期，不能传 alive_check →
-    否则 600s 超时被 1 秒中断，roll 不出权重加载进度。"""
+def test_wait_ready_docker_uses_container_alive_check(tmp_path, monkeypatch):
+    """docker 分支：客户端 daemonize 后立刻退出是预期，但存活探针必须以**容器状态**衡量，
+    而非客户端进程——容器死亡（OOM/GPU 失败/架构不识别）时应立即中止健康检查，不再空转到超时。"""
     import modelctl.engines.vllm as vllm_mod
 
     captured = {}
+    container_calls: list[str] = []
 
     def fake_wait_health(url, timeout, api_key=None, alive_check=None):
         captured["alive_check"] = alive_check
         captured["timeout"] = timeout
+        if alive_check is not None:
+            alive_check()  # 触发容器探针调用，验证它以容器名为参
         return True
 
+    def fake_container_alive(name):
+        container_calls.append(name)
+        return False  # 容器已死
+
     monkeypatch.setattr(vllm_mod, "wait_health", fake_wait_health)
+    monkeypatch.setattr(vllm_mod, "docker_container_alive", fake_container_alive)
     model_dir = tmp_path / "m" / "X"
     model_dir.mkdir(parents=True)
     p = _write(
@@ -801,8 +809,10 @@ def test_wait_ready_docker_ignores_client_early_exit(tmp_path, monkeypatch):
     a = get_adapter("vllm")(p, CAPS8)
     a.spawned_proc = _FakeProc(done=True)  # docker run 客户端已退出（daemonize 后）
     assert a.wait_ready(30) is True
-    assert captured["alive_check"] is None
     assert captured["timeout"] == 30
+    # 存活探针不再为 None：已传入容器状态探针，并以容器名调用
+    assert captured["alive_check"] is not None
+    assert container_calls == ["q-vllm"]
 
 
 def test_wait_ready_venv_early_exit_uses_alive_check(tmp_path, monkeypatch):

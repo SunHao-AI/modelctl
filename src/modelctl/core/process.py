@@ -197,6 +197,28 @@ def wait_health(url: str, timeout: float, api_key: str | None = None, alive_chec
     return False
 
 
+def docker_container_alive(container_name: str) -> bool:
+    """探测 docker 容器是否仍在运行（docker inspect 容器 Running 状态）。
+
+    容器不存在（含 --rm 容器崩溃后被 daemon 自动回收）、已退出、或 docker 查询失败
+    （PATH / daemon 不可用）均返回 False。供 wait_health 的 alive_check 与失败诊断共用。
+
+    与客户端进程探针不同：`docker run --detach` 客户端 daemonize 后立刻退出是**预期行为**，
+    真正的服务存活由容器状态衡量——容器死亡（OOM / GPU 初始化失败 / 架构不识别）时
+    允许 wait_health 立即中止，不再空转到超时。
+    """
+    try:
+        out = subprocess.run(
+            ["docker", "inspect", "--format", "{{.State.Running}}", container_name],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return out.returncode == 0 and out.stdout.strip() == "true"
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def tail_file(path: Path, lines: int) -> str:
     try:
         content = path.read_text(encoding="utf-8", errors="replace").splitlines()

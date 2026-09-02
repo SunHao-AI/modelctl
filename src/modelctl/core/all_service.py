@@ -107,7 +107,9 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float) -> Compo
             logger.info("提示：用量统计可通过 `modelctl stats start` 启动")
         return ComponentResult(tag, "ok", f"http://127.0.0.1:{profile.port}")
     log = launch_log(profile.name)
-    died = proc.poll() is not None
+    # 死亡判定交给引擎适配器：docker 分支以容器状态衡量（客户端进程早退≠容器死亡），
+    # venv 分支维持"本工具拉起的进程早退即死亡"的语义
+    died = adapter.backend_dead()
     if log is None:
         logger.warning("引擎未在时限内就绪，且未找到启动日志")
     elif died:

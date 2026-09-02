@@ -55,6 +55,7 @@ class _FakeAdapter:
         self.warnings: list[str] = []
         self.profile = profile
         self._ready = ready
+        self.spawned_proc = None
 
     def check_requirements(self):
         return None
@@ -76,6 +77,10 @@ class _FakeAdapter:
 
     def metrics_mapping(self):
         return None
+
+    def backend_dead(self):
+        """mirror base.EngineAdapter：本工具拉起的进程早退即视为死亡（docker 子类覆盖为容器状态探测）。"""
+        return self.spawned_proc is not None and self.spawned_proc.poll() is not None
 
 
 # ---- 默认模型解析 ----

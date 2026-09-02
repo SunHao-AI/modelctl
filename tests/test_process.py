@@ -292,3 +292,37 @@ def test_is_pid_alive_current_process():
 def test_is_pid_alive_dead_pid(dead_pid):
     # dead_pid fixture（conftest）：确定已死的真实 PID，不假设某个大数一定无效
     assert process.is_pid_alive(dead_pid) is False
+
+
+# ---- docker_container_alive：容器存活探测 ----
+
+def _fake_run(stdout: str, returncode: int = 0, exc: Exception | None = None):
+    def _run(cmd, **kwargs):
+        assert cmd[:3] == ["docker", "inspect", "--format"]
+        assert cmd[3] == "{{.State.Running}}"
+        if exc is not None:
+            raise exc
+        return type("R", (), {"returncode": returncode, "stdout": stdout})()
+    return _run
+
+
+def test_docker_container_alive_running_true(monkeypatch):
+    monkeypatch.setattr(process.subprocess, "run", _fake_run(stdout="true\n"))
+    assert process.docker_container_alive("q-vllm") is True
+
+
+def test_docker_container_alive_stopped_false(monkeypatch):
+    monkeypatch.setattr(process.subprocess, "run", _fake_run(stdout="false\n"))
+    assert process.docker_container_alive("q-vllm") is False
+
+
+def test_docker_container_alive_missing_container_false(monkeypatch):
+    # docker inspect 对不存在的容器返回非零退出码
+    monkeypatch.setattr(process.subprocess, "run", _fake_run(stdout="", returncode=1))
+    assert process.docker_container_alive("ghost") is False
+
+
+def test_docker_container_alive_subprocess_error_false(monkeypatch):
+    # OSError（docker 不在 PATH）/ SubprocessError（超时）一律视为不存活
+    monkeypatch.setattr(process.subprocess, "run", _fake_run(stdout="", exc=OSError("no docker")))
+    assert process.docker_container_alive("q-vllm") is False

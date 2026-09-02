@@ -23,6 +23,7 @@ from modelctl.core import envs
 from modelctl.core.envfile import PROJECT_ROOT
 from modelctl.core.gpu_lock import acquire_gpu_lock
 from modelctl.core.gpu_utils import GPUValidationError
+from modelctl.core.process import docker_container_alive, wait_health
 from modelctl.engines._download import download_repo
 from modelctl.engines._persist import persist_model_path
 from modelctl.engines.base import EngineAdapter, RequirementError
@@ -96,7 +97,7 @@ class TokenSpeedAdapter(EngineAdapter):
             model_local = Path(model).expanduser().resolve()
             cmd = [
                 "docker", "run", "--rm", "--detach",
-                "--name", f"{self.profile.name}-tokenspeed",
+                "--name", self._container_name,
                 "--gpus", self._gpus_json(gpus, tp),
                 "-p", f"{self.profile.port}:8000",
                 "-v", f"{model_local.parent.as_posix()}:/models:ro",
@@ -156,14 +157,27 @@ class TokenSpeedAdapter(EngineAdapter):
             seq = list(range(int(self.caps.gpu_count or tp)))
         return '"device=' + ",".join(str(g) for g in seq) + '"'
 
+    def _container_name(self) -> str:
+        return f"{self.profile.name}-tokenspeed"
+
     def wait_ready(self, timeout: float) -> bool:
-        from modelctl.core.process import wait_health
         if self._resolve_runtime()[0] == "docker":
-            return wait_health(self.health_url(), timeout, self.upstream_api_key(), alive_check=None)
+            return wait_health(
+                self.health_url(),
+                timeout,
+                self.upstream_api_key(),
+                alive_check=lambda: docker_container_alive(self._container_name),
+            )
         return super().wait_ready(timeout)
+
+    def backend_dead(self) -> bool:
+        """docker 分支：后端死亡 = 容器已退出/不存在（客户端进程早退不等于容器死亡）。"""
+        if self._resolve_runtime()[0] == "docker":
+            return not docker_container_alive(self._container_name)
+        return super().backend_dead()
 
     def stop_patterns(self) -> list[str]:
         if self._resolve_runtime()[0] != "docker":
             return ["tokenspeed serve"]
-        name = f"{self.profile.name}-tokenspeed"
+        name = self._container_name
         return [f"docker run --rm --detach --name {name}"]

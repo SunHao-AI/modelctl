@@ -149,6 +149,15 @@ class EngineAdapter(ABC):
         alive_check = (lambda: self.spawned_proc.poll() is None) if self.spawned_proc else None
         return wait_health(self.health_url(), timeout, self.upstream_api_key(), alive_check=alive_check)
 
+    def backend_dead(self) -> bool:
+        """后端是否真正死亡（用于失败诊断措辞）。
+
+        默认 venv 语义：本工具拉起的进程早退即视为死亡。docker 子类覆盖为容器状态探测
+        （容器退出/不存在即视为死亡，客户端进程 daemonize 后早退不等同于容器死亡）。
+        spawned_proc 为 None（非本工具拉起）时不视为死亡，回退到"健康超时"措辞。
+        """
+        return self.spawned_proc is not None and self.spawned_proc.poll() is not None
+
     def ui_spec(self, port: int | None = None, host: str | None = None) -> dict | None:
         """Web 管理控制台规格 {cmd, env, port, host, allow_from}；引擎不提供时返回 None。
 
