@@ -199,6 +199,16 @@ class VllmAdapter(EngineAdapter):
             image,
             f"/models/{model_local.name}",
         ] + model_args + ["--port", "8000"]
+        # docker_env：yaml vllm.docker_env（dict）→ 容器内环境变量。
+        # ⚠ 必须用 `docker run -e`（而非 build_command 返回的 env dict）才能进入容器：
+        #   start_detached 只把 env 注入 docker CLI 宿主进程（Popen），不会透传进容器。
+        docker_env = cfg.get("docker_env") or {}
+        if docker_env:
+            env_args: list[str] = []
+            for k, v in docker_env.items():
+                env_args += ["-e", f"{k}={v}"]
+            ipc_idx = cmd.index("--ipc=host")
+            cmd[ipc_idx:ipc_idx] = env_args
         env = {"HF_HOME": os.environ["HF_HOME"]} if os.environ.get("HF_HOME") else {}
         if gpus:
             env.update(self.cuda_visible_devices(gpus))
@@ -316,3 +326,16 @@ class VllmAdapter(EngineAdapter):
             f"docker run --name {name} --gpus {gpus_json}",
             f"-v {root}:/models:ro",
         ]
+
+    def is_docker_runtime(self) -> bool:
+        """vllm 路径判定：docker_image 字段非空时走 docker runtime。"""
+        return self._resolve_runtime()[0] == "docker"
+
+    def stop_backend(self) -> None:
+        """docker 分支：docker rm -f <container>（清 PID 防御 venv/docker 环境切换残留）；
+        venv 分支：基类 stop_instance（pkill 兜底）。"""
+        if self._resolve_runtime()[0] == "docker":
+            from modelctl.core.process import stop_docker_instance
+            stop_docker_instance(self.profile.name, self._container_name)
+        else:
+            super().stop_backend()

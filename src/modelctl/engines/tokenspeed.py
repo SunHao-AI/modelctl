@@ -181,3 +181,15 @@ class TokenSpeedAdapter(EngineAdapter):
             return ["tokenspeed serve"]
         name = self._container_name
         return [f"docker run --rm --detach --name {name}"]
+
+    def is_docker_runtime(self) -> bool:
+        """tokenspeed 路径判定：docker_image 字段非空时走 docker runtime。"""
+        return self._resolve_runtime()[0] == "docker"
+
+    def stop_backend(self) -> None:
+        """docker 分支：docker rm -f <container>；venv 分支：基类 stop_instance。"""
+        if self._resolve_runtime()[0] == "docker":
+            from modelctl.core.process import stop_docker_instance
+            stop_docker_instance(self.profile.name, self._container_name())
+        else:
+            super().stop_backend()

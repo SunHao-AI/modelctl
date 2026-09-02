@@ -234,3 +234,59 @@ def test_tensorrt_llm_build_subcommand_registered():
     args2 = cli.build_parser().parse_args(["trtllm", "status", "q"])
     assert args2.command == "trtllm"
     assert args2.action == "status"
+    assert args2.name == "q"
+
+
+# ---- Task 3: stop_backend + is_docker_runtime 分流（docker/venv）----
+
+
+def _fake_docker_runtime_profile():
+    from modelctl.core.profile import Profile
+    return Profile(name="x", engine="tensorrt_llm", port=8112,
+                   engine_config={"docker_image": "nvidia/tensorrt-llm:test",
+                                  "model": "/x"})
+
+
+def test_tensorrt_llm_stop_backend_docker_uses_docker_rm(monkeypatch):
+    from modelctl.core.capabilities import Capabilities
+    from modelctl.engines import get_adapter
+    adapter = get_adapter("tensorrt_llm")(_fake_docker_runtime_profile(), Capabilities())
+    captured = {}
+    def _fake_rm(name, container_name):
+        captured.update(name=name, container_name=container_name)
+        return True
+    monkeypatch.setattr("modelctl.core.process.stop_docker_instance", _fake_rm)
+    captured_pid = []
+    monkeypatch.setattr("modelctl.core.process.stop_instance",
+                        lambda *a, **k: captured_pid.append(a) or False)
+    adapter.stop_backend()
+    assert captured == {"name": "x", "container_name": "x-trtllm"}
+    assert captured_pid == []  # 不走 venv 路径
+
+
+def test_tensorrt_llm_stop_backend_venv_uses_stop_instance(monkeypatch):
+    from modelctl.core.capabilities import Capabilities
+    from modelctl.engines import get_adapter
+    from modelctl.core.profile import Profile
+    profile = Profile(name="q2", engine="tensorrt_llm", port=8113, engine_config={"model": "/m"})
+    adapter = get_adapter("tensorrt_llm")(profile, Capabilities())
+    captured = {}
+    monkeypatch.setattr("modelctl.core.process.stop_instance",
+                        lambda name, port, patterns: captured.update(name=name, port=port, patterns=patterns) or True)
+    adapter.stop_backend()
+    assert captured["name"] == "q2"
+    assert captured["port"] == 8113
+    assert captured["patterns"] == ["tensorrt_llm.serve"]
+
+
+def test_tensorrt_llm_is_docker_runtime_flag():
+    from modelctl.core.capabilities import Capabilities
+    from modelctl.engines import get_adapter
+    from modelctl.core.profile import Profile
+    docker_p = get_adapter("tensorrt_llm")(
+        Profile(name="x", engine="tensorrt_llm", port=8112,
+                engine_config={"docker_image": "x", "model": "/m"}), Capabilities())
+    venv_p = get_adapter("tensorrt_llm")(
+        Profile(name="q2", engine="tensorrt_llm", port=8113, engine_config={"model": "/m"}), Capabilities())
+    assert docker_p.is_docker_runtime() is True
+    assert venv_p.is_docker_runtime() is False

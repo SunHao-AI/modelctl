@@ -111,3 +111,58 @@ def test_tokenspeed_metrics(tmp_path):
     mapping = a.metrics_mapping()
     assert mapping["prompt_total"] == ["tokenspeed:prompt_tokens_total"]
     assert mapping["predicted_total"] == ["tokenspeed:generation_tokens_total"]
+
+
+# ---- Task 3: stop_backend + is_docker_runtime 分流（docker/venv）----
+
+
+def _fake_docker_runtime_profile():
+    from modelctl.core.profile import Profile
+    return Profile(name="x", engine="tokenspeed", port=8111,
+                   engine_config={"docker_image": "inkflow/tokenspeed:test",
+                                  "model": "/x"})
+
+
+def test_tokenspeed_stop_backend_docker_uses_docker_rm(monkeypatch):
+    from modelctl.core.capabilities import Capabilities
+    from modelctl.engines import get_adapter
+    adapter = get_adapter("tokenspeed")(_fake_docker_runtime_profile(), Capabilities())
+    captured = {}
+    def _fake_rm(name, container_name):
+        captured.update(name=name, container_name=container_name)
+        return True
+    monkeypatch.setattr("modelctl.core.process.stop_docker_instance", _fake_rm)
+    captured_pid = []
+    monkeypatch.setattr("modelctl.core.process.stop_instance",
+                        lambda *a, **k: captured_pid.append(a) or False)
+    adapter.stop_backend()
+    assert captured == {"name": "x", "container_name": "x-tokenspeed"}
+    assert captured_pid == []  # 不走 venv 路径
+
+
+def test_tokenspeed_stop_backend_venv_uses_stop_instance(monkeypatch):
+    from modelctl.core.capabilities import Capabilities
+    from modelctl.engines import get_adapter
+    from modelctl.core.profile import Profile
+    profile = Profile(name="q2", engine="tokenspeed", port=8112, engine_config={"model": "/m"})
+    adapter = get_adapter("tokenspeed")(profile, Capabilities())
+    captured = {}
+    monkeypatch.setattr("modelctl.core.process.stop_instance",
+                        lambda name, port, patterns: captured.update(name=name, port=port, patterns=patterns) or True)
+    adapter.stop_backend()
+    assert captured["name"] == "q2"
+    assert captured["port"] == 8112
+    assert captured["patterns"] == ["tokenspeed serve"]
+
+
+def test_tokenspeed_is_docker_runtime_flag():
+    from modelctl.core.capabilities import Capabilities
+    from modelctl.engines import get_adapter
+    from modelctl.core.profile import Profile
+    docker_p = get_adapter("tokenspeed")(
+        Profile(name="x", engine="tokenspeed", port=8111,
+                engine_config={"docker_image": "x", "model": "/m"}), Capabilities())
+    venv_p = get_adapter("tokenspeed")(
+        Profile(name="q2", engine="tokenspeed", port=8112, engine_config={"model": "/m"}), Capabilities())
+    assert docker_p.is_docker_runtime() is True
+    assert venv_p.is_docker_runtime() is False

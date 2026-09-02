@@ -500,6 +500,34 @@ def test_build_command_docker_template(tmp_path, monkeypatch):
     assert "VIRTUAL_ENV" not in env
 
 
+def test_build_command_docker_env(tmp_path, monkeypatch):
+    """docker 路径 + vllm.docker_env → cmd 注入 -e KEY=VALUE（透传进容器）。"""
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    model_dir = tmp_path / "m" / "Qwen3.8-Flash-Next-FP8"
+    model_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: vllm\nport: 8111\nvllm:\n"
+        f"  model: {model_dir}\n"
+        "  docker_image: vllm/vllm-openai:qwen38-flash-next\n"
+        "  tensor_parallel_size: 8\n"
+        "  docker_env:\n"
+        '    VLLM_PLE_CPU_OFFLOAD: "1"\n',
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    cmd, env = a.build_command()
+
+    # docker run -e 项插入 --ipc=host 之前（保持镜像/模型路径位置不变）
+    env_flag_idx = cmd.index("-e")
+    assert cmd[env_flag_idx] == "-e"
+    assert cmd[env_flag_idx + 1] == "VLLM_PLE_CPU_OFFLOAD=1"
+    assert "--ipc=host" in cmd[env_flag_idx + 2:]
+    image_pos = cmd.index("vllm/vllm-openai:qwen38-flash-next")
+    assert cmd[image_pos + 1] == "/models/Qwen3.8-Flash-Next-FP8"
+    # docker_env 不进返回的 env dict（只进容器）
+    assert "VLLM_PLE_CPU_OFFLOAD" not in env
+
+
 def test_build_command_docker_relative_model_rejected(tmp_path, monkeypatch):
     """docker 路径 + HF repo id（相对路径且非目录）→ RequirementError。"""
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
@@ -858,3 +886,58 @@ def test_wait_ready_venv_alive_proc_passes_check(tmp_path, monkeypatch):
     assert a.wait_ready(42) is True
     assert calls and calls[0] is not None
     assert calls[0]() is True
+
+
+# ---- Task 3: stop_backend + is_docker_runtime 分流（docker/venv）----
+
+
+def _fake_docker_runtime_profile():
+    from modelctl.core.profile import Profile
+    return Profile(name="q", engine="vllm", port=8110,
+                   engine_config={"docker_image": "vllm/vllm-openai:test",
+                                  "model": "/x"})
+
+
+def test_vllm_stop_backend_docker_uses_docker_rm(monkeypatch):
+    from modelctl.core.capabilities import Capabilities
+    from modelctl.engines import get_adapter
+    adapter = get_adapter("vllm")(_fake_docker_runtime_profile(), Capabilities())
+    captured = {}
+    def _fake_rm(name, container_name):
+        captured.update(name=name, container_name=container_name)
+        return True
+    monkeypatch.setattr("modelctl.core.process.stop_docker_instance", _fake_rm)
+    captured_pid = []
+    monkeypatch.setattr("modelctl.core.process.stop_instance",
+                        lambda *a, **k: captured_pid.append(a) or False)
+    adapter.stop_backend()
+    assert captured == {"name": "q", "container_name": "q-vllm"}
+    assert captured_pid == []  # 不走 venv 路径
+
+
+def test_vllm_stop_backend_venv_uses_stop_instance(monkeypatch):
+    from modelctl.core.capabilities import Capabilities
+    from modelctl.engines import get_adapter
+    from modelctl.core.profile import Profile
+    profile = Profile(name="q2", engine="vllm", port=8111, engine_config={"model": "/m"})
+    adapter = get_adapter("vllm")(profile, Capabilities())
+    captured = {}
+    monkeypatch.setattr("modelctl.core.process.stop_instance",
+                        lambda name, port, patterns: captured.update(name=name, port=port, patterns=patterns) or True)
+    adapter.stop_backend()
+    assert captured["name"] == "q2"
+    assert captured["port"] == 8111
+    assert captured["patterns"] == ["vllm serve"]
+
+
+def test_vllm_is_docker_runtime_flag():
+    from modelctl.core.capabilities import Capabilities
+    from modelctl.engines import get_adapter
+    from modelctl.core.profile import Profile
+    docker_p = get_adapter("vllm")(
+        Profile(name="q", engine="vllm", port=8110,
+                engine_config={"docker_image": "x", "model": "/m"}), Capabilities())
+    venv_p = get_adapter("vllm")(
+        Profile(name="q2", engine="vllm", port=8111, engine_config={"model": "/m"}), Capabilities())
+    assert docker_p.is_docker_runtime() is True
+    assert venv_p.is_docker_runtime() is False
