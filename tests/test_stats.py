@@ -1111,3 +1111,56 @@ def test_no_bench_when_rate_and_ttft_present():
         payload = handler._build_target_payload(handler.targets[0])
     assert called["n"] == 0
     assert payload.get("rate_source") == "window_diff"
+
+
+# ---------- Task 7: 轮询默认 60s + 透传 USAGE_BENCH_TTFT_ONLY ----------
+
+
+def test_run_server_poll_interval_default_sixty_and_pass_ttft_only(monkeypatch, tmp_path):
+    import modelctl.core.stats as S
+    monkeypatch.setenv("USAGE_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("USAGE_POLL_INTERVAL", raising=False)
+    monkeypatch.setenv("USAGE_BENCH_TTFT_ONLY", "false")
+
+    captured: dict = {}
+
+    def _fake_load_env():
+        return None
+
+    def _fake_targets(data_dir):
+        from modelctl.core.stats import StatsTarget
+        t = StatsTarget(
+            name="t",
+            data_dir=data_dir,
+            metrics_url="http://127.0.0.1:8000/metrics",
+            mapping={"prompt_total": ["x"]},
+            bench_url="http://127.0.0.1:8000/v1/chat/completions",
+            bench_model="t",
+            usage_cfg={},
+        )
+        return [t]
+
+    class _FakeThreadingHTTPServer:
+        def __init__(self, addr, handler):
+            captured["addr"] = addr
+            captured["handler"] = handler
+
+        def serve_forever(self, *a, **k):
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            return None
+
+    monkeypatch.setattr(S, "load_env", _fake_load_env)
+    monkeypatch.setattr(S, "_targets_from_profiles", _fake_targets)
+    monkeypatch.setattr(S, "ThreadingHTTPServer", _FakeThreadingHTTPServer)
+
+    try:
+        S.run_server()
+    except KeyboardInterrupt:
+        pass
+
+    assert captured["handler"] is S.UsageHandler
+    collector = captured["handler"].collectors["t"]
+    assert collector.poll_interval == 60.0
+    assert collector.bench_ttft_only is False
