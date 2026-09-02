@@ -18,6 +18,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 
 from modelctl.core.gateway import (
     GatewayModel,
@@ -29,6 +30,12 @@ from modelctl.core.gateway import (
     is_model_available,
     resolve_model,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cache_dir(monkeypatch, tmp_path):
+    """Test 全局隔离 PID 命名空间：CACHE_DIR 强制指向 tmp_path，避免 is_running_any 走假 PID 命中 / 真 PID 干扰。"""
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
 
 
 def _run(coro):
@@ -416,7 +423,6 @@ def test_list_models_uses_alias_as_id():
 def test_list_models_includes_external_started(tmp_path, monkeypatch):
     """Running 端口健康（无受管 PID，docker/supervisor 拉起）的模型须出现在 /v1/models"""
     from modelctl.core.profile import Profile
-    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
     reg = {
         "qwen3.8-flash-next-vllm": GatewayModel(
             name="qwen3.8-flash-next-vllm",
