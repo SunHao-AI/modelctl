@@ -180,14 +180,41 @@ def _build_patterns(mapping: dict[str, list[str]]) -> dict[str, list[re.Pattern]
     }
 
 
-def parse_metrics(text: str, mapping: dict[str, list[str]]) -> dict[str, float]:
-    """解析 Prometheus 文本，返回 {prompt_total, predicted_total, prompt_rate, predicted_rate}。
+def _hist_mean(text: str, name: str) -> float:
+    """Prometheus 直方图均值：name_sum / name_count。
 
-    按 mapping 各键的候选指标名取第一个命中；无命中返回 0.0。
-    速率为 gauge 值（tok/s）。
+    任一缺失或 count <= 0 返回 0.0。用于 vLLM time_to_first_token_seconds
+    这类只有 Histogram、没有现成均值 gauge 的引擎内置指标。
     """
-    result = {"prompt_total": 0.0, "predicted_total": 0.0, "prompt_rate": 0.0, "predicted_rate": 0.0}
-    patterns = _build_patterns(mapping)
+    sum_m = re.search(rf"^{re.escape(name)}_sum\s+([-+0-9.eE]+)\s*$", text, re.MULTILINE)
+    cnt_m = re.search(rf"^{re.escape(name)}_count\s+([-+0-9.eE]+)\s*$", text, re.MULTILINE)
+    if not sum_m or not cnt_m:
+        return 0.0
+    try:
+        cnt = float(cnt_m.group(1))
+    except ValueError:
+        return 0.0
+    if cnt <= 0:
+        return 0.0
+    return float(sum_m.group(1)) / cnt
+
+
+def parse_metrics(text: str, mapping: dict[str, list[str]]) -> dict[str, float]:
+    """解析 Prometheus 文本，返回指标名映射对应的数值。
+
+    已知四个键（prompt_total / predicted_total / prompt_rate / predicted_rate）
+    取 gauge 裸值（候选名第一个命中）。可选键 ttft_ms 额外支持直方图：
+    候选名裸名未命中时用 <name>_sum / <name>_count 相除得均值（引擎内置 TTFT
+    直方图，如 vllm:time_to_first_token_seconds）。未声明 ttft_ms 键恒得 0.0。
+    """
+    result = {
+        "prompt_total": 0.0,
+        "predicted_total": 0.0,
+        "prompt_rate": 0.0,
+        "predicted_rate": 0.0,
+        "ttft_ms": 0.0,
+    }
+    patterns = _build_patterns({k: v for k, v in mapping.items() if k in result})
     for key, key_patterns in patterns.items():
         for pattern in key_patterns:
             m = pattern.search(text)
@@ -196,6 +223,12 @@ def parse_metrics(text: str, mapping: dict[str, list[str]]) -> dict[str, float]:
                     result[key] = float(m.group(1))
                 except ValueError:
                     pass
+                break
+    if "ttft_ms" in mapping and result["ttft_ms"] == 0.0:
+        for name in mapping["ttft_ms"]:
+            val = _hist_mean(text, name)
+            if val:
+                result["ttft_ms"] = val
                 break
     return result
 

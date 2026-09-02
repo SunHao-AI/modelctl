@@ -16,7 +16,7 @@ import time
 import urllib.request
 from unittest.mock import patch
 
-from modelctl.core.stats import build_usage_payload, parse_metrics
+from modelctl.core.stats import _hist_mean, build_usage_payload, parse_metrics
 
 LLAMACPP_MAPPING = {
     "prompt_total": ["llamacpp:prompt_tokens_total"],
@@ -874,3 +874,59 @@ def test_do_get_routes_view_tier_param():
     handler.do_GET()
     assert sent["code"] == 503
     assert "未配置预算" in sent["body"]["error"]
+
+
+# ---------- Task 1: _hist_mean / parse_metrics ttft_ms ----------
+
+
+def _TF(**kw):
+    """基准 mapping（llamacpp）+ 覆盖，作为 parse_metrics 测试的工厂函数。"""
+    d = {
+        "prompt_total": ["llamacpp:prompt_tokens_total"],
+        "predicted_total": ["llamacpp:tokens_predicted_total"],
+        "prompt_rate": ["llamacpp:prompt_tokens_seconds"],
+        "predicted_rate": ["llamacpp:predicted_tokens_seconds"],
+    }
+    d.update(kw)
+    return d
+
+
+TEXT_HIST = (
+    "vllm:time_to_first_token_seconds_sum 2.5\n"
+    "vllm:time_to_first_token_seconds_count 10\n"
+    "vllm:time_to_first_token_seconds_bucket{le=\"0.1\"} 0\n"
+    "vllm:time_to_first_token_seconds_bucket{le=\"+Inf\"} 10\n"
+)
+
+
+def test_hist_mean_divides_sum_by_count():
+    assert _hist_mean(TEXT_HIST, "vllm:time_to_first_token_seconds") == 0.25
+
+
+def test_hist_mean_zero_count_returns_zero():
+    text = "m_sum 1.0\nm_count 0\n"
+    assert _hist_mean(text, "m") == 0.0
+
+
+def test_hist_mean_missing_sum_returns_zero():
+    text = "m_count 4\nm_bucket{le=\"+Inf\"} 4\n"
+    assert _hist_mean(text, "m") == 0.0
+
+
+def test_parse_metrics_ttft_from_histogram_when_no_bare_gauge():
+    got = parse_metrics(TEXT_HIST, _TF(ttft_ms=["vllm:time_to_first_token_seconds"]))
+    assert got["ttft_ms"] == 0.25
+
+
+def test_parse_metrics_ttft_prefers_bare_gauge():
+    text = "vllm:time_to_first_token_seconds 0.3\n" + TEXT_HIST
+    got = parse_metrics(text, _TF(ttft_ms=["vllm:time_to_first_token_seconds"]))
+    assert got["ttft_ms"] == 0.3
+
+
+def test_parse_metrics_without_ttft_key_defaults_zero():
+    got = parse_metrics(TEXT_HIST, _TF())
+    assert got["ttft_ms"] == 0.0
+    # 现有四键不受 ttft_ms 逻辑影响
+    assert got["prompt_rate"] == 0.0
+    assert got["predicted_rate"] == 0.0
