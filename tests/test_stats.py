@@ -14,7 +14,8 @@
 import json
 import time
 import urllib.request
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from modelctl.core.stats import _hist_mean, build_usage_payload, parse_metrics
 
@@ -58,9 +59,7 @@ def test_parse_metrics_vllm_no_rate():
 
 def test_build_payload_with_budget():
     tokens = {"prompt_total": 1_000_000, "predicted_total": 500_000, "prompt_rate": 0.0, "predicted_rate": 0.0}
-    payload = build_usage_payload(
-        tokens, {"price_in": 1.0, "price_out": 2.0, "budget": 100}, start_time=time.time() - 60, now=time.time()
-    )
+    payload = build_usage_payload(tokens, {"price_in": 1.0, "price_out": 2.0, "budget": 100}, start_time=time.time() - 60, now=time.time())
     # 1M 输入 × 1元/M + 0.5M 输出 × 2元/M = 2 元
     assert payload["used"] == 2.0
     assert payload["total"] == 100
@@ -118,6 +117,7 @@ def test_usage_collector_loads_persisted_totals(tmp_path):
         encoding="utf-8",
     )
     from modelctl.core.stats import UsageCollector
+
     collector = UsageCollector(
         name="demo",
         base_url="http://127.0.0.1:8000",
@@ -138,6 +138,7 @@ def test_usage_collector_falls_back_on_non_dict_cache(tmp_path):
     data_dir.mkdir()
     (data_dir / "demo.json").write_text("[1,2,3]", encoding="utf-8")
     from modelctl.core.stats import UsageCollector
+
     collector = UsageCollector(
         name="demo",
         base_url="http://127.0.0.1:8000",
@@ -156,6 +157,7 @@ def test_usage_collector_persists_totals(tmp_path):
     data_dir = tmp_path / "cache"
     data_dir.mkdir()
     from modelctl.core.stats import UsageCollector
+
     collector = UsageCollector(
         name="demo",
         base_url="http://127.0.0.1:8000",
@@ -179,6 +181,7 @@ def test_usage_collector_sliding_window_rate(tmp_path):
     data_dir = tmp_path / "cache"
     data_dir.mkdir()
     from modelctl.core.stats import UsageCollector
+
     collector = UsageCollector(
         name="demo",
         base_url="http://127.0.0.1:8000",
@@ -294,9 +297,7 @@ def test_poll_once_prefers_persisted_gateway_totals(tmp_path):
 
     # 第一轮：网关已累计 1000/500；引擎 /metrics 空（恒 0）→ 应以持久化值为准
     _write_json(1000.0, 500.0)
-    with patch("modelctl.core.stats.time.monotonic", return_value=100.0), patch.object(
-        urllib.request, "urlopen", return_value=FakeResp("")
-    ):
+    with patch("modelctl.core.stats.time.monotonic", return_value=100.0), patch.object(urllib.request, "urlopen", return_value=FakeResp("")):
         collector._poll_once()
     snap = collector.snapshot()
     assert snap["prompt_total"] == 1000.0
@@ -304,9 +305,7 @@ def test_poll_once_prefers_persisted_gateway_totals(tmp_path):
 
     # 第二轮：网关继续累计到 1100/550（时间差 5s）→ 差分速率 20/10 tok/s
     _write_json(1100.0, 550.0)
-    with patch("modelctl.core.stats.time.monotonic", return_value=105.0), patch.object(
-        urllib.request, "urlopen", return_value=FakeResp("")
-    ):
+    with patch("modelctl.core.stats.time.monotonic", return_value=105.0), patch.object(urllib.request, "urlopen", return_value=FakeResp("")):
         collector._poll_once()
     snap = collector.snapshot()
     assert snap["prompt_total"] == 1100.0
@@ -356,7 +355,7 @@ def test_build_target_payload_benchmarks_when_idle(monkeypatch):
 
 
 def test_build_target_payload_skips_bench_when_active(monkeypatch):
-    """窗口有真实流量（速率非 0）时不得用伪造请求覆盖真实速率。"""
+    """速率与 TTFT 都有值（无缺口）时不得用伪造请求覆盖真实数据。"""
     import time
     from unittest.mock import MagicMock
 
@@ -380,11 +379,13 @@ def test_build_target_payload_skips_bench_when_active(monkeypatch):
         "predicted_total": 50.0,
         "prompt_rate": 10.0,
         "predicted_rate": 5.0,
+        "ttft_ms": 120.0,
+        "ttft_ms_p95": 150.0,
     }
     UsageHandler.collectors = {"a": mock_collector}
 
     def _should_not_call(t):
-        raise AssertionError("有真实速率时不应触发伪造测速")
+        raise AssertionError("速率与 TTFT 都齐时不应触发伪造测速")
 
     monkeypatch.setattr("modelctl.core.stats._bench_cached", _should_not_call)
     handler = UsageHandler.__new__(UsageHandler)
@@ -394,9 +395,8 @@ def test_build_target_payload_skips_bench_when_active(monkeypatch):
 
 
 def test_build_target_payload_no_bench_when_native_rate_present(monkeypatch):
-    """回归（Task 5 新行为）：任一原生速率/TTFT 已有值（native_has_any=True）时，
-    不做伪造测速兜底，避免覆盖或混入真实原生数据。
-    仅当速率与 TTFT 全为 0 且开关打开时才触发 bench。"""
+    """回归（Task 5 新语义）：速率两行均有值且 TTFT 有值（无字段缺口）时
+    不做伪腔测速兜底，避免覆盖或混入真实原生数据。"""
     import time
     from unittest.mock import MagicMock
 
@@ -419,7 +419,9 @@ def test_build_target_payload_no_bench_when_native_rate_present(monkeypatch):
         "prompt_total": 100.0,
         "predicted_total": 50.0,
         "prompt_rate": 2906.3,
-        "predicted_rate": 0.0,
+        "predicted_rate": 412.0,
+        "ttft_ms": 180.0,
+        "ttft_ms_p95": 240.0,
     }
     mock_collector.bench_fallback = True
     UsageHandler.collectors = {"a": mock_collector}
@@ -428,13 +430,13 @@ def test_build_target_payload_no_bench_when_native_rate_present(monkeypatch):
     _BENCH_CACHE.clear()
 
     def _should_not_call(t):
-        raise AssertionError("原生已有速率时不应触发伪造测速")
+        raise AssertionError("速率与 TTFT 都齐时不应触发伪造测速")
 
     monkeypatch.setattr("modelctl.core.stats._bench_cached", _should_not_call)
     handler = UsageHandler.__new__(UsageHandler)
     payload = handler._resolve_payload("a")
     assert payload["prompt_rate"] == 2906.3  # 真实输入速率保留
-    assert payload["predicted_rate"] == 0.0  # 输出速率保持 0（无原生数据也不兜底）
+    assert payload["predicted_rate"] == 412.0  # 真实输出速率保留
 
 
 def test_benchmark_rates_parses_streaming_usage(monkeypatch):
@@ -444,11 +446,7 @@ def test_benchmark_rates_parses_streaming_usage(monkeypatch):
 
     from modelctl.core.stats import benchmark_rates
 
-    sse = (
-        'data: {"id":"1","usage":{"prompt_tokens":4,"completion_tokens":2}}\n'
-        'data: {"id":"1","usage":{"prompt_tokens":4,"completion_tokens":8}}\n'
-        "data: [DONE]\n"
-    )
+    sse = 'data: {"id":"1","usage":{"prompt_tokens":4,"completion_tokens":2}}\n' 'data: {"id":"1","usage":{"prompt_tokens":4,"completion_tokens":8}}\n' "data: [DONE]\n"
     # t_start=0.0, t_ttft=0.5, t_end=2.5 → input=4/0.5=8.0, output=8/2.0=4.0, ttft=500ms
     clock = iter([0.0, 0.5, 2.5])
     monkeypatch.setattr("modelctl.core.stats.time.perf_counter", lambda: next(clock))
@@ -474,6 +472,7 @@ def test_usage_collector_prefers_engine_rate_gauge(tmp_path):
     data_dir = tmp_path / "cache"
     data_dir.mkdir()
     from modelctl.core.stats import UsageCollector
+
     collector = UsageCollector(
         name="demo",
         base_url="http://127.0.0.1:8000",
@@ -505,15 +504,8 @@ def test_usage_collector_prefers_engine_rate_gauge(tmp_path):
         def read(self):
             return self._body
 
-    metrics_text = (
-        "prompt_tokens_total 2000\n"
-        "tokens_predicted_total 3000\n"
-        "prompt_tokens_seconds 12.0\n"
-        "predicted_tokens_seconds 42.0\n"
-    )
-    with patch("modelctl.core.stats.time.monotonic", return_value=1005.0), patch.object(
-        urllib.request, "urlopen", return_value=FakeResp(metrics_text)
-    ):
+    metrics_text = "prompt_tokens_total 2000\n" "tokens_predicted_total 3000\n" "prompt_tokens_seconds 12.0\n" "predicted_tokens_seconds 42.0\n"
+    with patch("modelctl.core.stats.time.monotonic", return_value=1005.0), patch.object(urllib.request, "urlopen", return_value=FakeResp(metrics_text)):
         collector._poll_once()
 
     snap = collector.snapshot()
@@ -527,6 +519,7 @@ def test_usage_collector_falls_back_to_window_rate(tmp_path):
     data_dir = tmp_path / "cache"
     data_dir.mkdir()
     from modelctl.core.stats import UsageCollector
+
     collector = UsageCollector(
         name="demo",
         base_url="http://127.0.0.1:8000",
@@ -559,9 +552,7 @@ def test_usage_collector_falls_back_to_window_rate(tmp_path):
             return self._body
 
     metrics_text = "prompt_tokens_total 2000\ntokens_predicted_total 3000\n"  # 无速率 gauge
-    with patch("modelctl.core.stats.time.monotonic", return_value=1005.0), patch.object(
-        urllib.request, "urlopen", return_value=FakeResp(metrics_text)
-    ):
+    with patch("modelctl.core.stats.time.monotonic", return_value=1005.0), patch.object(urllib.request, "urlopen", return_value=FakeResp(metrics_text)):
         collector._poll_once()
 
     snap = collector.snapshot()
@@ -894,8 +885,8 @@ def _TF(**kw):
 TEXT_HIST = (
     "vllm:time_to_first_token_seconds_sum 2.5\n"
     "vllm:time_to_first_token_seconds_count 10\n"
-    "vllm:time_to_first_token_seconds_bucket{le=\"0.1\"} 0\n"
-    "vllm:time_to_first_token_seconds_bucket{le=\"+Inf\"} 10\n"
+    'vllm:time_to_first_token_seconds_bucket{le="0.1"} 0\n'
+    'vllm:time_to_first_token_seconds_bucket{le="+Inf"} 10\n'
 )
 
 
@@ -909,7 +900,7 @@ def test_hist_mean_zero_count_returns_zero():
 
 
 def test_hist_mean_missing_sum_returns_zero():
-    text = "m_count 4\nm_bucket{le=\"+Inf\"} 4\n"
+    text = 'm_count 4\nm_bucket{le="+Inf"} 4\n'
     assert _hist_mean(text, "m") == 0.0
 
 
@@ -986,6 +977,7 @@ def test_snapshot_keeps_gauge_ttft_when_native_window_empty(monkeypatch, tmp_pat
 
 def _mk_bench_ttft_only_collector(tmp_path):
     from modelctl.core.stats import UsageCollector
+
     return UsageCollector(
         name="t",
         base_url="http://127.0.0.1:8000",
@@ -1043,3 +1035,79 @@ def test_bench_ttft_only_env_unset_defaults_true(tmp_path, monkeypatch):
         bench_ttft_only=False,
     )
     assert c2.bench_ttft_only is False
+
+
+# ---------- Task 5: _build_target_payload gate 按字段缺口 ----------
+
+
+def _mk_target_for_gate(snap: dict, *, bench_fallback=True, bench_ttft_only=True, tmp_path=Path("data/cache")):
+    from modelctl.core.stats import StatsTarget, UsageHandler
+
+    collector = MagicMock()
+    collector.get_snapshot.return_value = {**snap, "ok": True, "error": None}
+    collector.bench_fallback = bench_fallback
+    collector.bench_ttft_only = bench_ttft_only
+    handler = UsageHandler.__new__(UsageHandler)
+    UsageHandler.targets = [
+        StatsTarget(
+            name="m",
+            data_dir=tmp_path,
+            metrics_url="http://127.0.0.1:1/m",
+            mapping={"prompt_total": ["x"]},
+            bench_url="http://127.0.0.1:1/v1/chat/completions",
+            bench_model="m",
+            usage_cfg={},
+        )
+    ]
+    UsageHandler.collectors = {"m": collector}
+    UsageHandler.start_time = time.time()
+    return handler
+
+
+def test_should_bench_when_rate_present_but_ttft_missing(monkeypatch):
+    """gate 改动后：rate 有值、ttft 缺，bench_ttft_only 默认 True → 仍 bench 补 ttft。"""
+    from modelctl.core.stats import _BENCH_CACHE
+
+    _BENCH_CACHE.clear()
+    monkeypatch.setattr(
+        "modelctl.core.stats.benchmark_rates",
+        lambda bench_url, model, api_key: (11.0, 22.0, 330),
+    )
+    snap = {
+        "prompt_rate": 11.0,
+        "predicted_rate": 11.0,
+        "ttft_ms": 0.0,
+        "ttft_ms_p95": 0.0,
+        "rate_source": "window_diff",
+    }
+    handler = _mk_target_for_gate(snap)
+    with patch("urllib.request.urlopen", create=True) as mock:
+        mock.return_value.read.return_value = b"ok"
+        payload = handler._build_target_payload(handler.targets[0])
+    assert payload.get("rate_source") == "bench"
+    assert payload.get("ttft_ms") == 330
+
+
+def test_no_bench_when_rate_and_ttft_present():
+    """gate 后：rate 与 ttft 全都齐 → 不 bench，rate_source 保持原生。"""
+    from modelctl.core.stats import _BENCH_CACHE
+
+    _BENCH_CACHE.clear()
+    called = {"n": 0}
+
+    def _boom(*a, **k):
+        called["n"] += 1
+        assert False, "benchmark_rates 不应被调"
+
+    with patch("modelctl.core.stats.benchmark_rates", side_effect=_boom):
+        snap = {
+            "prompt_rate": 40.0,
+            "predicted_rate": 42.0,
+            "ttft_ms": 120.0,
+            "ttft_ms_p95": 150.0,
+            "rate_source": "window_diff",
+        }
+        handler = _mk_target_for_gate(snap)
+        payload = handler._build_target_payload(handler.targets[0])
+    assert called["n"] == 0
+    assert payload.get("rate_source") == "window_diff"

@@ -265,7 +265,13 @@ def test_build_usage_payload_ttft_p95_optional_when_zero():
     assert "P95" not in payload["extra"]
 
 
-def test_build_target_payload_skips_bench_when_native_ttft_present():
+def test_build_target_payload_skips_bench_when_ttft_and_rate_present():
+    """Task 5 新语义：TTFT 与速率都齐（无字段缺口）→ 不 bench，rate_ttft 保留。
+
+    历史注记：旧版叫 ...skips_bench_when_native_ttft_present，仅凭 ttft 有就足
+    以跳 bench（native_has_any 任一沟碰）；新 gate 按字段缺口分别受限，有 rate
+    缺口仍需 bench（补 rate 不碰 ttft）。所以这个用例同步补上 rate 有值才有
+    跳 bench 意义。"""
     import modelctl.core.stats as S
     from unittest.mock import MagicMock, Mock, patch
     fake_collector = MagicMock()
@@ -274,8 +280,8 @@ def test_build_target_payload_skips_bench_when_native_ttft_present():
         "ok": True,
         "prompt_total": 100.0,
         "predicted_total": 200.0,
-        "prompt_rate": 0.0,
-        "predicted_rate": 0.0,
+        "prompt_rate": 42.0,
+        "predicted_rate": 43.0,
         "ttft_ms": 123.0,
         "ttft_ms_p95": 210.0,
         "rate_source": "native",

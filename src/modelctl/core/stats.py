@@ -738,18 +738,20 @@ class UsageHandler(BaseHTTPRequestHandler):
         if not snap["ok"]:
             return {"isValid": False, "invalidMessage": f"{target.name} 不可用：{snap['error'] or '未知错误'}"}
         tokens = dict(snap)
-        # 原生指标（vLLM per-request）已给出速率/TTFT 时无需兜底测速；
-        # 仅当速率全为 0 且 bench_fallback 开关打开时才伪造请求测速，避免 cc-switch 一直显示 0。
-        native_has_any = (
-            (tokens.get("prompt_rate") or 0) > 0
-            or (tokens.get("predicted_rate") or 0) > 0
-            or (tokens.get("ttft_ms") or 0) > 0
-        )
+        # 按字段缺口分别触发兜底测速（与 spec §2.3 矩阵一致）：
+        #  - 速率缺口（prompt 或 predicted 为 0）；
+        #  - TTFT 缺口（ttft_ms 为 0），受 bench_ttft_only 子开关控制，默认开。
+        # 总开关 bench_fallback ("Usage_BENCH_FALLBACK") 关闭时永不 bench。
         bench_fallback_enabled = getattr(collector, "bench_fallback", True) is True
+        bench_ttft_only_enabled = getattr(collector, "bench_ttft_only", True) is True
+        rate_gap = (
+            (tokens.get("prompt_rate") or 0) == 0
+            or (tokens.get("predicted_rate") or 0) == 0
+        )
+        ttft_gap = (tokens.get("ttft_ms") or 0) == 0
         should_bench = (
-            not native_has_any
-            and bench_fallback_enabled
-            and (tokens.get("prompt_rate", 0) == 0 or tokens.get("predicted_rate", 0) == 0)
+            bench_fallback_enabled
+            and (rate_gap or (bench_ttft_only_enabled and ttft_gap))
         )
         if should_bench:
             bench = _bench_cached(target)
