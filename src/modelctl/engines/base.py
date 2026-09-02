@@ -97,6 +97,28 @@ class EngineAdapter(ABC):
     def stop_patterns(self) -> list[str]:
         return []
 
+    def stop_backend(self) -> None:
+        """停止本 profile 后端（默认 = venv / 通用进程路径）。
+
+        默认实现（涵盖 vllm-venv / llamacpp / ollama-serve / unsloth / sglang / aphrodite /
+        lmdeploy / tokenspeed-venv / trtllm-venv）调 stop_instance(name, port, stop_patterns())。
+        子类覆盖点：VllmAdapter / TokenSpeedAdapter / TensorRtLlmAdapter 的 docker runtime
+        覆盖为 stop_docker_instance(name, container_name)——容器路径下 PID 文件本不写
+        （write_pid=False），且 fuser/pkill 对 docker 容器客户端失效，必须 docker rm -f。
+        OllamaAdapter 不覆盖（共享 serve 特判在 all_service.stop_profile 内做）。
+        """
+        from modelctl.core.process import stop_instance
+        stop_instance(self.profile.name, self.profile.port, self.stop_patterns())
+
+    def is_docker_runtime(self) -> bool:
+        """本 profile 是否走 docker runtime（docker run --detach）。
+
+        默认 False。VllmAdapter / TokenSpeedAdapter / TensorRtLlmAdapter 在
+        `cfg.docker_image` 非空时覆盖为 True；all_service.start_profile 据此
+        决定 start_detached 的 write_pid 参数（docker 路径不写 PID 文件）。
+        """
+        return False
+
     def upstream_model_name(self) -> str:
         """后端 API 期望的模型名（网关改写请求体 model 字段的目标）。
 

@@ -67,3 +67,35 @@ def test_cli_parser_parses_gpus():
 
     args = build_parser().parse_args(["start", "some-model", "--gpus", "0,1"])
     assert args.gpus == "0,1"
+
+
+def _make_profile(tmp_path):
+    from modelctl.core.profile import Profile
+    return Profile(name="buddy", engine="vllm", port=8199, engine_config={})
+
+
+def test_engine_adapter_stop_backend_default_uses_stop_instance(monkeypatch, tmp_path):
+    """基类默认 stop_backend 调 stop_instance(profile.name, profile.port, stop_patterns())"""
+    from modelctl.core.capabilities import Capabilities
+    from modelctl.engines import get_adapter
+    profile = _make_profile(tmp_path)
+    adapter = get_adapter("vllm")(profile, Capabilities())
+    captured = {}
+
+    def _fake_stop(name, port, patterns):
+        captured.update(name=name, port=port, patterns=patterns)
+        return True
+    monkeypatch.setattr("modelctl.core.process.stop_instance", _fake_stop)
+    adapter.stop_backend()
+    assert captured["name"] == "buddy"
+    assert captured["port"] == 8199
+    assert captured["patterns"] == ["vllm serve"]
+
+
+def test_engine_adapter_is_docker_runtime_default_false(tmp_path):
+    """基类默认 is_docker_runtime() 返回 False（venv / 无 docker 概念路径）"""
+    from modelctl.core.capabilities import Capabilities
+    from modelctl.engines import get_adapter
+    profile = _make_profile(tmp_path)
+    adapter = get_adapter("llamacpp")(profile, Capabilities())
+    assert adapter.is_docker_runtime() is False
