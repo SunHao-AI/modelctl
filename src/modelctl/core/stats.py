@@ -640,7 +640,7 @@ class UsageCollector:
                 "predicted_total": new_predicted,
                 "prompt_rate": metrics["prompt_rate"],
                 "predicted_rate": metrics["predicted_rate"],
-                "ttft_ms": 0.0,
+                "ttft_ms": metrics.get("ttft_ms", 0.0),
                 "ttft_ms_p95": 0.0,
                 "rate_source": source,
             }
@@ -652,11 +652,12 @@ class UsageCollector:
         with self._lock:
             base = dict(self._snapshot)
         # vLLM 原生指标融进快照：rate 桶仅原生值为真时覆盖引擎/窗口值（窗口无流量时
-        # 仍给出测速真值）；ttft 时间桶覆写（原生注入是唯一数据源；引擎/窗口均置 0）。
+        # 仍给出测速真值）；ttft 时间桶 native-first——有 native 用 native，否则保
+        # 引擎 gauge 值（如 vLLM time_to_first_token_seconds 直方图均值），最后才是 0。
         native_row = self._compute_native_row()
         base["prompt_rate"] = native_row["prompt_rate"] or base.get("prompt_rate") or 0.0
         base["predicted_rate"] = native_row["predicted_rate"] or base.get("predicted_rate") or 0.0
-        base["ttft_ms"] = native_row["ttft_ms"]
+        base["ttft_ms"] = native_row["ttft_ms"] or base.get("ttft_ms") or 0.0
         base["ttft_ms_p95"] = native_row["ttft_ms_p95"]
         if (
             base.get("rate_source") == "none"

@@ -930,3 +930,52 @@ def test_parse_metrics_without_ttft_key_defaults_zero():
     # 现有四键不受 ttft_ms 逻辑影响
     assert got["prompt_rate"] == 0.0
     assert got["predicted_rate"] == 0.0
+
+
+# ---------- Task 3: _poll_once 写 gauge ttft + snapshot native-first ----------
+
+
+def test_snapshot_keeps_gauge_ttft_when_native_window_empty(monkeypatch, tmp_path):
+    """gauge 提供 ttft 而 native 滑窗为空时，snapshot 应保留 gauge 值（不再被归零）。"""
+    import urllib.request
+    from modelctl.core.stats import UsageCollector
+
+    text = (
+        "vllm:prompt_tokens_total 10\n"
+        "vllm:generation_tokens_total 20\n"
+        "vllm:prompt_tokens_seconds 0.0\n"
+        "vllm:predicted_tokens_seconds 0.0\n"
+        "vllm:time_to_first_token_seconds_sum 2.5\n"
+        "vllm:time_to_first_token_seconds_count 10\n"
+    )
+
+    class _Resp:
+        def read(self):
+            return text.encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: _Resp())
+    mapping = {
+        "prompt_total": ["vllm:prompt_tokens_total"],
+        "predicted_total": ["vllm:generation_tokens_total"],
+        "prompt_rate": ["vllm:prompt_tokens_seconds"],
+        "predicted_rate": ["vllm:predicted_tokens_seconds"],
+        "ttft_ms": ["vllm:time_to_first_token_seconds"],
+    }
+    c = UsageCollector(
+        name="t",
+        base_url="http://127.0.0.1:8000",
+        poll_interval=999,
+        api_key=None,
+        data_dir=tmp_path,
+        mapping=mapping,
+    )
+    c._poll_once()
+    snap = c.snapshot()
+    assert snap["ttft_ms"] == 0.25
+    assert snap["ttft_ms_p95"] == 0.0
