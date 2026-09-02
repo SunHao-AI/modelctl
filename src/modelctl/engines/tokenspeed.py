@@ -157,6 +157,7 @@ class TokenSpeedAdapter(EngineAdapter):
             seq = list(range(int(self.caps.gpu_count or tp)))
         return '"device=' + ",".join(str(g) for g in seq) + '"'
 
+    @property
     def _container_name(self) -> str:
         return f"{self.profile.name}-tokenspeed"
 
@@ -190,6 +191,6 @@ class TokenSpeedAdapter(EngineAdapter):
         """docker 分支：docker rm -f <container>；venv 分支：基类 stop_instance。"""
         if self._resolve_runtime()[0] == "docker":
             from modelctl.core.process import stop_docker_instance
-            stop_docker_instance(self.profile.name, self._container_name())
+            stop_docker_instance(self.profile.name, self._container_name)
         else:
             super().stop_backend()

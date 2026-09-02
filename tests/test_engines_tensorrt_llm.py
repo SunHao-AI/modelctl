@@ -97,6 +97,30 @@ def test_tensorrt_llm_docker_command(tmp_path, monkeypatch):
     assert "--use_fused_mlp" in cmd
 
 
+def test_tensorrt_llm_build_command_uses_string_container_name(tmp_path, monkeypatch):
+    """Regression: docker 路径 build_command 的 --name 值必须是 <profile.name>-trtllm 字符串 (预存在 bug 修复)。"""
+    engine_dir = tmp_path / "engines" / "qwen3.8-tp4-fp8"
+    engine_dir.mkdir(parents=True)
+    model_dir = tmp_path / "models" / "Qwen3.8-27B"
+    model_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: tensorrt_llm\nport: 8120\napi_key: sk-test\ntensorrt_llm:\n"
+        f"  model: {model_dir}\n  engine_dir: {engine_dir}\n"
+        f"  tensor_parallel_size: 4\n"
+        f"  docker_image: nvcr.io/nvidia/tensorrt-llm:latest\n",
+    )
+    a = get_adapter("tensorrt_llm")(p, CAPS8)
+    a.check_requirements()
+    cmd, env = a.build_command()
+    assert "--name" in cmd
+    name_val = cmd[cmd.index("--name") + 1]
+    assert isinstance(name_val, str)
+    # 显式排除 bound method 对象（_container_name 必须是 @property 返回 str，不是 callable）
+    assert not callable(name_val), f"--name 值必须是纯字符串而非 bound method: {name_val!r}"
+    assert name_val == "q-trtllm"
+
+
 def test_tensorrt_llm_metrics(tmp_path):
     p = _write(tmp_path, "name: q\nengine: tensorrt_llm\nport: 8120\ntensorrt_llm:\n  model: m\n  engine_dir: /e\n")
     a = get_adapter("tensorrt_llm")(p, CAPS8)

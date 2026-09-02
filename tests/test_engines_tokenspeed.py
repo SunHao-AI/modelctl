@@ -64,6 +64,27 @@ def test_tokenspeed_docker_command(tmp_path, monkeypatch):
     assert "--enable-prefix-caching" in cmd
 
 
+def test_tokenspeed_build_command_uses_string_container_name(tmp_path, monkeypatch):
+    """Regression: docker 路径 build_command 的 --name 值必须是 <profile.name>-tokenspeed 字符串 (预存在 bug 修复)。"""
+    model_dir = tmp_path / "models" / "Qwen3.5-397B-A17B"
+    model_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: tokenspeed\nport: 8150\napi_key: sk-test\ntokenspeed:\n"
+        f"  model: {model_dir}\n  tensor_parallel_size: 8\n"
+        f"  docker_image: lightseekorg/tokenspeed:latest\n",
+    )
+    a = get_adapter("tokenspeed")(p, CAPS8)
+    a.check_requirements()
+    cmd, env = a.build_command()
+    assert "--name" in cmd
+    name_val = cmd[cmd.index("--name") + 1]
+    assert isinstance(name_val, str)
+    # 显式排除 bound method 对象（_container_name 必须是 @property 返回 str，不是 callable）
+    assert not callable(name_val), f"--name 值必须是纯字符串而非 bound method: {name_val!r}"
+    assert name_val == "q-tokenspeed"
+
+
 def test_tokenspeed_venv_command(tmp_path, monkeypatch):
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
     _stub_venv(tmp_path, monkeypatch)
