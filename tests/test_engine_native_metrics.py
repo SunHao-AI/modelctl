@@ -99,3 +99,9 @@ def test_vllm_no_warning_when_both_flags_on(monkeypatch):
     except Exception:
         pass
     assert not any("enable_force_include_usage" in w for w in adapter.warnings)
+
+
+def test_vllm_metrics_mapping_declares_ttft_histogram():
+    profile = _make_vllm_profile({})
+    adapter = VllmAdapter(profile, Capabilities())
+    assert adapter.metrics_mapping()["ttft_ms"] == ["vllm:time_to_first_token_seconds"]

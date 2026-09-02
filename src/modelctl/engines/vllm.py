@@ -232,6 +232,8 @@ class VllmAdapter(EngineAdapter):
                 "vllm:generation_tokens_seconds",
                 "vllm:avg_generation_throughput_toks_per_sec",
             ],
+            # 首 Token 耗时：Histogram，无现成均值 gauge；stats.parse_metrics 以 sum/count 取均值
+            "ttft_ms": ["vllm:time_to_first_token_seconds"],
         }
 
     def upstream_model_name(self) -> str:
