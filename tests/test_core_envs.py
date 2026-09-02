@@ -336,3 +336,63 @@ def test_engine_site_packages_vllm_env_present_windows(tmp_path, monkeypatch):
     (sp / "x-1.0.dist-info" / "METADATA").write_text("Metadata-Version: 2.1\nName: x\nVersion: 1.0\n", encoding="utf-8")
     _make_env(root, "vllm", windows=True)
     assert engine_site_packages("vllm") == sp
+
+
+# ---- §3 / TODO 项 5：平台限制矩阵 ----
+
+def test_platform_supports_managed_engines_linux(monkeypatch):
+    """Linux 下托管引擎应支持。"""
+    import modelctl.core.envs as envs
+    monkeypatch.setattr(envs, "_is_linux", lambda: True)
+    assert envs.platform_supports("vllm") is True
+    assert envs.platform_supports("sglang") is True
+    assert envs.platform_supports("tokenspeed") is True
+
+
+def test_platform_supports_managed_engines_windows(monkeypatch):
+    """Windows 下托管引擎不支持（CUDA 推理栈限 Linux）。"""
+    import modelctl.core.envs as envs
+    monkeypatch.setattr(envs, "_is_linux", lambda: False)
+    assert envs.platform_supports("vllm") is False
+    assert envs.platform_supports("lmdeploy") is False
+    assert envs.platform_supports("tensorrt_llm") is False
+
+
+def test_platform_supports_gateway_cross_platform(monkeypatch):
+    """gateway 跨平台（纯 FastAPI/uvicorn）。"""
+    import modelctl.core.envs as envs
+    monkeypatch.setattr(envs, "_is_linux", lambda: False)
+    assert envs.platform_supports("gateway") is True
+    monkeypatch.setattr(envs, "_is_linux", lambda: True)
+    assert envs.platform_supports("gateway") is True
+
+
+def test_platform_limitation_message_linux_supports(monkeypatch):
+    import modelctl.core.envs as envs
+    monkeypatch.setattr(envs, "_is_linux", lambda: True)
+    assert envs.platform_limitation_message("vllm") is None
+    assert envs.platform_limitation_message("gateway") is None
+
+
+def test_platform_limitation_message_windows_managed(monkeypatch):
+    import modelctl.core.envs as envs
+    monkeypatch.setattr(envs, "_is_linux", lambda: False)
+    msg = envs.platform_limitation_message("vllm")
+    assert msg is not None
+    assert "Linux" in msg and "vllm" in msg and "modelctl env setup" in msg
+
+
+def test_platform_limitation_message_unknown_target():
+    import modelctl.core.envs as envs
+    msg = envs.platform_limitation_message("not-a-real-engine")
+    assert msg is not None and "not-a-real-engine" in msg
+
+
+def test_setup_uses_platform_matrix(monkeypatch, tmp_path):
+    """setup 在 Windows 下对托管引擎抛出含平台说明的 EngineEnvError。"""
+    import modelctl.core.envs as envs
+    from modelctl.core.envs import EngineEnvError
+    monkeypatch.setattr(envs, "_is_linux", lambda: False)
+    _redirect(tmp_path, monkeypatch)
+    with pytest.raises(EngineEnvError, match="不支持"):
+        envs.setup("vllm")

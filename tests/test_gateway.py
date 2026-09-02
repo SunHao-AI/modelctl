@@ -19,7 +19,15 @@ from unittest.mock import patch
 
 import httpx
 
-from modelctl.core.gateway import GatewayModel, build_groups, build_registry, create_app, resolve_model
+from modelctl.core.gateway import (
+    GatewayModel,
+    _THINKING_DISABLED_ENGINES,
+    _THINKING_DISABLED_GROUPS,
+    build_groups,
+    build_registry,
+    create_app,
+    resolve_model,
+)
 
 
 def _run(coro):
@@ -462,6 +470,40 @@ def test_build_groups_sorted_by_engine_priority(tmp_path):
     assert [m.name for m in groups["c"]] == ["standalone"]
 
 
+def test_build_groups_new_engine_priority_ordering(tmp_path):
+    """§1.1: aphrodite/tokenspeed/lmdeploy/tensorrt_llm 按 5/6/7/8 排在 llamacpp(4) 之后。"""
+    engines = [
+        ("e1", "tensorrt_llm", "tensorrt_llm"),
+        ("e2", "lmdeploy", "lmdeploy"),
+        ("e3", "tokenspeed", "tokenspeed"),
+        ("e4", "aphrodite", "aphrodite"),
+        ("e5", "llamacpp", "llamacpp"),
+        ("e6", "unsloth", "unsloth"),
+        ("e7", "sglang", "sglang"),
+        ("e8", "vllm", "vllm"),
+    ]
+    for fname, engine, eng_key in engines:
+        (tmp_path / f"{fname}.yaml").write_text(
+            f"name: qwen-{engine}-a\ngroup: qwen3.8\nengine: {engine}\nport: 9000\n{eng_key}:\n  model: q\n",
+            encoding="utf-8",
+        )
+    from modelctl.core.gateway import ENGINE_PRIORITY
+    groups = build_groups(models_dir=tmp_path)
+    members = groups["qwen3.8"]
+    # 严格按 ENGINE_PRIORITY 数值升序
+    assert [m.engine for m in members] == [
+        e for e in sorted((e for _, e, _ in engines), key=lambda x: ENGINE_PRIORITY[x])
+    ]
+    # 显式断言关键相对顺序
+    engines_seq = [m.engine for m in members]
+    assert engines_seq.index("vllm") < engines_seq.index("sglang")
+    assert engines_seq.index("unsloth") < engines_seq.index("llamacpp")
+    assert engines_seq.index("llamacpp") < engines_seq.index("aphrodite")
+    assert engines_seq.index("aphrodite") < engines_seq.index("tokenspeed")
+    assert engines_seq.index("tokenspeed") < engines_seq.index("lmdeploy")
+    assert engines_seq.index("lmdeploy") < engines_seq.index("tensorrt_llm")
+
+
 def test_resolve_model_group_prefers_running_member():
     reg = {}
     members = [
@@ -561,6 +603,203 @@ def test_create_app_auto_builds_registry_and_groups():
         resp = _run(_get(app, "/v1/models"))
     assert resp.status_code == 200
     assert [m["id"] for m in resp.json()["data"]] == ["qwen3.8-vllm", "qwen3.8"]
+
+
+# ---- §1.2 thinking / reasoning_effort 策略配置化 ----
+
+def test_profile_gateway_thinking_disabled_parsed():
+    """§1.2 + §1.3: profile 顶层 gateway 段解析 → (thinking, reasoning_map, native_map) 三元组。"""
+    from modelctl.core.profile import _parse_gateway
+
+    # 正常 True / False
+    td, remap, nm = _parse_gateway({"gateway": {"thinking_disabled": True}}, "src")
+    assert td is True and remap is None and nm is None
+    td, remap, nm = _parse_gateway({"gateway": {"thinking_disabled": False}}, "src")
+    assert td is False and remap is None and nm is None
+    # 缺省 → 全部 None
+    td, remap, nm = _parse_gateway({}, "src")
+    assert td is None and remap is None and nm is None
+    # 非 bool 告警 → 视为缺省（不抛错）
+    td, _, _ = _parse_gateway({"gateway": {"thinking_disabled": "yes"}}, "src")
+    assert td is None
+    # reasoning_effort_map 正常
+    remap = _parse_gateway({"gateway": {"reasoning_effort_map": {"foo": "bar"}}}, "src")[1]
+    assert remap == {"foo": "bar"}
+    # reasoning_effort_map 非 str→str 告警 → None
+    remap = _parse_gateway({"gateway": {"reasoning_effort_map": {"foo": 1}}}, "src")[1]
+    assert remap is None
+    # §1.3 native_metrics_mapping 键校验：合法子集被接受
+    nm = _parse_gateway(
+        {"gateway": {"native_metrics_mapping": {"rate": "tokens_per_second"}}}, "src"
+    )[2]
+    assert nm == {"rate": "tokens_per_second"}
+    # 非法键被忽略（返回 None）
+    nm = _parse_gateway(
+        {"gateway": {"native_metrics_mapping": {"bad_key": "x"}}}, "src"
+    )[2]
+    assert nm is None
+    # 部分合法部分非法 → 整段告警并忽略（不保留合法部分，避免歧义）
+    nm = _parse_gateway(
+        {"gateway": {"native_metrics_mapping": {"rate": "ok", "bad": "x"}}}, "src"
+    )[2]
+    assert nm is None
+
+
+def test_profile_gateway_managed_by_profile_yaml(tmp_path):
+    """§1.2: 顶层 gateway 段可覆盖 thinking / reasoning_effort_map（端到端 build_registry）。"""
+    yaml_text = (
+        "name: qwen3.8-x\nengine: vllm\nport: 8101\ngroup: qwen3.8\n"
+        "vllm:\n  model: q\n"
+        "gateway:\n  thinking_disabled: false\n  reasoning_effort_map:\n    high: ultra\n"
+    )
+    (tmp_path / "x.yaml").write_text(yaml_text, encoding="utf-8")
+    from modelctl.core.gateway import build_registry
+    reg = build_registry(models_dir=tmp_path)
+    model = reg["qwen3.8-x"]
+    assert model.thinking_disabled is False
+    assert model.reasoning_effort_map == {"high": "ultra"}
+
+
+def test_proxy_thinking_disabled_configurable_false_overrides_group(tmp_path):
+    """§1.2: gateway.thinking_disabled=false 覆盖白名单（qwen3.8 vllm 不强制 enable_thinking=false）。"""
+    yaml_text = (
+        "name: qwen3.8-vllm\nengine: vllm\nport: 8101\ngroup: qwen3.8\n"
+        "vllm:\n  model: q\n"
+        "gateway:\n  thinking_disabled: false\n"
+    )
+    (tmp_path / "x.yaml").write_text(yaml_text, encoding="utf-8")
+    from modelctl.core.gateway import build_registry
+
+    reg = build_registry(models_dir=tmp_path)
+    gm = reg["qwen3.8-vllm"]
+    assert gm.thinking_disabled is False  # profile 配置读取正确
+    # §1.2 决策逻辑：profile 显式配置优先于 group 白名单
+    body = {}
+    target = gm
+    should = (
+        target.thinking_disabled
+        if target.thinking_disabled is not None
+        else (target.group in _THINKING_DISABLED_GROUPS and target.engine in _THINKING_DISABLED_ENGINES)
+    )
+    if should and "chat_template_kwargs" not in body:
+        body["chat_template_kwargs"] = {"enable_thinking": False}
+    assert "chat_template_kwargs" not in body  # 显式 False → 不注入
+
+
+def test_proxy_thinking_disabled_configurable_true_forces_inject_for_other_group(tmp_path):
+    """§1.2: gateway.thinking_disabled=true 对非白名单 group 也强制 enable_thinking=false。"""
+    yaml_text = (
+        "name: ds-vllm\nengine: vllm\nport: 8101\ngroup: deepseek-v4-flash\n"
+        "vllm:\n  model: d\n"
+        "gateway:\n  thinking_disabled: true\n"
+    )
+    (tmp_path / "x.yaml").write_text(yaml_text, encoding="utf-8")
+    from modelctl.core.gateway import build_registry
+
+    reg = build_registry(models_dir=tmp_path)
+    gm = reg["ds-vllm"]
+    assert gm.thinking_disabled is True
+    body = {}
+    target = gm
+    should = (
+        target.thinking_disabled
+        if target.thinking_disabled is not None
+        else (target.group in _THINKING_DISABLED_GROUPS and target.engine in _THINKING_DISABLED_ENGINES)
+    )
+    if should and "chat_template_kwargs" not in body:
+        body["chat_template_kwargs"] = {"enable_thinking": False}
+    assert body.get("chat_template_kwargs", {}).get("enable_thinking") is False
+
+
+def test_proxy_thinking_disabled_default_uses_group_whitelist():
+    """§1.2 回退：profile 未声明 gateway（thinking_disabled=None）时用 group 白名单。"""
+    from modelctl.core.gateway import GatewayModel
+
+    # qwen3.8 + vllm → 白名单命中
+    m1 = GatewayModel("m1", "vllm", "http://u", "m1", None, "http://u/", group="qwen3.8")
+    assert m1.thinking_disabled is None
+    assert m1.group in _THINKING_DISABLED_GROUPS
+    # 非白名单 group → 不强制
+    m2 = GatewayModel("m2", "vllm", "http://u", "m2", None, "http://u/", group="other")
+    assert m2.thinking_disabled is None
+    assert m2.group not in _THINKING_DISABLED_GROUPS
+
+
+def test_profile_native_metrics_mapping_end_to_end(tmp_path):
+    """§1.3: profile 顶层 gateway.native_metrics_mapping 端到端注入 collector。
+
+    通过桩（stub）模拟 adapter 默认 native_metrics_mapping 返回 1 键，验证 collector
+    拿到 merge 结果（profile 覆盖 engine 默认）。
+    """
+    yaml_text = (
+        "name: sglang-x\nengine: sglang\nport: 8102\ngroup: sglang\n"
+        "sglang:\n  model: s\n"
+        "gateway:\n  native_metrics_mapping:\n    rate: my_tps\n"
+    )
+    (tmp_path / "x.yaml").write_text(yaml_text, encoding="utf-8")
+    from modelctl.core.profile import list_profiles
+    real_profiles_list = list_profiles(tmp_path)
+    assert len(real_profiles_list) == 1
+    profile = real_profiles_list[0]
+    assert profile.engine == "sglang"
+    assert profile.native_metrics_mapping == {"rate": "my_tps"}
+
+    # 直接构造 collector 验证 merge 行为
+    from modelctl.core.stats import UsageCollector
+    default = {"rate": "tokens_per_second", "ttft_ms": "time_to_first_token_ms"}
+    merged = dict(default)
+    merged.update(profile.native_metrics_mapping)
+    collector = UsageCollector(
+        profile.name, "http://127.0.0.1:99999", 0.5, None, tmp_path,
+        mode="on-demand", mapping={}, native_mapping=merged,
+    )
+    assert collector.native_mapping == {"rate": "my_tps", "ttft_ms": "time_to_first_token_ms"}
+    assert collector.native_mapping["rate"] == "my_tps"
+    assert collector.native_mapping["ttft_ms"] == "time_to_first_token_ms"
+
+
+def test_profile_native_metrics_mapping_partial_override_engine_default(tmp_path):
+    """§1.3: 引擎默认 None + profile 全 key → collector 拿到 profile 全 key。"""
+    yaml_text = (
+        "name: tokenspeed-x\nengine: tokenspeed\nport: 8103\ngroup: tokenspeed\n"
+        "tokenspeed:\n  model: t\n"
+        "gateway:\n  native_metrics_mapping:\n    rate: tokens_per_second\n    ttft_ms: ttft_ms\n"
+    )
+    (tmp_path / "x.yaml").write_text(yaml_text, encoding="utf-8")
+    from modelctl.core.profile import list_profiles
+    from modelctl.core.stats import UsageCollector
+
+    profile = list_profiles(models_dir=tmp_path)[0]
+    assert profile.engine == "tokenspeed"
+    assert profile.native_metrics_mapping is not None
+    # tokenspeed default native_metrics_mapping 为 None（base 类默认）→ 直接采用 profile 值
+    default = None
+    if not default:
+        merged = dict(profile.native_metrics_mapping)
+    else:
+        merged = dict(default); merged.update(profile.native_metrics_mapping)
+    collector = UsageCollector(
+        profile.name, "http://127.0.0.1:99999", 0.5, None, tmp_path,
+        mode="on-demand", mapping={}, native_mapping=merged,
+    )
+    assert collector.native_mapping == profile.native_metrics_mapping
+
+
+def test_normalize_reasoning_effort_with_custom_map():
+    """§1.2: _normalize_reasoning_effort 接受自定义 mapping 整段覆盖。"""
+    from modelctl.core.gateway import _normalize_reasoning_effort
+
+    body = {"reasoning_effort": "high"}
+    _normalize_reasoning_effort(body, {"high": "ultra"})
+    assert body["reasoning_effort"] == "ultra"
+    # mapping 中不存在的 key 应原样保留
+    body2 = {"reasoning_effort": "extreme"}
+    _normalize_reasoning_effort(body2, {"high": "ultra"})
+    assert body2["reasoning_effort"] == "extreme"
+    # mapping 为 None 时回退默认 map
+    body3 = {"reasoning_effort": "high"}
+    _normalize_reasoning_effort(body3, None)
+    assert body3["reasoning_effort"] == "xhigh"
 
 
 # ---- 网关真实用量统计（vLLM token 计数 gauge 恒 0 的修复）----

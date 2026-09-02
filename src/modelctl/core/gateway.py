@@ -47,7 +47,12 @@ from modelctl.engines.base import EngineAdapter
 GATEWAY_PORT = 5003
 
 # 家族路由引擎优先级（数值越小越优先）；未知引擎兜底 99
-ENGINE_PRIORITY = {"vllm": 0, "sglang": 1, "unsloth": 2, "ollama": 3, "llamacpp": 4}
+# 排序依据：成熟度 + 吞吐 + 混合注意力支持；aphrodite/tokenspeed/lmdeploy/tensorrt_llm
+# 为 2024-2025 新引擎，保守排在 clang++(llamacpp) 之后
+ENGINE_PRIORITY = {
+    "vllm": 0, "sglang": 1, "unsloth": 2, "ollama": 3, "llamacpp": 4,
+    "aphrodite": 5, "tokenspeed": 6, "lmdeploy": 7, "tensorrt_llm": 8,
+}
 
 # 网关默认关闭 thinking 的模型家族（group）及其引擎。
 # 背景：Qwen3.5 家族 chat 模板强制把 <think> 放入 prompt，模型总是先思考，
@@ -62,16 +67,19 @@ _THINKING_DISABLED_ENGINES: frozenset[str] = frozenset({"vllm", "sglang", "unslo
 # Claude Code 等客户端发送 high/ultra 等枚举会触发 500
 # （"Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low"），
 # 网关统一映射为最接近的支持值。
-_REASONING_EFFORT_MAP: dict[str, str] = {
+# §1.2 配置化：全局默认 map；profile 顶层 gateway.reasoning_effort_map 可整段覆盖。
+DEFAULT_REASONING_EFFORT_MAP: dict[str, str] = {
     "high": "xhigh",
     "ultra": "xhigh",
     "extreme": "xhigh",
     "balanced": "medium",
     "minimal": "low",
 }
+# 旧名保留（兼容既有导入）
+_REASONING_EFFORT_MAP = DEFAULT_REASONING_EFFORT_MAP
 
 
-def _normalize_reasoning_effort(body: dict) -> None:
+def _normalize_reasoning_effort(body: dict, mapping: dict[str, str] | None = None) -> None:
     """就地改写不兼容的 reasoning_effort 枚举（vLLM 仅支持 xhigh/medium/low）。
 
     Claude Code 等客户端把 effort 放在顶层 reasoning_effort、Anthropic 的
@@ -80,24 +88,25 @@ def _normalize_reasoning_effort(body: dict) -> None:
     Qwen3.8 的 chat template 会读取这些值并校验枚举，high/ultra 等会触发 500，
     统一映射为支持值。参见 QwenLM/Qwen3.8#217。
     """
+    m = mapping if mapping is not None else DEFAULT_REASONING_EFFORT_MAP
     for key in ("reasoning_effort",):
         effort = body.get(key)
-        if isinstance(effort, str) and effort.lower() in _REASONING_EFFORT_MAP:
-            body[key] = _REASONING_EFFORT_MAP[effort.lower()]
+        if isinstance(effort, str) and effort.lower() in m:
+            body[key] = m[effort.lower()]
             logger.info(f"reasoning_effort 兼容映射：{effort} -> {body[key]}")
     for key in ("thinking", "reasoning"):
         block = body.get(key)
         if not isinstance(block, dict):
             continue
         effort = block.get("effort")
-        if isinstance(effort, str) and effort.lower() in _REASONING_EFFORT_MAP:
-            block["effort"] = _REASONING_EFFORT_MAP[effort.lower()]
+        if isinstance(effort, str) and effort.lower() in m:
+            block["effort"] = m[effort.lower()]
             logger.info(f"{key}.effort 兼容映射：{effort} -> {block['effort']}")
     output_config = body.get("output_config")
     if isinstance(output_config, dict):
         effort = output_config.get("effort")
-        if isinstance(effort, str) and effort.lower() in _REASONING_EFFORT_MAP:
-            output_config["effort"] = _REASONING_EFFORT_MAP[effort.lower()]
+        if isinstance(effort, str) and effort.lower() in m:
+            output_config["effort"] = m[effort.lower()]
             logger.info(f"output_config.effort 兼容映射：{effort} -> {output_config['effort']}")
 
 
@@ -186,6 +195,11 @@ class GatewayModel:
     collector: UsageCollector | None = None
     # 请求级审计日志：create_app 统一注入（None 表示仅静态信息，handler 跳过写入）
     audit_log: RequestAuditLog | NoopAuditLog | None = None
+    # §1.2 策略配置化：来自 profile 顶层 gateway 段（缺省时由白名单/全局 map 决定）
+    thinking_disabled: bool | None = None
+    reasoning_effort_map: dict[str, str] | None = None
+    # §1.3 配置化：自定义 per-request 原生指标字段名映射（None 时回退引擎适配器默认）
+    native_metrics_mapping: dict[str, str] | None = None
 
     def upstream_api_key(self) -> str | None:
         """上游 Bearer key：unsloth 等自管认证引擎的 key 每次启动自动生成，
@@ -268,6 +282,15 @@ def get_collector(profile: Profile, adapter: EngineAdapter, data_dir: Path) -> "
         native_mapping = adapter.native_metrics_mapping()
     except (NotImplementedError, AttributeError):
         native_mapping = None
+    # §1.3 配置化：profile 顶层 gateway.native_metrics_mapping 优先；
+    # 允许部分键覆盖（与引擎默认 merge），其余键保留引擎默认。
+    if profile.native_metrics_mapping:
+        if not native_mapping:
+            native_mapping = dict(profile.native_metrics_mapping)
+        else:
+            merged = dict(native_mapping)
+            merged.update(profile.native_metrics_mapping)
+            native_mapping = merged
     return UsageCollector(
         profile.name,
         f"http://127.0.0.1:{profile.port}",
@@ -300,6 +323,9 @@ def build_registry(models_dir: Path | None = None, host: str = "127.0.0.1") -> d
             aliases=profile.aliases,
             group=profile.group,
             adapter=adapter,
+            thinking_disabled=profile.thinking_disabled,
+            reasoning_effort_map=profile.reasoning_effort_map,
+            native_metrics_mapping=profile.native_metrics_mapping,
         )
         for key in [profile.name, *profile.aliases]:
             if key in registry:
@@ -329,6 +355,9 @@ def build_groups(models_dir: Path | None = None, host: str = "127.0.0.1") -> dic
             aliases=profile.aliases,
             group=profile.group,
             adapter=adapter,
+            thinking_disabled=profile.thinking_disabled,
+            reasoning_effort_map=profile.reasoning_effort_map,
+            native_metrics_mapping=profile.native_metrics_mapping,
         )
         groups.setdefault(profile.group, []).append(model)
     for members in groups.values():
@@ -556,7 +585,7 @@ def create_app(
         self_audit_log = target.audit_log
         # 改写为后端期望的模型名（同 OpenAI 端点）
         body["model"] = target.upstream_model
-        _normalize_reasoning_effort(body)
+        _normalize_reasoning_effort(body, target.reasoning_effort_map)
         # Claude Code 新版发 thinking: {"type": "adaptive"}（Anthropic 自动思考）；
         # vLLM 0.27.1 不支持 adaptive，会映射出 effort=high 触发 Qwen3.8 模板 500，
         # 转为 vLLM 支持的 disabled（关闭思考，与 OpenAI 端点 enable_thinking=false 策略一致）。
@@ -760,10 +789,16 @@ def create_app(
         self_audit_log = target.audit_log
         # 改写为后端期望的模型名（ollama 严格校验，llamacpp 忽略）
         body["model"] = target.upstream_model
-        _normalize_reasoning_effort(body)
+        _normalize_reasoning_effort(body, target.reasoning_effort_map)
         # 思考型模型家族默认关闭 thinking（见 _THINKING_DISABLED_GROUPS 注释）；
-        # 请求显式传 chat_template_kwargs 时尊重调用方意图，不覆盖。
-        if target.group in _THINKING_DISABLED_GROUPS and target.engine in _THINKING_DISABLED_ENGINES and "chat_template_kwargs" not in body:
+        # §1.2 配置化：profile 顶层 gateway.thinking_disabled（True/False）优先；
+        # 缺省（None）时按 group 白名单判断；请求显式传 chat_template_kwargs 时尊重调用方意图，不覆盖。
+        _should_disable_thinking = (
+            target.thinking_disabled
+            if target.thinking_disabled is not None
+            else (target.group in _THINKING_DISABLED_GROUPS and target.engine in _THINKING_DISABLED_ENGINES)
+        )
+        if _should_disable_thinking and "chat_template_kwargs" not in body:
             body["chat_template_kwargs"] = {"enable_thinking": False}
         headers = {"Content-Type": "application/json"}
         up_key = target.upstream_api_key()

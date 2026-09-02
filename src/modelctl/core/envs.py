@@ -39,6 +39,36 @@ def _is_linux() -> bool:
     return sys.platform.startswith("linux")
 
 
+# 平台支持矩阵（§3 / TODO 项 5）：托管引擎 venv 仅在 Linux 可建（CUDA 推理栈），
+# gateway 子项目跨平台（纯 FastAPI/uvicorn）。值表示「当前平台是否支持该 target」。
+# 该平台限制集中在 CLI 入口与文档中读取；Windows 用户在 Windows 端运行 modelctl
+# env setup airgapped 会得到错误友好提示（而非原始 traceback）。
+def platform_supports(target: str) -> bool:
+    """判断当前运行平台是否支持 target（True 表示可环境 setup / 后续运行）。"""
+    if target in MANAGED_ENGINES:
+        return _is_linux()
+    if target == GATEWAY_SUBPROJECT:
+        return True  # gateway 在 Linux/Windows/macOS 均可
+    return False
+
+
+def platform_limitation_message(target: str) -> str | None:
+    """返回当前平台不支持 target 的友好提示；支持时返回 None。"""
+    if platform_supports(target):
+        return None
+    current = sys.platform or "unknown"
+    if target in MANAGED_ENGINES:
+        return (
+            f"引擎 {target} 的托管 venv 仅支持 Linux（CUDA 推理栈依赖 nvidia-pypi + cudatools）；"
+            f"当前平台 {current!r} 不支持。请在部署机（Linux）上执行 "
+            f"`modelctl env setup {target}`，或走 docker 镜像绕过 venv。"
+        )
+    if target == GATEWAY_SUBPROJECT:
+        # gateway 应跨平台；若到达此分支说明 _is_target 异常
+        return f"gateway 在当前平台 {current!r} 未提供部署（不应发生，请联系维护）"
+    return f"target {target!r} 不受支持"
+
+
 def _is_target(target: str) -> bool:
     return target in MANAGED_ENGINES or (GATEWAY_SUBPROJECT is not None and target == GATEWAY_SUBPROJECT)
 
@@ -112,12 +142,12 @@ def vllm_version() -> tuple[int, int, int] | None:
 def setup(target: str) -> int:
     if not _is_target(target):
         raise ValueError(f"非受管环境：{target}")
-    # 托管引擎限定 Linux（CUDA 推理）；gateway 子项目跨 Linux/Windows 通用
-    if target in MANAGED_ENGINES and not _is_linux():
-        raise EngineEnvError(
-            f"引擎 {target} 的目标平台为 Linux，当前平台为 {sys.platform}；"
-            f"请到 Linux 部署机上执行：modelctl env setup {target}"
-        )
+    # 平台限制（§3 / TODO 项 5）：托管引擎仅 Linux；gateway 跨平台。
+    # 用 platform_supports / platform_limitation_message 统一判断，确保 CLI 提示
+    # 与未来运行时探测保持一致。
+    message = platform_limitation_message(target)
+    if message is not None:
+        raise EngineEnvError(message)
     exe = shutil.which("uv")
     if exe is None:
         raise EngineEnvError("未找到 uv，请先安装：pip install uv")

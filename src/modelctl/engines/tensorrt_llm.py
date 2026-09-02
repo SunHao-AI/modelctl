@@ -77,10 +77,66 @@ class TensorRtLlmAdapter(EngineAdapter):
         if engine_dir.exists() and any(engine_dir.iterdir()):
             return
         # 编译产物缺失：记录警告，由用户手动触发编译（避免首次 28min 阻塞在 modelctl start）
+        # §2.2：可执行 `modelctl trtllm build <name>` 触发 build_command 编译
         self.warnings.append(
             f"TensorRT-LLM engine_dir {engine_dir} 不存在或为空，"
             "请先执行 trtllm-build 编译或配置 docker_image 使用预编译镜像"
+            "（或 `modelctl trtllm build <profile-name>` 自动编译）"
         )
+
+    def build_compile_command(self) -> tuple[list[str], dict[str, str]]:
+        """§2.2：trtllm-build 编译命令（CLI `modelctl trtllm build` 调用）。
+
+        使用 venv 内的 trtllm-build 可执行文件编译 HuggingFace 模型到 engine_dir；
+        docker 模式不支持自动编译（trtllm-build 需 host 端 GPU 与 Python 运行时）。
+        编译完成前 modelctl start 会因 engine_dir 空而报错。
+        """
+        cfg = self.profile.engine_config
+        gpus = self.selected_gpus()
+        tp = len(gpus) if gpus else int(cfg.get("tensor_parallel_size", 1))
+        runtime, _image = self._resolve_runtime()
+        if runtime == "docker":
+            raise RequirementError(
+                "trtllm build 仅在 venv 模式下支持（docker 模式请使用预编译镜像或 host 手动执行 trtllm-build）"
+            )
+        model = str(cfg["model"])
+        engine_dir = Path(str(cfg.get("engine_dir") or "")).expanduser()
+        engine_dir.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            "trtllm-build",
+            f"--model_dir={model}",
+            f"--workspace_dir={engine_dir}",
+            f"--tensor_parallelism_size={tp}",
+        ]
+        for key, flag in (
+            ("quantization", "--quantization"),
+            ("max_input_len", "--max_input_len"),
+            ("max_output_len", "--max_output_len"),
+            ("max_batch_size", "--max_batch_size"),
+        ):
+            if cfg.get(key):
+                cmd.append(f"{flag}={cfg[key]}")
+        if cfg.get("dtype"):
+            cmd.append(f"--dtype={cfg['dtype']}")
+        cmd += shlex.split(str(cfg.get("extra_args") or ""))
+        env = {}
+        if gpus:
+            env.update(self.cuda_visible_devices(gpus))
+        env["VIRTUAL_ENV"] = str(envs.VENV_ROOT / "tensorrt_llm")
+        env["PATH"] = str(envs.VENV_ROOT / "tensorrt_llm" / "bin") + os.pathsep + os.environ.get("PATH", "")
+        return cmd, env
+
+    def ensure_bin(self) -> None:
+        """校验托管 venv 已安装（modelctl trtllm build 前置）。"""
+        cfg = self.profile.engine_config
+        runtime, _image = self._resolve_runtime()
+        if runtime == "docker":
+            raise RequirementError("trtllm build 仅在 venv 模式下支持")
+        envs.ensure_env("tensorrt_llm")
+        if not cfg.get("model"):
+            raise RequirementError(f"{self.profile.name}：tensorrt_llm.model 必填")
+        if not cfg.get("engine_dir"):
+            raise RequirementError(f"{self.profile.name}：tensorrt_llm.engine_dir 必填（编译产物缓存目录）")
 
     def build_command(self) -> tuple[list[str], dict[str, str]]:
         cfg = self.profile.engine_config
@@ -140,9 +196,19 @@ class TensorRtLlmAdapter(EngineAdapter):
         return cmd, env
 
     def metrics_mapping(self) -> dict[str, list[str]]:
+        # §2.2 速率 gauge 补全：参照 vllm/sglang 风格暴露 tokens/sec gauge。
+        # TensorRT-LLM 0.11+ 提供 *_tokens_per_second 增量 gauge（老版本缺则退化为窗口差分）。
         return {
             "prompt_total": ["trtllm:prompt_tokens_total"],
             "predicted_total": ["trtllm:generation_tokens_total"],
+            "prompt_rate": [
+                "trtllm:prompt_tokens_per_second",
+                "trtllm:avg_prompt_throughput_tokens_per_second",
+            ],
+            "predicted_rate": [
+                "trtllm:generation_tokens_per_second",
+                "trtllm:avg_generation_throughput_tokens_per_second",
+            ],
         }
 
     def _gpus_json(self, gpus, tp) -> str:

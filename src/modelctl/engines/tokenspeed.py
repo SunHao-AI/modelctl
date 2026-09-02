@@ -134,9 +134,19 @@ class TokenSpeedAdapter(EngineAdapter):
         return cmd, env
 
     def metrics_mapping(self) -> dict[str, list[str]]:
+        # §2.2 速率 gauge 补全：参照 vllm/sglang 风格暴露 avg_*_throughput gauge。
+        # 缺失/恒为 0 时 stats 退化为窗口差分（不会出错）。
         return {
             "prompt_total": ["tokenspeed:prompt_tokens_total"],
             "predicted_total": ["tokenspeed:generation_tokens_total"],
+            "prompt_rate": [
+                "tokenspeed:prompt_tokens_seconds",
+                "tokenspeed:avg_prompt_throughput_toks_per_sec",
+            ],
+            "predicted_rate": [
+                "tokenspeed:generation_tokens_seconds",
+                "tokenspeed:avg_generation_throughput_toks_per_sec",
+            ],
         }
 
     def _gpus_json(self, gpus, tp) -> str:

@@ -434,7 +434,9 @@ def test_get_collector_injects_native_mapping(tmp_path, monkeypatch):
     from modelctl.core.gateway import get_collector
 
     monkeypatch.delenv("USAGE_BENCH_FALLBACK", raising=False)
-    profile = MagicMock(name="q", port=8000, api_key=None)
+    # native_metrics_mapping 须显式置 None：MagicMock 的自动子属性是 truthy 的 mock，
+    # 会被 get_collector 当作"profile 已配置原生映射"而进入 merge 分支。
+    profile = MagicMock(name="q", port=8000, api_key=None, native_metrics_mapping=None)
     adapter = MagicMock()
     adapter.metrics_mapping.return_value = {
         "prompt_total": ["vllm:prompt_tokens_total"],
@@ -456,7 +458,8 @@ def test_get_collector_injects_none_native_mapping_for_default_engine(tmp_path, 
     from modelctl.core.gateway import get_collector
 
     monkeypatch.delenv("USAGE_BENCH_FALLBACK", raising=False)
-    profile = MagicMock(name="q", port=8000, api_key=None)
+    # profile 未配置原生映射（见上一个用例的说明，必须显式置 None）
+    profile = MagicMock(name="q", port=8000, api_key=None, native_metrics_mapping=None)
     adapter = MagicMock()
     adapter.metrics_mapping.return_value = {
         "prompt_total": ["ollama:prompt_tokens_total"],

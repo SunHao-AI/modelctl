@@ -47,6 +47,50 @@ class Profile:
     path: Path | None = None
     tool_call_rounds: int | None = None
     max_output_tokens: int | None = None
+    # 网关策略（§1.2 配置化）：
+    #   thinking_disabled    : bool   | None  — 强制关闭 thinking（默认 False；None 时由 group 白名单决定）
+    #   reasoning_effort_map : dict     | None  — 自定义 reasoning_effort 枚举映射（None 时回退全局 _REASONING_EFFORT_MAP）
+    thinking_disabled: bool | None = None
+    reasoning_effort_map: dict[str, str] | None = None
+    # §1.3 配置化：自定义 per-request 原生指标字段名映射（SGlang/Aphrodite 等
+    # 未来的响应 metrics 字段名不同或需要覆盖默认时通过 YAML 提供；None 时
+    # 回退到引擎适配器 native_metrics_mapping() 的默认值）
+    native_metrics_mapping: dict[str, str] | None = None
+
+
+_GATEWAY_NATIVE_KEYS = ("rate", "ttft_ms", "gen_time_ms", "prompt_tokens", "completion_tokens")
+
+
+def _parse_gateway(raw: dict[str, Any], src: str) -> tuple[bool | None, dict[str, str] | None, dict[str, str] | None]:
+    """解析顶层 `gateway` 段 → (thinking_disabled, reasoning_effort_map, native_metrics_mapping)。
+
+    字段可缺；类型不匹配的字段告警并返回 None（不抛错）。
+    native_metrics_mapping 键必须是 _GATEWAY_NATIVE_KEYS 的子集（允许部分指定）。
+    """
+    g = raw.get("gateway")
+    if not isinstance(g, dict):
+        return None, None, None
+    td = g.get("thinking_disabled")
+    rd = g.get("reasoning_effort_map")
+    nm = g.get("native_metrics_mapping")
+    thinking = bool(td) if isinstance(td, bool) else None
+    if thinking is None and td is not None:
+        logger.warning(f"{src}：gateway.thinking_disabled 必须是 bool，已忽略 current={td!r}")
+    remap: dict[str, str] | None = None
+    if isinstance(rd, dict):
+        if all(isinstance(k, str) and isinstance(v, str) for k, v in rd.items()):
+            remap = {str(k): str(v) for k, v in rd.items()}
+        else:
+            logger.warning(f"{src}：gateway.reasoning_effort_map 必须是 str→str 映射，已忽略 current={rd!r}")
+    native: dict[str, str] | None = None
+    if isinstance(nm, dict):
+        bad = [k for k, v in nm.items() if not isinstance(k, str) or not isinstance(v, str) or k not in _GATEWAY_NATIVE_KEYS]
+        if not bad:
+            native = {k: v for k, v in nm.items()}
+        else:
+            logger.warning(f"{src}：gateway.native_metrics_mapping 仅支持键 {list(_GATEWAY_NATIVE_KEYS)}；"
+                           f"非法键被忽略 {bad!r}（当前 {nm!r}）")
+    return thinking, remap, native
 
 
 def _interpolate(value: Any, source: str) -> Any:
@@ -138,6 +182,7 @@ def _to_profile(raw: dict[str, Any], path: Path) -> Profile:
         raise ProfileError(f"{src}：{engine} 段必须是映射")
 
     aliases = _parse_aliases(raw, src, resolved_name)
+    thinking_disabled, reasoning_effort_map, native_metrics_mapping = _parse_gateway(raw, src)
     tool_call_rounds = raw.get("tool_call_rounds")
     if tool_call_rounds is not None:
         try:
@@ -163,6 +208,9 @@ def _to_profile(raw: dict[str, Any], path: Path) -> Profile:
         path=path,
         tool_call_rounds=tool_call_rounds,
         max_output_tokens=max_output_tokens,
+        thinking_disabled=thinking_disabled,
+        reasoning_effort_map=reasoning_effort_map,
+        native_metrics_mapping=native_metrics_mapping,
     )
 
 

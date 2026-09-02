@@ -158,6 +158,10 @@ def build_parser() -> argparse.ArgumentParser:
         choices=ENV_TARGETS,
         help=f"受管目标：{' / '.join(ENV_TARGETS)}（list 不需要）",
     )
+    # §2.2 TensorRT-LLM 引擎编译
+    tp = sub.add_parser("trtllm", help="TensorRT-LLM 编译/检查子命令")
+    tp.add_argument("action", choices=["build", "status"])
+    tp.add_argument("name", help="profile 名称（status 可选名，缺省=all）")
     return parser
 
 
@@ -979,6 +983,64 @@ def _cmd_audit_cleanup(args) -> int:
     return 0
 
 
+# ---- §2.2 TensorRT-LLM 编译子命令 ----
+
+def _cmd_trtllm_build(args, models_dir: Path | None, caps) -> int:
+    """§2.2：执行 `trtllm-build` 编译 HuggingFace 模型到 engine_dir。
+
+    流程：加载 profile → 校验 venv 可用 → 编译命令（build_compile_command）→ subprocess run
+    （同步阻塞，由 modelctl start 等待健康）。编译成功后 engine_dir 含 .trt 等产物，
+    即可 `modelctl start <name>` 启动服务。
+    """
+    import subprocess
+    from loguru import logger as _logger
+
+    profile = load_profile(args.name, models_dir)
+    if profile.engine != "tensorrt_llm":
+        _logger.error(f"profile {profile.name} engine 必须是 tensorrt_llm（实际 {profile.engine!r}）")
+        return 2
+    adapter = get_adapter(profile.engine)(profile, caps)
+    # 复用通用需求检查（会清理 docker 残留、acquire GPU 锁）
+    try:
+        adapter.check_requirements()
+    except RequirementError as exc:
+        _logger.error(str(exc))
+        return 2
+    for w in adapter.warnings:
+        _logger.warning(w)
+    # 静态校验
+    adapter.ensure_bin()
+    cmd, env = adapter.build_compile_command()
+    _logger.info(f"[trtllm build] 编译 {args.name}: {' '.join(cmd)}")
+    _logger.info(f"[trtllm build] 同步执行（首次冷编译约 28 分钟，含 --dump_intermediates 时更久）")
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    if result.returncode != 0:
+        _logger.error(f"[trtllm build] 编译失败 (exit={result.returncode})：")
+        _logger.error(f"stdout: {result.stdout[-3000:] if result.stdout else '(empty)'}")
+        _logger.error(f"stderr: {result.stderr[-3000:] if result.stderr else '(empty)'}")
+        return 1
+    _logger.info(f"[trtllm build] 编译完成：{profile.engine_config.get('engine_dir')!r}")
+    _logger.info(f"现在可执行 `modelctl start {profile.name}` 启动服务")
+    return 0
+
+
+def _cmd_trtllm_status(args, models_dir: Path | None, caps) -> int:
+    """查询 profile 的编译产物状态（engine_dir 是否存在且非空）。"""
+    profile = load_profile(args.name, models_dir)
+    if profile.engine != "tensorrt_llm":
+        print(f"{profile.name}: engine 是 {profile.engine!r}（非 tensorrt_llm），跳过")
+        return 1
+    engine_dir = __import__("pathlib").Path(str(profile.engine_config.get("engine_dir") or "")).expanduser()
+    if not engine_dir.exists():
+        print(f"{profile.name}: engine_dir {engine_dir} 不存在 → 未编译")
+        return 1
+    files = [p.name for p in engine_dir.iterdir()]
+    size_kb = sum(p.stat().st_size for p in engine_dir.iterdir() if p.is_file()) // 1024
+    state = "已编译" if files else "空目录（未编译）"
+    print(f"{profile.name}: engine_dir={engine_dir} {state} ({len(files)} 个文件，{size_kb} KB)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     # 先扫描 --no-color（在全局 argparse 之前），以便 setup_logging 同步禁用颜色
@@ -1055,6 +1117,10 @@ def main(argv: list[str] | None = None) -> int:
             if args.action == "list":
                 return _cmd_env_list(args, models_dir, caps)
             return _cmd_env_remove(args, models_dir, caps)
+        if args.command == "trtllm":
+            if args.action == "build":
+                return _cmd_trtllm_build(args, models_dir, caps)
+            return _cmd_trtllm_status(args, models_dir, caps)
     except (ProfileError, RequirementError, EngineEnvError) as error:
         logger.error(str(error))
         return 2

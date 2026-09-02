@@ -182,3 +182,55 @@ def test_tensorrt_llm_stop_patterns_venv(tmp_path, monkeypatch):
     )
     a = get_adapter("tensorrt_llm")(p, CAPS8)
     assert "tensorrt_llm.serve" in a.stop_patterns()
+
+
+def test_tensorrt_llm_build_compile_command_venv(tmp_path, monkeypatch):
+    """§2.2: build_compile_command 在 venv 模式下返回 trtllm-build 调用。"""
+    _stub_venv(tmp_path, monkeypatch)
+    engine_dir = tmp_path / "engines" / "bld"
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: tensorrt_llm\nport: 8120\ntensorrt_llm:\n"
+        f"  model: /models/Qwen3.8-27B\n  engine_dir: {engine_dir}\n"
+        f"  tensor_parallel_size: 4\n  quantization: fp8\n"
+        f"  max_input_len: 32768\n  max_output_len: 8192\n  max_batch_size: 64\n"
+        f'  extra_args: "--use_fused_mlp"\n',
+    )
+    a = get_adapter("tensorrt_llm")(p, CAPS8)
+    a.ensure_bin()
+    cmd, env = a.build_compile_command()
+    assert cmd[0] == "trtllm-build"
+    assert f"--model_dir=/models/Qwen3.8-27B" in cmd
+    assert f"--workspace_dir={engine_dir}" in cmd
+    assert "--tensor_parallelism_size=4" in cmd
+    assert "--quantization=fp8" in cmd
+    assert "--max_input_len=32768" in cmd
+    assert "--max_output_len=8192" in cmd
+    assert "--max_batch_size=64" in cmd
+    assert "--use_fused_mlp" in cmd
+    assert "VIRTUAL_ENV" in env
+
+
+def test_tensorrt_llm_build_compile_command_docker_mode_rejected(tmp_path, monkeypatch):
+    """§2.2: docker 模式 build_compile_command 抛 RequirementError（要求 host 端手动编译）。"""
+    p = _write(
+        tmp_path,
+        "name: q\nengine: tensorrt_llm\nport: 8120\ntensorrt_llm:\n"
+        "  model: m\n  engine_dir: /e\n  docker_image: nvcr.io/nvidia/tensorrt-llm:latest\n",
+    )
+    a = get_adapter("tensorrt_llm")(p, CAPS8)
+    with pytest.raises(RequirementError, match="docker"):
+        a.build_compile_command()
+
+
+def test_tensorrt_llm_build_subcommand_registered():
+    """§2.2: CLI build_parser 注册 modelctl trtllm build <name> 子命令。"""
+    import modelctl.cli as cli
+    args = cli.build_parser().parse_args(["trtllm", "build", "q"])
+    assert args.command == "trtllm"
+    assert args.action == "build"
+    assert args.name == "q"
+    # status 子命令
+    args2 = cli.build_parser().parse_args(["trtllm", "status", "q"])
+    assert args2.command == "trtllm"
+    assert args2.action == "status"
