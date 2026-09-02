@@ -13,8 +13,9 @@
 #   2. 模型按 download 段从 ModelScope 拉到 $MODEL_ROOT（默认 /raid5/sh/model-hf），
 #      modelctl 写回 yaml `model:` 字段为本地绝对路径（之后的启动不再重复下载）
 #   3. 容器使用 nvidia-container-toolkit + --gpus JSON 透传 yaml gpu_list 指定的同卡
-#   4. 容器内 vLLM 绑定 8000，宿主端口 = yaml 顶层 `port`
-#   5. modelctl stop 通过 start_detached PID → fuser → pkill 三层 stop 容器
+#   4. 容器内 vLLM 绑定 8000，宿主端口 = yaml 顶层 `port`；docker 路径不写 PID 文件
+#   5. modelctl stop 走 stop_docker_instance——docker rm -f + 清本地 PID（容器路径本身不写
+#      PID，PID 仅 venv 路径写；环境切换残留由同一把防御性清理兜住）
 #
 # 【硬件真实（8×RTX 5880 Ada，本配置已验证）】
 #   - 8×NVIDIA RTX 5880 Ada，单卡 49,140 MiB ≈ 48GB（非 80G），CC 8.9，**支持 FP8**

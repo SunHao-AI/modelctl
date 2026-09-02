@@ -58,6 +58,7 @@ from modelctl.core.logging import setup_logging
 from modelctl.core.nginx_snippet import build_llm_map
 from modelctl.core.process import (
     is_running,
+    is_running_any,
     launch_log,
     open_local,
     pid_file,
@@ -205,7 +206,7 @@ def _print_table(headers: list[str], rows: list[list], *, dim_indices: tuple[int
     # 分隔线（灰色）
     print(_table_paint("  ".join("-" * w for w in widths), "TABLE_SEP"))
     # 数据行（状态列按值着色，次要列灰色）
-    state_words = {"运行中", "已外部启动", "已停止", "正常", "无响应", "PID 异常", "未就绪"}
+    state_words = {"运行中", "已停止", "正常", "无响应", "PID 残留", "未就绪"}
     for row in rows:
         cells: list[str] = []
         for i in range(col_count):
@@ -257,23 +258,24 @@ def _port_health_ok(profile: Profile, timeout: float = 2.0) -> bool:
 
 
 def _instance_state(profile: Profile | None = None, name: str | None = None) -> str:
-    """判断实例状态（PID 文件优先，无 PID 时按端口兜底探测"外部运行"）。
+    """判断实例状态（is_running_any 统一口径：/health 2xx 优先，PID 文件兜底）。
 
     状态取值：
-    - 运行中       PID 文件存在且进程存活（modelctl 拉起或受管实例）
-    - PID 异常     PID 文件存在但进程已退出
-    - 已外部启动   无 PID 文件，但端口 /health 响应正常（如 docker 容器拉起）
-    - 已停止       无 PID 文件且端口无响应
+    - 运行中     /health 2xx 或 venv PID 文件存活（含外部 docker/supervisor 拉起的同端口服务）
+    - PID 残留   PID 文件存在但进程不存活且端口不响应该 profile（venv 孤儿 + docker 切换残留）
+    - 已停止     无 PID 文件且端口无响应
+
+    "PID 残留" 识别：is_running_any 已声明"判定无副作用"（不 unlink PID 文件），
+    本处仅做识别并返回供用户提示，文件清理由 stop_instance / stop_docker_instance 负责。
     """
     if name is None and profile is not None:
         name = profile.name
     assert name is not None
-    pf = pid_file(name)
-    if pf.is_file():
-        return "运行中" if is_running(name) else "PID 异常"
-    # 无 PID 文件：兜底探测端口是否由外部服务（docker/supervise 等）撑起
-    if profile is not None and _port_health_ok(profile):
-        return "已外部启动"
+    if is_running_any(name, profile):
+        return "运行中"
+    if pid_file(name).is_file():
+        logger.warning(f"{name}：疑似残留 PID 文件，建议执行 `modelctl stop {name}` 清理后再次 start")
+        return "PID 残留"
     return "已停止"
 
 
@@ -467,7 +469,7 @@ def _cmd_status(args, models_dir: Path | None, caps) -> int:
     for p in profiles:
         state = _instance_state(profile=p)
         health = "-"
-        if state in ("运行中", "已外部启动"):
+        if state == "运行中":
             try:
                 adapter = get_adapter(p.engine)(p, caps)
                 ok = adapter.wait_ready(3.0)
@@ -488,7 +490,7 @@ def _cmd_status(args, models_dir: Path | None, caps) -> int:
         print(f"  Top P：{info['top_p']}")
         print(f"  Top K：{info['top_k']}")
         print(f"  Token 计费：{_price_rate_text(profiles[0])}")
-        if _instance_state(profile=profiles[0]) in ("运行中", "已外部启动"):
+        if _instance_state(profile=profiles[0]) == "运行中":
             rate = _token_rate_data(profiles[0], caps)
             if rate["source"] is None:
                 rate_text = "输入 -，输出 -（测速失败）"
@@ -506,14 +508,14 @@ def _cmd_status(args, models_dir: Path | None, caps) -> int:
 
 
 def _group_runtime_target(members: list[Profile], states: list[str]) -> tuple[Profile, str] | None:
-    """返回组内第一个可用的成员及其状态（"运行中"或"已外部启动"）。
+    """返回组内第一个可用的成员及其状态（`'运行中'`）。
 
     states 为调用方已探得的各成员状态（避免重复端口探测）。成员已按引擎优先级
     排序（vllm 优先），与网关家族路由 _resolve_group 一致——两者按同一可用口径判定
-    （受管运行中，或无 PID 文件但端口健康的外部启动实例）。
+    （is_running_any：/health 2xx 或 venv PID 文件存活）。
     """
     for p, state in zip(members, states, strict=False):
-        if state in ("运行中", "已外部启动"):
+        if state == "运行中":
             return p, state
     return None
 
@@ -549,14 +551,14 @@ def _cmd_list(args, models_dir: Path | None, caps) -> int:
         for p in members:
             state = _instance_state(profile=p)
             rate = "-"
-            if state in ("运行中", "已外部启动"):
+            if state == "运行中":
                 r = _stats_token_rate(p)
                 # 仅显示非零速率：0/0（空闲且无兜底数据）无信息量，统一显示 -
                 if r is not None and (r[0] > 0 or r[1] > 0):
                     rate = f"{r[0]:.1f}/{r[1]:.1f}"
             rows.append([p.engine, p.variant or "-", p.port, state, rate, p.name])
         # 路由映射提示复用上方已探得的状态列，与网关家族路由的可用口径一致；
-        # 括号内直接取状态列原值（运行中 / 已外部启动），避免与表格自相矛盾
+        # 括号内直接取状态列原值（运行中），避免与表格自相矛盾
         target = _group_runtime_target(members, [r[3] for r in rows])
         if target:
             target_profile, target_state = target
