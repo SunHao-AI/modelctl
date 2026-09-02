@@ -9,8 +9,11 @@
 # @Desc   : 进程管理测试
 # ===============================================================================
 
+import os
+import subprocess as sp
 import sys
 import time
+import urllib.error
 
 import pytest
 
@@ -346,3 +349,137 @@ def test_docker_container_alive_docker_daemon_down_true(monkeypatch):
         _fake_run(returncode=1, stderr="Cannot connect to the Docker daemon\n"),
     )
     assert process.docker_container_alive("q-vllm") is True
+
+
+# ---- is_running_any / start_detached(write_pid) / stop_docker_instance ----
+
+
+def _write_pid(name: str, pid: int, cache_path) -> None:
+    (cache_path / f"{name}.pid").write_text(str(pid), encoding="utf-8")
+
+
+class _FakeProfile:
+    """最小化 profile：只暴露 is_running_any 用到的 name/port/engine_config/api_key。"""
+    def __init__(self, name, port, api_key=None, ec=None):
+        self.name = name
+        self.port = port
+        self.api_key = api_key
+        self.engine_config = ec or {}
+
+
+def _fake_resp_200(req, timeout):
+    """仅返回 status=200 的伪对象，便于 mock open_local。"""
+    return _Resp200()
+
+
+class _Resp200:
+    def __init__(self): self.status = 200
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
+def test_is_running_any_port_healthy_true(monkeypatch, tmp_path):
+    """profile 有且端口 /health 200 → True（不触碰 PID 文件）"""
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(process, "open_local", _fake_resp_200)
+    result = process.is_running_any("p1", _FakeProfile("p1", 8100))
+    assert result is True
+
+
+def test_is_running_any_port_up_pid_dead_clean_up(monkeypatch, tmp_path):
+    """端口 200 但 PID 文件残留（已死 PID）→ True 且 dead PID 被清理"""
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
+    (tmp_path / "cache").mkdir(parents=True, exist_ok=True)
+    _write_pid("p2", 999999, tmp_path / "cache")  # 999999 在 /proc 必死
+    monkeypatch.setattr(process, "open_local", _fake_resp_200)
+    assert process.is_running_any("p2", _FakeProfile("p2", 8101)) is True
+    assert not (tmp_path / "cache" / "p2.pid").is_file()
+
+
+def test_is_running_any_all_none_false(monkeypatch, tmp_path):
+    """profile=None + 无 PID 文件 → False"""
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
+    assert process.is_running_any("p3", None) is False
+
+
+def test_is_running_any_profile_none_with_pid_file(monkeypatch, tmp_path):
+    """profile=None 但 PID 文件文件损坏 → 清理 + False"""
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
+    (tmp_path / "cache").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "cache" / "p4.pid").write_text("not-a-pid", encoding="utf-8")
+    assert process.is_running_any("p4", None) is False
+    assert not (tmp_path / "cache" / "p4.pid").is_file()
+
+
+def test_is_running_any_port_down_pid_alive_true(monkeypatch, tmp_path):
+    """venv 情况：/health 还没起来但 venv 进程确实活着 → True（PID 兜底）"""
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
+    (tmp_path / "cache").mkdir(parents=True, exist_ok=True)
+    _write_pid("p5", os.getpid(), tmp_path / "cache")  # 自己的 PID 必活
+    # 模拟端口不通（抛 URLError）
+    def _boring(req, timeout):
+        raise urllib.error.URLError("refused")
+    monkeypatch.setattr(process, "open_local", _boring)
+    assert process.is_running_any("p5", _FakeProfile("p5", 8102)) is True
+
+
+def test_is_running_any_unknown_name_returns_false(monkeypatch, tmp_path):
+    """兜底：profile 存在但端口 / PID 都无 → False（不抛错）"""
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
+    assert process.is_running_any("ghost", _FakeProfile("ghost", 1)) is False
+
+
+def test_start_detached_write_pid_false(monkeypatch, tmp_path):
+    """write_pid=False 时不写 PID 文件，但返回 (pid, proc) 维持签名"""
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
+    pid, proc = process.start_detached("no-pid-w", [sys.executable, "-c", "pass"], {}, write_pid=False)
+    assert (tmp_path / "cache" / "no-pid-w.pid").exists() is False
+    assert isinstance(pid, int) and pid > 0
+    assert isinstance(proc, sp.Popen)
+    proc.wait()
+
+
+def test_start_detached_write_pid_default_true(monkeypatch, tmp_path):
+    """默认 write_pid=True 保持向后兼容：PID 文件照常写入"""
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
+    pid, proc = process.start_detached("has-pid-w", [sys.executable, "-c", "pass"], {})
+    assert (tmp_path / "cache" / "has-pid-w.pid").is_file() is True
+    assert int((tmp_path / "cache" / "has-pid-w.pid").read_text()) == pid
+    proc.wait()
+
+
+def test_stop_docker_instance_runs_rm_and_cleans(monkeypatch, tmp_path):
+    """docker rm -f 被记录 + 残留 PID 被清理 + gpu_lock 被释放"""
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
+    (tmp_path / "cache").mkdir(parents=True, exist_ok=True)
+    _write_pid("app", 12345, tmp_path / "cache")
+    invocations = []
+
+    def _fake_run(cmd, **kw):
+        invocations.append((cmd, kw))
+        return sp.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(process.subprocess, "run", _fake_run)
+    release_calls = []
+    monkeypatch.setattr("modelctl.core.gpu_lock.release_gpu_lock",
+                        lambda name: release_calls.append(name) or None)
+    ok = process.stop_docker_instance("app", "app-vllm")
+    assert ok is True
+    assert invocations and invocations[0][0] == ["docker", "rm", "-f", "app-vllm"]
+    assert "timeout" in invocations[0][1] and invocations[0][1]["timeout"] == 10
+    assert "capture_output" in invocations[0][1] and invocations[0][1]["capture_output"] is True
+    assert not (tmp_path / "cache" / "app.pid").is_file()
+    assert release_calls == ["app"]
+
+
+def test_stop_docker_instance_docker_unavailable(monkeypatch, tmp_path):
+    """docker 命令缺失（OSError）时仍 True 但清本地 PID + 释放锁"""
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
+    (tmp_path / "cache").mkdir(parents=True, exist_ok=True)
+    _write_pid("x", 1, tmp_path / "cache")
+
+    def _boom(cmd, **kw):
+        raise FileNotFoundError(cmd[0])
+    monkeypatch.setattr(process.subprocess, "run", _boom)
+    assert process.stop_docker_instance("x", "x-vllm") is True
+    assert not (tmp_path / "cache" / "x.pid").is_file()

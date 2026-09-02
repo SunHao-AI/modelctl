@@ -18,6 +18,7 @@ import signal
 import subprocess
 import sys
 import time
+import typing
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -25,6 +26,9 @@ from pathlib import Path
 from loguru import logger
 
 from modelctl.core.envfile import PROJECT_ROOT
+
+if typing.TYPE_CHECKING:
+    from modelctl.core.profile import Profile
 
 if sys.platform == "win32":
     import ctypes
@@ -75,15 +79,22 @@ def launch_log(name: str) -> Path | None:
     return path if path.is_file() else None
 
 
-def start_detached(name: str, command: list[str], extra_env: dict[str, str]) -> tuple[int, subprocess.Popen]:
-    """后台启动进程，返回 (pid, Popen)。Popen 供调用方在等待健康检查期间探测早退（fail-fast）。"""
+def start_detached(name: str, command: list[str], extra_env: dict[str, str],
+                   write_pid: bool = True) -> tuple[int, subprocess.Popen]:
+    """后台启动进程，返回 (pid, Popen)。Popen 供调用方在等待健康检查期间探测早退（fail-fast）。
+
+    write_pid=False：docker runtime 专用——`docker run --detach` 客户端在容器创建后
+    ~1s 内退出、Popen.pid 写入后即为已死号，后续状态判定会被该 PID 误导，
+    故 docker 路径调用方传 False 不写 PID 文件，改用容器名作为身份标识。
+    返回签名不变：pid 仍为本机 Popen.pid，仅作日志显示用。"""
     log_path = log_dir() / f"launch-{name}.log"
     env = {**os.environ, **extra_env}
     fp = open(log_path, "w", encoding="utf-8")  # "w"：每次启动覆盖旧日志
     kwargs: dict = {"stdout": fp, "stderr": subprocess.STDOUT, "env": env, "stdin": subprocess.DEVNULL}
     kwargs["start_new_session"] = True  # nohup 语义：SSH 断开不影响
     proc = subprocess.Popen(command, **kwargs)
-    pid_file(name).write_text(str(proc.pid), encoding="utf-8")
+    if write_pid:
+        pid_file(name).write_text(str(proc.pid), encoding="utf-8")
     return proc.pid, proc
 
 
@@ -102,6 +113,79 @@ def is_running(name: str) -> bool:
     # 进程已不存在，清理残留的 PID 文件
     pf.unlink(missing_ok=True)
     return False
+
+
+def is_running_any(name: str, profile: Profile | None) -> bool:
+    """统一运行态判定：端口 /health 2xx 优先，PID 文件机器兜底（venv 路径残留清理 / dead PID 清理）。
+
+    profile 缺省：gateway.stats 等无 Profile 场景退回纯 PID 探测，与原 is_running(name) 行为一致。
+    profile 存在（通常 venv/docker 都能获取 port）：先探测 127.0.0.1:{profile.port}/health
+    （单次 2s 超时，不重试），2xx 直接 True；失败/不可达再回到 PID 文件探测。
+    任何异常（端口不通 / PID 文件损坏 / profile.short 访问异常）一律 False，绝不抛错。
+    命中 dead-PID 路径时会顺手 unlink PID 文件并发出一次 warning，把"PID 残留"语义
+    交由更上层（cli._instance_state）判定——本函数只负责"还活着吗"。
+    """
+    # 1. 端口健康探测（仅 profile 非 None 时）
+    port_ok = False
+    if profile is not None:
+        port: int | None = getattr(profile, "port", None)
+        if port is not None:
+            headers: dict[str, str] = {}
+            try:
+                key = (getattr(profile, "api_key", None)
+                       or (profile.engine_config or {}).get("api_key"))
+            except Exception:  # noqa: BLE001 —— 配置字段缺失不阻塞判定
+                key = None
+            if key:
+                headers["Authorization"] = f"Bearer {key}"
+            try:
+                req = urllib.request.Request(f"http://127.0.0.1:{port}/health", headers=headers)
+                with open_local(req, timeout=2.0) as resp:
+                    if 200 <= resp.status < 300:
+                        port_ok = True
+            except (urllib.error.URLError, OSError, ValueError):
+                pass
+    # 2. PID 文件探测（无论端口是否健康都执行：端口健康时顺带清理 dead/损坏的残留 PID 文件）
+    pid_ok = False
+    pf = pid_file(name)
+    if pf.is_file():
+        try:
+            pid = int(pf.read_text(encoding="utf-8").strip())
+        except ValueError:
+            pf.unlink(missing_ok=True)
+            logger.warning(f"{name}：PID 文件无法解析，已清理")
+        else:
+            if is_pid_alive(pid):
+                pid_ok = True
+            else:
+                pf.unlink(missing_ok=True)
+    return port_ok or pid_ok
+
+
+def stop_docker_instance(name: str, container_name: str) -> bool:
+    """docker runtime 路径停止：`docker rm -f <container_name>` + 清本地 PID + 释放 GPU 锁。
+
+    docker rm -f 幂等（容器不存在亦退出码 0；非零退出码仅警告、不阻断）；本地 PID
+    文件（venv 路径才有）一并清理以防环境切换残留（docker→venv 反复切换场景）。
+    """
+    try:
+        result = subprocess.run(["docker", "rm", "-f", container_name],
+                                capture_output=True, timeout=10)
+        if result.returncode != 0:
+            logger.warning(
+                f"docker rm -f {container_name} 返回码 {result.returncode}："
+                f"{(result.stderr or b'').decode(errors='replace').strip()}")
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning(f"docker rm -f {container_name} 执行失败：{exc}")
+    pf = pid_file(name)
+    if pf.is_file():
+        pf.unlink(missing_ok=True)
+    try:
+        from modelctl.core.gpu_lock import release_gpu_lock
+        release_gpu_lock(name)
+    except Exception:  # noqa: BLE001
+        pass
+    return True
 
 
 def stop_instance(name: str, port: int, patterns: list[str]) -> bool:
