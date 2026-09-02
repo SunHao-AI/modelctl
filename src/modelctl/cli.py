@@ -932,7 +932,7 @@ def _parse_since_arg(s: str) -> _dt_dt:
 
 
 def _format_audit_table(records: list[dict]) -> list[str]:
-    """审计记录表格化输出（固定列 + ljust 对齐，不依赖终端宽度）。"""
+    """审计记录表格化输出（按 display_width 全角对齐，未来引入中文列也不会错位）。"""
     if not records:
         return []
     headers = ["ts", "model", "endpoint", "stream", "src", "tokens (in/out)", "ttft_ms", "tps", "status"]
@@ -956,12 +956,13 @@ def _format_audit_table(records: list[dict]) -> list[str]:
         for r in records
     ]
     widths = [
-        max(len(headers[i]), max((len(rows[j][i]) for j in range(len(rows))), default=0))
+        max(_display_width(headers[i]),
+            max((_display_width(r[i]) for r in rows), default=0))
         for i in range(len(headers))
     ]
-    out: list[str] = ["  ".join(h.ljust(widths[i]) for i, h in enumerate(headers))]
-    for r in rows:
-        out.append("  ".join(c.ljust(widths[i]) for i, c in enumerate(r)))
+    out: list[str] = ["  ".join(_ljust_width(h, widths[i]) for i, h in enumerate(headers))]
+    for row in rows:
+        out.append("  ".join(_ljust_width(c, widths[i]) for i, c in enumerate(row)))
     return out
 
 

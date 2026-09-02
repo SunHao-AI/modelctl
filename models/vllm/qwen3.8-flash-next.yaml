@@ -61,7 +61,7 @@ vllm:
   #   MTP 草稿头 + draft KV 是挤占显存的主因；故降到首推档 131072（有充足余量）。
   #   降档阶梯：131072（当前首推） → 65536（多 agent 并发） → 32768（短问答）
   # 改完此字段必须 modelctl stop + start 重新走 init_engine_core
-  max_model_len: 131072
+  max_model_len: 262144
   # gpu_memory_utilization：显存利用率上限（0~1）
   # ★ 8 卡 RTX 5880 实测：0.85 时 profiling 固定开销（权重 23.52GiB/卡 + warmup activation）
   #   已把预算吃穿，Available KV cache memory = -1.6 GiB（与 max_model_len 无关，降 len 无效）。
