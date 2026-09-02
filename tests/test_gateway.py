@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 
@@ -26,6 +26,7 @@ from modelctl.core.gateway import (
     build_groups,
     build_registry,
     create_app,
+    is_model_available,
     resolve_model,
 )
 
@@ -74,10 +75,7 @@ async def _get(app, path: str):
 def test_list_models_health_filtered():
     reg = {"qwen3.8": GatewayModel("qwen3.8", "ollama", "http://upstream", "qwen3.8:27b", None, "http://upstream/")}
     app = create_app(reg, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
-    with (
-        patch("modelctl.core.gateway.is_model_healthy", return_value=True),
-        patch("modelctl.core.gateway.is_running", return_value=True),
-    ):
+    with patch("modelctl.core.gateway.is_running_any", return_value=True):
         resp = _run(_get(app, "/v1/models"))
     assert resp.status_code == 200
     assert [m["id"] for m in resp.json()["data"]] == ["qwen3.8"]
@@ -409,56 +407,56 @@ def test_list_models_uses_alias_as_id():
         )
     }
     app = create_app(reg, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
-    with (
-        patch("modelctl.core.gateway.is_model_healthy", return_value=True),
-        patch("modelctl.core.gateway.is_running", return_value=True),
-    ):
+    with patch("modelctl.core.gateway.is_running_any", return_value=True):
         resp = _run(_get(app, "/v1/models"))
     assert resp.status_code == 200
     assert [m["id"] for m in resp.json()["data"]] == ["deepseek-v4-flash"]
 
 
-def test_list_models_includes_external_started():
-    """外部启动（无 PID 文件、端口健康，如 docker 拉起）的模型须出现在 /v1/models。
-
-    口径与 CLI 状态列的"已外部启动"一致：modelctl 未接管不影响其可用性。
-    """
+def test_list_models_includes_external_started(tmp_path, monkeypatch):
+    """Running 端口健康（无受管 PID，docker/supervisor 拉起）的模型须出现在 /v1/models"""
+    from modelctl.core.profile import Profile
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
     reg = {
         "qwen3.8-flash-next-vllm": GatewayModel(
-            "qwen3.8-flash-next-vllm", "vllm", "http://upstream", "x", None, "http://upstream/"
+            name="qwen3.8-flash-next-vllm",
+            engine="vllm",
+            backend_url="http://upstream",
+            upstream_model="x",
+            api_key=None,
+            health_url="http://upstream/",
+            adapter=MagicMock(profile=Profile(
+                name="qwen3.8-flash-next-vllm", engine="vllm", port=8110)),
         )
     }
     app = create_app(reg, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
-    with (
-        patch("modelctl.core.gateway.is_model_healthy", return_value=True),
-        patch("modelctl.core.gateway.is_running", return_value=False),
-    ):
+    with patch("modelctl.core.gateway.is_running_any", return_value=True):
         resp = _run(_get(app, "/v1/models"))
     assert resp.status_code == 200
     assert [m["id"] for m in resp.json()["data"]] == ["qwen3.8-flash-next-vllm"]
 
 
-def test_list_models_excludes_stale_pid_but_alive():
-    """回归：PID 文件残留（受管进程已退出）但端口被其他进程占用时不得视为可用。
+def test_is_model_available_with_profile_uses_profile():
+    """is_model_available 持有 adapter.profile 时以 profile 接入 is_running_any"""
+    from modelctl.core.profile import Profile
+    profile = Profile(name="ap", engine="vllm", port=8111)
+    m = GatewayModel(
+        name="ap", engine="vllm", backend_url="http://x", upstream_model="x",
+        api_key=None, health_url="http://x/",
+        adapter=MagicMock(profile=profile))
+    with patch("modelctl.core.gateway.is_running_any", return_value=False) as spy:
+        assert is_model_available(m) is False
+    spy.assert_called_once_with("ap", profile)
 
-    仅凭端口响应会把遗留进程占用的端口误判为该模型可用，故以 PID 文件是否存在
-    区分"外部启动"与"PID 异常"。
-    """
-    reg = {
-        "deepseek-v4-flash-ollama": GatewayModel(
-            "deepseek-v4-flash-ollama", "ollama", "http://upstream", "x", None, "http://upstream/"
-        )
-    }
-    app = create_app(reg, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
-    with (
-        patch("modelctl.core.gateway.is_model_healthy", return_value=True),
-        patch("modelctl.core.gateway.is_running", return_value=False),
-        patch("modelctl.core.gateway.pid_file") as pf,
-    ):
-        pf.return_value.is_file.return_value = True
-        resp = _run(_get(app, "/v1/models"))
-    assert resp.status_code == 200
-    assert resp.json()["data"] == []
+
+def test_is_model_available_no_adapter_fallback_to_none():
+    """旧 GatewayModel（adapter=None）仍能判定，profile 缺省 → 纯 PID 探测"""
+    m = GatewayModel(
+        name="np", engine="vllm", backend_url="http://x", upstream_model="x",
+        api_key=None, health_url="http://x/")
+    with patch("modelctl.core.gateway.is_running_any", return_value=True) as spy:
+        assert is_model_available(m) is True
+    spy.assert_called_once_with("np", None)
 
 
 def test_list_models_dedups_alias_and_name():
@@ -466,10 +464,7 @@ def test_list_models_dedups_alias_and_name():
     gm = GatewayModel("ds-llamacpp", "llamacpp", "http://upstream", "ds-llamacpp", None, "http://upstream/")
     reg = {"ds-llamacpp": gm, "ds": gm}
     app = create_app(reg, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
-    with (
-        patch("modelctl.core.gateway.is_model_healthy", return_value=True),
-        patch("modelctl.core.gateway.is_running", return_value=True),
-    ):
+    with patch("modelctl.core.gateway.is_running_any", return_value=True):
         resp = _run(_get(app, "/v1/models"))
     assert resp.status_code == 200
     assert [m["id"] for m in resp.json()["data"]] == ["ds-llamacpp"]
@@ -536,10 +531,7 @@ def test_resolve_model_group_prefers_running_member():
         GatewayModel("qwen3.8-llamacpp", "llamacpp", "http://127.0.0.1:1", "q", None, "http://127.0.0.1:1/"),
     ]
     groups = {"qwen3.8": members}
-    with (
-        patch("modelctl.core.gateway.is_running", side_effect=lambda n: n == "qwen3.8-llamacpp"),
-        patch("modelctl.core.gateway.is_model_healthy", side_effect=lambda m: m.name == "qwen3.8-llamacpp"),
-    ):
+    with patch("modelctl.core.gateway.is_running_any", side_effect=lambda n, p: n == "qwen3.8-llamacpp"):
         target = resolve_model(reg, "qwen3.8", None, groups=groups)
     assert target is members[1]  # vllm 不可用（未运行且端口不通）→ 落到 llamacpp
 
@@ -547,10 +539,7 @@ def test_resolve_model_group_prefers_running_member():
 def test_resolve_model_group_none_running_returns_none():
     reg = {"qwen3.8": GatewayModel("qwen3.8-llamacpp", "llamacpp", "http://127.0.0.1:1", "q", None, "http://127.0.0.1:1/")}
     groups = {"qwen3.8": [reg["qwen3.8"]]}
-    with (
-        patch("modelctl.core.gateway.is_running", return_value=False),
-        patch("modelctl.core.gateway.is_model_healthy", return_value=False),
-    ):
+    with patch("modelctl.core.gateway.is_running_any", return_value=False):
         # 裸名 qwen3.8 同时是 llamacpp alias 与 group 名：group 优先，无可用成员 → None（不回退 alias）
         assert resolve_model(reg, "qwen3.8", None, groups=groups) is None
 
@@ -563,10 +552,7 @@ def test_resolve_model_group_routes_external_started_member():
     """
     members = [GatewayModel("qwen3.8-flash-next-vllm", "vllm", "http://127.0.0.1:8110", "q", None, "http://127.0.0.1:8110/")]
     groups = {"qwen3.8-flash-next": members}
-    with (
-        patch("modelctl.core.gateway.is_running", return_value=False),
-        patch("modelctl.core.gateway.is_model_healthy", return_value=True),
-    ):
+    with patch("modelctl.core.gateway.is_running_any", return_value=True):
         assert resolve_model({}, "qwen3.8-flash-next", None, groups=groups) is members[0]
 
 
@@ -574,10 +560,7 @@ def test_resolve_model_group_as_default():
     reg = {}
     members = [GatewayModel("qwen3.8-vllm", "vllm", "http://127.0.0.1:2", "q", None, "http://127.0.0.1:2/")]
     groups = {"qwen3.8": members}
-    with (
-        patch("modelctl.core.gateway.is_running", return_value=True),
-        patch("modelctl.core.gateway.is_model_healthy", return_value=True),
-    ):
+    with patch("modelctl.core.gateway.is_running_any", return_value=True):
         target = resolve_model(reg, "ghost", "qwen3.8", groups=groups)
     assert target is members[0]
 
@@ -585,10 +568,7 @@ def test_resolve_model_group_as_default():
 def test_list_models_shows_group_when_member_healthy():
     members = [GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "q", None, "http://upstream/")]
     app = create_app({}, groups={"qwen3.8": members}, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
-    with (
-        patch("modelctl.core.gateway.is_model_healthy", return_value=True),
-        patch("modelctl.core.gateway.is_running", return_value=True),
-    ):
+    with patch("modelctl.core.gateway.is_running_any", return_value=True):
         resp = _run(_get(app, "/v1/models"))
     assert resp.status_code == 200
     assert [m["id"] for m in resp.json()["data"]] == ["qwen3.8"]
@@ -597,10 +577,7 @@ def test_list_models_shows_group_when_member_healthy():
 def test_list_models_hides_group_when_no_member_healthy():
     members = [GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "q", None, "http://upstream/")]
     app = create_app({}, groups={"qwen3.8": members}, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
-    with (
-        patch("modelctl.core.gateway.is_model_healthy", return_value=False),
-        patch("modelctl.core.gateway.is_running", return_value=False),
-    ):
+    with patch("modelctl.core.gateway.is_running_any", return_value=False):
         resp = _run(_get(app, "/v1/models"))
     assert resp.status_code == 200
     assert resp.json()["data"] == []
@@ -619,10 +596,7 @@ def test_proxy_group_routes_to_running_member():
     ]
     groups = {"qwen3.8": members}
     app = create_app({}, groups=groups, transport=httpx.MockTransport(upstream))
-    with (
-        patch("modelctl.core.gateway.is_running", side_effect=lambda n: n == "qwen3.8-vllm"),
-        patch("modelctl.core.gateway.is_model_healthy", side_effect=lambda m: m.name == "qwen3.8-vllm"),
-    ):
+    with patch("modelctl.core.gateway.is_running_any", side_effect=lambda n, p: n == "qwen3.8-vllm"):
         resp = _run(_post(app, "/v1/chat/completions", json={"model": "qwen3.8", "messages": []}))
     assert resp.status_code == 200
     assert captured["body"]["model"] == "q3-vllm"  # 已改写为可用成员的上游模型名
@@ -636,10 +610,7 @@ def test_create_app_auto_builds_registry_and_groups():
         patch("modelctl.core.gateway.build_groups", return_value={"qwen3.8": [gm]}),
     ):
         app = create_app()  # registry=None, groups=None
-    with (
-        patch("modelctl.core.gateway.is_model_healthy", return_value=True),
-        patch("modelctl.core.gateway.is_running", return_value=True),
-    ):
+    with patch("modelctl.core.gateway.is_running_any", return_value=True):
         resp = _run(_get(app, "/v1/models"))
     assert resp.status_code == 200
     assert [m["id"] for m in resp.json()["data"]] == ["qwen3.8-vllm", "qwen3.8"]

@@ -417,23 +417,22 @@ def reset_color() -> str:
 def status_color(state: str) -> str:
     """实例状态 → ANSI 色码。未知状态回退 DIM。
 
-    映射：
+    映射（6 状态，PID 残留 = venv 孤儿 / docker 切换残留；未知 → DIM）：
     - 运行中 → STATUS_RUNNING（绿色加粗）
     - 已停止 → STATUS_STOPPED（灰色）
     - 未就绪 → STATUS_NA（灰色）
     - 正常   → STATUS_HEALTHY（绿色加粗）
     - 无响应 → STATUS_UNHEALTHY（红色）
-    - PID 异常 → STATUS_ERROR（红色加粗）
+    - PID 残留 → STATUS_ERROR（红色加粗）
     - 未知   → DIM
     """
     mapping = {
         "运行中": "STATUS_RUNNING",
-        "已外部启动": "STATUS_EXTERNAL",
         "已停止": "STATUS_STOPPED",
         "未就绪": "STATUS_NA",
         "正常": "STATUS_HEALTHY",
         "无响应": "STATUS_UNHEALTHY",
-        "PID 异常": "STATUS_ERROR",
+        "PID 残留": "STATUS_ERROR",
         "unknown": "STATUS_NA",
     }
     return style_of(mapping.get(state, "DIM"))

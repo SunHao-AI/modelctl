@@ -38,7 +38,7 @@ from loguru import logger
 from modelctl.core.audit import NoopAuditLog, RequestAuditLog, _new_audit_log
 from modelctl.core.capabilities import Capabilities
 from modelctl.core.envfile import load_env
-from modelctl.core.process import is_running, open_local, pid_file
+from modelctl.core.process import is_running_any, open_local
 from modelctl.core.profile import Profile, list_profiles
 from modelctl.core.stats import UsageCollector
 from modelctl.engines import get_adapter
@@ -207,6 +207,28 @@ class GatewayModel:
         if self.adapter is not None:
             return self.adapter.upstream_api_key()
         return self.api_key
+
+
+def _resolve_static_dir(static_dir: str | Path | None) -> Path | None:
+    """解析前端静态目录：仅目录存在时返回；缺失返回 None（调用方据此静默跳过挂载）。
+
+    解析优先级：参数 > WEBUI_STATIC 环境变量 > PROJECT_ROOT/web/dist。
+    相对路径以 PROJECT_ROOT 为基。
+    """
+    from modelctl.core.envfile import PROJECT_ROOT
+
+    candidates: list[Path] = []
+    if static_dir:
+        candidates.append(Path(static_dir))
+    env_val = os.environ.get("WEBUI_STATIC")
+    if env_val:
+        candidates.append(Path(env_val))
+    candidates.append(PROJECT_ROOT / "web" / "dist")
+    for c in candidates:
+        p = c if c.is_absolute() else PROJECT_ROOT / c
+        if p.is_dir():
+            return p
+    return None
 
 
 def _build_audit_entry(
@@ -388,17 +410,12 @@ def apply_context_switch(
 
 
 def is_model_available(model: GatewayModel) -> bool:
-    """模型是否可路由：受管运行中，或无 PID 文件但端口健康（外部启动，如 docker 拉起）。
+    """模型是否可路由：端口 /health 2xx 优先，PID 文件机器兜底（与原 is_running 退化一致）。
 
-    与 CLI 状态列口径一致（运行中 / 已外部启动）。区分"外部启动"与"PID 异常"的
-    依据是 PID 文件是否存在：残留 PID 文件说明进程已退出，端口即便被其他进程占用
-    也不算该模型可用（避免遗留进程被误判为可用）。
+    adapter.profile 缺省（旧 GatewayModel / 未注入 adapter 时）退回纯 PID 探测——
+    等效 venv-only 路径下"PID 文件可读 + 进程 alive"语义，无回归。
     """
-    if is_running(model.name):
-        return True
-    if pid_file(model.name).is_file():
-        return False
-    return is_model_healthy(model)
+    return is_running_any(model.name, model.adapter.profile if model.adapter else None)
 
 
 def _resolve_group(groups: dict[str, list[GatewayModel]], name: str) -> GatewayModel | None:
@@ -458,6 +475,8 @@ def create_app(
     groups: dict[str, list[GatewayModel]] | None = None,
     stats_data_dir: Path | None = None,
     audit_log: RequestAuditLog | NoopAuditLog | None = None,
+    admin: bool = False,
+    static_dir: str | Path | None = None,
 ):
     """构建 FastAPI 网关应用（transport 供测试注入 httpx.MockTransport）。
 
@@ -519,6 +538,27 @@ def create_app(
                 stats_data_dir,
             )
         model.audit_log = audit_log
+
+    # Web UI 管理 API：admin 开关启用时为后端同时挂载 /admin/api/*（复用本进程），
+    # 并提供 task_manager 单例供长耗时操作（start/stop/restart/build 等）的异步任务协调。
+    # admin=False（默认）时保持原 gateway 行为，对既有 nginx/CLI 零影响。
+    if admin:
+        from modelctl.core.webui.admin_router import create_admin_router
+
+        admin_router = create_admin_router()
+        app.state.task_manager = admin_router.task_manager
+        app.include_router(admin_router, prefix="/admin/api")
+
+    # 前端静态文件（web/dist，SPA fallback）：仅当目录存在时挂载，缺失静默跳过。
+    # 挂载在 /admin/api 之后注册，因 Starlette 静态中间件兜底在根路径，不影响 /v1/* 与 /admin/api/*。
+    static_path = _resolve_static_dir(static_dir)
+    if static_path is not None:
+        try:
+            from fastapi.staticfiles import StaticFiles
+
+            app.mount("/", StaticFiles(directory=static_path, html=True), name="webui_static")
+        except Exception as exc:  # noqa: BLE001 — 静态挂载失败不应摧毁 API
+            logger.warning(f"Web UI 静态文件挂载失败（{static_path}）: {exc}")
 
     @app.get("/v1/models")
     async def list_models() -> dict:
@@ -1064,8 +1104,20 @@ def main() -> None:
 
     import uvicorn
 
-    app = create_app(default_model=default_model, read_timeout=read_timeout, stats_data_dir=data_dir)
-    print(f"modelctl 网关运行于 http://{host}:{port}/v1（默认模型：{default_model or '未配置'}）", flush=True)
+    # Web UI 开关：WEBUI_ADMIN=1 启用管理 API + 前端静态目录（webui 子命令使用）
+    admin_on = os.environ.get("WEBUI_ADMIN", "").strip().lower() in ("1", "true", "yes", "on")
+    static_dir = os.environ.get("WEBUI_STATIC") or None
+    app = create_app(
+        default_model=default_model,
+        read_timeout=read_timeout,
+        stats_data_dir=data_dir,
+        admin=admin_on,
+        static_dir=static_dir,
+    )
+    if admin_on:
+        print(f"modelctl Web UI 运行于 http://{host}:{port}/（管理端点 /admin/api）", flush=True)
+    else:
+        print(f"modelctl 网关运行于 http://{host}:{port}/v1（默认模型：{default_model or '未配置'}）", flush=True)
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
