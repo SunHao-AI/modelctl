@@ -34,12 +34,14 @@
    - 失败/异常 → fall through 到 2
 2. PID 文件存在 (cache_dir()/{name}.pid)
    - 存在 + is_pid_alive(pid)  → True
-   - 存在 + not is_pid_alive   → 清理 PID 文件 + gpu_lock，返回 False
-   - 文件损坏 / 缺失 / 其他     → False
+   - 存在 + not is_pid_alive   → False（dead PID 文件保留，不在此清理）
+   - 文件损坏（无法解析为 int） / 缺失 / 其他 → False（损坏文件同样保留）
 3. False
 ```
 
-签名约定：`profile` 缺失的位置（如 `gateway.restart` 等不持有 Profile 的扫码、`stats_restart`、`ui-*` 实例）退回 PID-only 探测，与原 `is_running(name)` 行为等价，无回归。
+**判定必须无副作用**：`is_running_any` 只读不写——不得 `unlink` PID 文件、不得释放 GPU 锁。理由：CLI 的 "PID 残留" 状态需要在判定返回 False 之后回看 `pid_file(name).is_file()` 才能识别；若判定内部就地删除文件，该状态永不可达，且用户会丢失"有孤儿实例需要 stop"的唯一线索。清理职责归 **stop 路径**：`stop_instance`（已有 `pf.unlink`）与 `stop_docker_instance`（防御 venv↔docker 切换残留）。
+
+签名约定：`profile` 缺失的位置（如 `gateway.restart` 等不持有 Profile 的调用点、`stats_restart`、`ui-*` 实例）退回 PID-only 探测，与原 `is_running(name)` 判定结果等价（`is_running` 自身在 dead/损坏分支会顺手 unlink——保留其原行为不动，仅新的统一入口 `is_running_any` 不做副作用）。
 
 ### 2.2 接口层改动（`core/process.py`）
 
@@ -164,7 +166,7 @@ adapter.spawned_proc = proc
 | dock 环境切换：同一个 profile 从 docker 改 venv 运行 | 启动 docker 时不写 PID，启动 venv 时写——切换方向（docker→venv）意味着 docker 不写、venv 写，PID 文件从无到有；反向（venv→docker）venv 一次性写 PID，docker 路径不覆盖但 `stop_backend` 的 `stop_docker_instance` 也会清理（防御残留）。 |
 | 共享进程（ollama 多 profile 共用 serve） | `is_running_any` 按 `profile.port`（11434）探测，A 启了 serve 之后 B 启动返回 True——"运行中"。`stop_profile(ollama)` 保留 owns-else 跳过 + `unload_model` 语义（已有逻辑）。 |
 | `gateway` 多次 `/v1/models` 探测开销 | 每次都对未运行 profile 做 open_local（2s 超时）——与现 `is_model_healthy` 行为一致，无新增开销。 |
-| venv 路径下的 PID 文件 vs docker 路径下的污染 | docker 不再写 + 启动时 stop_backend 主动清理 + `is_running_any` 命中 dead-PID 时也主动清理 → 三种机制清理，过度防御但安全。 |
+| venv 路径下的 PID 文件 vs docker 路径下的污染 | 两种清理机制：docker 路径不写 PID 文件（`write_pid=False`）+ stop 路径主动清理（`stop_docker_instance` 无条件 `pf.unlink`，`stop_instance` 已有同款）。判定路径 `is_running_any` 不做清理（见 §2.1 无副作用约束），以保住 CLI "PID 残留" 状态的可观测性。 |
 
 ## 3. 不做的事（YAGNI）
 

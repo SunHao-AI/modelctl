@@ -17,6 +17,7 @@
 - 无新增文档 / README / 配置项；只修改本 spec 列出的文件。
 - 状态枚举 6 状态固定为：`{"运行中", "已停止", "正常", "无响应", "PID 残留", "未就绪"}`（`models\tests` 内一致使用，不得引入新状态）。
 - `is_running_any` 签名固定为 `is_running_any(name: str, profile: Profile | None) -> bool`；`stop_backend()` 固定为 `def stop_backend(self) -> None`；`is_docker_runtime()` 固定为 `def is_docker_runtime(self) -> bool`；`start_detached` 参数序 `(name, command, extra_env, write_pid=True)`。
+- **`is_running_any` 必须无副作用**：只读探测，绝不 `unlink` PID 文件、绝不释放 GPU 锁。PID 文件的清理职责专属 stop 路径（`stop_instance` / `stop_docker_instance`）。理由：CLI 的 "PID 残留" 状态需在判定返回 False 后回看 `pid_file(name).is_file()` 才能识别。
 - 所有 import 使用项目全限定路径：`from modelctl.core.process import ...`、`from modelctl.engines.base import EngineAdapter` 等；不得通过 `modelctl.engines` 包绕过。
 - `modelctl.env` 不要修改；自带 uv/pytest 须经项目 `uv run pytest` 调用。
 - commit 口令：中文、首行 ≤ 60 字符，前缀 `feat:` / `refactor:` / `test:`（与 `git log` 现有风格对齐，参考 `6452ca4`/`3351efb`/`1717e01`）。
@@ -58,7 +59,7 @@
 - Consumes: 现有 `is_pid_alive` (L33-49)、`pid_file` (L65-66)、`cache_dir` (L58-62)、`open_local` (L151-157)、`stop_instance` (L107-148) 的签名均不变。
 - Produces:
   - `is_running_any(name: str, profile: Profile | None) -> bool` —— 全 None-safe，任何异常（端口不可达 / PID 文件损坏 / profile 无 health 路径）返回 False。
-  - `stop_docker_instance(name: str, container_name: str) -> bool` —— 调 `subprocess.run(["docker","rm","-f", container_name])`，无论容器是否存在均 True（幂等）；`docker` 不可用 / 超时返回 False 但依旧清理本地 PID 与 gpu_lock。
+  - `stop_docker_instance(name: str, container_name: str) -> bool` —— 调模块级 `subprocess.run(["docker","rm","-f", container_name], capture_output=True, timeout=10)`；非零退出码或 docker 不可用/超时仅 `logger.warning`，随后无条件清理本地 PID 文件与 gpu_lock，恒返回 True（幂等）。
   - `start_detached(name: str, command: list[str], extra_env: dict[str, str], write_pid: bool = True) -> tuple[int, subprocess.Popen]` —— `write_pid=False` 时跳过 `pid_file(name).write_text(...)`，但依旧返回 `(proc.pid, proc)` 维持签名兼容（pid = Popen.pid 本机号，仅用于日志显示）。
 
 - [ ] **Step 1: 先写 9 个新测试用例（`tests/test_process.py` 末尾追加，不改现有函数）**
@@ -91,6 +92,11 @@ class _Resp200:
     def __exit__(self, *a): return False
 
 
+def _raise_url_error(req, timeout):
+    """模拟端口不可达（连接被拒）。"""
+    raise urllib.error.URLError("refused")
+
+
 def test_is_running_any_port_healthy_true(monkeypatch, tmp_path):
     """profile 有且端口 /health 200 → True（不触碰 PID 文件）"""
     monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
@@ -99,14 +105,24 @@ def test_is_running_any_port_healthy_true(monkeypatch, tmp_path):
     assert result is True
 
 
-def test_is_running_any_port_up_pid_dead_clean_up(monkeypatch, tmp_path):
-    """端口 200 但 PID 文件残留（已死 PID）→ True 且 dead PID 被清理"""
+def test_is_running_any_port_up_pid_dead_preserves_file(monkeypatch, tmp_path):
+    """端口 200 但 PID 文件已死 → True，且判定不得有副作用（dead PID 文件保留，留给 stop 清理）"""
     monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
     (tmp_path / "cache").mkdir(parents=True, exist_ok=True)
     _write_pid("p2", 999999, tmp_path / "cache")  # 999999 在 /proc 必死
     monkeypatch.setattr(process, "open_local", _fake_resp_200)
     assert process.is_running_any("p2", _FakeProfile("p2", 8101)) is True
-    assert not (tmp_path / "cache" / "p2.pid").is_file()
+    assert (tmp_path / "cache" / "p2.pid").is_file()  # 无副作用：不删
+
+
+def test_is_running_any_port_down_pid_dead_preserves_file(monkeypatch, tmp_path):
+    """端口不通 + PID 已死 → False，dead PID 文件仍保留（CLI 据此报 "PID 残留"）"""
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
+    (tmp_path / "cache").mkdir(parents=True, exist_ok=True)
+    _write_pid("p2b", 999999, tmp_path / "cache")
+    monkeypatch.setattr(process, "open_local", _raise_url_error)
+    assert process.is_running_any("p2b", _FakeProfile("p2b", 8109)) is False
+    assert (tmp_path / "cache" / "p2b.pid").is_file()
 
 
 def test_is_running_any_all_none_false(monkeypatch, tmp_path):
@@ -115,20 +131,20 @@ def test_is_running_any_all_none_false(monkeypatch, tmp_path):
     assert process.is_running_any("p3", None) is False
 
 
-def test_is_running_any_profile_none_with_pid_file(monkeypatch, tmp_path):
-    """profile=None 但 PID 文件文件损坏 → 清理 + False"""
+def test_is_running_any_profile_none_with_corrupt_pid_file(monkeypatch, tmp_path):
+    """profile=None 且 PID 文件损坏（无法解析为 int）→ False 且文件保留（判定无副作用）"""
     monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
     (tmp_path / "cache").mkdir(parents=True, exist_ok=True)
     (tmp_path / "cache" / "p4.pid").write_text("not-a-pid", encoding="utf-8")
     assert process.is_running_any("p4", None) is False
-    assert not (tmp_path / "cache" / "p4.pid").is_file()
+    assert (tmp_path / "cache" / "p4.pid").is_file()  # 无副作用：不删
 
 
 def test_is_running_any_port_down_pid_alive_true(monkeypatch, tmp_path):
     """venv 情况：/health 还没起来但 venv 进程确实活着 → True（PID 兜底）"""
     monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
     (tmp_path / "cache").mkdir(parents=True, exist_ok=True)
-    _write_pid("sleeper", os.getpid(), tmp_path / "cache")  # 自己的 PID 必活
+    _write_pid("p5", os.getpid(), tmp_path / "cache")  # 自己的 PID 必活
     # 模拟端口不通（抛 URLError）
     def _boring(req, timeout):
         raise urllib.error.URLError("refused")
@@ -239,20 +255,23 @@ def start_detached(name: str, command: list[str], extra_env: dict[str, str],
     return proc.pid, proc
 ```
 
-在 `def is_running(name)` 之后（L104 之后）插入：
+在 `def is_running(name)` 之后（L114 之后）插入：
 
 ```python
 def is_running_any(name: str, profile: Profile | None) -> bool:
-    """统一运行态判定：端口 /health 2xx 优先，PID 文件机器兜底（venv 路径残留清理 / dead PID 清理）。
+    """统一运行态判定：端口 /health 2xx 优先，PID 文件机器兜底。
 
-    profile 缺省：gateway.stats 等无 Profile 场景退回纯 PID 探测，与原 is_running(name) 行为一致。
-    profile 存在（通常 venv/docker 都能获取 port）：先探测 127.0.0.1:{profile.port}/health
-    （单次 2s 超时，不重试），2xx 直接 True；失败/不可达再回到 PID 文件探测。
-    任何异常（端口不通 / PID 文件损坏 / profile.short 访问异常）一律 False，绝不抛错。
-    命中 dead-PID 路径时会顺手 unlink PID 文件并发出一次 warning，把"PID 残留"语义
-    交由更上层（cli._instance_state）判定——本函数只负责"还活着吗"。
+    **判定无副作用**：只读不写——绝不 unlink PID 文件、绝不释放 GPU 锁。dead / 损坏的
+    PID 文件原样保留，由 stop 路径（stop_instance / stop_docker_instance）负责清理；
+    CLI 的 "PID 残留" 状态依赖判定返回 False 后回看 pid_file(name).is_file() 才能识别。
+
+    profile 缺省（gateway.stats / ui-* 等不持有 Profile 的调用点）退回纯 PID 探测，
+    与原 is_running(name) 的判定结果等价。
+    profile 存在时先探测 127.0.0.1:{profile.port}/health（单次 2s 超时，不重试），
+    2xx 即 True；失败/不可达再回到 PID 文件探测。
+    任何异常（端口不通 / PID 文件损坏 / profile 字段缺失）一律 False，绝不抛错。
     """
-    # 1. 端口健康探测（仅 profile 非 None 时）
+    # 1. 端口健康探测（仅 profile 非 None 时）——2xx 直接判定存活，不再看 PID 文件
     if profile is not None:
         port: int | None = getattr(profile, "port", None)
         if port is not None:
@@ -271,20 +290,15 @@ def is_running_any(name: str, profile: Profile | None) -> bool:
                         return True
             except (urllib.error.URLError, OSError, ValueError):
                 pass
-    # 2. PID 文件探测
+    # 2. PID 文件探测（只读；dead / 损坏都返回 False 且保留文件）
     pf = pid_file(name)
     if not pf.is_file():
         return False
     try:
         pid = int(pf.read_text(encoding="utf-8").strip())
     except ValueError:
-        pf.unlink(missing_ok=True)
-        logger.warning(f"{name}：PID 文件无法解析，已清理")
         return False
-    if is_pid_alive(pid):
-        return True
-    pf.unlink(missing_ok=True)
-    return False
+    return is_pid_alive(pid)
 
 
 def stop_docker_instance(name: str, container_name: str) -> bool:
@@ -292,35 +306,9 @@ def stop_docker_instance(name: str, container_name: str) -> bool:
 
     docker rm -f 幂等（容器不存在亦退出码 0；非零退出码仅警告、不阻断）；本地 PID
     文件（venv 路径才有）一并清理以防环境切换残留（docker→venv 反复切换场景）。
+    必须走模块级 `subprocess.run`（不要 `import subprocess as _sp` 局部别名），
+    否则测试无法通过 `process.subprocess.run` 打桩。
     """
-    import subprocess as _sp
-    try:
-        result = _sp.run(["docker", "rm", "-f", container_name],
-                         capture_output=True,
-                         timeout=10)
-        if result.returncode != 0:
-            logger.warning(f"docker rm -f {container_name} 返回码 {result.returncode}："
-                           f"{(result.stderr or b'').decode(errors='replace').strip()}")
-    except (OSError, _sp.SubprocessError) as exc:
-        logger.warning(f"docker rm -f {container_name} 执行失败：{exc}")
-    pf = pid_file(name)
-    if pf.is_file():
-        pf.unlink(missing_ok=True)
-    try:
-        from modelctl.core.gpu_lock import release_gpu_lock
-        release_gpu_lock(name)
-    except Exception:  # noqa: BLE001
-        pass
-    return True
-```
-
-注意：`stop_docker_instance` 里 `import subprocess as _sp` 是防御局部作用域遮蔽（模块顶部已 import `subprocess`，这里用别名确保测试 monkeypatch `process.subprocess` 时 alias 同步替换——上面的测试用 `process.subprocess.run` mock 的就是模块全局，所以这里也走模块全局 `subprocess.run` 即可，**简化**为直接在函数体使用 `subprocess.run`，删掉 `import subprocess as _sp`）。
-
-最终 `stop_docker_instance` 应该长这样（与 Step 3 中 body 一致，只是去掉 alias 行）：
-
-```python
-def stop_docker_instance(name: str, container_name: str) -> bool:
-    """...（docstring 同上）"""
     try:
         result = subprocess.run(["docker", "rm", "-f", container_name],
                                 capture_output=True, timeout=10)
@@ -345,7 +333,7 @@ def stop_docker_instance(name: str, container_name: str) -> bool:
 
 Run: `uv run pytest tests/test_process.py -v`
 
-Expected: 全部 PASS（新增 9 个 + 既有的 `test_pid_file_path`/`test_start_and_is_running`/`test_is_running_no_pidfile`/`test_stop_instance_*` 均 PASS）。
+Expected: 全部 PASS（新增 10 个 + 既有的 `test_pid_file_path`/`test_start_and_is_running`/`test_is_running_no_pidfile`/`test_stop_instance_*` 均 PASS）。
 
 - [ ] **Step 5: Commit**
 
@@ -982,9 +970,8 @@ def _instance_state(profile: Profile | None = None, name: str | None = None) -> 
     assert name is not None
     if is_running_any(name, profile):
         return "运行中"
-    # 仅做"PID 残留"识别：文件存在但该功能判定 False（dead PID 文件已在本工具
-    # 启动/cleanup 路径被清，残留时给用户提示"先 stop 再 start"。清理动作已在
-    # is_running_any 内以 best-effort 完成）
+    # "PID 残留"识别：PID 文件仍在但判定为 False（is_running_any 无副作用，不删文件；
+    # 清理由 stop_instance / stop_docker_instance 负责），此处提示用户先 stop 再 start
     if pid_file(name).is_file():
         logger.warning(f"{name}：疑似残留 PID 文件，建议执行 `modelctl stop {name}` 清理后再次 start")
         return "PID 残留"
