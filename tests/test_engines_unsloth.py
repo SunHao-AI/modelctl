@@ -197,8 +197,34 @@ def test_unsloth_health_url_and_metrics(tmp_path):
     p = _write(tmp_path, "name: u\nengine: unsloth\nport: 30000\nunsloth:\n  model: m\n")
     a = get_adapter("unsloth")(p, CAPS8)
     assert a.health_url() == "http://127.0.0.1:30000/v1/models"
-    assert a.metrics_mapping() is None
+    # §1.3：默认开启 metrics（llama-server 的 /metrics 需 --metrics 才提供）
+    mapping = a.metrics_mapping()
+    assert mapping is not None
+    assert "prompt_total" in mapping and "predicted_total" in mapping
+    assert "llamacpp:prompt_tokens_total" in mapping["prompt_total"]
+    assert "llamacpp:tokens_predicted_total" in mapping["predicted_total"]
+    assert "llamacpp:prompt_tokens_seconds" in mapping["prompt_rate"]
     assert a.stop_patterns() == ["unsloth studio run"]  # 启动命令特征，避免误杀 modelctl 自身
+
+
+def test_unsloth_build_command_injects_metrics_flag_by_default(tmp_path):
+    """§1.3：默认 build_command 追加 --metrics（llama-server 启用 /metrics）"""
+    p = _write(tmp_path, "name: u\nengine: unsloth\nport: 30000\nunsloth:\n  model: m\n")
+    a = get_adapter("unsloth")(p, CAPS8)
+    cmd, _env = a.build_command()
+    assert "--metrics" in cmd
+
+
+def test_unsloth_metrics_disabled_by_config(tmp_path):
+    """§1.3：metrics_enabled=false → build_command 不带 --metrics，metrics_mapping 返 None。"""
+    p = _write(
+        tmp_path,
+        "name: u\nengine: unsloth\nport: 30000\nunsloth:\n  model: m\n  metrics_enabled: false\n",
+    )
+    a = get_adapter("unsloth")(p, CAPS8)
+    cmd, _ = a.build_command()
+    assert "--metrics" not in cmd
+    assert a.metrics_mapping() is None
 
 
 def test_unsloth_pre_start_downloads_and_persists(tmp_path, monkeypatch):

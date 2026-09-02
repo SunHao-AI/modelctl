@@ -20,7 +20,6 @@ import subprocess
 from pathlib import Path
 
 from modelctl.core import envs
-from modelctl.core.envfile import PROJECT_ROOT
 from modelctl.core.gpu_lock import acquire_gpu_lock
 from modelctl.core.gpu_utils import GPUValidationError
 from modelctl.engines.base import EngineAdapter, RequirementError

@@ -728,17 +728,27 @@ def test_build_tier_item_clamps_over_budget():
 
 
 def test_build_tier_item_requires_valid_budget():
-    from modelctl.core.stats import _budget_of, build_tier_item
+    from modelctl.core.stats import _budget_of
 
     assert _budget_of({}) is None
     assert _budget_of({"budget": -5}) is None
     assert _budget_of({"budget": "abc"}) is None
     assert _budget_of({"budget": 100}) == 100.0
-    try:
-        build_tier_item("demo", {}, {"price_in": 1.0, "price_out": 2.0}, "x")
-        raise AssertionError("应抛出 ValueError")
-    except ValueError as error:
-        assert "未配置有效预算" in str(error)
+
+
+def test_build_tier_item_degrades_without_budget():
+    """§3（待办 #10）：未配置 budget 时降级（isValid=False / used=0 / note），不抛 ValueError。"""
+    from modelctl.core.stats import build_tier_item
+
+    snap = {"prompt_total": 1_000_000, "predicted_total": 500_000}
+    item = build_tier_item("demo", snap, {"price_in": 1.0, "price_out": 2.0}, "label")
+    assert item["isValid"] is False
+    assert item["used"] == 0.0
+    assert item["planName"] == "demo"
+    data = json.loads(item["extra"])
+    assert data["resetsAt"] is None
+    assert data["planLabel"] == "label"
+    assert data.get("note") == "无预算配置"
 
 
 def _make_tier_handler(usage_cfg: dict, ok: bool = True):

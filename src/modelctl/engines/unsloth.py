@@ -83,8 +83,12 @@ class UnslothAdapter(EngineAdapter):
             if cfg.get("tensor_parallel") and len(gpus) < 2:
                 raise RequirementError(f"tensor_parallel 需要至少 2 块 GPU，但 gpu_list 仅指定 {len(gpus)} 块：{gpus}")
         self._check_vram(cfg)
-        # 用量统计降级提示：无头 API 模式的 /metrics 端点尚未验证
-        self.warnings.append("unsloth 引擎暂未验证 /metrics 端点，用量统计降级为'不支持精确统计'")
+        # 用量统计：unsloth 后端 = llama-server，/metrics 需 --metrics 才启用。
+        # 默认开启（metrics_enabled 未写/为 true 时自动注入 --metrics）；显式禁用时降级。
+        if not cfg.get("metrics_enabled", True):
+            self.warnings.append(
+                "unsloth /metrics 已禁用（unsloth.metrics_enabled=false），用量统计降级为'不支持精确统计'"
+            )
         self.run_compat_checks()  # 预检：软件规则 + 模型 id 特征
         if gpus:
             acquire_gpu_lock(self.profile.name, gpus)
@@ -145,6 +149,10 @@ class UnslothAdapter(EngineAdapter):
             cmd += ["--tensor-parallel"]
         if cfg.get("load_in_4bit"):
             cmd += ["--load-in-4bit"]
+        # §1.3：unsloth 后端 = llama-server，/metrics 端点需 --metrics 才启用。默认开启；
+        # cfg.metrics_enabled=False 时不注入 --metrics（与 check_requirements 的降级告警一致）。
+        if cfg.get("metrics_enabled", True):
+            cmd += ["--metrics"]
         # 不传 --api-key：run 自管认证，key 自动生成后打印到启动日志。
         if cfg.get("extra_args"):
             cmd += shlex.split(str(cfg["extra_args"]))
@@ -177,8 +185,36 @@ class UnslothAdapter(EngineAdapter):
     def health_url(self) -> str:
         return f"http://127.0.0.1:{self.profile.port}/v1/models"
 
-    def metrics_mapping(self) -> None:
-        return None
+    def metrics_mapping(self) -> dict[str, list[str]] | None:
+        """unsloth 后端 = llama-server（GGUF）；`/metrics` 由 `--metrics` 启用。
+
+        §1.3：默认开启（build_command 注入 `--metrics`），未配置或 metrics_enabled=True 时
+        返回与 llamacpp 同结构的 Prometheus 指标名映射，精确统计可用；
+        metrics_enabled=False 时返回 None，stats collector 自动降级到"不支持精确统计"。
+        """
+        cfg = self.profile.engine_config
+        if not cfg.get("metrics_enabled", True):
+            return None
+        return {
+            "prompt_total": [
+                "llamacpp:prompt_tokens_total",
+                "llamacpp:tokens_evaluated_total",
+                "llama_tokens_evaluated_total",
+                "prompt_tokens_total",
+            ],
+            "predicted_total": [
+                "llamacpp:tokens_predicted_total",
+                "llamacpp:predicted_tokens_total",
+                "llama_tokens_predicted_total",
+                "tokens_predicted_total",
+            ],
+            "prompt_rate": ["llamacpp:prompt_tokens_seconds", "prompt_tokens_seconds"],
+            "predicted_rate": [
+                "llamacpp:predicted_tokens_seconds",
+                "llamacpp:tokens_predicted_seconds",
+                "predicted_tokens_seconds",
+            ],
+        }
 
     def upstream_model_name(self) -> str:
         return str(self.profile.engine_config.get("model") or self.profile.name)

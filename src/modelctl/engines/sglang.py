@@ -18,7 +18,6 @@ import shlex
 from pathlib import Path
 
 from modelctl.core import envs
-from modelctl.core.capabilities import all_vram_total_mb, selected_vram_total_mb
 from modelctl.core.envfile import PROJECT_ROOT
 from modelctl.core.gpu_lock import acquire_gpu_lock
 from modelctl.core.gpu_utils import GPUValidationError
@@ -59,22 +58,15 @@ class SglangAdapter(EngineAdapter):
         上限按 总显存 × mem_fraction_static 估算；未计 KV cache/激活，
         HF 权重加载行为复杂，故不做硬性 block（sglang 自身启动时会 OOM 报错）。
         """
-        model = Path(str(cfg.get("model") or "")).expanduser()
-        if not model.is_dir():
-            return  # 尚未下载或非本地路径，无法估算
-        size_bytes = sum(p.stat().st_size for pat in ("*.safetensors", "*.bin") for p in model.rglob(pat))
-        weights_mb = size_bytes / 1024 / 1024
-        if weights_mb <= 0:
-            return
-        fraction = float(cfg.get("mem_fraction_static", 0.85))
-        total_mb = selected_vram_total_mb(self.caps, gpus) if gpus else all_vram_total_mb(self.caps)
-        cap_mb = total_mb * fraction
-        if total_mb > 0 and weights_mb > cap_mb:
-            self.warnings.append(
-                f"模型权重约 {weights_mb:.0f}MB，超过估算可用显存上限 {cap_mb:.0f}MB"
-                f"（总显存 {total_mb}MB × mem_fraction_static={fraction}，未计 KV cache）；"
-                "若实际剩余显存不足 sglang 启动会失败，可更换 gpu_list 或调整 mem_fraction_static"
-            )
+        self._check_weights_advisory(
+            str(cfg.get("model") or ""),
+            gpus,
+            self.caps,
+            float(cfg.get("mem_fraction_static", 0.85)),
+            "mem_fraction_static",
+            self.profile.engine,
+            self.warnings,
+        )
 
     def pre_start(self) -> None:
         cfg = self.profile.engine_config

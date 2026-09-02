@@ -272,13 +272,26 @@ def build_tier_item(name: str, snap: dict, usage_cfg: dict, plan_label: str) -> 
     planName 作为徽章标签，extra 以 "{" 开头则按 JSON 解析出
     resetsAt/usedValueUsd/maxValueUsd/planLabel。本地部署无重置窗口，
     resetsAt 恒为 null；不带 USD 字段避免界面硬编码的 $ 前缀误导。
+
+    未配置有效预算（usage.budget）时降级：isValid=False + used=0 +
+    note="无预算配置"，不抛 ValueError——支持 "零配置看 tier" 场景。
+    需要硬失败的调用方可以显式 check budget。
     """
     budget = _budget_of(usage_cfg)
-    if budget is None:
-        raise ValueError(f"{name} 未配置有效预算（usage.budget）")
     price_in = float(usage_cfg.get("price_in", 1.0))
     price_out = float(usage_cfg.get("price_out", 2.0))
     cost = calc_cost(snap.get("prompt_total", 0.0), snap.get("predicted_total", 0.0), price_in, price_out)
+    if budget is None:
+        return {
+            "isValid": False,
+            "planName": name,
+            "used": 0.0,
+            "unit": "CNY",
+            "extra": json.dumps(
+                {"resetsAt": None, "planLabel": plan_label, "note": "无预算配置"},
+                ensure_ascii=False,
+            ),
+        }
     pct = min(max(round(cost / budget * 100.0, 1), 0.0), 100.0)
     return {
         "isValid": True,

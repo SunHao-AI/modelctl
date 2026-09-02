@@ -155,3 +155,38 @@ class EngineAdapter(ABC):
         port/host/allow_from 可经 yaml 与 CLI 参数覆盖，优先级由实现方保证。
         """
         return None
+
+    @staticmethod
+    def _check_weights_advisory(
+        model_path: str,
+        gpus: list[int] | None,
+        caps: Capabilities,
+        fraction: float,
+        fraction_key: str,
+        engine_name: str,
+        warnings: list[str],
+    ) -> None:
+        """HF 权重粗估：权重大小超可用显存上限时仅告警、不硬拦截。
+
+        上限 = 总显存 × fraction（各引擎的 gpu_memory_utilization / mem_fraction_static）。
+        未计 KV cache/激活，引擎自身启动时会 OOM 报错——本步骤只做前置提醒。
+        """
+        from pathlib import Path
+
+        from modelctl.core.capabilities import all_vram_total_mb, selected_vram_total_mb
+
+        model = Path(model_path).expanduser()
+        if not model.is_dir():
+            return
+        size_bytes = sum(p.stat().st_size for pat in ("*.safetensors", "*.bin") for p in model.rglob(pat))
+        weights_mb = size_bytes / 1024 / 1024
+        if weights_mb <= 0:
+            return
+        total_mb = selected_vram_total_mb(caps, gpus) if gpus else all_vram_total_mb(caps)
+        cap_mb = total_mb * fraction
+        if total_mb > 0 and weights_mb > cap_mb:
+            warnings.append(
+                f"模型权重约 {weights_mb:.0f}MB，超过估算可用显存上限 {cap_mb:.0f}MB"
+                f"（总显存 {total_mb}MB × {fraction_key}={fraction}，未计 KV cache）；"
+                f"若实际剩余显存不足 {engine_name} 启动会失败，可更换 gpu_list 或调整 {fraction_key}"
+            )

@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import sys
+
 from modelctl.core.capabilities import cc_at_least
 from modelctl.core.compat import (
     CompatIssue,
@@ -120,6 +122,11 @@ def _nvidia_pkg_complete_check(gpu: GpuSpec, env: EnvSpec, model: ModelSpec | No
 
 def _cuda_lib_resolvable_check(gpu: GpuSpec, env: EnvSpec, model: ModelSpec | None) -> CompatIssue | None:
     if not env.libs_resolvable_known:
+        return None
+    if sys.platform.startswith("win") and "libcuda.dll" in env.cuda_libs_resolvable:
+        # Windows 路径：nvidia-smi 已确认 GPU 栈存在（libcuda.dll 命中）。
+        # torch 的 cudnn/cudart 走 wheel 内带库或 Python 进程内 runtime，
+        # 无 LD 等价物，按"视为可解析"放行 .so 名称检查，避免误报 block。
         return None
     needed: set[str] = set()
     for pkg, version in env.packages.items():

@@ -232,13 +232,23 @@ def _scan_nvidia_so(sp: Path) -> set[str]:
 
 
 def _resolvable_cuda_libs() -> tuple[set[str], bool]:
-    """探测动态链接器可解析的 .so 文件名集合。ldconfig 不可用时返回 (空集, False)。"""
+    """探测动态链接器可解析的 .so/.dll 文件名集合。
+
+    Linux 走 `ldconfig -p` 解析 ELF 动态库路径；Windows 上 ldconfig 不可用，
+    改走 Windows 兜底：nvidia-smi 探测 CUDA 栈 + PATH 扫描 .dll（torch wheel
+    内的 nvidia cubin/cudart 落在 site-packages 的 bin/ 下，由 EnvSpec 扫描
+    补充）。Windows 兜底无任何命中时返回 (空集, False)，调用方视为"未知"。
+    """
     names: set[str] = set()
     try:
         out = subprocess.run(["ldconfig", "-p"], capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
+        # ldconfig 不可用（典型：Windows 上没有该命令）
+        if sys.platform.startswith("win"):
+            return _resolvable_cuda_libs_windows()
         return names, False
     if out.returncode != 0:
+        # ldconfig 存在但报非零错误，POSIX 侧有意保留旧行为（不主动 fallback）。
         return names, False
     for line in out.stdout.splitlines():
         parts = line.split("=>")
@@ -253,6 +263,33 @@ def _resolvable_cuda_libs() -> tuple[set[str], bool]:
         if p.is_dir():
             names.update(f.name for f in p.glob("*.so*") if f.is_file())
     return names, True
+
+
+def _resolvable_cuda_libs_windows() -> tuple[set[str], bool]:
+    """Windows 兜底：nvidia-smi 探测 CUDA 运行时 + PATH 扫描 .dll。
+
+    nvidia-smi 命中即认为 libcuda.dll 可解析（驱动/运行时栈就位）；
+    PATH 扫描补充 cudnn/cudart/nccl 等 .dll（来自 torch wheel 或独立安装）。
+    两者都未命中才返回 (空集, False)。
+    """
+    names: set[str] = set()
+    try:
+        probe = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=10)
+        if probe.returncode == 0 and "GPU" in (probe.stdout or ""):
+            names.add("libcuda.dll")
+    except (OSError, subprocess.SubprocessError):
+        pass
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if not d:
+            continue
+        p = Path(d)
+        if not p.is_dir():
+            continue
+        try:
+            names.update(f.name for f in p.glob("*.dll") if f.is_file())
+        except OSError:
+            continue
+    return names, bool(names)
 
 
 def _disk_free_mb() -> int:

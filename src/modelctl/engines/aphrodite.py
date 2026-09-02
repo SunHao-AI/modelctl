@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import os
 import shlex
-import shutil
 from pathlib import Path
 
 from modelctl.core import envs

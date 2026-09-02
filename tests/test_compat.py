@@ -196,13 +196,17 @@ def test_resolvable_cuda_libs_glibc_ldconfig(monkeypatch):
 
 
 def test_env_spec_libs_resolvable_unknown_without_ldconfig(monkeypatch, tmp_path):
-    """ldconfig 不可用（命令缺失/非 Linux）时 libs_resolvable_known 应为 False。"""
+    """ldconfig 不可用且 Windows 兜底（nvidia-smi/PATH .dll）也空时 libs_resolvable_known 应为 False。"""
 
     def _raise_oserror(*args, **kwargs):
-        raise OSError("ldconfig not found")
+        raise OSError("command not found")
 
     monkeypatch.setattr("modelctl.core.compat.subprocess.run", _raise_oserror)
     monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+    # Windows 兜底被显式 mock 为空，确保不论 OS 都进入"未知"分支
+    monkeypatch.setattr(
+        "modelctl.core.compat._resolvable_cuda_libs_windows", lambda: (set(), False),
+    )
     env = EnvSpec.from_env(site_packages=tmp_path)
     assert env.libs_resolvable_known is False
 

@@ -136,7 +136,19 @@ def _ctx_tokens_and_gpus(profile: Profile) -> tuple[int, int, str] | None:
         parallel = int(ec.get("num_parallel", 1) or 1)
         # ollama 为全局 serve 进程，无法按卡细分，按单卡口径预警
         return int(ctx) * parallel, 1, "fp16"
-    return None  # unsloth 等暂无稳定估算口径
+    # §3（待办 #8）：GPU 推理引擎组（vLLM 派生），KV 口径 modelName=max_model_len /
+    # context_length（同 sglang），按 tensor_parallel_size 均摊（unsloth 用 tensor_parallel）。
+    if engine in ("unsloth", "aphrodite", "lmdeploy", "tokenspeed"):
+        ctx = ec.get("max_model_len") or ec.get("context_length")
+        if not ctx:
+            return None
+        if engine == "unsloth":
+            gpus = int(ec.get("tensor_parallel", 1) or 1)
+        else:
+            gpus = int(ec.get("tensor_parallel_size", 1) or 1)
+        dtype = ec.get("kv_cache_dtype") or "fp16"
+        return int(ctx), gpus, str(dtype)
+    return None  # 其他引擎暂无稳定估算口径
 
 
 def kv_estimate_for_profile(profile: Profile) -> dict[str, Any] | None:
