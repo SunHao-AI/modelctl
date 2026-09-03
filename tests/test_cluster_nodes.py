@@ -48,6 +48,18 @@ def test_rejoin_reuses_node_token(reg: NodeRegistry) -> None:
     assert welcome2["node_token"] == nt
 
 
+def test_node_token_bound_to_own_node_id(reg: NodeRegistry) -> None:
+    """NT 只能给自己的 node_id 用：冒充他人 node_id 必须 AuthError（防 token 覆盖劫持）。"""
+    jt = reg.ensure_join_token()
+    nt = reg.handle_hello(HelloMsg(node_id="w-1", lan="", key=jt, meta={}))[0]["node_token"]
+    reg.handle_hello(HelloMsg(node_id="w-2", lan="", key=jt, meta={}))  # 受害者正常注册
+    with pytest.raises(AuthError):
+        reg.handle_hello(HelloMsg(node_id="w-2", lan="", key=nt, meta={}))  # w-1 的 NT 冒充 w-2
+    # 受害者 token 未被覆盖，仍可重连
+    welcome, _ = reg.handle_hello(HelloMsg(node_id="w-2", lan="", key=jt, meta={}))
+    assert welcome["t"] == "welcome"
+
+
 def test_bad_token_rejected(reg: NodeRegistry) -> None:
     reg.ensure_join_token()
     with pytest.raises(AuthError):

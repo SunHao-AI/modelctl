@@ -52,6 +52,10 @@ class NodeRegistry:
             known = self.store.find_node_by_token(hello.key)
             if known is None:
                 raise AuthError("无效的 join/node token")
+            # node_token 与签发时的 node_id 绑定：防止持自己的 NT 冒充他人 node_id，
+            # 经 upsert 的 ON CONFLICT 覆盖受害者行的 node_token（跨节点身份劫持）
+            if str(known["node_id"]) != hello.node_id:
+                raise AuthError("node_id 与节点令牌不匹配")
             node_token = str(known["node_token"])  # 重连：沿用既有 token
         engines = hello.meta.get("engines")
         self.store.upsert_node(
