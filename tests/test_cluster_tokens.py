@@ -25,3 +25,9 @@ def test_token_matches_fail_closed() -> None:
     assert not token_matches("", "")          # 空值 fail-closed
     assert not token_matches("abc", "")
     assert not token_matches("", "abc")
+
+
+def test_token_matches_non_ascii_no_raise() -> None:
+    assert not token_matches("密钥", "NT-abc")
+    assert not token_matches("NT-abc", "密钥")
+    assert token_matches("NT-abc", "NT-abc")

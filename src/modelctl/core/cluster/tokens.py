@@ -31,7 +31,11 @@ def new_node_token() -> str:
 
 
 def token_matches(candidate: str, expected: str) -> bool:
-    """恒定时间比较；任一为空返回 False（fail-closed）。"""
+    """恒定时间比较；任一为空返回 False（fail-closed）。
+
+    以 UTF-8 bytes 比较：compare_digest 对含非 ASCII 的 str 会抛 TypeError，
+    而 candidate 来自 worker 上报的不可信输入，必须干净拒绝而非冒泡异常。
+    """
     if not candidate or not expected:
         return False
-    return hmac.compare_digest(candidate, expected)
+    return hmac.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8"))
