@@ -65,6 +65,27 @@ def test_lease_three_states(store: ClusterStore) -> None:
     assert store.get_node("w-1")["status"] == "offline"
 
 
+def test_rejoin_clears_stale_lease(store: ClusterStore) -> None:
+    store.upsert_node(node_id="w-1", node_token="t", lan_id="", role="worker",
+                      host_ip="", hostname="", engines=None, now=0.0)
+    store.touch_heartbeat("w-1", now=0.0, lease_s=90)
+    assert ("w-1", "offline") in store.sweep_expired(now=1000.0, lease_s=90)
+    # rejoin：注册即 online，旧 lease 必须清空，否则首个心跳前会被 sweep 误判 stale
+    assert store.upsert_node(node_id="w-1", node_token="t", lan_id="", role="worker",
+                             host_ip="", hostname="", engines=None, now=1001.0) == "rejoined"
+    node = store.get_node("w-1")
+    assert node is not None and node["status"] == "online"
+    assert node["lease_expiry"] is None
+    assert ("w-1", "stale") not in store.sweep_expired(now=1002.0, lease_s=90)
+
+
+def test_set_node_status_rejects_invalid(store: ClusterStore) -> None:
+    store.upsert_node(node_id="w-1", node_token="t", lan_id="", role="worker",
+                      host_ip="", hostname="", engines=None, now=1.0)
+    with pytest.raises(ValueError):
+        store.set_node_status("w-1", "stalee")
+
+
 def test_rotate_node_token(store: ClusterStore) -> None:
     store.upsert_node(node_id="w-1", node_token="old", lan_id="", role="worker",
                       host_ip="", hostname="", engines=None, now=1.0)

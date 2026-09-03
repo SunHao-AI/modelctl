@@ -27,6 +27,9 @@ from typing import Any
 
 _MASK_KEEP_TAIL = 4
 
+#: set_node_status 允许的状态白名单，防止调用方 typo 污染台账状态机
+NODE_STATUSES = ("online", "stale", "offline", "disabled")
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS nodes (
@@ -74,7 +77,7 @@ _NODE_COLS = ("node_id", "node_token", "lan_id", "role", "host_ip", "hostname",
 
 
 def mask_tail(value: str) -> str:
-    """密钥脱敏：*** + 末 4 位；空值/短值 → ***（与 admin_auth.mask_key 同口径）。"""
+    """密钥脱敏：*** + 末 4 位；空值或长度 ≤4 的短值一律返回 ***。"""
     if not value or len(value) <= _MASK_KEEP_TAIL:
         return "***"
     return "***" + value[-_MASK_KEEP_TAIL:]
@@ -102,6 +105,9 @@ class ClusterStore:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
+            # CLI 与常驻 center 进程可能共库：WAL 提升并发读写，busy_timeout 缓解锁冲突
+            self._conn.execute("PRAGMA journal_mode=WAL;")
+            self._conn.execute("PRAGMA busy_timeout=5000;")
         return self._conn
 
     def init_db(self) -> None:
@@ -145,9 +151,9 @@ class ClusterStore:
                    ON CONFLICT(node_id) DO UPDATE SET
                      node_token=excluded.node_token, lan_id=excluded.lan_id, role=excluded.role,
                      host_ip=excluded.host_ip, hostname=excluded.hostname, engines=excluded.engines,
-                     last_seen=excluded.last_seen, status='online'""",
+                     last_seen=excluded.last_seen, status='online', lease_expiry=NULL""",
                 (node_id, node_token, lan_id, role, host_ip, hostname,
-                 json.dumps(merged) if merged is not None else None, now, now),
+                 json.dumps(merged, ensure_ascii=False) if merged is not None else None, now, now),
             )
             self._db().commit()
         return result
@@ -178,6 +184,8 @@ class ClusterStore:
             self._db().commit()
 
     def set_node_status(self, node_id: str, status: str) -> None:
+        if status not in NODE_STATUSES:
+            raise ValueError(f"非法节点状态: {status!r}，允许值 {NODE_STATUSES}")
         with self._lock:
             self._db().execute("UPDATE nodes SET status=? WHERE node_id=?", (status, node_id))
             self._db().commit()
@@ -195,24 +203,31 @@ class ClusterStore:
         """lease 过期→stale；last_seen 超 3×lease→offline。仅返回本次发生迁移的节点。"""
         transitions: list[tuple[str, str]] = []
         with self._lock:
-            rows = self._db().execute(
-                "SELECT node_id,status,last_seen,lease_expiry FROM nodes WHERE disabled=0"
-            ).fetchall()
-            for r in rows:
-                cur_status = r["status"]
-                if cur_status in ("offline", "disabled"):
-                    continue
-                new_status: str | None = None
-                last_seen = r["last_seen"]
-                if last_seen is not None and last_seen + 3 * lease_s < now:
-                    new_status = "offline"
-                elif r["lease_expiry"] is not None and r["lease_expiry"] < now:
-                    new_status = "stale"
-                if new_status and new_status != cur_status:
-                    self._db().execute("UPDATE nodes SET status=? WHERE node_id=?",
-                                       (new_status, r["node_id"]))
-                    transitions.append((r["node_id"], new_status))
-            self._db().commit()
+            conn = self._db()
+            # BEGIN IMMEDIATE：读全表 + 逐条改写必须是原子单元，且避免跨进程写锁冲突
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                rows = conn.execute(
+                    "SELECT node_id,status,last_seen,lease_expiry FROM nodes WHERE disabled=0"
+                ).fetchall()
+                for r in rows:
+                    cur_status = r["status"]
+                    if cur_status in ("offline", "disabled"):
+                        continue
+                    new_status: str | None = None
+                    last_seen = r["last_seen"]
+                    if last_seen is not None and last_seen + 3 * lease_s < now:
+                        new_status = "offline"
+                    elif r["lease_expiry"] is not None and r["lease_expiry"] < now:
+                        new_status = "stale"
+                    if new_status and new_status != cur_status:
+                        conn.execute("UPDATE nodes SET status=? WHERE node_id=?",
+                                     (new_status, r["node_id"]))
+                        transitions.append((r["node_id"], new_status))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
         return transitions
 
     # ---- events ----
