@@ -126,7 +126,7 @@ modelctl 是一个多模型 LLM 部署启动器，支持 9 种推理引擎、12 
 **单进程 FastAPI**（扩展现有 `gateway.py::create_app()`）:
 
 ```
-浏览器 (Vue3 SPA, web/dist 构建产物)
+浏览器 (Vue3 SPA, 项目根 dist/ 构建产物)
   ├── Pinia (auth / system / operations / ui)
   ├── axios 拦截器 (401→/login, 注入 Bearer)
   ├── 全局 3s 状态轮询 (GET /admin/api/overview)
@@ -135,7 +135,7 @@ modelctl 是一个多模型 LLM 部署启动器，支持 9 种推理引擎、12 
 FastAPI 单进程 (uvicorn, 复用 gateway venv)
   ├── /v1/*        原有 OpenAI 兼容代理 (不变，nginx 依赖)
   ├── /admin/api/* 新增管理 API (本设计主体)
-  ├── /            前端静态文件 (web/dist, html=True)
+  ├── /            前端静态文件 (项目根 dist/，SPA history 兜底 index.html)
   └── 后台线程池 (asyncio.to_thread 跑阻塞操作)
        → 每任务一个 asyncio.Queue 广播 SSE
        → 任务状态存 app.state.tasks[id]
