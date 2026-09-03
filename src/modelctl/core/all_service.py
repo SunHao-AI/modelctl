@@ -316,7 +316,8 @@ def status_webui() -> ComponentResult:
     port = webui_port()
     if is_running(WEBUI_INSTANCE):
         ok = wait_health(f"http://127.0.0.1:{port}/admin/api/health", 3.0)
-        return ComponentResult("webui", "ok", f"运行中（端口 {port}），/admin/api/health " + ("正常" if ok else "无响应"))
+        detail = f"运行中（端口 {port}），/admin/api/health " + ("正常" if ok else "无响应")
+        return ComponentResult("webui", "ok", detail)
     return ComponentResult("webui", "ok", "已停止")
 
 
@@ -424,7 +425,7 @@ def restart_all(models_dir: Path | None, model_name: str | None = None, timeout:
 
 
 def status_all(models_dir: Path | None) -> list[ComponentResult]:
-    """汇总默认模型 + gateway + stats 状态。"""
+    """汇总默认模型 + gateway + webui + stats 状态。"""
     results: list[ComponentResult] = []
     profile = resolve_default_profile(models_dir, None)
     if profile is None:
@@ -437,5 +438,9 @@ def status_all(models_dir: Path | None) -> list[ComponentResult]:
     else:
         results.append(ComponentResult(f"model:{profile.name}", "ok", "已停止"))
     results.append(status_gateway())
+    # webui 与 gateway 数据面独立实例（PID 文件/WebUI_INSTANCE）但共享 gateway venv 解释器
+    # （ensure_packages("gateway") 与 .venvs/gateway 解释器路径）
+    # 顺序约定：model → gateway → webui → stats，与 `/admin/api/all/status` 前端展示顺序一致
+    results.append(status_webui())
     results.append(status_stats())
     return results
