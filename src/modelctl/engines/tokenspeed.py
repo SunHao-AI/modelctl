@@ -102,6 +102,8 @@ class TokenSpeedAdapter(EngineAdapter):
                 "-p", f"{self.profile.port}:8000",
                 "-v", f"{model_local.parent.as_posix()}:/models:ro",
                 "--ipc=host",
+                # 容器时区只能靠 -e（start_detached 的 env 进不了容器），否则日志是 UTC
+                *self.docker_timezone_args(),
                 image,
                 "serve", f"/models/{model_local.name}",
                 "--host", "0.0.0.0",

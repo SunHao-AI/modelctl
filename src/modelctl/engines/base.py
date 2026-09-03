@@ -82,6 +82,16 @@ class EngineAdapter(ABC):
     def cuda_visible_devices(self, gpus: list[int]) -> dict[str, str]:
         return {"CUDA_VISIBLE_DEVICES": ",".join(str(g) for g in gpus)}
 
+    def docker_timezone_args(self) -> list[str]:
+        """docker run 的时区参数（`-e TZ=` [+ 挂 /etc/localtime]，供三个 docker 适配器共用）。
+
+        容器时区**只能靠 `-e`**：start_detached 注入的 env 只进 docker CLI 宿主进程，
+        进不了容器。缺了它，容器内引擎日志一律 UTC，与 modelctl 侧时间差 8 小时。
+        """
+        from modelctl.core.timezone import container_timezone_args
+
+        return container_timezone_args()
+
     def pre_start(self) -> None:
         """启动前钩子（下载/编译/pull）。"""
         return None

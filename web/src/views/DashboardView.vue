@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import dayjs from 'dayjs';
 import { overview } from '@/api/services';
 import type { OverviewResponse } from '@/api/types';
 import StatusBadge from '@/components/common/StatusBadge.vue';
@@ -44,6 +45,12 @@ function fmtUptime(): string {
   const u = data.value?.uptime_s;
   if (u === null || u === undefined) return '未知';
   return Math.round(u) >= 0 ? `${Math.round(u)}s` : '未知';
+}
+
+/** 探测时间（后端带偏移的 ISO）→ 浏览器本地 YYYY-MM-DD HH:mm:ss */
+function fmtProbedAt(): string {
+  const v = data.value?.probed_at;
+  return v ? dayjs(v).format('YYYY-MM-DD HH:mm:ss') : '未知';
 }
 
 /** 按 name 排序的引擎二进制列表 */
@@ -132,7 +139,7 @@ const engineBinaries = computed<Array<{ name: string; state: 'available' | 'miss
           </div>
           <div class="flex items-center justify-between">
             <span class="text-slate-400">探测于</span>
-            <span class="font-mono text-slate-100">{{ data.probed_at }}</span>
+            <span class="font-mono text-slate-100">{{ fmtProbedAt() }}</span>
           </div>
         </div>
       </section>

@@ -202,11 +202,11 @@ class VllmAdapter(EngineAdapter):
         # docker_env：yaml vllm.docker_env（dict）→ 容器内环境变量。
         # ⚠ 必须用 `docker run -e`（而非 build_command 返回的 env dict）才能进入容器：
         #   start_detached 只把 env 注入 docker CLI 宿主进程（Popen），不会透传进容器。
-        docker_env = cfg.get("docker_env") or {}
-        if docker_env:
-            env_args: list[str] = []
-            for k, v in docker_env.items():
-                env_args += ["-e", f"{k}={v}"]
+        # TZ 同理，必须显式带上，否则容器内 vLLM 日志是 UTC。
+        env_args = self.docker_timezone_args()
+        for k, v in (cfg.get("docker_env") or {}).items():
+            env_args += ["-e", f"{k}={v}"]
+        if env_args:
             ipc_idx = cmd.index("--ipc=host")
             cmd[ipc_idx:ipc_idx] = env_args
         env = {"HF_HOME": os.environ["HF_HOME"]} if os.environ.get("HF_HOME") else {}

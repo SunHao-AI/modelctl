@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-import time
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
@@ -204,7 +204,8 @@ def _gather_overview() -> dict:
         "hardware": hardware,
         "models": models,
         "services": services,
-        "probed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        # 带偏移的 ISO：naive 时间会被前端按浏览器时区二次解释，跨时区即偏差
+        "probed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
 
 

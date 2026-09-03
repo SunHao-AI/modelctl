@@ -503,6 +503,7 @@ def test_build_command_docker_template(tmp_path, monkeypatch):
 def test_build_command_docker_env(tmp_path, monkeypatch):
     """docker 路径 + vllm.docker_env → cmd 注入 -e KEY=VALUE（透传进容器）。"""
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    monkeypatch.setenv("TZ", "Asia/Shanghai")  # 显式固定，避免依赖 CI 环境默认时区
     model_dir = tmp_path / "m" / "Qwen3.8-Flash-Next-FP8"
     model_dir.mkdir(parents=True)
     p = _write(
@@ -518,14 +519,31 @@ def test_build_command_docker_env(tmp_path, monkeypatch):
     cmd, env = a.build_command()
 
     # docker run -e 项插入 --ipc=host 之前（保持镜像/模型路径位置不变）
-    env_flag_idx = cmd.index("-e")
-    assert cmd[env_flag_idx] == "-e"
-    assert cmd[env_flag_idx + 1] == "VLLM_PLE_CPU_OFFLOAD=1"
-    assert "--ipc=host" in cmd[env_flag_idx + 2:]
+    # TZ 由 docker_timezone_args 自动前置，其后才是 yaml docker_env 的键
+    env_pairs = [cmd[i + 1] for i, v in enumerate(cmd) if v == "-e"]
+    assert env_pairs[0] == "TZ=Asia/Shanghai"
+    assert "VLLM_PLE_CPU_OFFLOAD=1" in env_pairs
+    assert "--ipc=host" in cmd[cmd.index("-e") + 2:]
     image_pos = cmd.index("vllm/vllm-openai:qwen38-flash-next")
     assert cmd[image_pos + 1] == "/models/Qwen3.8-Flash-Next-FP8"
-    # docker_env 不进返回的 env dict（只进容器）
-    assert "VLLM_PLE_CPU_OFFLOAD" not in env
+    # TZ 与 docker_env 都不进返回的 env dict（只进容器）
+    assert "VLLM_PLE_CPU_OFFLOAD" not in env and "TZ" not in env
+
+
+def test_build_command_docker_always_carries_tz(tmp_path, monkeypatch):
+    """未配 docker_env 时也必须带 TZ，否则容器内 vLLM 日志是 UTC。"""
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    model_dir = tmp_path / "m" / "Qwen3.8"
+    model_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: vllm\nport: 8000\nvllm:\n"
+        f"  model: {model_dir}\n  docker_image: x/y:z\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    cmd, _env = a.build_command()
+    assert cmd[cmd.index("-e") + 1] == "TZ=Asia/Shanghai"
 
 
 def test_build_command_docker_relative_model_rejected(tmp_path, monkeypatch):

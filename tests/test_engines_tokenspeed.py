@@ -64,6 +64,22 @@ def test_tokenspeed_docker_command(tmp_path, monkeypatch):
     assert "--enable-prefix-caching" in cmd
 
 
+def test_tokenspeed_docker_command_carries_tz(tmp_path, monkeypatch):
+    """容器时区只认 -e，缺了它容器内日志是 UTC（与 modelctl 侧差 8 小时）。"""
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    model_dir = tmp_path / "models" / "Qwen3.5-397B-A17B"
+    model_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: tokenspeed\nport: 8150\ntokenspeed:\n"
+        f"  model: {model_dir}\n  docker_image: lightseekorg/tokenspeed:latest\n",
+    )
+    a = get_adapter("tokenspeed")(p, CAPS8)
+    cmd, env = a.build_command()
+    assert cmd[cmd.index("-e") + 1] == "TZ=Asia/Shanghai"
+    assert "TZ" not in env  # 只进容器，不进 docker CLI 宿主进程
+
+
 def test_tokenspeed_build_command_uses_string_container_name(tmp_path, monkeypatch):
     """Regression: docker 路径 build_command 的 --name 值必须是 <profile.name>-tokenspeed 字符串 (预存在 bug 修复)。"""
     model_dir = tmp_path / "models" / "Qwen3.5-397B-A17B"

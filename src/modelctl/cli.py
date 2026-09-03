@@ -66,6 +66,7 @@ from modelctl.core.process import (
     stop_instance,
 )
 from modelctl.core.profile import Profile, ProfileError, list_profiles, load_profile
+from modelctl.core.timezone import apply_timezone
 from modelctl.core.ufw import ensure_ufw_allow
 from modelctl.engines import get_adapter
 from modelctl.engines.base import RequirementError
@@ -1142,9 +1143,13 @@ def main(argv: list[str] | None = None) -> int:
     # 先扫描 --no-color（在全局 argparse 之前），以便 setup_logging 同步禁用颜色
     if "--no-color" in argv:
         os.environ["MODELCTL_NO_COLOR"] = "1"
-    setup_logging()
     models_dir, rest = _extract_models_dir(argv)
+    # 顺序要求：load_env 注入 .env 的 TZ → setup_logging 建 handler → apply_timezone
+    # 钉死本地时区。loguru 的 {time} 在记录时求值，故 apply_timezone 只需早于首条
+    # 业务日志；置于 setup_logging 之后可让时区回退警告也用统一配色格式。
     load_env()
+    setup_logging()
+    apply_timezone()
     # 命令路由前先做一次"CLI 自身"缺失依赖检测（loguru/yaml）。
     # 缺失时自动经 uv/pip 多源回退补齐；补不齐则直接退出 2（后续命令也没法跑）。
     # 启动类命令（start/restart/all+start）进入对应 handler 时，handler 会

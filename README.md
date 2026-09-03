@@ -680,6 +680,24 @@ npm run dev
 
 Web 管理控制台的完整设计（信息架构、页面清单、API 契约、SSE 事件协议）详见 [docs/superpowers/specs/2026-09-02-webui-design.md](docs/superpowers/specs/2026-09-02-webui-design.md)。
 
+## 时区
+
+`.env` 的 `TZ`（默认 `Asia/Shanghai`，仅 Linux/macOS 生效）统一以下时间的显示：
+
+- modelctl 自身的 loguru 日志、审计记录 `ts` 与按天切分的审计文件名
+- 引擎子进程（venv 形态的 vllm / sglang / llamacpp / ollama 等）与用量统计服务
+- docker 形态的 vllm / tokenspeed / tensorrt_llm：自动注入 `-e TZ=`，宿主机能定位 tz 文件时再挂 `/etc/localtime`
+
+**部署机仍需把系统时区设为东八区**，否则 modelctl 管不到的部分仍是 UTC：
+
+```bash
+sudo timedatectl set-timezone Asia/Shanghai
+```
+
+nginx 的 access/error log、logrotate、`docker logs` 与 `journalctl` 的时间戳都取**宿主机系统时区**，`TZ` 环境变量对它们无效。
+
+Windows 开发机上 `TZ` 会被忽略（无 `time.tzset`，且 UCRT 会把 IANA 名误解析成 +0100 而污染子进程），请直接设置系统时区。
+
 ## 说明
 
 - 模型级配置（模型路径、端口、并行度、量化、用量单价）在 `models/*.yaml` 中管理，全局配置（API 密钥、存储目录、日志目录、统计服务）在 `.env` 中管理

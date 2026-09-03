@@ -26,6 +26,7 @@ from pathlib import Path
 from loguru import logger
 
 from modelctl.core.envfile import PROJECT_ROOT
+from modelctl.core.timezone import subprocess_timezone
 
 if typing.TYPE_CHECKING:
     from modelctl.core.profile import Profile
@@ -88,7 +89,10 @@ def start_detached(name: str, command: list[str], extra_env: dict[str, str],
     故 docker 路径调用方传 False 不写 PID 文件，改用容器名作为身份标识。
     返回签名不变：pid 仍为本机 Popen.pid，仅作日志显示用。"""
     log_path = log_dir() / f"launch-{name}.log"
-    env = {**os.environ, **extra_env}
+    # TZ 显式兜底：正常已由 os.environ 继承，此处防止日后改成"只传白名单 env"的
+    # 重构静默丢掉时区（引擎日志会退回 UTC）。Windows 下返回空 dict，绝不注入
+    # IANA 名——UCRT 会把 "Asia/Shanghai" 解析成 +0100，反而污染子进程。
+    env = {**os.environ, **subprocess_timezone(), **extra_env}
     fp = open(log_path, "w", encoding="utf-8")  # "w"：每次启动覆盖旧日志
     kwargs: dict = {"stdout": fp, "stderr": subprocess.STDOUT, "env": env, "stdin": subprocess.DEVNULL}
     kwargs["start_new_session"] = True  # nohup 语义：SSH 断开不影响

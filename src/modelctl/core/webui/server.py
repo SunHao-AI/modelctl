@@ -95,8 +95,10 @@ def main() -> None:
     `modelctl webui start` 即以此形态（gateway 子环境解释器 -m ...）后台拉起。
     """
     from modelctl.core.envfile import load_env
+    from modelctl.core.timezone import apply_timezone
 
     load_env()
+    apply_timezone()
 
     import uvicorn
 

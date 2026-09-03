@@ -6,6 +6,9 @@ requires-python = ">=3.12"
 dependencies = [
     "PyYAML>=6.0",
     "loguru>=0.7",
+    # zoneinfo 在 Windows 无系统 tz 库，需 tzdata 才能解析 IANA 时区名（core/timezone.py）；
+    # Linux/macOS 自带 /usr/share/zoneinfo，不必额外安装。
+    "tzdata; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

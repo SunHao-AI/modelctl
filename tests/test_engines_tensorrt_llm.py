@@ -97,6 +97,25 @@ def test_tensorrt_llm_docker_command(tmp_path, monkeypatch):
     assert "--use_fused_mlp" in cmd
 
 
+def test_tensorrt_llm_docker_command_carries_tz(tmp_path, monkeypatch):
+    """容器时区只认 -e，缺了它容器内日志是 UTC（与 modelctl 侧差 8 小时）。"""
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    engine_dir = tmp_path / "engines" / "qwen3.8-tp4-fp8"
+    engine_dir.mkdir(parents=True)
+    model_dir = tmp_path / "models" / "Qwen3.8-27B"
+    model_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: tensorrt_llm\nport: 8120\ntensorrt_llm:\n"
+        f"  model: {model_dir}\n  engine_dir: {engine_dir}\n"
+        f"  docker_image: nvcr.io/nvidia/tensorrt-llm:latest\n",
+    )
+    a = get_adapter("tensorrt_llm")(p, CAPS8)
+    cmd, env = a.build_command()
+    assert cmd[cmd.index("-e") + 1] == "TZ=Asia/Shanghai"
+    assert "TZ" not in env  # 只进容器，不进 docker CLI 宿主进程
+
+
 def test_tensorrt_llm_build_command_uses_string_container_name(tmp_path, monkeypatch):
     """Regression: docker 路径 build_command 的 --name 值必须是 <profile.name>-trtllm 字符串 (预存在 bug 修复)。"""
     engine_dir = tmp_path / "engines" / "qwen3.8-tp4-fp8"

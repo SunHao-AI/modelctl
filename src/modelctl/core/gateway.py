@@ -1067,7 +1067,10 @@ def create_app(
 
 def main() -> None:
     """独立运行入口：python -m modelctl.core.gateway。"""
+    from modelctl.core.timezone import apply_timezone
+
     load_env()
+    apply_timezone()
     host = os.environ.get("GATEWAY_HOST", "0.0.0.0")
     port = int(os.environ.get("GATEWAY_PORT", str(GATEWAY_PORT)))
     read_timeout = float(os.environ.get("GATEWAY_READ_TIMEOUT", "600"))
