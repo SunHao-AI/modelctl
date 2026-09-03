@@ -57,10 +57,14 @@ def dumps(msg: dict[str, Any]) -> str:
 
 
 def parse_type(raw: str) -> str:
-    """解析消息类型；非法 JSON / 非 dict / 缺 t 一律返回空串（调用侧回 error 帧）。"""
+    """解析消息类型；非法 JSON / 非 dict / 缺 t 一律返回空串（调用侧回 error 帧）。
+
+    RecursionError：对端可构造数千层嵌套的 JSON 帧击穿 CPython 递归上限，该异常
+    不属 ValueError 家族，若不外捕会直接掀掉中心侧的 WS 处理循环。
+    """
     try:
         data = json.loads(raw)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         return ""
     return str(data.get("t", "")) if isinstance(data, dict) else ""
 

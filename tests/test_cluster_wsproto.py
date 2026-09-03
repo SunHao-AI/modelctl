@@ -35,6 +35,11 @@ def test_parse_type_invalid() -> None:
     assert wsproto.parse_type('{"no_type":1}') == ""
 
 
+def test_parse_type_deep_nesting_is_not_fatal() -> None:
+    """深嵌套 JSON 帧触发 RecursionError，必须吞掉返回空串，不得击穿中心。"""
+    assert wsproto.parse_type("[" * 6000) == ""
+
+
 def test_event_and_error() -> None:
     assert wsproto.make_event("model.up", {"profile": "q"})["kind"] == "model.up"
     assert wsproto.make_error("bad token")["t"] == "error"
