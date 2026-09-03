@@ -1,13 +1,108 @@
 # modelctl Cluster 分布式管理面设计文档
 
-> 日期: 2026-09-03 | 状态: 已评审（待实现）
+> 日期: 2026-09-03 | 状态: 已评审（含竞品对比 + 待实现）
 > 目标: 在不改动单机推理行为的前提下，为 modelctl 增加一个跨局域网的分布式控制面。每台 GPU 服务器在同一个局域网（M 个 LAN）中以现有 webui 进程常驻，向中心节点（节点 A）注册形成集群，通过一个 Web UI + CLI 统一管理 N 台服务器的模型下发、启停、监控与审计聚合。
 
 ---
 
-## 1. 需求分析
+## 1. 竞品分析
 
-### 1.1 背景
+调研了 6 类"节点 + 中心"分布式管理系统，按"对本设计的启发度"排序：
+
+### 1.1 K3s（Kubernetes distro）
+
+- **节点注册**：`k3s agent` 主动 join，token 仅作一次性 bootstrap，注册成功后转成本地持久证书（kubelet cert）。
+- **声明式**：声明式目标 + controller reconcile 是主路径；命令式运维为辅。
+- **通道**：HTTPS + watch（long-running API stream）而非自研 WS；agent 周期注册心跳。
+- **stale 判定**：lease heartbeat 超时 → `Unknown/NotReady`。
+- **UI**：Rancher/K3s dashboard 给节点列表 + workload events + 资源面板。
+- **启发**：
+  1. **bootstrap token 只用一次**（设计正合）。
+  2. **长期用节点专属身份**（node_token 思路正合）。
+  3. **lease 思路用于 stale 判定**（→§6 改进 A：用 `stale = (ts < lease_expiry)` 而非裸 `ts - last_seen > 3×interval`）。
+
+### 1.2 Fleet (Rancher multi-cluster)
+
+- **目标**：Git 仓库里声明 "这个集群应该有什么"（GitOps）；下游 cluster-fleet agent 持续 reconcile。
+- **UI**：第一屏是 **goal vs state diff**，不是简单列表；drift/rollout 进度可见。
+- **故障恢复**：control plane 故障时，下游 cluster 的 fleet agent 继续按本地 cached goal 工作；recovery 后 Git 目标再次 reconcile。
+- **启发**：
+  1. **cluster console 第一屏应该是 goal vs state**（→§8 UI 增量）。
+  2. **不存命令流水，存目标**（设计正合）。
+  3. **agent 必须有 last known goal 本地缓存**（设计正合，`cluster-goals.json`）。
+
+### 1.3 Nomad (HashiCorp)
+
+- **节点注册**：node → server register + gossip membership（UDP，memberlist）+ lease 机制。
+- **目标**：声明式 job spec + 命令式 ops（alloc stop、node drain、retry 等）。
+- **stale**：lease 过期 → 标记降级，节点失联先标 stale 而不是直接清理。
+- **启发**：
+  1. **lease 优于 heartbeat**（设计 §4 已写 `3×/9×interval`；§10 lease 替换为 `ts < lease_expiry`）。
+  2. **membership 与 workload 状态解耦**（node stale 和 model state 正交，设计正合）。
+  3. **auto retry policy 而非 auto-restart 一刀切**（设计正合，§6.2 错误不自动重试）。
+
+### 1.4 Ray Serve / vLLM Ray（最接近本设计）
+
+- **节点注册**：`ray start --address=head:6379` 主动 join；GCS 持中心控制面元数据。
+- **资源调度**：**Placement Group** 约束（`STRICT_PACK/SPREAD/STRICT_SPREAD/PACK`）+ capacity-aware 资源约束 + autoscaler（按 queue depth / replica 状态）。
+- **状态机**：deployment 显式状态 `PENDING / STARTING / READY / FAILED`，每个状态带 reason。
+- **runtime**：`runtime_env` 管理每个 deployment 的依赖 bundle（Python version / pip / image）。
+- **启发**（最高 ROI 来源）：
+  1. **worker 主动 join head 是合理模式**（design 正合）。
+  2. **placement group 约束**（memo 改进 C：goal 增加 placement）→ §5.6 校验门禁。
+  3. **deployment 状态机 + reason**（memo 改进 A：goal lifecycle 8 态 + 每态 reason）。
+  4. **GCS 集中元数据，用 SQLite 替代**（design 正合）。
+  5. **runtime_env = 每个 goal 绑定 runtime_ref**（memo 改进 C：goal 加 runtime_ref）。
+
+### 1.5 Kubernetes + KServe + SageMaker Fargate
+
+- **endpoint**：Service = 逻辑名 → ready replicas（endpoint slice）按 health probe 自动更新；外部 client 不直连 worker。
+- **声明式**：`kubectl apply` / InferenceService / SageMaker endpoint/variant 全部声明式 + controller reconcile。
+- **variant/traffic**：同一 endpoint 下多变体流量权重（canary、blue-green）。
+- **readiness**：未 ready 的 replica 不进 gateway pool。
+- **审计**：K8s event API 集中；audit policy 控所有 API 请求；logs 走 Fluentd/Loki（双层存储：worker 留 raw，center 留 summary）。
+- **启发**（P2 范围，MVP 不引入）：
+  1. **Endpoint + readiness + traffic_weight 抽象**（memo 改进 E，P2）。
+  2. **双层 audit**（memo 改进 F，MVP 已实现：worker raw JSONL + center 摘要 + 短事件）。
+  3. **readiness probe gate**（改进 A：`ready` 才是真正的 RUNNING，启动失败的 reason 可让用户在 dashboard 看到）。
+
+### 1.6 Triton Inference Server
+
+- **model repository**：声明式资源库（model/version/config），`config.pbtxt` 是 spec，backend 是 plugin。
+- **version policy**：all / latest / [1,2] 控制哪些版本可服务。
+- **ready/liveness**：`/v2/health/ready` 与时 `ModelReady` 决定 replica 是否可路由。
+- **metrics**：`/metrics` Prometheus text + per-model stats。
+- **启发**：
+  1. **model repository 作为声明式资源**（design 正合：profile YAML 就是模型的 spec）。
+  2. **readiness /ready API**（设计正合，现有 health 检查）。
+  3. **version policy + backend capability**（memo 改进 C：goal 加 `profile_version` + runtime 版本）。
+
+### 1.7 提取的改进清单
+
+| # | 改进 | 来源 | spec 落地 |
+|---|---|---|---|
+| A | goal 状态机 8 态（带 reason）替换 6 态模型状态机 | Ray + Triton | §6.2 |
+| B | `nodes` 表增强：容量 + 运行时 + last_goal_sync_sha | Ray GCS | §10.1 |
+| C | `goals` 表增强：placement / runtime_ref / profile_version / target_role / traffic_weight | Ray PG + Triton version + K8s variant | §10.1 |
+| D | goal 下发前 placement gate（中心侧校验 + `--dry-run`） | Ray autoscaler | §5.6 |
+| E | 集群网关 registry（P2，MVP 不改 gateway） | K8s EndpointSlice | §11 标记 |
+| F | Audit 摘要双层存储 + `metrics_rollups` 表 | K8s event API | §9.7 + §10.1 |
+| G | stale 判定从裸 interval 固emu 改为 lease | K3s / Nomad | §4.4 + §10.1 |
+
+### 1.8 明确不做（写出界防止 scope 漂移）
+
+- **不引入** Ray / K8s / Triton / Nomad / Fleet 本体（学思想不引组件）。
+- **不**改 gateway 做 cluster-aware routing（数据面零改动是核心边界，P2 再做，MVP 保留 nginx 路由）。
+- **不**引 EFK / Tekton（worker 本地 JSONL + center 摘要 + 短事件足够）。
+- **不**做 mTLS / RBAC（MVP 内 `API_KEY` + 节点 `node_token` 足够）。
+- **不**做中心 HA / 主备（MVP 单中心；中心故障不影响推理面）。
+- **不**做跨网复制 / 请求拆分（`goal set --all` 是"N 台各跑一份"，单请求仍走 nginx 单节点；跨网切流/负载均衡 P2）。
+
+---
+
+## 2. 需求分析
+
+### 2.1 背景
 
 modelctl 当前的能力是单机的：CLI / webui 管理本机上的模型 profile、引擎 venv、网关路由、用量统计与审计。它已有 `NODE_ID` / `NODE_HOST`（用于生成 nginx 多节点路由），但没有跨机集群能力。用户需求：把 N 台 GPU 服务器（分布在 M 个局域网，N ≥ M）纳入一个控制平面，通过 **一个 Web UI + 一套 CLI** 集中管理。
 
@@ -18,13 +113,13 @@ modelctl 当前的能力是单机的：CLI / webui 管理本机上的模型 prof
 4. **声明式目标状态 + 自动同步**：中心定义"集群应跑什么"，worker 本机可执行、可重启，配置由中心下发。
 5. **范围：仅管理面**。推理流量（数据面）仍走现有 nginx 路由直连 worker，不跨网拆分单个请求；"同一模型多 LAN 复制/负载均衡"留 P2。
 
-### 1.2 目标用户
+### 2.2 目标用户
 
 - 运维多 GPU 服务器 / 多 LAN 的工程师
 - 希望把分散的推理节点纳入统一管理的团队
 - 熟悉单机 modelctl 但需要批量下发同一 profile 到多机的人
 
-### 1.3 功能需求
+### 2.3 功能需求
 
 | 能力 | 说明 |
 |---|---|
@@ -36,8 +131,9 @@ modelctl 当前的能力是单机的：CLI / webui 管理本机上的模型 prof
 | 事件 / 审计聚合 | 跨节点事件流与审计日志可在中心 dashboard / CLI 查看 |
 | 集群视图 Web UI | 节点视图 + 跨机目标矩阵 + 事件流 + 集群设置 |
 | 集群 CLI | `modelctl cluster ...` 子命令 + 现有命令加 `--cluster` 聚合模式 |
+| **placement gate（新增）** | `goal set --dry-run` / 正式下发前中心校验：vram 估算 / runtime / GPU 冲突；不通过则标 `FAILED` + reason 不下发 |
 
-### 1.4 非功能需求
+### 2.4 非功能需求
 
 - **零破坏**：`CLUSTER_ROLE=solo`（默认）下行为与现状完全一致，现有部署零影响。
 - **控制面故障不中断推理面**：中心宕机 / 断网时，worker 推理进程持续运行；只失去控制面。
@@ -47,7 +143,7 @@ modelctl 当前的能力是单机的：CLI / webui 管理本机上的模型 prof
 
 ---
 
-## 2. 总体架构与角色
+## 3. 总体架构与角色
 
 **单中心、同构、单进程。** 同一个 `modelctl` 二进制，在 A 机上以"控制面实例"启动，在各 worker 上以"工作节点实例"启动。中心不跑推理流量（数据面直连 worker）。
 
@@ -60,7 +156,8 @@ modelctl 当前的能力是单机的：CLI / webui 管理本机上的模型 prof
                     │  ├─ /admin/cluster/* （节点/任务/状态）  │
                     │  ├─ /ws/cluster      （worker 通道）    │
                     │  └─ SQLite: nodes / goals / states /    │
-                    │                  events / audit         │
+                    │            events / audit /            │
+                    │            metrics_rollups             │
                     └──────────────┬──────────────────────────┘
                                    │ WebSocket（每 worker 一条）
                     ┌──────────────┼──────────────────┐
@@ -81,11 +178,11 @@ modelctl 当前的能力是单机的：CLI / webui 管理本机上的模型 prof
 
 ---
 
-## 3. 进程与角色模型（单一二进制）
+## 4. 进程与角色模型（单一二进制）
 
 一个 `modelctl` 进程同时承载三个面：数据面（网关 `/v1`）、管理面（`/admin/api`）、集群面（`/admin/cluster` + `/ws/cluster`）。三者共用同一端口（现有 webui 端口 4173），由 `.env` 的 `CLUSTER_ROLE` 决定是否挂集群路由。**worker 节点 = 不开集群面的 webui 进程**（`CLUSTER_ROLE=worker`），中心 = `both`。
 
-### 3.1 CLUSTER_ROLE 矩阵
+### 4.1 CLUSTER_ROLE 矩阵
 
 | CLUSTER_ROLE | 本地模型调度 | /admin/cluster/* | /ws/cluster | 节点台账 SQLite |
 |---|---|---|---|---|
@@ -95,7 +192,7 @@ modelctl 当前的能力是单机的：CLI / webui 管理本机上的模型 prof
 
 `solo` 不产生任何行为变化，现有部署零影响。
 
-### 3.2 cluster 子命令（CLI）
+### 4.2 cluster 子命令（CLI）
 
 ```bash
 # 中心（A）侧
@@ -103,19 +200,19 @@ modelctl cluster init                        # 初始化中心：生成 cluster 
 modelctl cluster status                      # 节点、模型目标状态汇总
 modelctl cluster nodes                       # 列出 worker（连/断/最后心跳/目标 diff）
 modelctl cluster goal list                   # 所有 (node, profile) 目标
-modelctl cluster goal set <profile> --node <id> [--create]
-modelctl cluster goal set qwen3.8-vllm --all --create   # 批量下发到所有 worker
+modelctl cluster goal set <profile> --node <id> [--create] [--dry-run]
+modelctl cluster goal set qwen3.8-vllm --all [--create] [--dry-run]   # 批量下发到所有 worker
 modelctl cluster goal remove <profile> --node <id>
 modelctl cluster sync --node <id>            # 手动触发一次 profile 全量同步（也可 --all）
-modelctl cluster launch <profile> --node <id> [--create]   # = goal set + start
+modelctl cluster launch <profile> --node <id> [--create]
 modelctl cluster stop <profile> --node <id>
-modelctl cluster join-token --rotate         # 生成/轮换 worker 加入凭证
+modelctl cluster join-token --rotate
 modelctl cluster events --node <id> --limit 100
 modelctl cluster backup --to <path>
 modelctl cluster restore --from <path>
 ```
 
-### 3.3 节点侧（worker）
+### 4.3 节点侧（worker）
 
 ```bash
 modelctl cluster join --center <A>:4173 --token <join-token> --node-id <id> --lan <lan-id>
@@ -125,13 +222,13 @@ modelctl cluster join --center <A>:4173 --token <join-token> --node-id <id> --la
 
 `join` 只写本地 `.env` 三行 + 触发 webui 重载，**不安装任何新的进程 / systemd 单元**——worker 仍跑现有 `modelctl webui start`（systemd）。即"N 台 server 单命令启动" = 现有 webui 启动命令 + 一次性 join。
 
-### 3.4 角色判定
+### 4.4 角色判定
 
 进程启动时读 `CLUSTER_ROLE`：
 - `both` / `control-plane` → 挂中心路由 + 启动节点监听器 + 调度循环
 - `worker` → 不挂集群路由，webui 起来后 spawn 一个 `WorkerAgent` 线程维持 WS
 
-### 3.5 关键不变量
+### 4.5 关键不变量
 
 1. 中心故障不中断 worker 推理（worker 本地 loop 持续 reconcile 最后 goal，WS 断线只影响控制面）。
 2. worker 离线时中心查看该节点显示 `stale`，但对其模型的本地起停不受影响。
@@ -139,332 +236,429 @@ modelctl cluster join --center <A>:4173 --token <join-token> --node-id <id> --la
 
 ---
 
-## 4. 注册与心跳协议（WebSocket，拉式 join）
+## 5. 注册与心跳协议（WebSocket，拉式 join）
 
-worker 不做"中心反向 push"，**worker 主动连中心**（`/ws/cluster`），带上 join token 注册。中心被动接受。这保证任何 NAT/防火墙下 worker 都能起来（worker 出站已可达——保留出站可达优先的健壮性）。
+worker 不做"中心反向 push"，**worker 主动连中心**（`/ws/cluster`），带上 join token 注册。中心被动接受。这保证任何 NAT/防火墙下 worker 都能起来（保留出站可达优先的健壮性）。
 
-### 4.1 WebSocket 协议（JSON over WS，一行一条）
+### 5.1 WebSocket 协议（JSON over WS，一行一条）
 
 握手（worker → center）：
 
 ```json
-{"t":"hello","v":1,"node_id":"w-210","lan":"lan-2","key":"<join-token|node_token>","meta":{"host_ip":"192.168.77.210","engines":{"vllm":"0.9.1","sglang":null},"api_key_sha":"ab12cd...","hostname":"w210"}}
+{"t":"hello","v":1,"node_id":"w-210","lan":"lan-2","key":"<join-token|node_token>","meta":{"host_ip":"192.168.77.210","engines":{"vllm":"0.9.1","sglang":null},"api_key_sha":"ab12cd...","hostname":"w210","capacity":{"gpu_count":8,"vram_total_mb":393216,"gpus":["RTX 5880 × 8"]},"runtimes":{"vllm-0.9.1":{"type":"venv","ok":true},"llamacpp-b6123":{"type":"binary","ok":true}}}}
 ```
 
 中心验证 key（hmac.compare_digest 对 join token 或已登记节点的 node_token）后回：
 
 ```json
-{"t":"welcome","node_token":"<该节点专属 token>","interval_s":10,"push":{"profiles":["qwen3.8-vllm"],"started":[...],"stopped":[...]}}
+{"t":"welcome","node_token":"<该节点专属 token>","interval_s":10,"lease_s":90,"push":{"profiles":["qwen3.8-vllm"],"started":[...],"stopped":[...]}}
 ```
 
-之后双向长连，worker 周期发心跳（默认 10s），中心按需下行指令。
+之后双向长连，worker 周期发心跳（默认 10s），中心按需下行指令；同时分配一个 lease（`lease_s`，默认 90s），worker 每周期续租。
 
-### 4.2 消息类型（t 字段）
+### 5.2 消息类型（t 字段）
 
 | 方向 | t | 用途 |
 |---|---|---|
 | worker→center | `hello` | 注册（一次性） |
 | center→worker | `welcome` | 注册成功 + 当前全量 goal 状态 |
-| worker→center | `heartbeat` | 周期；携带 `{profiles: {name:{state,health,gpu:[..],port,updated_at}}, gpu:{used_mb,total_mb,fan,util}, host:{cpu_pct,mem_pct,load}}` |
+| worker→center | `heartbeat` | 周期；携带 `{profiles: {name:{state,health,gpu:[..],port,updated_at}}, gpu:{used_mb,total_mb,fan,util}, host:{cpu_pct,mem_pct,load}, runtimes:{name:{ok,reason}}}` |
 | worker→center | `event` | 离散事件：模型 up/down、venv ready、probe 完成（用于审计聚合） |
 | worker→center | `log_tail` | 响应 log-tail 请求时回 N 行 |
-| center→worker | `goal.sync` | 下发 profile YAML 全量（`{name, yaml, sha256}`） |
+| worker→center | `metrics_summary` | 周期；上报最近 N 分钟的 rollup（requests/errors/latency/tokens），center 存 `metrics_rollups` 表 |
+| center→worker | `goal.sync` | 下发 profile YAML 全量（`{name, yaml, sha256, sha256_params}`） |
 | center→worker | `model.start` / `model.stop` / `model.restart` | 控制面起停 |
-| center→worker | `status.query` / `log.tail` / `probe.run` | 主动查询 |
+| center→worker | `status.query` / `log.tail` / `probe.run` / `audit.query` | 主动查询 |
 | center→worker | `token.rotate` | 节点 token 轮换 |
 
-### 4.3 鉴权与凭据链
+### 5.3 鉴权与凭据链
 
 - 中心 `cluster init` 生成 `CLUSTER_JOIN_TOKEN`（一次性，仅用于新节点 join 校验）。
 - worker join 成功后，中心为每个节点签发**节点专属 `node_token`**，后续该 worker 重连只用 node_token（不再需要 join token），可单独吊销某一节点。
 - 节点 token 存中心 SQLite；忘记则 `cluster join-token --rotate-node <id>`。
 
-### 4.4 断线 / 重连 / 防抖
+### 5.4 断线 / 重连 / 防抖
 
 - worker 本地 WorkerAgent 维护指数退避（1s→2s→…→30s）重连；每次重连重发 hello 用 node_token（幂等，中心回当前 goal，worker 据此 reconcile 本地）。
-- 中心侧：worker 心跳超时（3×interval）标记节点 `stale`；9×interval 标记 `offline`；不删除记录。
-- 同一 node_id 同时只允许一条 WS：新连接到来时踢旧连接（同一 worker 重启新进程）。
-- 中心→worker 指令是**幂等**的：start 时若已 up 直接 ack；stop 时若已 down 直接 ack。
+- **中心侧 stale 判定改为 lease 机制**（K3s/Nomad 借鉴）：每个 node 记 `lease_expiry`；heartbeat 成功时延长 `lease_expiry = now + lease_s`；`now > lease_expiry` 即 stale（`status=stale`）；`stale + (now > last_seen + 3×lease_s)` 即 offline。**不再使用裸 3×/9×interval 双阈值**。
+- 同一 node_id 同时只允许一条 WS：新连接到来时踢旧连接。
+- 中心→worker 指令是**幂等**的：start 已 up → ack；stop 已 down → ack；sync 同 sha → skip。
 
-### 4.5 中心可靠性
+### 5.5 中心可靠性
 
-- 中心进程崩溃：worker 不受影响（心跳收不到响应只是退避重连）；重开后 worker 自动 hello 回来，状态恢复。
-- worker 推理被外部杀掉：webui 进程存活→下一次 heartbeat 上报 `state=down`，中心标记 stale model；webui 被杀→worker 节点 `stale/offline`，推理自然断（符合预期）。
-- 中心记录所有节点最后已知 goal，重启后从 SQLite 加载，不丢失目标状态。
+- 中心进程崩溃：worker 不受影响（心跳收不到响应只是退避重连）；中心重启后 worker 自动 hello 回来，状态从 SQLite 恢复，goal 不丢。
+- worker 推理被外部杀掉：webui 活着 → 下次 heartbeat `state=down`；webui 死了 → 节点 `stale/offline`，推理自然断（符合预期）。
 
 ---
 
-## 5. 声明式目标状态与 profile 同步
+## 6. 声明式目标状态与 profile 同步
 
 **Goal（目标）= 中心记录在 SQLite 里"应该在哪个节点跑哪个 profile"的声明**，worker 端的 `models/` 是同步产物 + 执行层。Goal 是唯一 source of truth。
 
-### 5.1 Goal 记录结构
+### 6.1 Goal 记录结构
 
 ```
 goals(
-  id            TEXT PK          # 全局唯一，形如 "qwen3.8-vllm@w-210"
+  goal_id       TEXT PK          # "<profile>@@<node_id>"
   node_id       TEXT             # 目标节点 worker 的 cluster node_id
   profile       TEXT             # 模型标识符 (name)
   engine        TEXT             # 引擎子目录，如 "vllm"
   profile_yaml  TEXT             # 下发的完整 profile YAML 原文
   profile_sha   TEXT             # sha256（漂移检测 + sync 幂等）
+  profile_version TEXT           # 语义版本（如 "2026-09-03-1"，Triton version policy 借鉴）
   intent        TEXT             # start | stop（默认 start）
   params        JSON             # 引擎参数覆盖（可选，如 gpu_list、tp）
   env_overlay   JSON             # .env 片段要覆盖到 worker 的字段（仅白名单 key）
+  placement     JSON             # 资源约束 {min_vram_mb, gpu_count, same_node_required, min_free_mb_per_gpu, lan_allow}
+  runtime_ref   TEXT             # "vllm@0.9.1" / "docker:image:xx" / "binary:llamacpp@b..."
+  target_role   TEXT             # primary | replica | benchmark
+  traffic_weight INTEGER NULL    # 同 family 下 traffic weight（P2 用，MVP 0）
   created_by    TEXT
   created_at    TEXT
 )
 ```
 
-`goal set qwen3.8-vllm --all` → 对每个在线 worker 生成一条 `(node_id, profile)` goal。
+`goal set qwen3.8-vllm --all` → 对每个 **placement 通过的**在线 worker 生成一条 `(node_id, profile)` goal（自动跳过容量不足的节点，给提示）。`--create` 标志：若节点上还没有该 profile，sync 时自动先下载。
 
-### 5.2 Worker 端数据结构（同步产物）
+### 6.2 Worker 端数据结构（同步产物）
 
 ```
 worker 机
 ├── models/                          # 现有目录，profile 原地
 │   ├── vllm/
 │   │   └── qwen3.8.yaml            # 由 sync 写入
-│   │       └─ 头部注入注释：# managed-by: modelctl-cluster goal_id=qwen3.8-vllm@w-210
+│   │       └─ 头部注释：# managed-by: modelctl-cluster goal_id=qwen3.8-vllm@w-210
 │   └── ...
 ├── data/cache/
 │   ├── cluster-goals.json           # 缓存本节点所有 goal（含源 + sha256）
 │   └── cluster-sync-marker.json     # 上次 sync 时间 + goal 集合 hash
 ```
 
-### 5.3 同步语义
+### 6.3 同步语义
 
-- **写文件原子**：`models/<engine>/<name>.yaml` 用临时文件 + rename 写入；写入前做一个 `.master` 备份（与现有下载回写一致）。
-- **漂移检测**：worker 端 heartbeat 前扫一遍 `data/cache/cluster-goals.json` 列出的每个 profile 的当前 sha256，与 goal 的 sha 比较；不一致 → 上报 drift 事件（worker 本地被改过或被删）。中心 dashboard 标黄。
-- **不覆盖**本地自定义：worker 上手动 `modelctl start` 一个新 profile（中心不知道）不算 drift；删掉了中心管理的 profile 才标 stale。
-- **幂等**：sync 以 goal_id 为键，重复 sync 不重写未变内容（sha 相同则 skip）。
+- **写文件原子**：`models/<engine>/<name>.yaml` 用临时文件 + rename 写入；写入前做 `.master` 备份。
+- **漂移检测**：worker 端 heartbeat 前扫一遍 cluster-goals.json 列出的每个 profile 的当前 sha256，与 goal 的 sha 比较；不一致 → 上报 drift 事件（worker 本地被改过或被删）。中心 dashboard 标黄。
+- **不覆盖**本地自定义：worker 上手动 `modelctl start` 一个新 profile（中心不知道）不算 drift；删掉中心管理的 profile 才标 stale。
+- **幂等**：sync 以 goal_id 为键，重复 sync 不重写未变内容（sha 相同跳）。
 
-### 5.4 环境变量处理
+### 6.4 环境变量处理
 
-worker 本地 `.env` 的敏感项（API_KEY、MODEL_ROOT）**不从中心下发**。profile YAML 里的 `${API_KEY}` 模板在 worker 本地解析（与现有 envfile 机制一致），密钥不随 sync 落明文。中心 dashboard 显示该 goal 对应 worker 是否已配置所需 env 项（worker 心跳带 `env_ok: {profile: bool}`）。
+worker 本地 `.env` 的敏感项（API_KEY、MODEL_ROOT）**不从中心下发**。profile YAML 里 `${API_KEY}` 占位符 worker 本地解析（与现有 envfile 机制一致），密钥不随 sync 落明文。中心 dashboard 显示该 goal 对应 worker 是否已配置所需 env 项（worker 心跳带 `env_ok: {profile: bool}`）。
 
-### 5.5 控制面 API（/admin/cluster/*）
+### 6.5 控制面 API（/admin/cluster/*）
 
 ```
-GET    /admin/cluster/nodes               # 节点列表 + 状态
-GET    /admin/cluster/nodes/{id}          # 单节点详情（含本节点 goals 列表）
-POST   /admin/cluster/goals               # 创建 goal {profile, node_id|all, params, env_overlay}
-GET    /admin/cluster/goals?node_id=&profile=
-PUT    /admin/cluster/goals/{id}          # 更新 params
-DELETE /admin/cluster/goals/{id}          # 删除 → 下发动作: 删本地 profile + 停模型
-POST   /admin/cluster/nodes/{id}/sync     # 强制全量 sync
+GET    /admin/cluster/nodes                    # 节点列表 + 状态
+GET    /admin/cluster/nodes/{id}               # 单节点详情（含本节点 goals 列表）
+POST   /admin/cluster/goals                    # 创建 goal {profile, node_id|all, params, env_overlay, placement, runtime_ref, target_role}
+GET    /admin/cluster/goals?node_id=&profile=  # 列 goal
+PUT    /admin/cluster/goals/{id}               # 更新 params
+DELETE /admin/cluster/goals/{id}               # 删除 → 下发动作: 删本地 profile + 停模型
+POST   /admin/cluster/nodes/{id}/sync          # 强制全量 sync
 POST   /admin/cluster/nodes/{id}/model/{name}/start|stop|restart
-GET    /admin/cluster/nodes/{id}/log?tail=200
-GET    /admin/cluster/audit?from=&to=&node_id=   # 跨节点审计聚合
-POST   /admin/cluster/join-tokens         # 轮换 join token
-GET    /admin/cluster/export              # 全部 goal + 节点状态的 JSON 导出
+GET    /admin/cluster/nodes/{id}/log?tail=200  # 模型日志
+GET    /admin/cluster/audit?from=&to=&node_id= # 跨节点审计聚合（摘要）
+POST   /admin/cluster/join-tokens              # 轮换 join token
+GET    /admin/cluster/export                   # 全量 goal + 节点状态 JSON 导出
 ```
 
-所有 `/admin/cluster/*` 过现有 Bearer（API_KEY）鉴权，访问权限不变。
+所有 `/admin/cluster/*` 过现有 Bearer（API_KEY）鉴权。
+
+### 6.6 下发校验门禁（placement gate，Ray autoscaler / Placement Group 借鉴）
+
+**所有 `goal set` / `launch` 在正式下发前先过中心侧校验门禁**；`--dry-run` 时只跑校验不写 DB：
+
+```
+inputs:
+  goal: { profile_yaml, params, env_overlay, placement, runtime_ref, target_role, node_id | --all }
+
+gate 步骤（按顺序，短路）:
+  1. profile schema (PyYAML 加载 + 必填字段检查)
+  2. engine 是否在 worker 节点支持（node.runtimes[engine*] 探测, 来自 worker 心跳缓存）
+  3. 模型 vram 估算: 用现有 vram_estimator.py 估算 estimated_vram_mb
+  4. 对每个候选 node:
+     a. capacity.gpu_count >= placement.gpu_count
+     b. capacity.vram_total_mb >= placement.min_vram_mb
+     c. 现有 conflicts: 检查 node 上已 start/starting 的 model 与 placement.same_node_required=gpu 冲突（用 gpu_lock 的 gpus 字段）
+     d. lan_allow 通过
+     e. 同 model + 同 node + 同 profile_version 已存在 goal？→ skip（幂等）
+  5. 全部候选都 fail → 不下发，center 输出:
+       [error] candidate w-211: vram 不足 (need 200G, total 48G)
+       [error] candidate w-212: gpu 0,1 已被 deepseek-v4-flash-vllm 占用
+       [hint]  原因: need 4 GPUs, 候选节点都缺失 → --placement 调整或扩 GPU
+  6. --create 且 node 上没有该 model → gate 标 "PENDING_DOWNLOAD"（worker 触发同步时 stage 状态机标记）
+
+输出（--dry-run）:
+  node      result    reason
+  w-210     ok        vram ok, gpus free
+  w-211     skip      vram 不足
+  w-212     skip      gpu 冲突
+  centers   created    1 new goal
+```
+
+正式下发：成功的 goal 写入 `goals` 表，stage=`PENDING_PROFILE_SYNC`；失败的 goal 不入库，输出失败 reason 列表。
+
+**`goal.set` 的 stage 字段：** `PENDING_PROFILE_SYNC / PROFILE_SYNCED / RUNTIME_OK / STARTING / READY / DEGRADED / FAILED`（详见 §7.2）。
 
 ---
 
-## 6. 启动流程与模型状态机
+## 7. 启动流程与模型状态机
 
-**原则：worker 自持 reconcile 循环，与中心解耦。** 中心只投递 intent（goal + start/stop 指令），worker 端常驻 reconciler 负责把本地状态逼向"最后已知"状态。中心断线 / 宕机，worker 推理不受影响。
+**原则：worker 自持 reconcile 循环，与中心解耦。** 中心只投递 intent（goal + start/stop 指令），worker 端常驻 reconciler 负责把本地状态逼向"最后已知"状态。
 
-### 6.1 Worker 端 reconciler（webui 进程内一个线程）
+### 7.1 Worker 端 reconciler（webui 进程内一个线程）
 
 每 5s 一轮（也是 heartbeat 的触发源）：
 
 ```
 loop:
-  1. 读取本地 data/cache/cluster-goals.json（中心最后一次 goal.sync 写入）
+  1. 读取本地 data/cache/cluster-goals.json
   2. 对每个 (profile: intent):
        读本地 model state（process.is_pid_alive + health 探测）
        配方:
-         - intent=start  且 state=unknown/down → 调用现有 start 入口
-         - intent=stop   且 state=up           → 调用现有 stop
+         - intent=start  且 state=unknown/down  ↓
+             - 检查 stage=PENDING_PROFILE_SYNC → 等 sync
+             - 检查 stage=RUNTIME_OK → 调现有 start 入口（走现有能力探测/gpu_lock/venv）
+         - intent=stop   且 state=up           → 调现有 stop；stage=STOPPED
          - intent=start  且 state=up           → skip
-       start/stop 的实际执行仍走原有 modelctl core（cli.py 内 _cmd_start），
-       reconciler 只决定"去不去调"，不重写执行逻辑
+         - start/stop 的实际执行仍走原有 modelctl core（cli.py 内 _cmd_start）
+       更新本地 stage 映射:
+         PENDING_PROFILE_SYNC  →（中心 goal.sync 追上） PROFILE_SYNCED
+         PROFILE_SYNCED        →（runtime 可用 + 模型文件存在） RUNTIME_OK
+         RUNTIME_OK            →（reconciler 调 start） STARTING
+         STARTING              →（health 返回） READY
+         READY                 →（health 失败） DEGRADED
+         DEGRADED              →（连续 3 次 health 失败，或 error 类型不可重试）FAILED
+         任意                  →（中心 goal.intent=stop 且 stop OK） STOPPED
+       错误分类（error_class）：venv_missing / gpu_lock / oom / startup_timeout / model_download_failed / runtime_capability
   3. 比较"实际 state"与 goal 声明，记录 drift 标记
-  4. 发起 heartbeat（含 profiles / gpu 聚合 / events）
+  4. 发起 heartbeat（含 profiles / gpu 聚合 / events / runtimes / 最短 metrics_summary）
   5. 若收到中心新指令:
        goal.sync            → 原地更新 models/<engine>/<name>.yaml（后续 re-reconcile）
        model.start/stop/restart → 调整本地 intent 表（不立即执行，下轮 loop 生效）
        status.query / probe.run → 立即执行
-       log.tail             → 立即响应
+       log.tail / audit.query   → 立即响应
   6. sleep(5)
 ```
 
 关键点：reconciler 只调度"去调现有 start/stop"，所有重算力走现有引擎 adapter。**worker 的本地行为与单机模式完全一致**，集群模式是单机之上的调度层，不替换不破坏。
 
-### 6.2 模型状态机（worker 端，与中心展示一致）
+### 7.2 模型 goal lifecycle 状态机（8 态 + reason，Ray deployment / Triton readiness / K8s 借鉴）
 
 ```
-  unknown  ──(probe ok, pid alive)──▶  up
-     │       ▲
-     │stop   │(health ok after start)
-     ▼       │
-   down  ◀──(manual start ok)──  starting  ◀──(start command)──  unknown
-     │        ▲
-     │(start cmd)
-     ▼
-  stopping
+        goal.set
+           │
+           ▼
+  ┌──────────────────────────────────────────────────────────┐
+  │         PENDING_PROFILE_SYNC                               │
+  │  center 已创建 goal，正在 goal.sync 到 worker              │
+  └────────┬─────────────────────────────────────────────────┘
+           │ worker 端收到 sync
+           ▼
+  ┌──────────────────────────────────────────────────────────┐
+  │         PROFILE_SYNCED                                     │
+  │  worker 端 models/<engine>/<name>.yaml 已写入，sha 匹配    │
+  └────────┬─────────────────────────────────────────────────┘
+           │ runtime 可用（venv/docker/env vars OK）
+           ▼
+  ┌──────────────────────────────────────────────────────────┐
+  │         RUNTIME_OK                                         │
+  │  引擎 binary/venv/model 文件齐备；可 start                  │
+  └────────┬─────────────────────────────────────────────────┘
+           │ reconciler 调 start (gpu_lock 通过 + 能力探测通过)
+           ▼
+  ┌──────────────────────────────────────────────────────────┐
+  │         STARTING                                          │
+  │  start 中，等 health（最长 300s timeout）                   │
+  └────────┬─────────────────────────────────────────────────┘
+           │ health 200
+           ▼
+  ┌──────────────────────────────────────────────────────────┐
+  │         READY                                             │
+  │  推理可用；dashboard 绿 / 可被 nginx 路由                   │
+  │       │                                                    │
+  │       │ health 失败 N 次                                   │
+  │       ▼                                                    │
+  │  ┌────────────────────────────────────────────────────────┐
+  │  │  DEGRADED                                              │
+  │  │  健康检查失败但进程还在（worker 自动通过 now retry 恢复）│
+  │  │  │ continuous 3 F fail 或 error_class not retryable   │
+  │  │  ▼                                                     │
+  │  │  FAILED                                                │
+  │  │  推理不可用；reason 显示                                    │
+  │  │  用户手动 retry → RESET 回 PENDING_PROFILE_SYNC          │
+  │  └────────────────────────────────────────────────────────┘
+  └────────┬─────────────────────────────────────────────────
+           │ 中心下发 stop 且 stop OK
+           ▼
+       ┌────────────────┐
+       │     STOPPED    │（不进入 FAILED）
+       └────────────────┘
 ```
 
-- `unknown`：还没收到过 intent 或 probe 中
-- `starting`：reconciler 已发 start，等 health 回来（走现有 wait_health，超时 300s）
-- `up`：health OK，推理可用
-- `stopping`：stop 发出，等 PID 消失
-- `down`：已停止 / 健康检查失败
-- `error`：start 失败（能力探测失败 / venv 缺失 / gpu_lock 抢占失败），附 failure reason
+- **状态机是 goal 层面的，不是 model-instance 层面的**——一个 goal 同时只有一个 stage。
+- **错误不自动重试**：reconciler 看到 `error_class ∈ {venv_missing, gpu_lock, oom, frontend_capability}` → 标 FAILED + reason，停调度；`model_download_failed` 可能允许 dry-retry（`--create` 场景），其他 error_class 一律不 retry。
+- **错误分类（error_class）**：`venv_missing / gpu_lock / oom / startup_timeout / model_download_failed / runtime_capability / profile_invalid`，dashboard 红 + 一键 retry（中心直接发 start 指令）。
 
-**错误不自动重试**：reconciler 看到 error → 停止对该 goal 的调度（避免无限重试刷爆日志）；下次 goal 变更（同步/手动 start）或节点重启时重新尝试。中心 dashboard 上 `error` 节点标红 + 提供"重试"按钮（本质是触发一次 start 指令）。
-
-### 6.3 与现有本地操作兼容
+### 7.3 与现有本地操作兼容
 
 - worker 上手工 `modelctl start`（不经中心）：reconciler 探测到 state=up、intent=stop → 会把它停下（reconcile 到 goal）。有意行为。用户想让 worker 自治：`cluster goal remove` 后再本地 start，reconciler 不再管理该 profile。
 - 中心 stop 一个本地没启动的模型：worker 收到 stop 指令但 state=down，直接 ack skip（幂等）。
-- goal=start 但 worker 缺 venv：现有 start 报错，reconciler 标 error，dashboard 提示"需要先 `modelctl env setup <engine>`"。
+- goal=start 但 worker 缺 venv：现有 start 报错，reconciler 标 FAILED（error_class=venv_missing），dashboard 提示"需要先 `modelctl env setup <engine>`"。
 
-### 6.4 跨 LAN 同一请求
+### 7.4 跨 LAN 同一请求
 
-本设计（仅管理面）**不做跨网复制调度**。`goal set --all` 只是"在所有 worker 上都跑"，请求仍由 nginx 直连某一台（用户/客户端通过 nginx 路由到具体 node-id 决定）。后续如需复制/负载均衡，在 nginx 层按 node-id 做 upstream 即可，数据面零改动。
+本设计（仅管理面）**不做跨网复制调度**。`goal set --all` 只是"在所有 placement 通过的 worker 上都跑"，请求仍由 nginx 直连某一台。后续如需跨网复制/负载均衡，P2 在 nginx 层按 node-id 做 upstream 即可，数据面零改动。
 
-### 6.5 中心 dashboard / CLI 的模型视图
+### 7.5 中心 dashboard / CLI 的 goal 视图
 
 每个 `(node, profile)` 一行：
 
 ```
-node       profile           intent  state     gpu        port   age      events
-w-210      qwen3.8-vllm      start   up        [0,1,2,3]  8101   2d3h     -
-w-210      qwen3.8-llamacpp  stop    down      -          -      -        -
-w-211      deepseek-v4-flash start   starting  [0,1]      18888  45s      venv ready
-w-212      kimi-k2.5-sglang  start   error     -          -      12m      gpu_lock: 已被占用
+node       profile           intent  stage              reason    gpu        port   age
+w-210      qwen3.8-vllm      start   READY               -        [0,1,2,3]  8101   2d3h
+w-210      qwen3.8-llamacpp  stop    STOPPED             -        -          -      -
+w-211      deepseek-v4-flash start   STARTING            venv ready  [0,1]   18888  45s
+w-212      kimi-k2.5-sglang  start   FAILED              gpu_lock: gpus [0-3] 已被占用  -  -
+w-212      qwen3.8-vllm      start   PROFILE_SYNCED      waiting runtime  -  -
 ```
 
 ---
 
-## 7. 故障处理与恢复
+## 8. 故障处理与恢复
 
 **核心立场：控制面故障永远不中断推理面。** 推理面跑在 worker 本地 webui + 引擎进程里，是长驻进程；集群是 scheduler/监控层，不是数据路径。
 
-### 7.1 故障场景与恢复矩阵
+### 8.1 故障场景与恢复矩阵
 
 | 故障 | 现象 | 恢复路径 | 数据面影响 |
 |---|---|---|---|
-| worker 模型 OOM/崩溃 | 引擎进程死，webui 活着 | reconciler 探测 state=down、intent=start → **不自动重启**（避免 OOM loop），标 error + 事件上报；中心 dashboard 标红 + 手动"重试" | 该模型不可用，其他模型不受影响 |
-| worker webui 进程死 | 引擎进程可能还在（detached）；WS 断 | 节点心跳超时 → 中心标 `stale`（3×interval）→ `offline`（9×interval）；webui 由 systemd 重启后重新 join → 中心收 hello → 状态恢复，reconciler 对仍 running 的引擎进程做 "adopt"（只读 pid，不重复 start） | 无（引擎 detached） |
+| worker 模型 OOM/崩溃 | 引擎进程死，webui 活着 | reconciler 探测 state=down、intent=start → **不自动重启**（避免 OOM loop），标 FAILED（error_class=oom）+ 事件上报；中心 dashboard 标红 + 手动"重试" | 该模型不可用，其他模型不受影响 |
+| worker webui 进程死 | 引擎进程可能还在（detached）；WS 断 | 节点 lease 超时 → `stale` → `offline`；webui 由 systemd 重启后重新 join → 中心收 hello → 状态恢复，reconciler 对仍 running 的引擎进程做 "adopt"（只读 pid，不重复 start） | 无（引擎 detached） |
 | worker 整台机器宕机 | 节点 offline | 中心标 offline；单机故障不影响其他节点；用户按 nginx 路由感知单节点 404 | 该 LAN 内切流到其它 LAN 需用户改 nginx |
-| 中心进程宕机 | 所有 WS 断；所有 worker stale→offline | 中心 systemd 自动拉起；worker 指数退避重连 → hello → 中心从 SQLite 恢复 goal/节点 → 全量重放；worker reconciler 期间按本地最后 goal 继续 reconcile | **零**（worker 独立） |
+| 中心进程宕机 | 所有 WS 断；所有 worker 节点 stale→offline（lease 持续到期） | 中心 systemd 自动拉起；worker 指数退避重连 → hello → 中心从 SQLite 恢复 goal/节点 → 全量重放；worker reconciler 期间按本地最后 goal 继续 reconcile | **零**（worker 独立） |
 | 中心 SQLite 损坏/删除 | 节点列表 + goal 全丢 | 用备份恢复；或 `cluster init` 重建 + 所有 worker 重新 join（重新 sync）。worker 端 `cluster-goals.json` 还在，推理持续 | **零** |
 | join token 泄露/实体攻击 | 任意公网 worker 可注入 | `cluster join-token --rotate`（一次性换发）；节点专属 token 可单独 `--rotate-node <id>` 吊销；中心可标 `node.disabled=true` 拒绝对节点所有指令 | **零** |
 | 跨网到某 LAN 不通 | 节点 stale | 同"中心宕机"路径；该 LAN 推理仍可用；中心 dashboard 标红。网络恢复后自动重连 | 该 LAN 推理可用；中心失去该 LAN 控制 |
-| LAN 网络抖动 | 心跳丢包 | WS 自带 TCP 重传；worker 指数退避重连；3×interval 阈值吸收抖动 | 无 |
+| LAN 网络抖动 | 心跳丢包 | WS 自带 TCP 重传；worker 指数退避重连；lease 阈值（lease_s=90s）吸收抖动 | 无 |
+| goal 下发被 placement gate 拒 | 节点容量不足 / GPU 冲突 / runtime 缺失 | `cluster goal set --dry-run` 提示 reason；修正后重新 set；dashboard 标 red | 无（没下发，没影响） |
 
-### 7.2 一致性保证（幂等 + 最后 goal 语义）
+### 8.2 一致性保证（幂等 + 最后 goal 语义）
 
 - **所有 center→worker 指令幂等**（start 已 up → ack；stop 已 down → ack；sync 同 sha → skip），重放安全。
 - **worker reconciler 以本地 intent 表为唯一调度源**，intent 表从中心 goal.sync 或 model.start/stop 指令更新，worker 崩溃重启时从 `cluster-goals.json` 重建，本地不依赖中心在线。
 - **heartbeat 带"events 队列"**：worker 本地事件先入队（内存环形 1000），WS 重连后先 flush 未确认 events 再恢复周期心跳，避免事件丢失。
 - **审计日志独立**：每 worker 本地 audit（现有 `AUDIT_DIR`），中心 dashboard 聚合视图只读 worker 持久化日志（`modelctl audit` 远程调用），中心宕机不丢审计。
 
-### 7.3 明确不做（MVP 范围外）
+### 8.3 明确不做（MVP 范围外）
 
-- 不做自动重启策略（防止 OOM loop）、不做 LAN 自动切流（nginx 层的事）、不做中心主备（MVP 内 1 中心足够，P2 再议）。
+- 不做自动重启策略（防止 OOM loop）、LAN 自动切流（nginx 层的事）、中心主备（MVP 内 1 中心足够，P2 再议）。
 - 做：dashboard 红色节点 + 事件流；`cluster status` CLI 持续输出。
 
-### 7.4 测试
+### 8.4 测试
 
-- 单元测试：state machine 转移、幂等指令、reconcile 配方表、token 校验。
-- 集成测试（fake center / fake worker 在进程内）：节点注册/心跳/断线/重连/重新 join 后状态恢复。
-- 故障注入测试：`SIGKILL` worker webui、删中心 SQLite、断网 90s 后 reconcile，断言推理不中断。
+- 单元测试：goal state machine 转移、幂等指令、reconcile 配方表、token 校验、placement gate 各策略。
+- 集成测试（fake center / fake worker 在进程内）：节点注册/心跳/断线/重连/重 join 后状态恢复。
+- 故障注入测试：`SIGKILL` worker webui、删中心 SQLite、断网 90s 后 reconcile，断言推理不中断、只标 offline。
 
 ---
 
-## 8. Web UI 与 CLI 用户体验
+## 9. Web UI 与 CLI 用户体验
 
 **原则：复用现有 Vue 前端结构（Layout/Sidebar/route 模块），新增 2 个路由面板 + 1 个 API 模块 + 现有 Dashboard 增加"节点"列。** 不新做工程，不改 Vite 配置。
 
-### 8.1 路由变更（web/src/router/index.ts）
+### 9.1 路由变更（web/src/router/index.ts）
 
 ```
 /admin              Dashboard（现有；表格加 1 列 "node"）
 /models             模型列表（现有；加 "节点" 筛选 + "节点" 显示列）
 /cluster/nodes      新增  ← 集群节点视图
-/cluster/goals      新增  ← 跨机目标状态矩阵 + goal 管理
+/cluster/goals      新增  ← 跨机目标状态矩阵 + goal 管理（Fleet 借鉴：第一屏 goal vs state）
 /system             现有 Settings（新增 Join Token 块）
 ```
 
-### 8.2 新增导航项（Sidebar.vue）
+### 9.2 新增导航项（Sidebar.vue）
 
 "集群" 下挂 `节点` 与 `目标` 两个子项；solo 角色下隐藏整组（根据 `/admin/cluster/status` 是否 404 判定）。
 
-### 8.3 ClusterNodesView.vue
+### 9.3 ClusterNodesView.vue
 
 ```
-┌─ 节点列表（表格）─────────────────────────────────────────────┐
-│ 节点    LAN     角色   状态    心跳   已建连   GPU 占用    模型数 │
-│ w-210   lan-2   worker online  3s     2d3h     384/384G    4    │
-│ w-211   lan-2   worker online  4s     1h2m     48/384G     1    │
-│ w-212   lan-5   worker stale   45s    -        -           2    │
-└──────────────────────────────────────────────────────────────┘
+┌─ 节点列表（表格）─────────────────────────────────────────────────────────┐
+│ 节点    LAN     角色   状态    lease   已建连   GPU 占用    模型数  gate ok │
+│ w-210   lan-2   worker online   35s   2d3h     384/384G     4      4/4    │
+│ w-211   lan-2   worker online   42s   1h2m     48/384G      1      4/4    │
+│ w-212   lan-5   worker stale    -     -        -            2      3/4    │
+└──────────────────────────────────────────────────────────────────────────┘
   点进去 → /cluster/nodes/:id → 详情面板:
-  ・基础信息: host_ip / hostname / engine 版本表 / API_KEY 可用性
+  ・基础信息: host_ip / hostname / engine 版本表 / API_KEY 可用性 / placement 余量
   ・GPU: 每卡 used_mb/total_mb/fan%/util%/温度
-  ・模型矩阵: profile / intent / state / gpu / port / age
-    → 每个模型可 [启动]/[停止]/[跟踪日志]
+  ・Runtimes: 每 engine 的 venv/docker 版本 + ok flag
+  ・模型矩阵: profile / intent / goal stage / reason / gpu / port / age
+    → 每个模型可 [启动]/[停止]/[跟踪日志]/[重试]
   ・事件流: 最近 100 条 event（SseLogViewer 复用）
   ・"重新 sync" / "禁用节点" / "轮换该节点 token" 按钮
 ```
 
-### 8.4 ClusterGoalsView.vue
+### 9.4 ClusterGoalsView.vue
+
+**第一屏：goal vs state diff（Fleet 借鉴），不是命令流水。**
 
 ```
-┌─ 目标状态矩阵 ──────────────────────────────────────────────┐
-│ 节点  ┬ qwen3.8-vllm  ┬ deepseek-v4-flash ┬ kimi-k2.5-sglang │
-├───────┼───────────────┼──────────────────┼──────────────────
-│ w-210 │ ● up [0-3]    │ ○ down           │ ○ down
-        │ intent=start  │ intent=stop      │ intent=start
-│ w-211 │ ● up [0-1]    │ ◐ starting [0-1] │ -（未声明）
-│ w-212 │ -             │ ● up [0-3]       │ ✕ error: gpu_lock
-└──────────────────────────────────────────────────────────────┘
-  ✕ 点击弹事件详情。
+┌─ 目标状态矩阵 ──────────────────────────────────────────────────────┐
+│ 节点   ┬ qwen3.8-vllm          ┬ deepseek-v4-flash  ┬ kimi-k2.5-sglang│
+├────────┼───────────────────────┼────────────────────┼────────────────┤
+│ w-210  │                         │                    │
+        │  声明: start@v1           │ 声明: stop@v1       │
+        │  实际: READY [0-3]:8101   │ 实际: STOPPED       │
+        │  ● diff: 0                │  ● diff: 0            │
+│ w-211  │   same as w-210            │ 声明: start@v1    │
+        │                            │  实际: STARTING [0-1]│
+        │                            │  ◐ diff: 启动中     │
+│ w-212  │   未声明                 │  声明: start@v1      │
+        │                            │  实际: READY [0-3]:9001 │
+        │                            │  ● diff: 0          │
+        └────────────────────────────┴────────────────────┴────────────────┘
+  右侧工具栏:
+  ・"批量下发"：选 profile → 选 --all/指定节点 → (可选 env_overlay JSON) → 提交
+  ・"[placement gate]"：批量下发前跑 gate，展示 ok/skip/fail 列表
+  ・"全集群清单 JSON 导出" 按钮
+  ・"目标不一致"报告：列出"声明了 goal 但 worker 上 profile 文件被改过/被删/版本不一致"的 (node, profile)
+  ・"diff 状态筛选": ● all  ◐ starting  ✕ failed  ⚠ drift
 ```
 
-顶部工具栏：
-- "批量下发"：选 profile → 选 `--all`/指定节点 → (可选 env_overlay JSON) → 提交
-- "全集群清单 JSON 导出" 按钮（`GET /admin/cluster/export`）
-- "目标不一致"报告：列出"声明了 goal 但 worker 上 profile 文件被改过/被删"的 (node, profile)
-
-### 8.5 Dashboard 增量（现有页）
+### 9.5 Dashboard 增量（现有页）
 
 `modelctl list` 风格表格加 1 列 `node`：所在节点的 cluster node_id（solo 下显示 `-`）；筛选器 `node`。
 
-### 8.6 SettingsView 增量（新增"集群"块）
+### 9.6 SettingsView 增量（新增"集群"块）
 
 ```
 [node_id]  [CLUSTER_ROLE ▾ (solo/worker/both)]
 [CLUSTER_CENTER_URL]  [CLUSTER_LAN]
 [Join Token 显示(脱敏)]  [轮换] [节点 Token 轮换表]
+[Interval 时长(s)] [Lease 时长(s)]
 ```
 
 写 `PUT /admin/config`（扩展现有 admin_config API，加 cluster 字段）。
 
-### 8.7 CLI UX
+### 9.7 CLI UX
 
-- 所有 `modelctl cluster *` 子命令独立（见 3.2）。
-- **加 `--cluster` 全局 flag**：让现有 `modelctl status/list/probe` 自动走中心聚合视图（不传则看本机；传则拼合 `/admin/cluster/nodes` 多节点视图）。保留老 CLI 习惯。
-- 终端彩色复用现有 `colors.py`：online 绿、stale 黄、offline 红；表格对齐复用 CJK 对齐工具。
+- 所有 `modelctl cluster *` 子命令独立（见 §4.2）。
+- 现有 `modelctl status/list/probe` 加 `--cluster` 全局 flag：走 center 聚合视图。传则拼合 `/admin/cluster/nodes` 多节点视图（按 node 分组），不传则看本机。
+- 终端彩色复用现有 `colors.py`：READY 绿、STARTING 黄、FAILED 红、stale 黄、offline 灰。表格对齐复用 CJK 对齐工具。
 
-### 8.8 组件复用清单
+### 9.8 组件复用清单
 
 | 复用 | 用途 |
 |---|---|
 | `SseLogViewer.vue` | 节点事件流 / log.tail 实时看 |
 | `TaskButton.vue` | 批量下发起停 |
 | `ConfirmDialog.vue` | 删 goal / 禁用节点 / 取消 Token |
-| `StatusBadge.vue` | 扩展颜色集（online/stale/offline/error） |
+| `StatusBadge.vue` | 扩展颜色集（online/stale/offline/READY/FAILED/DEGRADED） |
 | `stores/auth` + `client.ts` | 扩展 `cluster.ts` API 模块（`/admin/cluster/*`） |
 
-### 8.9 部署示例
+### 9.9 部署示例
 
 ```bash
 # 一次性部署 4 台机
@@ -472,18 +666,19 @@ ssh w210 "cd modelctl && modelctl cluster join --center a210:4173 --token $JT --
 ssh w211 "...node-id w-211..."
 ssh w212 "...node-id w-212 --lan lan-5"
 # 中心侧：
-modelctl cluster goal set qwen3.8-vllm --all --create
+modelctl cluster goal set qwen3.8-vllm --all --create --dry-run   # 先看 placement
+modelctl cluster goal set qwen3.8-vllm --all --create             # 正式下发
 modelctl cluster goal set deepseek-v4-flash --node w-210 --create
 modelctl cluster status -f
 ```
 
-验收：浏览器开 `https://a210:4173/cluster/nodes`，能看到 4 台机器、模型矩阵、每个节点 GPU 实时数据。
+验收：浏览器开 `https://a210:4173/cluster/goals`，看到 goal vs state diff 矩阵；click 单元格出 detail + 一键 retry。
 
 ---
 
-## 9. 安全与鉴权
+## 10. 安全与鉴权
 
-### 9.1 威胁模型（按可信层级）
+### 10.1 威胁模型（按可信层级）
 
 - **可信**：中心 A 机进程 + 持有 `node_token` 已合法 join 的 worker webui 进程。
 - **半可信**：持有 `API_KEY`（webui admin token）的用户/进程——等同管理员，可读写所有 goal，与今天 webui 行为一致。
@@ -491,7 +686,7 @@ modelctl cluster status -f
 
 目标：只靠"一个正确的 WS 连接"无法做"中心管理面"以外的事情。MVP 不引入 mTLS（所有 server 单向可达 A，后续 P2 再议）。
 
-### 9.2 凭证链
+### 10.2 凭证链
 
 | 名称 | 生成时机 | 寿命 | 用途 |
 |---|---|---|---|
@@ -506,13 +701,13 @@ modelctl cluster status -f
 3. `join_token` rotate 后所有未 join 请求拒绝；已 join 节点不受影响（他们有 node_token）。
 4. 中心 dashboard 显示各 node token 的 last_seen。
 
-### 9.3 传输层
+### 10.3 传输层
 
-- WS 默认 **HTTPS/WSS**（center 侧）；仅内网可设 `CLUSTER_WS_INSECURE=1` 走裸 WS（MVP 可行，稳定后升级 WSS）。
-- WS 消息体序列化前做 `node_id + seq` 去重 + `nonce` 防重放（MVP 保 `node_id + seq` 即可）。
+- WS 默认 **HTTPS/WSS**（center 侧）；仅内网可设 `CLUSTER_WS_INSECURE=1` 走裸 WS（MVP 可选，建议 WSS）。
+- WS 消息体序列化前做 `node_id + seq` 去重 + `nonce` 防重放（MVP 保 `node_id + seq`）。
 - 敏感字段（API_KEY、node_token、join_token）不出现在审计 log；center log 只出现 node_id。
 
-### 9.4 授权粒度
+### 10.4 授权粒度
 
 MVP 不做 RBAC，只分 2 类：
 - **operator（持有 API_KEY）**：可执行所有 `/admin/cluster/*`，可 rotate token / disable 节点 / 删 SQLite 备份。
@@ -520,80 +715,114 @@ MVP 不做 RBAC，只分 2 类：
 
 更细粒度（谁能启动哪台节点/哪个 model）留 P2。
 
-### 9.5 不入明文的敏感项
+### 10.5 不入明文的敏感项
 
 - **API_KEY / MODELSCOPE_TOKEN** 等永不下发到 worker profile YAML。profile 里 `${API_KEY}` 占位符由 worker 本地 envfile 解析。
-- `env_overlay`（goal 里的 env 覆盖）**只允许覆盖白名单 key**：`MODEL_ROOT`、`MODELSCOPE_CACHE`、`HF_HOME`、`OLLAMA_MODELS`、`LOG_DIR`、`AUDIT_DIR`、`MODELCTL_GPUS`。禁止写入 `API_KEY`/`*_API_KEY`（防止把密钥当配置下发到明文文件）。WebUI 表单直接禁用这些 key 的输入。
+- `env_overlay`（goal 里的 env 覆盖）**只允许覆盖白名单 key**：`MODEL_ROOT`、`MODELSCOPE_CACHE`、`HF_HOME`、`OLLAMA_MODELS`、`LOG_DIR`、`AUDIT_DIR`、`MODELCTL_GPUS`。禁止写入 `API_KEY`/`*_API_KEY`（防密钥泄露到明文文件）。WebUI 表单直接禁用这些 key 的输入。
 - worker 本地 sync 产物（models/、cluster-goals.json）**不入 git**，.gitignore 加 `data/cache/cluster-*` + 用文件头注释 `# managed-by: modelctl-cluster` 标记，不单独建目录。
 
-### 9.6 中心自身的安全边界
+### 10.6 中心自身的安全边界
 
 - 中心 SQLite 在 `data/cache/cluster-meta.db`（`.gitignore`），权限 0600。
 - 中心要求 `WEBUI_HOST=0.0.0.0` 才能从 LAN 访问——由用户手动改，不进默认配置。若 `WEBUI_HOST=127.0.0.1` 则 LAN 其他机器无法接入（与现有 webui 默认隔离一致）。提醒：集群模式必须显式改成 0.0.0.0 + 防火墙暴露 4173。
 - 中心 SQLite 备份：`modelctl cluster backup --to file:///path`（MVP 支持 file，对象存储留 P2）。
 
-### 9.7 审计
+### 10.7 审计（Fleet / K8s 双层借鉴）
 
-- 集群面关键操作进本地审计（与现有 AUDIT_DIR 同款 loguru JSONL）：
-  - `cluster.init` / `cluster.role_change`
-  - `node.join` / `node.rejoin` / `node.disable` / `node.enable`
-  - `token.rotate`（join / 单节点）
-  - `goal.create` / `goal.update` / `goal.delete`
-  - `model.start` / `model.stop` / `model.restart`
-  - `node.sync`
-- 审计条目带 `operator=<API_KEY 指纹>`、`node_id`、`timestamp`、`goal_id`（若有）。
-- worker 本地 audit 不 mix，worker 自己的 audit 照旧。中心 dashboard "审计聚合" 实际是遍历 online 节点调 `log.tail`/`stats query`，中心不落全量事件（MVP 内如此，P2 可加 `events.stream` 全量上报）。
+**双层存储**：
+
+| 层 | 存什么 | 量级 |
+|---|---|---|
+| worker 本地 | `AUDIT_DIR` request JSONL（全量 prompt/completion/TTFT/TPS） | 长保留，按天轮转 |
+| center 摘要 | `events` 表（短事件） + `metrics_rollups` 表（1min/5min 聚合） | 量小 |
+| center 明细按需 | `audit.query` 远程 WS 命令拉 worker 的 JSONL | 按需，不持久 |
+
+center 的 `events` 表存每条关键事件的短条目：
+- `cluster.init` / `cluster.role_change`
+- `node.join` / `node.rejoin` / `node.disable` / `node.enable`
+- `token.rotate`（join / 单节点）
+- `goal.create` / `goal.update` / `goal.delete` / `goal.stage_change`
+- `model.start` / `model.stop` / `model.restart` / `model.failed`
+- `node.sync` / `node.drift`
+- `node.stale` / `node.offline`
+
+审计条目带 `operator=<API_KEY 指纹>`、`node_id`、`goal_id`（若有）、`errorCode`（若有）。
+
+worker 本地 audit 不 mix，worker 自己的 audit 照旧。中心 dashboard "审计聚合" 实际是遍历 online 节点调 `audit.query`（worker 把这个 node 的 INFO 级 JSONL 汇总表查回，不落 center），MVP 内如此，P2 可加 `events.stream` 全量上报。
 
 ---
 
-## 10. 数据模型（SQLite schema）
+## 11. 数据模型（SQLite schema）
 
 中心所有持久化状态在 `data/cache/cluster-meta.db`（`.gitignore`，0600）。用 Python 原生 `sqlite3`（轻量、无硬依赖），单文件，无额外服务。
 
-### 10.1 表结构（DDL）
+### 11.1 表结构（DDL）
 
 ```sql
--- 节点注册台账。join 成功后插入，永不删除（offline 仅标状态）
+-- 节点寄存器台账。join 成功后插入，永不删除（offline 仅标状态）
 CREATE TABLE IF NOT EXISTS nodes (
-  node_id     TEXT PRIMARY KEY,
-  node_token  TEXT NOT NULL,
-  lan_id      TEXT,
-  role        TEXT NOT NULL DEFAULT 'worker',
-  host_ip     TEXT,
-  hostname    TEXT,
-  engines     JSON,
-  created_at  TEXT,
-  last_seen   TEXT,
-  status      TEXT NOT NULL DEFAULT 'offline',   -- online|stale|offline|disabled
-  disabled    INTEGER NOT NULL DEFAULT 0
+  node_id            TEXT PRIMARY KEY,
+  node_token         TEXT NOT NULL,
+  lan_id             TEXT,
+  role               TEXT NOT NULL DEFAULT 'worker',       -- worker | both
+  host_ip            TEXT,
+  hostname           TEXT,
+  engines            JSON,                                  -- {"vllm":"0.9.1", ...} 来自 hello.meta
+  capacity_json      JSON,                                  -- {gpu_count, vram_total_mb, gpus:[...]}  ← 改进 B
+  runtime_json       JSON,                                  -- {"vllm@0.9.1":{"type":"venv","ok":true},...}  ← 改进 B
+  gateway_url        TEXT,                                  -- 供 center UI 调 health/stats 用 (http://host:port)
+  last_goal_sync_sha TEXT,                                  -- 上次 sync 时 goal 集合的 hash  ← 改进 B
+  lease_expiry       TEXT,                                  -- ISO8601, ts > lease_expiry 即 stale  ← 改进 G
+  created_at         TEXT,
+  last_seen          TEXT,
+  status             TEXT NOT NULL DEFAULT 'offline',       -- online|stale|offline|disabled
+  disabled           INTEGER NOT NULL DEFAULT 0
 );
 
 -- 声明式目标。goal 的 source of truth
 CREATE TABLE IF NOT EXISTS goals (
-  goal_id      TEXT PRIMARY KEY,      -- "<profile>@@<node_id>"
-  node_id      TEXT NOT NULL REFERENCES nodes(node_id) ON DELETE CASCADE,
-  profile      TEXT NOT NULL,
-  engine       TEXT NOT NULL,
-  profile_yaml TEXT NOT NULL,
-  profile_sha  TEXT NOT NULL,
-  intent       TEXT NOT NULL DEFAULT 'start',
-  params       JSON,
-  env_overlay  JSON,
-  created_by   TEXT,
-  created_at   TEXT
+  goal_id        TEXT PRIMARY KEY,      -- "<profile>@@<node_id>"
+  node_id        TEXT NOT NULL REFERENCES nodes(node_id) ON DELETE CASCADE,
+  profile        TEXT NOT NULL,
+  engine         TEXT NOT NULL,
+  profile_yaml   TEXT NOT NULL,
+  profile_sha    TEXT NOT NULL,
+  profile_version TEXT,                 -- 语义版本  ← 改进 C
+  intent         TEXT NOT NULL DEFAULT 'start',
+  params         JSON,
+  env_overlay    JSON,
+  placement      JSON,                  -- {min_vram_mb, gpu_count, same_node_required, min_free_mb_per_gpu, lan_allow}  ← 改进 C
+  runtime_ref    TEXT,                  -- "vllm@0.9.1" / "docker:image:xx" / "binary:llamacpp@b..."  ← 改进 C
+  target_role    TEXT,                  -- primary | replica | benchmark  ← 改进 C
+  traffic_weight INTEGER NULL DEFAULT 0,                             ← 改进 C（P2 用）
+  stage          TEXT NOT NULL DEFAULT 'PENDING_PROFILE_SYNC',
+                                           -- PENDING_PROFILE_SYNC | PROFILE_SYNCED | RUNTIME_OK | STARTING | READY | DEGRADED | FAILED | STOPPED  ← 改进 A
+  stage_reason   TEXT,                 -- 每态带 reason  ← 改进 A
+  error_class    TEXT,                 -- venv_missing | gpu_lock | oom | startup_timeout | model_download_failed | runtime_capability | profile_invalid
+  created_by     TEXT,
+  created_at     TEXT,
+  updated_at     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_goals_node ON goals(node_id);
 CREATE INDEX IF NOT EXISTS idx_goals_profile ON goals(profile);
+CREATE INDEX IF NOT EXISTS idx_goals_stage ON goals(stage);
 
 -- 模型状态快照。每次 heartbeat 全量覆盖该 (node, profile)
 CREATE TABLE IF NOT EXISTS model_states (
   node_id  TEXT NOT NULL,
   profile  TEXT NOT NULL,
-  state    TEXT NOT NULL,
+  state    TEXT NOT NULL,                -- unknown|starting|up|stopping|down|error
   gpu      TEXT,
   port     INTEGER,
   pid      INTEGER,
   reason   TEXT,
+  endpoint_url      TEXT,                -- "http://host:port"  ← 改进 B（P2 用）
+  endpoint_ready    INTEGER,             -- 0|1  ← 改进 B（P2 用）
+  engine_version    TEXT,
+  gpu_util          INTEGER,
+  metrics_p50_ms    INTEGER,             -- request 平均时延  ← 改进 B
+  last_probe_ms     INTEGER,
+  error_class       TEXT,                -- 同 goals.error_class
   updated_at TEXT,
   PRIMARY KEY (node_id, profile)
 );
@@ -603,93 +832,90 @@ CREATE TABLE IF NOT EXISTS events (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   ts         TEXT NOT NULL,
   node_id    TEXT,
+  goal_id    TEXT,
   kind       TEXT NOT NULL,
   payload    JSON
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_node ON events(node_id, ts);
+CREATE INDEX IF NOT EXISTS idx_events_goal ON events(goal_id);
+
+-- 指标 rollup（1min/5min）← 改进 F
+CREATE TABLE IF NOT EXISTS metrics_rollups (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts            TEXT NOT NULL,           -- 桶起始时间
+  node_id       TEXT NOT NULL,
+  profile       TEXT,                    -- NULL 表示节点级
+  window_s      INTEGER NOT NULL,        -- 60 或 300
+  requests      INTEGER DEFAULT 0,
+  errors_4xx    INTEGER DEFAULT 0,
+  errors_5xx    INTEGER DEFAULT 0,
+  tokens_in     INTEGER DEFAULT 0,
+  tokens_out    INTEGER DEFAULT 0,
+  latency_p50_ms INTEGER,
+  latency_p95_ms INTEGER,
+  tps           REAL
+);
+CREATE INDEX IF NOT EXISTS idx_rollups_window ON metrics_rollups(node_id, profile, ts);
 
 -- 凭证轮换审计（不含明文 token）
 CREATE TABLE IF NOT EXISTS token_ops (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   ts         TEXT,
-  op         TEXT,
+  op         TEXT,                       -- join.rotate | node.rotate | node.disable
   node_id    TEXT,
   operator   TEXT
 );
 
--- 集群面操作审计（中心独立存一份供 backup）
+-- 集群面操作审计
 CREATE TABLE IF NOT EXISTS audit (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   ts         TEXT,
   operator   TEXT,
+  node_id    TEXT,
+  goal_id    TEXT,
   action     TEXT NOT NULL,
   detail     JSON
 );
 ```
 
-### 10.2 关键约定
+### 11.2 关键约定
 
 - **`nodes` 不删**：节点下线只更 `status=offline/disabled`。goal 的 node 引用 FK ON DELETE CASCADE 避免悬空。
-- **`model_states` 仅覆盖**：heartbeat 只 update 已存在 key 的行；新 key 是 insert。worker offline 超 9×interval 后 dashboard 不读旧 model_states（展示 `offline`）。
-- **retention**：`events` 保留 `CLUSTER_EVENT_RETENTION_DAYS`（默认 30）；应用启动时 `DELETE FROM events WHERE ts < ?`；`audit` 默认 90 天。
+- **`model_states` 仅覆盖**：heartbeat 只 update 已存在 key 的行；新 key 是 insert。worker offline 超 9×lease_s（默认 180s）后 dashboard 不读旧 model_states（展示 `offline`）。
+- **goal lifecycle 状态机**：worker 推送 `goal.stage_change` 或 heartbeat 自带 stage + reason；center 直接 upsert。stage 是 worker 端权威（center 只镜像展示 wish，不 center 本地调模型）。
+- **retention**：`events` 保留 `CLUSTER_EVENT_RETENTION_DAYS`（默认 30）；应用启动时 `DELETE FROM events WHERE ts < ?`；`audit` 默认 90 天；`metrics_rollups` 按 `CLUSTER_ROLLUP_RETENTION_DAYS=30` 滚动。
 - **不存明文 token**：`node_token` 存明文（短），中心走 hmac 比对。未来升级 mTLS 可改 radix 指纹方案。
-- **单文件备份** = `modelctl cluster backup`（sqlite3 Online Backup，不锁读不写）。默认 to `data/cache/cluster-meta.db.<utc-stamp>`。
+- **单文件备份** = `modelctl cluster backup`（sqlite3 Online Backup，不锁读不写）。default to `data/cache/cluster-meta.db.<utc-stamp>`。
 
-### 10.3 中心 DB 损坏恢复
+### 11.3 中心 DB 损坏恢复
 
 - 备份：`modelctl cluster backup --to /backup/` + 手工 `git push`。
 - 恢复：`modelctl cluster restore --from /backup/xxx.db`（原子 rename：备份旧 DB → 复制恢复 → 重启 webui）。
 - 最坏情况（备份全损）：`cluster init` 重建 + 每个 worker `cluster join` 重新下发；推理进程仍在跑（detached），`cluster status` 能看到，对运行中的引擎做 "adopt"（只查 pid/health 不重启）。
 
-### 10.4 与现有 webui 本地状态的隔离
+### 11.4 与现有 webui 本地状态的隔离
 
 - 现有单机逻辑继续用本地文件（`data/cache/*.pid`、`*.lock`）。`cluster-meta.db` **只属于 center**。
 - worker 上不出现在 `cluster-meta.db`；worker 节点只有 `.env` 的 CLUSTER_* key + `data/cache/cluster-goals.json` + `data/cache/cluster-reconcile.json`（intent 表 + 上次 sync 时间）。
 
-### 10.5 API/CLI 映射
+### 11.5 API/CLI 映射
 
 | 表 | CLI | HTTP |
-|---|---|---|
+|---|---|---|---|
 | nodes | `cluster nodes`、`cluster join-token ...` | `GET /admin/cluster/nodes*`、`POST /admin/cluster/join-tokens` |
 | goals | `cluster goal *` | `GET/POST/PUT/DELETE /admin/cluster/goals*` |
 | model_states | `cluster status` | 嵌入 `GET /admin/cluster/nodes/{id}` |
 | events / audit | `cluster events?node=&limit=` | `GET /admin/cluster/events*` |
+| metrics_rollups | `cluster stats?node=&profile=` | `GET /admin/cluster/stats*` |
 | token_ops | （无） | （无，只内部写） |
 
 ---
 
-## 11. 分阶段交付（MVP → P2，供实现计划切分参考）
+## 12. 分阶段交付（MVP → P2）
 
 > 本节为交付边界说明，不是功能承诺；落地计划由 writing-plans 细化。
 
-- **M0（基础）**：CLUSTER_ROLE 矩阵 + `cluster init/join` + WS 协议（hello/heartbeat）+ nodes/model_states 表 + 中心 dashboard 复用、`cluster status/nodes` CLI。**验收**：A 机看到 1 个 worker online，心跳数据正确，solo 模式零影响。
-- **M1（目标状态）**：goals 表 + `goal set/sync` + profile 同步（原子写 + drift）+ 远程启停 + intent reconciler + `cluster launch/stop`。**验收**：`goal set qwen3.8-vllm --node w-210 --create` 后 w-210 上模型健康就绪。
-- **M2（聚类视图）**：ClusterNodesView / ClusterGoalsView vue + 事件流 + `--cluster` 聚合 flag + 审计聚合 + token 轮换 + backup/restore。
-- **P2（MVP 外）**：跨网复制/负载均衡（nginx upstream）、中心主备、mTLS、RBAC 细粒度、对象存储备份、`events.stream` 全量上报。
-
----
-
-## 12. 风险与权衡
-
-| 风险 | 缓解 |
-|---|---|
-| 中心单点故障 | MVP 接受单中心（控制面故障不伤推理面）；P2 主备 |
-| WS 长连在 LAN 间抖动 | 指数退避重连 + 3×interval 阈值 + events 离线缓冲 |
-| worker 本地 model 被手改后意图混淆 | drift 检测 + dashboard 标黄 + `cluster sync` 可一键强制覆写 |
-| 密钥泄露面 | 只 node_token 上 WS，API_KEY 永不下发；join_token 一次一换 |
-| SQLite 不可用于高并发 | MVP 控制面 QPS 低（心跳 10s/节点 + 事件），单文件足够 |
-| Vue 新增路由破坏现有布局 | 复用 Layout/Sidebar/现有组件，不引入新依赖 |
-
----
-
-## 13. 验收标准（DoD）
-
-- [ ] `CLUSTER_ROLE=solo` 的现有用户运行 `modelctl` 全部既有命令，行为与改动前完全一致（回归测试通过）。
-- [ ] A 机 + 2 个 worker（任意 LAN）跑通 `init` → `join` → `goal set --all --create` → 模型健康就绪 → `cluster status` 全绿。
-- [ ] kill -9 中心 webui：所有 worker 推理不中断；中心重启后 worker 自动 hello 恢复，goal 状态不丢。
-- [ ] kill -9 worker webui：该模型若在跑，引擎 detached 仍服务；webui 重启后 adopt 现有进程，不重复 start。
-- [ ] `goal set` 一个缺 venv 的 worker：该 (node, profile) 标 error，其他节点不受影响，dashboard 可一键重试。
-- [ ] `token.rotate` 后旧 worker 重连被拒；`--rotate-node` 只吊销指定节点。
-- [ ] 中心 SQLite 删除后 `cluster restore` 从备份恢复，节点/goal 全量回滚。
-- [ ] webui `/cluster/nodes`、`/cluster/goals` 在 solo 模式下正确隐藏；center 模式下展示全量数据。
+- **M0（基础框架 + 注册/心跳）**：CLUSTER_ROLE 矩阵 + `cluster init/join` + WS 协议（hello/welcome/heartbeat/event）+ nodes 表（含 lease）+ `cluster status/nodes` CLI + 中心 dashboard 加 "node" 列。**验收**：A 机看到 1 个 worker online，心跳数据正确，solo 模式零影响。
+- **M1（目标状态 + placement gate）**：goals 表（含 8 态 stage） + `goal set/sync/remove`（含 placement gate + `--dry-run`）+ profile 同步（原子写 + drift）+ 远程启停 + intent reconciler + `cluster launch/stop`。**验收**：`goal set qwen3.8-vllm --node w-210 --create` 后 w-210 上模型 healthy ready，stage=READY。
+- **M2（视图 + 摘要 + token + 备份）**：ClusterNodesView / ClusterGoalsView vue + 事件流 + `--cluster` 聚合 flag +
