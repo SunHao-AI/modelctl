@@ -68,7 +68,7 @@ vllm:
   #   已把预算吃穿，Available KV cache memory = -1.6 GiB（与 max_model_len 无关，降 len 无效）。
   #   0.85→0.92 补 3.36 GiB（覆盖 -1.6 GiB + 1.7 GiB 余量），必须在 warmup 前预留。
   #   ⚠ 若告警 JIT/激活瞬时 OOM，优先减 max_num_batched_tokens（如 8192→6144→4096）而非回退 len。
-  gpu_memory_utilization: 0.97
+  gpu_memory_utilization: 0.95
   # quantization：量化方式（FP8 块级）
   # 硬件要求：CC ≥ 8.9（A6000=8.6 不支持，本配置不用于 A6000）
   # 切换 BF16：删掉本字段，并把 model/modelscope_id 改回 Qwen/Qwen3.8-Flash-Next（335.28GiB，5880 装不下）
@@ -100,7 +100,7 @@ vllm:
   #   ⚠ 依赖 vLLM ≥0.9.x MTP 完整支持 + Day-0 镜像已注册 MTP 头；MTP 头/草稿 KV 额外占显存，
   #     本配置 8×RTX 5880 已到 gpu_memory_utilization 0.95，若启动 OOM 优先降 --max-num-seqs，
   #     或从 extra_args 删除 "--speculative-config ..." 回退。
-  extra_args: '--enable-expert-parallel --moe-backend triton --max-num-seqs 64 --max-num-batched-tokens 8192 --enable-prefix-caching --no-enable-flashinfer-autotune --enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3 --speculative-config ''{"method":"mtp","num_speculative_tokens":2}'''
+  extra_args: '--enable-expert-parallel --moe-backend triton --max-num-seqs 64 --max-num-batched-tokens 7168 --enable-prefix-caching --no-enable-flashinfer-autotune --enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3 --speculative-config ''{"method":"mtp","num_speculative_tokens":2}'''
 
 usage:
   # price_in / price_out：每千 token 计价（元），供 cc-switch 用量统计
