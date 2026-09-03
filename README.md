@@ -10,6 +10,7 @@
 - **能力探测与自动降级**：启动前探测 GPU/CC/显存/引擎二进制，硬性不满足拒绝启动并说明原因，可降级项自动降级并告警
 - **统一生命周期**：后台启动、PID 管理、健康检查、优雅停止
 - **用量统计**：`/api/usage` 输出与 cc-switch 兼容，支持多模型按 `?model=` 路由
+- **Web 管理控制台**：`modelctl webui` 单进程同时提供管理 API（`/admin/api/*`）与 Vue 3 控制台，模型启停、日志实时跟随、环境安装、体检、审计均可在浏览器完成
 - **配置外置**：全局配置通过 `.env` 管理，模型级配置通过 profile YAML 管理
 
 ## 目录结构
@@ -22,7 +23,7 @@ modelctl/
 ├── src/modelctl/
 │   ├── cli.py                      # 统一 CLI 入口（start/stop/restart/status/list/probe/stats/gateway/webui）
 │   ├── __main__.py                 # python -m modelctl 入口
-│   ├── core/                       # 核心模块：envfile / profile / capabilities / process / stats / envs（引擎 venv 管理）
+│   ├── core/                       # 核心模块：envfile / profile / capabilities / process / stats / envs（引擎 venv 管理）/ webui（Web 管理面）
 │   ├── engines/                    # 引擎适配器：base / llamacpp / ollama / vllm / sglang / unsloth
 │   └── py.typed                    # PEP 561 类型标记
 ├── envs/                           # vllm / sglang 引擎子项目（uv 独立工作区）
@@ -58,6 +59,10 @@ modelctl/
 │       ├── qwen3.8-flash-next.yaml # Qwen3.8-Flash-Next 111GB GGUF（unsloth，多卡或高内存）
 │       ├── qwen3-coder.yaml        # Qwen3-Coder-480B（unsloth，多卡 GGUF 分片）
 │       └── kimi-k2.5.yaml          # Kimi-K2.5（unsloth）
+├── web/                            # Web 管理控制台前端源码（Vue 3 + Vite + TypeScript）
+│   ├── src/                        # 前端源码（views / components / api / stores / router）
+│   └── package.json                # 前端脚本：dev（vite 5173）/ build（产物输出 ../dist）
+├── dist/                           # 前端构建产物（npm run build 生成，webui 挂载为 SPA）
 ├── .env.example                    # 全局配置模板（复制为 .env 后修改）
 ├── .env                            # 本地配置（含密钥，不入库）
 ├── .gitignore
@@ -564,13 +569,15 @@ bash script/modelctl-all.sh status
 
 ### 9. Web 管理控制台（modelctl webui）
 
-`modelctl webui` 启动 **单进程 FastAPI** 管理面，在原有 `/v1/*`（OpenAI 兼容代理，nginx 依赖）之外挂上 `/admin/api/*`（管理 API）与前端 SPA（`web/dist`，Vue 3 构建产物）。**与 `modelctl gateway start` 是同一份 FastAPI 代码**（`gateway.py::create_app(admin=True)`）两个端口：gateway 专职数据面（5003），webui 兼管理面（4173），互不影响（端口、PID 文件、实例名独立）。
+`modelctl webui` 启动 **单进程 FastAPI** 管理面，在原有 `/v1/*`（OpenAI 兼容代理，nginx 依赖）之外挂上 `/admin/api/*`（管理 API）与前端 SPA（项目根 `dist/`，Vue 3 构建产物）。**与 `modelctl gateway start` 是同一份 FastAPI 代码**（`gateway.py::create_app(admin=True)`）两个端口：gateway 专职数据面（5003），webui 兼管理面（4173），互不影响（端口、PID 文件、实例名独立）。
+
+#### 9.1 使用命令
 
 ```bash
 # 启动 Web UI（默认读 .env 的 WEBUI_HOST/WEBUI_PORT，缺省 127.0.0.1:4173）
 modelctl webui start
 
-# 命令行覆盖端口 / 绑定地址
+# 命令行覆盖端口 / 绑定地址（--port/--host 优先于 .env）
 modelctl webui start --port 8080 --host 0.0.0.0
 
 # 停止 / 重启 / 状态（复用 gateway venv，无需额外依赖）
@@ -578,19 +585,68 @@ modelctl webui stop
 modelctl webui restart
 modelctl webui status
 
-# 浏览器自动打开控制台（仅 start/restart 后提示，stop/status 不打）
-# 见下方「browser 行为」
+# 等价的前台独立运行（不经 start_detached，日志直接打到当前终端，便于调试；
+# 需当前解释器可用 fastapi/uvicorn，即 gateway venv 或已装依赖的 uv 环境，
+# 端口/地址用环境变量 WEBUI_HOST / WEBUI_PORT 控制）
+python -m modelctl.core.webui.server
 ```
+
+> `action` 是必填位置参数，只接受 `start` / `stop` / `restart` / `status`；缺省会报 `the following arguments are required: action`。
 
 **端口优先级**：命令行 `--port` > `.env` 的 `WEBUI_PORT` > 代码默认 `4173`。与 `GATEWAY_PORT`（默认 5003）不冲突，可同时运行。
 
-**前端 dist 要求**：前端构建产物在 `web/dist`（由 `npm run build` 在 `web/` 目录下生成）。dist 缺失时仍暴露 `/admin/api` 与 `/v1`，仅浏览器直连域名根会得到 404 JSON；启动日志会提示 "（dist/ 缺失，仅 /admin/api 可用；先 npm run build）"。
+**登录**：浏览器访问控制台后，登录页只需输入 `.env` 中的 `API_KEY`（作为 Bearer Token），复用 modelctl 现有鉴权；无独立密码体系。SSE 流式端点（任务进度 / 模型日志）因浏览器 `EventSource` 无法携带 header，改用 `?key=<API_KEY>` query 传递同一令牌，鉴权强度与 Bearer 一致。
 
-**登录**：浏览器访问后登录页只需输入 `.env` 中的 `API_KEY`（Bearer Token），复用 modelctl 现有鉴权；无独立密码体系。
-
-**依赖**：webui 与 gateway 完全共享 gateway venv（`fastapi / uvicorn / httpx`），首次 `modelctl webui start` 自动 `uv sync --project gateway` 落到 `.venvs/gateway`，无需重复 `env setup`。
+**依赖**：webui 与 gateway 完全共享 gateway venv（`fastapi / uvicorn / httpx`），首次 `modelctl webui start` 自动初始化落到 `.venvs/gateway`，无需重复 `env setup`。
 
 **启动日志**：webui 子进程的 stdout / stderr 由 `start_detached` 重定向到 `log_dir()/launch-modelctl-webui.log`（与 model profile 启动日志同目录——`LOG_DIR` 环境变量决定，缺省项目根上级的 `../logs/`，每次 start 覆盖不追加）。`modelctl webui status` 不读该文件，只探 PID + `/admin/api/health` 端口。
+
+#### 9.2 前端构建与产物路径
+
+前端源码在 `web/`（Vue 3 + Vite + TypeScript + UnoCSS），构建产物由 `web/vite.config.ts` 的 `build.outDir: '../dist'` 输出到**项目根 `dist/`**（非 `web/dist`）。`server.py::dist_dir()` 读的正是项目根 `dist/`，两端一致。
+
+```bash
+cd web
+npm install          # 首次安装依赖
+npm run build        # vue-tsc 类型检查 + vite build，产物落到 ../dist/
+```
+
+`dist/index.html` 缺失时 webui 仍暴露 `/admin/api` 与 `/v1`，仅浏览器直连域名根会拿到 404；启动日志会提示 `（dist/ 缺失，仅 /admin/api 可用；先 npm run build）`。
+
+#### 9.3 本地开发（前端热更新联调）
+
+开发期不构建 `dist/`，改用 vite dev server：前端 5173，`/admin/api` 代理到后端 `WEBUI_PORT`（读同一份 `.env`，单一真值来源）。
+
+```bash
+# 终端 1：起后端管理 API（二选一）
+modelctl webui start                              # 后台守护形态
+uv run python -m modelctl.core.webui.server       # 前台形态，日志直接可见，便于调试
+
+# 终端 2：起前端 dev server（vite 默认 5173，host 0.0.0.0）
+cd web
+npm run dev
+```
+
+浏览器访问 `http://127.0.0.1:5173`，用 `.env` 的 `API_KEY` 登录即可联调。
+
+> **注意**：vite 若发现 5173 被占用会静默改用其它端口（如 5174），联调前用 `netstat -ano | findstr :5173` 确认端口未被历史进程占用。
+
+#### 9.4 管理 API 能力一览（`/admin/api`）
+
+| 分组 | 端点 | 说明 |
+|---|---|---|
+| 会话 | `POST /login` · `GET /health` | 校验 API_KEY；健康探针（免鉴权） |
+| 概览/体检 | `GET /overview` · `GET /probe` | 仪表板聚合快照；硬件与引擎体检 |
+| 模型 | `GET /models` · `GET /models/{name}` · `GET /models/{name}/yaml` | 列表 / 详情 / YAML 原文 |
+| 模型操作 | `POST /models/{name}/start\|stop\|restart` · `POST /models/{name}/ui/start\|stop` | 生命周期（start/restart 走异步任务返回 202） |
+| 模型日志 | `GET /models/{name}/log` · `GET /models/{name}/log/stream` | 日志尾随（tail）/ SSE 实时流 |
+| 任务 | `GET /tasks` · `GET /tasks/{id}/stream` | 长任务列表 / SSE 进度流 |
+| 一键启停 | `POST /all/start\|stop\|restart` · `GET /all/status` | 四件套整体控制 |
+| 服务 | `GET /services` · `POST /services/{svc}/{action}` | gateway / stats 状态与操作 |
+| 环境 | `GET /envs` · `POST /envs/{target}/setup\|remove` | 引擎 venv 安装 / 卸载（setup 走异步任务） |
+| 审计 | `GET /audit` · `GET /audit/stats` · `GET /audit/path` · `POST /audit/cleanup` | 请求级审计查询 / 统计 / 清理 |
+| 配置 | `GET /config/static` · `GET /nginx-snippet` | 静态配置回显 / nginx 路由片段生成 |
+| TensorRT | `POST /trtllm/{name}/build` · `GET /trtllm/{name}/status` | 引擎编译（异步任务）/ 状态 |
 
 **与 gateway 进程的差异**：
 
@@ -607,6 +663,8 @@ modelctl webui status
 部署前置条件、目录布局、日志/停止/重启、参数速查等详见 [docs/DeepSeek-V4-Flash后台启动指南.md](docs/DeepSeek-V4-Flash后台启动指南.md)。
 
 多模型 nginx 路由的部署与测试步骤详见 [docs/nginx/测试指南.md](docs/nginx/测试指南.md)（nginx 参考配置见 [docs/nginx/llm-routing.example.conf](docs/nginx/llm-routing.example.conf)）。
+
+Web 管理控制台的完整设计（信息架构、页面清单、API 契约、SSE 事件协议）详见 [docs/superpowers/specs/2026-09-02-webui-design.md](docs/superpowers/specs/2026-09-02-webui-design.md)。
 
 ## 说明
 

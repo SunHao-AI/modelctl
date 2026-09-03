@@ -42,7 +42,7 @@ api_key: ${API_KEY}
 vllm:
   # model：HuggingFace 模型 ID 或本地模型目录。
   # 为空/不存在时通过 download 段从 ModelScope 下载并写回本地路径
-  model: Qwen/Qwen3.8-Flash-Next-FP8
+  model: /raid5/sh/model/model-gguf/Qwen/Qwen3.8-Flash-Next-FP8
   # docker_image：Day-0 vLLM 专用镜像
   #   - 仅此一个镜像支持本模型；`vllm serve` 在 PyPI vLLM 0.27/0.28 上跑不通本架构
   #   - 镜像内含 Qwen4ExpForConditionalGeneration 注册、QSA attention kernel、FlashQLA 等
