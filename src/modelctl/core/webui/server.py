@@ -106,6 +106,21 @@ def main() -> None:
 
     host, port = webui_host(), webui_port()
     app = create_app(admin=True)
+
+    # cluster worker Agent：任何导入/启动异常都不得阻断 webui，故整块 try/except 兜底
+    # （solo/纯中心：is_worker() False，一行 if 即过，零副作用）。
+    try:
+        from modelctl.core.cluster import config as cluster_config
+
+        if cluster_config.is_worker():
+            from modelctl.core.cluster import agent as cluster_agent
+
+            cluster_agent.start_agent_in_background()
+    except Exception as exc:  # noqa: BLE001 — 集群能力缺失/异常只降级，不影响管理面
+        from loguru import logger
+
+        logger.warning(f"cluster worker Agent 启动失败（Web UI 照常运行）: {exc}")
+
     hint = "（未找到 dist/，仅暴露 /admin/api；先执行 npm run build）" if not dist_ready() else ""
     print(f"modelctl Web UI 运行于 http://{host}:{port}/ {hint}", flush=True)
     uvicorn.run(app, host=host, port=port, log_level="info")
