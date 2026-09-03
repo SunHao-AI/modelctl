@@ -42,27 +42,17 @@ class VllmAdapter(EngineAdapter):
             container_name = f"{self.profile.name}-vllm"
             # docker / nvidia-smi 都在 PATH；硬拦截不降级
             if shutil.which("docker") is None:
-                raise RequirementError(
-                    "docker 命令不在 PATH——docker_image 已配置，请先安装 docker "
-                    "（参考 `apt install docker.io docker-compose` 或官网）"
-                )
+                raise RequirementError("docker 命令不在 PATH——docker_image 已配置，请先安装 docker " "（参考 `apt install docker.io docker-compose` 或官网）")
             if shutil.which("nvidia-smi") is None:
-                raise RequirementError(
-                    "nvidia-smi 不在 PATH / nvidia-container-toolkit 未就绪——"
-                    "docker 方式下 --gpus 设定需要 toolkit 支持，"
-                    "请先安装 nvidia-container-toolkit"
-                )
+                raise RequirementError("nvidia-smi 不在 PATH / nvidia-container-toolkit 未就绪——" "docker 方式下 --gpus 设定需要 toolkit 支持，" "请先安装 nvidia-container-toolkit")
             # 清冲突残留容器（幂等）
             try:
-                subprocess.run(["docker", "rm", "-f", container_name],
-                               capture_output=True, timeout=10)
+                subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=10)
             except (OSError, subprocess.SubprocessError):
                 pass
             # model 必填
             if not cfg.get("model") and not cfg.get("download"):
-                raise RequirementError(
-                    f"{self.profile.name}：vllm.model 必填（或配置 download 段自动下载）"
-                )
+                raise RequirementError(f"{self.profile.name}：vllm.model 必填（或配置 download 段自动下载）")
         else:
             # 现状路径：venv 检查、model 检查
             envs.ensure_env("vllm")
@@ -70,15 +60,20 @@ class VllmAdapter(EngineAdapter):
                 raise RequirementError(f"{self.profile.name}：vllm.model 必填（或配置 download 段自动下载）")
             # per-request 版本门控（仅开启任一 flag 时才探测；docker 路径跳过——版本真相在 docker 镜像 tag）
             if cfg.get("enable_per_request_metrics") or cfg.get("enable_force_include_usage"):
+                min_v = ".".join(map(str, MIN_VLLM_PER_REQUEST))
                 v = envs.vllm_version()  # 经模块属性访问，test 可 monkeypatch 该属性
                 if v is None:
-                    logger.warning("无法探测 vLLM 版本（将放行；若启动报错请人工确认 ≥ 0.13.0）")
-                elif v < MIN_VLLM_PER_REQUEST:
-                    raise RequirementError(
-                        f"enable_per_request_metrics 需 vLLM ≥ {'.'.join(map(str, MIN_VLLM_PER_REQUEST))}，"
-                        f"当前 {v[0]}.{v[1]}.{v[2]}；"
-                        "可升级（uv sync --project envs/vllm --upgrade vllm）或在 yaml 中关闭该项"
+                    # 带上安装目录：探测失败时（多为 import 超时）便于人工进 venv 直接核对版本
+                    venv_dir = envs.VENV_ROOT / "vllm"
+                    py = envs.engine_python("vllm")
+                    logger.warning(
+                        f"无法探测 vLLM 版本（将放行；若启动报错请人工确认 ≥ {min_v}）。"
+                        f"安装目录：{venv_dir}，可手动核对："
+                        f"`{envs.engine_bin('vllm', 'vllm')} --version` 或 "
+                        f'`{py} -c "import vllm; print(vllm.__version__)"`'
                     )
+                elif v < MIN_VLLM_PER_REQUEST:
+                    raise RequirementError(f"enable_per_request_metrics 需 vLLM ≥ {min_v}，" f"当前 {v[0]}.{v[1]}.{v[2]}；" "可升级（uv sync --project envs/vllm --upgrade vllm）或在 yaml 中关闭该项")
         # 共享部分：GPU / TP / VRAM / compat / gpu lock
         try:
             gpus = self.selected_gpus()
@@ -88,9 +83,7 @@ class VllmAdapter(EngineAdapter):
             self.validate_gpu_selection(gpus)
             tp = int(cfg.get("tensor_parallel_size", len(gpus)))
             if tp != len(gpus):
-                raise RequirementError(
-                    f"gpu_list 指定了 {len(gpus)} 块 GPU，但 tensor_parallel_size={tp}，二者必须一致"
-                )
+                raise RequirementError(f"gpu_list 指定了 {len(gpus)} 块 GPU，但 tensor_parallel_size={tp}，二者必须一致")
         else:
             tp = int(cfg.get("tensor_parallel_size", 1))
             if self.caps.gpu_count and tp > self.caps.gpu_count:
@@ -100,10 +93,7 @@ class VllmAdapter(EngineAdapter):
         per_request_on = bool(cfg.get("enable_per_request_metrics"))
         force_on = bool(cfg.get("enable_force_include_usage"))
         if per_request_on and not force_on:
-            self.warnings.append(
-                f"{self.profile.name}：enable_per_request_metrics=true 但 enable_force_include_usage=false，"
-                "流式中间块缺 usage 会使 stats.record_tokens 仅末块入账；建议同时开启"
-            )
+            self.warnings.append(f"{self.profile.name}：enable_per_request_metrics=true 但 enable_force_include_usage=false，" "流式中间块缺 usage 会使 stats.record_tokens 仅末块入账；建议同时开启")
         self.run_compat_checks()  # 预检：软件规则 + 模型 id 特征
         if gpus is not None:
             acquire_gpu_lock(self.profile.name, gpus)
@@ -153,10 +143,14 @@ class VllmAdapter(EngineAdapter):
         # 共用：--served-model-name 之后的 model_args
         extra = shlex.split(str(cfg.get("extra_args") or ""))
         model_args = [
-            "--served-model-name", self.upstream_model_name(),
-            "--host", "0.0.0.0",
-            "--tensor-parallel-size", str(tp),
-            "--gpu-memory-utilization", str(cfg.get("gpu_memory_utilization", 0.9)),
+            "--served-model-name",
+            self.upstream_model_name(),
+            "--host",
+            "0.0.0.0",
+            "--tensor-parallel-size",
+            str(tp),
+            "--gpu-memory-utilization",
+            str(cfg.get("gpu_memory_utilization", 0.9)),
             "--disable-uvicorn-access-log",
         ]
         if cfg.get("max_model_len"):
@@ -170,35 +164,55 @@ class VllmAdapter(EngineAdapter):
             model_args.append("--enable-per-request-metrics")
         if cfg.get("enable_force_include_usage"):
             model_args.append("--enable-force-include-usage")
-        model_args += self.api_key_args() + extra
+        # api_key / extra_args 恒定追加到末尾：extra_args 里的同名参数需能覆盖上面的默认值
+        tail = self.api_key_args() + extra
 
         if runtime == "venv":
-            cmd = [str(envs.engine_bin("vllm", "vllm")), "serve", str(cfg["model"])] + model_args
+            # 必须显式传 --port：不传时 `vllm serve` 回退默认 8000，既与 profile.port 不一致
+            # （健康检查探 127.0.0.1:{profile.port}/health 必然 Connection refused），
+            # 又和其他未指定端口的实例撞 8000（OSError: [Errno 98] Address already in use）。
+            # 置于 tail 之前，保证 extra_args 显式指定的 --port 仍能覆盖。
+            cmd = [
+                str(envs.engine_bin("vllm", "vllm")),
+                "serve",
+                str(cfg["model"]),
+                *model_args,
+                "--port",
+                str(self.profile.port),
+                *tail,
+            ]
             return cmd, self._venv_env(gpus)
 
         # docker 分支
         model_raw = str(cfg.get("model") or "").strip()
         model_local = Path(model_raw).expanduser()
         if not model_local.is_absolute() or not model_local.is_dir():
-            raise RequirementError(
-                f"{self.profile.name}：docker_image 路径下 model 必须为本地绝对路径"
-                f"且目录已存在（当前: {model_raw}——HF id 需先 modelctl start 触发 pre_start 下载）"
-            )
+            raise RequirementError(f"{self.profile.name}：docker_image 路径下 model 必须为本地绝对路径" f"且目录已存在（当前: {model_raw}——HF id 需先 modelctl start 触发 pre_start 下载）")
         model_local = model_local.resolve()
-        cmd = [
-            "docker", "run",
-            "--name", self._container_name,
-            "--gpus", self._gpus_json(),
-            "-p", f"{self.profile.port}:8000",
-            "-v", f"{model_local.parent.as_posix()}:/models:ro",
-            "--ipc=host",
-            "--detach",
-            # 镜像 ENTRYPOINT 是 ["vllm", "serve"]（vllm/vllm-openai Day-0 镜像约定），
-            # CMD 仅传位置参数（模型路径）+ 命名参数。重复 "serve" 会被拼成
-            # `vllm serve serve /models/...` 触发 argparse "unrecognized arguments" 退出 (exit code 2)
-            image,
-            f"/models/{model_local.name}",
-        ] + model_args + ["--port", "8000"]
+        cmd = (
+            [
+                "docker",
+                "run",
+                "--name",
+                self._container_name,
+                "--gpus",
+                self._gpus_json(),
+                "-p",
+                f"{self.profile.port}:8000",
+                "-v",
+                f"{model_local.parent.as_posix()}:/models:ro",
+                "--ipc=host",
+                "--detach",
+                # 镜像 ENTRYPOINT 是 ["vllm", "serve"]（vllm/vllm-openai Day-0 镜像约定），
+                # CMD 仅传位置参数（模型路径）+ 命名参数。重复 "serve" 会被拼成
+                # `vllm serve serve /models/...` 触发 argparse "unrecognized arguments" 退出 (exit code 2)
+                image,
+                f"/models/{model_local.name}",
+            ]
+            + model_args
+            + tail
+            + ["--port", "8000"]
+        )
         # docker_env：yaml vllm.docker_env（dict）→ 容器内环境变量。
         # ⚠ 必须用 `docker run -e`（而非 build_command 返回的 env dict）才能进入容器：
         #   start_detached 只把 env 注入 docker CLI 宿主进程（Popen），不会透传进容器。
@@ -284,8 +298,7 @@ class VllmAdapter(EngineAdapter):
         if gpus:
             env.update(self.cuda_visible_devices(gpus))
         env["VIRTUAL_ENV"] = str(envs.VENV_ROOT / "vllm")
-        env["PATH"] = str(envs.engine_bin("vllm", "vllm").parent) + os.pathsep + \
-            os.environ.get("PATH", os.environ["PATH"])
+        env["PATH"] = str(envs.engine_bin("vllm", "vllm").parent) + os.pathsep + os.environ.get("PATH", os.environ["PATH"])
         return env
 
     def wait_ready(self, timeout: float) -> bool:
@@ -336,6 +349,7 @@ class VllmAdapter(EngineAdapter):
         venv 分支：基类 stop_instance（pkill 兜底）。"""
         if self._resolve_runtime()[0] == "docker":
             from modelctl.core.process import stop_docker_instance
+
             stop_docker_instance(self.profile.name, self._container_name)
         else:
             super().stop_backend()

@@ -76,6 +76,33 @@ def test_tail_file(tmp_path):
     assert process.tail_file(f, 3).splitlines() == ["line97", "line98", "line99"]
 
 
+def test_port_in_use_true_when_listening():
+    """真实 listen 的端口必须判为占用（用 OS 分配的空闲端口，避免硬编码撞车）。"""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        assert process.port_in_use(port) is True
+
+
+def test_port_in_use_false_when_free():
+    """bind 后立刻 close 释放的端口应判为可用。"""
+    import socket
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    port = srv.getsockname()[1]
+    srv.close()
+    assert process.port_in_use(port) is False
+
+
+def test_describe_port_listener_never_raises():
+    """描述探测在任意输入下不得抛错（拿不到信息时降级空串）。"""
+    assert process.describe_port_listener(1) == "" or isinstance(process.describe_port_listener(1), str)
+
+
 def _write_crash_log(tmp_path) -> object:
     """模拟 vLLM 崩溃日志：真实异常在日志中部，尾部只有 traceback 尾巴。"""
     lines = [f"INFO filler line {i}" for i in range(60)]

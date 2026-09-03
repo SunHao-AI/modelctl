@@ -116,27 +116,50 @@ def ensure_env(target: str) -> Path:
     if not _is_target(target):
         raise ValueError(f"非受管环境：{target}")
     if not has_env(target):
-        raise EngineEnvError(
-            f"{target} 的专用环境未创建，请先执行：modelctl env setup {target}"
-        )
+        raise EngineEnvError(f"{target} 的专用环境未创建，请先执行：modelctl env setup {target}")
     return VENV_ROOT / target
+
+
+# 兜底路径（`vllm --version`）的超时预算：该命令要 `import vllm` 并连带加载 torch 等
+# 重型依赖，冷启动（page cache 未命中）轻松超过原来的 5s，导致稳定误报
+# 「无法探测 vLLM 版本」。正常情况走下方 dist-info 快路径，此处仅兜底，故给足预算。
+VLLM_PROBE_TIMEOUT = 60.0
+
+
+def _run_probe(cmd: list[str], timeout: float) -> str:
+    """执行探测命令并返回 stdout；命令缺失 / 超时 / 非零退出均归约为空串。
+
+    只取 stdout 且要求 returncode == 0：命令失败时解释器写到 stderr 的 traceback
+    自带 "Python 3.x.y"，若把 stderr 交给版本正则，会把**解释器版本误判成 vLLM 版本**
+    并错误放行版本门控。
+    """
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+    return (r.stdout or "").strip() if r.returncode == 0 else ""
+
+
+def _parse_version(out: str) -> tuple[int, int, int] | None:
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", out)
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
 
 
 @functools.lru_cache(maxsize=1)
 def vllm_version() -> tuple[int, int, int] | None:
-    """探测 vLLM 版本（subprocess vllm --version 解析首 token）；失败 / 未安装返回 None。"""
+    """探测 vLLM 版本；失败 / 未安装返回 None。
+
+    先纯磁盘读 `.venvs/vllm` 的 dist-info（复用 `status()` 的解析，不起子进程、
+    不 import vllm，无超时风险）；仅在元数据缺失 / 解析失败时，才退回
+    `vllm --version`（需完整 import，慢，故超时预算给得宽松）。
+    """
+    v = _parse_version(_read_installed_packages(VENV_ROOT / "vllm").get("vllm") or "")
+    if v is not None:
+        return v
     bin_path = engine_bin("vllm", "vllm")
     if not bin_path.is_file():
         return None
-    try:
-        r = subprocess.run([str(bin_path), "--version"], capture_output=True, text=True, timeout=5)
-        out = (r.stdout or "").strip()
-    except (subprocess.TimeoutExpired, OSError):
-        return None
-    m = re.search(r"(\d+)\.(\d+)\.(\d+)", out)
-    if not m:
-        return None
-    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+    return _parse_version(_run_probe([str(bin_path), "--version"], VLLM_PROBE_TIMEOUT))
 
 
 def setup(

@@ -156,6 +156,7 @@ def test_start_profile_check_raises_requirement(monkeypatch):
     from modelctl.core import all_service
 
     monkeypatch.setattr(all_service, "is_running_any", lambda name, p: False)
+    monkeypatch.setattr(all_service, "port_in_use", lambda port: False)
 
     class _FailingAdapter:
         def __init__(self, profile, caps):
@@ -167,6 +168,42 @@ def test_start_profile_check_raises_requirement(monkeypatch):
     monkeypatch.setattr(all_service, "get_adapter", lambda engine: _FailingAdapter)
     with pytest.raises(RequirementError):
         start_profile(_profile(), Capabilities(), 5.0)
+
+
+def test_start_profile_port_in_use_raises(monkeypatch):
+    """端口被外部占用时启动前即抛 RequirementError，且点名占用者。"""
+    from modelctl.core import all_service
+
+    monkeypatch.setattr(all_service, "is_running_any", lambda name, p: False)
+    monkeypatch.setattr(all_service, "port_in_use", lambda port: True)
+    monkeypatch.setattr(all_service, "describe_port_listener", lambda port: "PID 4242")
+
+    def _boom(*a, **kw):  # 走到适配器说明预检没拦住
+        raise AssertionError("端口占用应在 check_requirements 之前被拦截")
+
+    monkeypatch.setattr(all_service, "get_adapter", _boom)
+    with pytest.raises(RequirementError, match="端口 18080 已被占用（PID 4242）"):
+        start_profile(_profile(), Capabilities(), 5.0)
+
+
+def test_start_profile_ollama_shares_port(monkeypatch):
+    """ollama 多 profile 共享同一 serve 端口是设计语义，端口被占不得拦截。"""
+    from modelctl.core import all_service
+
+    p = Profile(name="ollama-b", engine="ollama", port=11434, engine_config={"model": "m:1"})
+    monkeypatch.setattr(all_service, "is_running_any", lambda name, prof: False)
+    monkeypatch.setattr(all_service, "port_in_use", lambda port: True)
+
+    started: list = []
+
+    class _Ok(_FakeAdapter):
+        def check_requirements(self):
+            started.append("checked")
+
+    monkeypatch.setattr(all_service, "get_adapter", lambda engine: lambda prof, caps: _Ok(prof, caps, ready=True))
+    monkeypatch.setattr(all_service, "start_detached", lambda *a, **kw: (999, _FakeProc()))
+    r = start_profile(p, Capabilities(), 5.0)
+    assert started == ["checked"] and r.status == "ok"
 
 
 def test_start_profile_ok(monkeypatch):

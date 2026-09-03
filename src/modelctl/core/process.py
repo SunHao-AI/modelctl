@@ -14,7 +14,9 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -239,6 +241,47 @@ def open_local(request: urllib.request.Request, timeout: float):
     回环请求也会被转发给代理（通常无法访问本机端口），导致探测永远失败、启动卡满超时。
     """
     return urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=timeout)
+
+
+def port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    """端口当前是否已有监听者（TCP connect 探测，0.5s 超时）。
+
+    connect 成功 ⇒ 已有服务监听 ⇒ 引擎随后 bind 必然 EADDRINUSE；connect 被拒
+    说明端口可用。误报场景仅"bind 但未 listen"，而这类进程不 accept、引擎
+    bind 也常能成功，属可接受的漏报（漏报仍由事后日志摘录兜底）。
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex((host, port)) == 0
+
+
+def describe_port_listener(port: int) -> str:
+    """尽力获取端口占用者描述（POSIX 用 ss，Windows 用 netstat）；拿不到返回空串。
+
+    仅 port_in_use 判 True 后调用一次，用于把"谁占了端口"直接写进错误信息；
+    探测命令缺失 / 权限不足 / 超时都静默降级为空串，绝不影响主流程判定。
+    """
+    if sys.platform == "win32":
+        cmd, marker = ["netstat", "-ano"], None
+    else:
+        cmd, marker = ["ss", "-ltnp"], "pid="
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    for line in (r.stdout or "").splitlines():
+        cols = line.split()
+        # 本地地址列（Windows 第 2 列 / ss 第 4 列）以 :{port} 结尾即命中
+        idx = 1 if sys.platform == "win32" else 3
+        if len(cols) > idx and cols[idx].endswith(f":{port}") and "LISTEN" in line.upper():
+            if marker:
+                m = re.search(r"pid=(\d+)", line)
+                if m:
+                    return f"PID {m.group(1)}"
+            elif cols[-1].isdigit():
+                return f"PID {cols[-1]}"
+            return cols[idx]
+    return ""
 
 
 def wait_health(url: str, timeout: float, api_key: str | None = None, alive_check=None) -> bool:

@@ -31,11 +31,13 @@ from modelctl.core.capabilities import Capabilities, probe
 from modelctl.core.deps import ensure_packages
 from modelctl.core.gateway import GATEWAY_PORT
 from modelctl.core.process import (
+    describe_port_listener,
     is_running,
     is_running_any,
     launch_log,
     log_excerpt,
     pid_file,
+    port_in_use,
     start_detached,
     stop_instance,
     tail_file,
@@ -77,6 +79,18 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float) -> Compo
     tag = f"model:{profile.name}"
     if is_running_any(profile.name, profile):
         return ComponentResult(tag, "skipped", "已在运行")
+    # 端口占用预检：走到这里端口仍被占 ⇒ 占用者不是本 profile，引擎启动后 bind 必然
+    # EADDRINUSE 秒退；提前拦截并点名占用者，替代"空等健康检查 + 事后翻日志"。
+    # RequirementError → cli exit 2，与配置/环境错误语义一致。
+    # ollama 豁免：多个 ollama profile 共享同一 11434 serve 是设计语义（见 stop_profile
+    # 同族特判）——第二个 profile 启动时 is_running_any 探 /health 得 404 不会 skip，
+    # 靠"新 serve bind 失败但健康检查命中已有 serve"就绪，端口被占是正常状态。
+    if profile.engine != "ollama" and port_in_use(profile.port):
+        who = describe_port_listener(profile.port)
+        raise RequirementError(
+            f"端口 {profile.port} 已被占用（{who or '占用者未知'}），无法启动 {profile.name}。"
+            f"请先释放该端口，或修改 profile 的 port 后重试"
+        )
     adapter = get_adapter(profile.engine)(profile, caps)
     adapter.check_requirements()  # RequirementError 向上抛
     for warning in adapter.warnings:

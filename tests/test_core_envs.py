@@ -396,3 +396,100 @@ def test_setup_uses_platform_matrix(monkeypatch, tmp_path):
     _redirect(tmp_path, monkeypatch)
     with pytest.raises(EngineEnvError, match="不支持"):
         envs.setup("vllm")
+
+
+# ---- vllm_version：dist-info 快路径优先，`vllm --version` 仅兜底 ----
+
+
+def _write_vllm_dist_info(root: Path, version: str, windows: bool) -> None:
+    sp = root / "vllm" / ("Lib/site-packages" if windows else "lib/python3.12/site-packages")
+    dist = sp / f"vllm-{version}.dist-info"
+    dist.mkdir(parents=True)
+    (dist / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: vllm\nVersion: {version}\n", encoding="utf-8"
+    )
+
+
+def test_vllm_version_reads_dist_info_without_subprocess(tmp_path, monkeypatch):
+    """dist-info 命中 → 直接返回版本，绝不启动子进程（超时根因所在）。"""
+    root = _redirect(tmp_path, monkeypatch)
+    _make_env(root, "vllm", windows=(os.name == "nt"))
+    _write_vllm_dist_info(root, "0.27.1", windows=(os.name == "nt"))
+
+    def boom(*a, **kw):
+        raise AssertionError("dist-info 命中时不应调用 subprocess")
+
+    monkeypatch.setattr(envs_mod.subprocess, "run", boom)
+    envs_mod.vllm_version.cache_clear()
+    try:
+        assert envs_mod.vllm_version() == (0, 27, 1)
+    finally:
+        envs_mod.vllm_version.cache_clear()
+
+
+def test_vllm_version_falls_back_to_cli(tmp_path, monkeypatch):
+    """dist-info 缺失 → 退回 `vllm --version`，且超时预算远大于原 5s。"""
+    root = _redirect(tmp_path, monkeypatch)
+    bin_dir = root / "vllm" / ("Scripts" if os.name == "nt" else "bin")
+    bin_dir.mkdir(parents=True)
+    exe = "vllm.exe" if os.name == "nt" else "vllm"
+    (bin_dir / exe).write_bytes(b"fake")
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append({"cmd": cmd, "timeout": kwargs.get("timeout")})
+
+        class R:
+            returncode, stdout, stderr = 0, "0.27.1", ""
+
+        return R()
+
+    monkeypatch.setattr(envs_mod.subprocess, "run", fake_run)
+    envs_mod.vllm_version.cache_clear()
+    try:
+        assert envs_mod.vllm_version() == (0, 27, 1)
+    finally:
+        envs_mod.vllm_version.cache_clear()
+
+    assert len(calls) == 1
+    assert calls[0]["cmd"][-1] == "--version"
+    assert calls[0]["timeout"] > 5, "兜底路径超时须显著高于原 5s，否则冷启动仍会误报"
+
+
+def test_vllm_version_none_when_env_absent(tmp_path, monkeypatch):
+    """venv 与 dist-info 都不存在 → None（且不起子进程）。"""
+    _redirect(tmp_path, monkeypatch)
+
+    def boom(*a, **kw):
+        raise AssertionError("venv 缺失时不应调用 subprocess")
+
+    monkeypatch.setattr(envs_mod.subprocess, "run", boom)
+    envs_mod.vllm_version.cache_clear()
+    try:
+        assert envs_mod.vllm_version() is None
+    finally:
+        envs_mod.vllm_version.cache_clear()
+
+
+def test_run_probe_ignores_stderr_and_nonzero_exit():
+    """非零退出的 traceback（含 Python x.y.z）不得被当成包版本，避免误放行版本门控。"""
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = "Traceback...  PackageNotFoundError\nPython 3.13.11 (main)\n"
+
+        return R()
+
+    original = envs_mod.subprocess.run
+    envs_mod.subprocess.run = fake_run
+    try:
+        assert envs_mod._run_probe(["python", "-c", "..."], 1) == ""
+        assert envs_mod._parse_version(envs_mod._run_probe(["python"], 1)) is None
+    finally:
+        envs_mod.subprocess.run = original
