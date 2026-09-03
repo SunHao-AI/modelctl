@@ -6,6 +6,11 @@
 |---|---|---|---|---|
 | 2026-09-03 | 构建 / 依赖 | uv 的 `default = true` 会让镜像源变成最低优先级 | 给 `[[index]]` 加 `default = true` 是降到兜底位而非设为主源，解析流量全落官方源。 | [build/uv-index-and-download.md](build/uv-index-and-download.md) |
 | 2026-09-03 | 后端 / 运行时 | 进程未设置时区，日志与审计时间比预期早 8 小时 | 全项目隐式本地时间继承宿主 OS 时区；用标准 `TZ` 覆盖进程/子进程/容器三条路径（默认 Asia/Shanghai），含 Windows 写 `TZ` 污染子进程成 +0100 的坑。 | [backend/timezone.md](backend/timezone.md) |
+| 2026-09-03 | 后端 / 引擎启动 | vLLM venv 分支漏传 `--port`，健康检查永远 Connection refused | `vllm serve` 回退默认 8000 与 `profile.port` 脱节，表现为端口秒退或健康检查空等超时；`--port` 须置于 `extra_args` 之前。 | [backend/engine-launch-args.md](backend/engine-launch-args.md) |
+| 2026-09-03 | 后端 / 引擎启动 | `vllm --version` 探测 5s 超时，版本门控长期静默失效 | 跑 CLI 问版本会触发完整 import 链；改读 dist-info 元数据，且版本正则绝不能碰 stderr（会把解释器版本当成包版本误放行）。 | [backend/engine-launch-args.md](backend/engine-launch-args.md) |
+| 2026-09-03 | 测试 / 隔离 | 生产代码 `load_env()` 把本地 .env 泄漏进测试，用例结论随机器漂移 | `os.environ.setdefault` 不受 monkeypatch 管辖；`GATEWAY_DEFAULT_MODEL` 泄漏让未知 model 不再 404（全量红、单跑绿）；conftest 需对改变控制流的 env 做 delenv 白名单。 | [backend/test-isolation.md](backend/test-isolation.md) |
+| 2026-09-03 | 测试 / 收集 | `tests/` 里调试脚本模块级 `sys.exit` 掀翻整个 pytest session | `test_*.py` 顶层在 collection 阶段执行；改造成 fixture + 断言，路由枚举改用 `app.openapi()["paths"]`。 | [backend/test-isolation.md](backend/test-isolation.md) |
+| 2026-09-03 | 后端 / 启动预检 | 端口占用无预检，引擎秒退后靠翻日志反推 EADDRINUSE | 新增 `port_in_use` 前置拦截并点名占用者；ollama 共享 serve 端口是设计语义，必须豁免。 | [backend/engine-launch-args.md](backend/engine-launch-args.md) |
 
 ## 目录约定
 

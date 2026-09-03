@@ -31,9 +31,18 @@ def isolated_runtime_dirs(tmp_path, monkeypatch):
       用例调 cli.main() → setup_logging() 时，loguru 文件 sink 会在该路径打开句柄；
       该句柄跨用例存活，被 pytest 的 gc.collect() 析构时 close() 抛 OSError(EBADF)，
       表现为"当时正在跑的用例"莫名失败（与用例自身逻辑无关）。
+    AUDIT_DIR：网关审计日志缺省写 CWD 下 data/audit，不隔离会把测试请求写进仓库。
+    GATEWAY_* delenv：cli 入口与 admin 端点会 load_env() 把**开发者本地 .env** 经
+      os.environ.setdefault 注入进程（不受 monkeypatch 管辖、跨用例存活）。典型翻车：
+      .env 里 GATEWAY_DEFAULT_MODEL=qwen3.8 泄漏后，create_app(default_model=None) 被
+      env 兜底，未知 model 不再 404——test_gateway 在全量跑时即因此失败、单跑通过。
+      每个用例前强制清除，测试只认用例自己显式设置的值。
     """
     monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setenv("AUDIT_DIR", str(tmp_path / "audit"))
+    monkeypatch.delenv("GATEWAY_DEFAULT_MODEL", raising=False)
+    monkeypatch.delenv("GATEWAY_CONTEXT_SWITCH", raising=False)
 
 
 @pytest.fixture()
