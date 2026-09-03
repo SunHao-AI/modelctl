@@ -150,6 +150,10 @@ def build_parser() -> argparse.ArgumentParser:
     ns = sub.add_parser("nginx-snippet", help="生成 nginx 多模型路由 map 片段")
     ns.add_argument("--node", required=True, help="节点编号（URL 前缀，如 210）")
     ns.add_argument("--host", required=True, help="节点 IP（如 192.168.77.210）")
+    wp = sub.add_parser("webui", help="Web 管理控制台服务（/admin/api + 前端 SPA）控制")
+    wp.add_argument("action", choices=["start", "stop", "restart", "status"])
+    wp.add_argument("--port", type=int, default=None, help="监听端口（默认 .env 的 WEBUI_PORT 或 4173）")
+    wp.add_argument("--host", default=None, help="绑定地址（默认 .env 的 WEBUI_HOST 或 127.0.0.1）")
     ep = sub.add_parser("env", help="专用虚拟环境管理（vllm / sglang / gateway）")
     ep.add_argument("action", choices=["setup", "list", "remove"])
     ep.add_argument(
@@ -721,6 +725,24 @@ def _cmd_gateway_status() -> int:
     return 0
 
 
+def _cmd_webui(args, models_dir: Path | None, caps) -> int:
+    # --port/--host 覆盖：写入进程环境后由 all_service 透传子进程（.env 值经 load_env 已在环境中）
+    if getattr(args, "port", None) is not None:
+        os.environ["WEBUI_PORT"] = str(args.port)
+    if getattr(args, "host", None):
+        os.environ["WEBUI_HOST"] = args.host
+    if args.action == "start":
+        r = all_service.start_webui()
+    elif args.action == "stop":
+        r = all_service.stop_webui()
+    elif args.action == "restart":
+        r = all_service.restart_webui()
+    else:
+        r = all_service.status_webui()
+    (logger.error if r.status == "error" else logger.info)(f"Web UI：{r.detail}")
+    return 0 if r.status in ("ok", "skipped") else 2
+
+
 def _cmd_all(args, models_dir: Path | None, caps) -> int:
     if args.action == "start":
         results = all_service.start_all(models_dir, args.model, args.timeout)
@@ -1170,6 +1192,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_ui_stop(args, models_dir, caps)
         if args.command == "nginx-snippet":
             return _cmd_nginx_snippet(args, models_dir)
+        if args.command == "webui":
+            return _cmd_webui(args, models_dir, caps)
         if args.command == "env":
             if args.action == "setup":
                 return _cmd_env_setup(args, models_dir, caps)

@@ -456,6 +456,7 @@ def create_app(
     groups: dict[str, list[GatewayModel]] | None = None,
     stats_data_dir: Path | None = None,
     audit_log: RequestAuditLog | NoopAuditLog | None = None,
+    admin: bool = False,
 ):
     """构建 FastAPI 网关应用（transport 供测试注入 httpx.MockTransport）。
 
@@ -465,6 +466,8 @@ def create_app(
     groups：家族索引（group -> 成员列表）；调用方注入 registry 时缺省为空 dict，
     未注入时自动从 models/*.yaml 构建。
     stats_data_dir：用量持久化目录（与 stats 服务共用，使网关累计的 token 跨进程保留）。
+    admin：True 时额外挂上 /admin/api/*（Web UI 管理面）与前端静态产物。仅
+    `modelctl webui` 传 True；`modelctl gateway start` 保持纯数据面，管理 API 不对外暴露。
     """
     import httpx
     from fastapi import FastAPI, Request
@@ -1047,6 +1050,17 @@ def create_app(
             await client.aclose()
             err_msg = f"后端不可达：{error}"
             return JSONResponse(status_code=502, content={"error": {"message": err_msg, "type": "upstream_error"}})
+
+    if admin:
+        # 管理面：/admin/api/* + 前端 SPA。须在全部 /v1 路由注册后挂载——静态兜底
+        # 路由 /{full_path:path} 依赖注册顺序接住未命中的 GET，不能提前注册。
+        from modelctl.core.webui.admin_router import create_admin_router
+        from modelctl.core.webui.server import mount_static
+
+        admin_router = create_admin_router()
+        app.include_router(admin_router, prefix="/admin/api")
+        app.state.task_manager = admin_router.task_manager
+        mount_static(app)
 
     return app
 

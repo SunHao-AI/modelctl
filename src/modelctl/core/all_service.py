@@ -249,6 +249,77 @@ def restart_gateway() -> ComponentResult:
     return start_gateway()
 
 
+# ---------------------------------------------------------------------------
+# Web UI（管理面）：复用 gateway 子环境解释器 + create_app(admin=True)
+# 与网关同为一份 FastAPI，只是端口不同、额外挂 /admin/api 与前端静态产物。
+# ---------------------------------------------------------------------------
+
+
+def start_webui() -> ComponentResult:
+    from modelctl.core.webui.server import WEBUI_INSTANCE, dist_ready, webui_host, webui_port
+
+    if is_running(WEBUI_INSTANCE):
+        return ComponentResult("webui", "skipped", "Web UI 已在运行")
+    # 依赖与网关完全一致（fastapi/uvicorn/httpx），直接复用网关的 venv 保障逻辑
+    vendor = _gateway_venv_python()
+    if vendor is None:
+        if not _ensure_gateway_venv():
+            if not ensure_packages("gateway"):
+                return ComponentResult(
+                    "webui", "error",
+                    "Web UI 依赖补齐失败，请手动 `modelctl env setup gateway` 后重试",
+                )
+        else:
+            vendor = _gateway_venv_python()
+    if vendor is None:
+        if not ensure_packages("gateway"):
+            return ComponentResult(
+                "webui", "error",
+                "Web UI 依赖补齐失败（fastapi/uvicorn/httpx），请手动 `modelctl env setup gateway` 后重试",
+            )
+        cmd, env = _detached_script("modelctl.core.webui.server")
+    else:
+        cmd, env = _detached_script("modelctl.core.webui.server", interpreter=str(vendor))
+    # 端口/host 显式注入：本进程已从 .env load_env，此处再写一次保证子进程拿到
+    # 的是本次生效值（CLI --port 覆盖时也走这里，由 webui 参数传入）
+    host, port = webui_host(), webui_port()
+    env["WEBUI_HOST"], env["WEBUI_PORT"] = host, str(port)
+    data_dir = os.environ.get("USAGE_DATA_DIR")
+    if data_dir:
+        env["USAGE_DATA_DIR"] = data_dir
+    pid, _ = start_detached(WEBUI_INSTANCE, cmd, env)
+    hint = "" if dist_ready() else "（dist/ 缺失，仅 /admin/api 可用；先 npm run build）"
+    logger.info(f"Web UI 已启动（PID {pid}），监听端口 {port}{hint}")
+    detail = f"http://127.0.0.1:{port}" if host in ("0.0.0.0", "::") else f"http://{host}:{port}"
+    return ComponentResult("webui", "ok", detail + hint)
+
+
+def stop_webui() -> ComponentResult:
+    from modelctl.core.webui.server import WEBUI_INSTANCE, webui_port
+
+    stop_instance(WEBUI_INSTANCE, webui_port(), ["modelctl.core.webui.server"])
+    logger.info("Web UI 已停止")
+    return ComponentResult("webui", "ok", "已停止")
+
+
+def restart_webui() -> ComponentResult:
+    from modelctl.core.webui.server import WEBUI_INSTANCE
+
+    if is_running(WEBUI_INSTANCE):
+        stop_webui()
+    return start_webui()
+
+
+def status_webui() -> ComponentResult:
+    from modelctl.core.webui.server import WEBUI_INSTANCE, webui_port
+
+    port = webui_port()
+    if is_running(WEBUI_INSTANCE):
+        ok = wait_health(f"http://127.0.0.1:{port}/admin/api/health", 3.0)
+        return ComponentResult("webui", "ok", f"运行中（端口 {port}），/admin/api/health " + ("正常" if ok else "无响应"))
+    return ComponentResult("webui", "ok", "已停止")
+
+
 def status_gateway() -> ComponentResult:
     port = int(os.environ.get("GATEWAY_PORT", str(GATEWAY_PORT)))
     if is_running("llm-gateway"):

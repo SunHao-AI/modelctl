@@ -1,0 +1,30 @@
+{
+  "name": "modelctl-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 5173",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "vue": "^3.5.0",
+    "vue-router": "^4.4.0",
+    "pinia": "^2.2.0",
+    "echarts": "^5.6.0",
+    "axios": "^1.7.0",
+    "dayjs": "^1.11.0",
+    "@vueuse/core": "^11.0.0"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0",
+    "@vitejs/plugin-vue": "^5.2.0",
+    "typescript": "^5.6.0",
+    "vue-tsc": "^2.1.0",
+    "unocss": "^66.0.0",
+    "@types/node": "^22.0.0",
+    "sass": "^1.80.0"
+  }
+}
