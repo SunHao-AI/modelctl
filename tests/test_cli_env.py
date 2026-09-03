@@ -92,7 +92,7 @@ def test_main_env_setup_bogus_rejected(monkeypatch, tmp_path, capsys):
 
 def test_cmd_env_setup_success(monkeypatch, capsys):
     """_cmd_env_setup 成功路径 → 返回 0。"""
-    monkeypatch.setattr(cli, "envs_setup", lambda engine: 0)
+    monkeypatch.setattr(cli, "envs_setup", lambda engine, **kw: 0)
 
     class _Args:
         engine = "vllm"
@@ -102,9 +102,49 @@ def test_cmd_env_setup_success(monkeypatch, capsys):
     assert "vllm" in capsys.readouterr().out
 
 
+def test_cmd_env_setup_passes_offline_options(monkeypatch, tmp_path):
+    """--wheels/--offline → 转成 envs_setup 的 wheels_dir/offline。"""
+    called = {}
+
+    def _fake(engine, *, wheels_dir=None, offline=False):
+        called["engine"], called["wheels_dir"], called["offline"] = engine, wheels_dir, offline
+        return 0
+
+    monkeypatch.setattr(cli, "envs_setup", _fake)
+
+    class _Args:
+        engine = "vllm"
+        wheels = str(tmp_path)
+        offline = True
+
+    assert cli._cmd_env_setup(_Args(), None, None) == 0
+    assert called["wheels_dir"] == tmp_path
+    assert called["offline"] is True
+
+
+def test_cmd_env_setup_offline_defaults(monkeypatch):
+    """未给 --wheels/--offline → wheels_dir=None、offline=False。"""
+    called = {}
+
+    def _fake(engine, *, wheels_dir=None, offline=False):
+        called["wheels_dir"], called["offline"] = wheels_dir, offline
+        return 0
+
+    monkeypatch.setattr(cli, "envs_setup", _fake)
+
+    class _Args:
+        engine = "vllm"
+
+    assert cli._cmd_env_setup(_Args(), None, None) == 0
+    assert called["wheels_dir"] is None
+    assert called["offline"] is False
+
+
 def test_cmd_env_setup_engine_env_error(monkeypatch, capsys):
     """envs_setup 抛 EngineEnvError（如未找到 uv）→ _cmd_env_setup 返回 2。"""
-    monkeypatch.setattr(cli, "envs_setup", lambda engine: (_ for _ in ()).throw(EngineEnvError("未找到 uv")))
+    monkeypatch.setattr(
+        cli, "envs_setup", lambda engine, **kw: (_ for _ in ()).throw(EngineEnvError("未找到 uv"))
+    )
 
     class _Args:
         engine = "vllm"
@@ -115,7 +155,7 @@ def test_cmd_env_setup_engine_env_error(monkeypatch, capsys):
 
 def test_cmd_env_setup_nonzero_exit(monkeypatch, capsys):
     """envs_setup 返回非 0 → _cmd_env_setup 透传退出码。"""
-    monkeypatch.setattr(cli, "envs_setup", lambda engine: 3)
+    monkeypatch.setattr(cli, "envs_setup", lambda engine, **kw: 3)
 
     class _Args:
         engine = "vllm"

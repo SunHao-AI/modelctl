@@ -168,6 +168,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=ENV_TARGETS,
         help=f"受管目标：{' / '.join(ENV_TARGETS)}（list 不需要）",
     )
+    # 离线/弱网安装：--wheels 指向本地 wheel 目录（uv --find-links），--offline 禁网。
+    ep.add_argument("--wheels", default=None, metavar="DIR",
+                    help="setup 时从本地 wheel 目录安装（uv --find-links），绕开跨境 PyPI 下载")
+    ep.add_argument("--offline", action="store_true",
+                    help="配合 --wheels 使用：完全禁用网络，要求目录内依赖已自闭包")
     # §2.2 TensorRT-LLM 引擎编译
     tp = sub.add_parser("trtllm", help="TensorRT-LLM 编译/检查子命令")
     tp.add_argument("action", choices=["build", "status"])
@@ -834,7 +839,12 @@ def _cmd_env_setup(args, models_dir: Path | None, caps) -> int:
         )
         return 2
     try:
-        code = envs_setup(args.engine)
+        wheels = getattr(args, "wheels", None)
+        code = envs_setup(
+            args.engine,
+            wheels_dir=Path(wheels).expanduser() if wheels else None,
+            offline=bool(getattr(args, "offline", False)),
+        )
     except EngineEnvError as exc:
         logger.error(str(exc))
         return 2

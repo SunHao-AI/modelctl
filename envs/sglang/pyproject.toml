@@ -6,3 +6,5 @@ requires-python = ">=3.12"
 dependencies = [
     "sglang[all]>=0.5.9,<0.6",
 ]
+
+# index 配置继承项目根 uv.toml（刻意不写 [tool.uv]，见根 uv.toml 顶部说明）。

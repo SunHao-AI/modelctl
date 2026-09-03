@@ -139,7 +139,18 @@ def vllm_version() -> tuple[int, int, int] | None:
     return int(m.group(1)), int(m.group(2)), int(m.group(3))
 
 
-def setup(target: str) -> int:
+def setup(
+    target: str,
+    *,
+    wheels_dir: Path | None = None,
+    offline: bool = False,
+) -> int:
+    """同步受管子项目依赖到 `.venvs/<target>`。
+
+    wheels_dir：本地 wheel 目录（透传 `--find-links`），作为额外包来源；
+    offline：配合 wheels_dir 使用，透传 `--offline` 完全禁用网络（要求目录内依赖自闭包）。
+    两者用于内网/弱网机器绕开跨境 PyPI 下载（先在有网机器 `pip download` 备好目录）。
+    """
     if not _is_target(target):
         raise ValueError(f"非受管环境：{target}")
     # 平台限制（§3 / TODO 项 5）：托管引擎仅 Linux；gateway 跨平台。
@@ -151,16 +162,20 @@ def setup(target: str) -> int:
     exe = shutil.which("uv")
     if exe is None:
         raise EngineEnvError("未找到 uv，请先安装：pip install uv")
+    if wheels_dir is not None and not wheels_dir.is_dir():
+        raise EngineEnvError(f"wheel 目录不存在：{wheels_dir}")
     # 子项目定位：网关在 <repo>/gateway；托管引擎在 <repo>/envs/<engine>
     project_root = GATEWAY_ROOT if target == GATEWAY_SUBPROJECT else ENVS_ROOT / target
     env = {
         **os.environ,
         "UV_PROJECT_ENVIRONMENT": str(VENV_ROOT / target),
     }
-    proc = subprocess.run(
-        [exe, "sync", "--project", str(project_root)],
-        env=env,
-    )
+    cmd = [exe, "sync", "--project", str(project_root)]
+    if wheels_dir is not None:
+        cmd += ["--find-links", str(wheels_dir.resolve())]
+        if offline:
+            cmd.append("--offline")
+    proc = subprocess.run(cmd, env=env)
     return proc.returncode
 
 

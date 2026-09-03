@@ -7,18 +7,4 @@ dependencies = [
     "aphrodite-engine",
 ]
 
-[tool.uv]
-# 声明 [tool.uv] 后 uv 不再向上读根 uv.toml，需在此重复 default 镜像。
-[[tool.uv.index]]
-name = "aliyun-pypi"
-url = "https://mirrors.aliyun.com/pypi/simple"
-default = true
-
-[[tool.uv.index]]
-name = "pytorch-cu13"
-url = "https://download.pytorch.org/whl/cu130"
-explicit = true
-
-# 官方 PyPI 兜底（与根 uv.toml 对齐）：阿里镜像缺失的包按声明顺序回退查询。
-[[tool.uv.index]]
-url = "https://pypi.org/simple/"
+# index 配置继承项目根 uv.toml（刻意不写 [tool.uv]，见根 uv.toml 顶部说明）。

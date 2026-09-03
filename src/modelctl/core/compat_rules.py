@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 import sys
 
 from modelctl.core.capabilities import cc_at_least
@@ -87,8 +89,75 @@ def _vllm_torch_abi_check(gpu: GpuSpec, env: EnvSpec, model: ModelSpec | None) -
     return CompatIssue(
         level="block",
         rule_id="vllm_torch_abi",
-        reason=f"vllm 要求 torch{req}，当前已装 {installed}（ABI 不匹配）。"
-        f"建议执行：modelctl env setup vllm 以重建引擎 venv 并对齐依赖。",
+        reason=f"vllm 要求 torch{req}，当前已装 {installed}（ABI 不匹配）。" f"建议执行：modelctl env setup vllm 以重建引擎 venv 并对齐依赖。",
+    )
+
+
+# vLLM / SGLang 的 KV cache 显存布局与 NCCL 通信内核依赖 CUDA 13 运行库（cu13 wheel 线）。
+# torch 的 CUDA 小版本不由 modelctl 选择——它取决于 vllm 钉死的 torch 版本 + 所选 index，
+# 而 PyPI 默认 wheel 的 CUDA 构建会随 torch 版本漂移（2.9 前是 cu12x）。因此安装期无法
+# 保证，必须在启动前显式校验，避免静默拿到 cu12x 构建后在运行期才炸。
+DEFAULT_TORCH_CUDA_MAJOR = 13
+TORCH_CUDA_MAJOR_ENV = "MODELCTL_TORCH_CUDA_MAJOR"
+
+# torch 版本 local 标签：2.13.0+cu130 / 2.7.0-cu128（PEP 440 local version）
+_CU_TAG_RE = re.compile(r"[+\-]cu(\d+)")
+# nvidia wheel 包名后缀：nvidia-nccl-cu13 / nvidia-cudnn-cu12
+_CU_PKG_RE = re.compile(r"-cu(\d+)$")
+
+
+def _cuda_major_of(tag_value: int) -> int:
+    """把两种 cu 标签格式统一成 CUDA 主版本。
+
+    - nvidia wheel 后缀是主版本本身：cu13 → 13；
+    - torch local 标签是 major*10+minor：cu130（=13.0）→ 13、cu128（=12.8）→ 12。
+    """
+    return tag_value // 10 if tag_value >= 100 else tag_value
+
+
+def _required_cuda_major() -> int:
+    """期望的 CUDA 主版本；可用 TORCH_CUDA_MAJOR_ENV 覆盖（如需回退 cu12 的旧卡环境）。"""
+    raw = (os.environ.get(TORCH_CUDA_MAJOR_ENV) or "").strip()
+    return int(raw) if raw.isdigit() else DEFAULT_TORCH_CUDA_MAJOR
+
+
+def _torch_cuda_major(env: EnvSpec) -> int | None:
+    """推断 venv 内 torch 实际链接的 CUDA 主版本，无法判定返回 None。
+
+    判定优先级：
+    1. torch 版本 local 标签（`2.13.0+cu130`，来自 PyTorch 官方 index 的显式标注）；
+    2. torch 强绑定的 nvidia wheel 包名后缀（cudnn/nccl 二者必随 CUDA 主版本变化）；
+    3. 都取不到（CPU-only wheel 或元数据缺失）→ None，交由调用方跳过、不误报。
+    """
+    tag = _CU_TAG_RE.search(env.packages.get("torch", ""))
+    if tag:
+        return _cuda_major_of(int(tag.group(1)))
+    for pkg in ("nvidia-cudnn", "nvidia-nccl"):
+        for name in env.packages:
+            if name.startswith(pkg + "-cu"):
+                m = _CU_PKG_RE.search(name)
+                if m:
+                    return _cuda_major_of(int(m.group(1)))
+    return None
+
+
+def _torch_cuda_build_check(gpu: GpuSpec, env: EnvSpec, model: ModelSpec | None) -> CompatIssue | None:
+    if "torch" not in env.packages:
+        return None  # 环境不含 torch（llamacpp / ollama 等），不适用
+    actual = _torch_cuda_major(env)
+    if actual is None:
+        return None  # 无法判定 CUDA 构建，不误报
+    required = _required_cuda_major()
+    if actual == required:
+        return None
+    return CompatIssue(
+        level="block",
+        rule_id="torch_cuda_build",
+        reason=(
+            f"torch 为 cu{actual} 构建（已装 {env.packages['torch']}），需要 cu{required}。"
+            f"KV cache 与 NCCL 通信内核依赖 CUDA {required} 运行库。"
+            f"若确需以 cu{actual} 运行，可设 {TORCH_CUDA_MAJOR_ENV}={actual} 放宽本检查。"
+        ),
     )
 
 
@@ -113,10 +182,7 @@ def _nvidia_pkg_complete_check(gpu: GpuSpec, env: EnvSpec, model: ModelSpec | No
     return CompatIssue(
         level="block",
         rule_id="nvidia_pkg_complete",
-        reason=(
-            f"检测到 nvidia 依赖包文件缺失（空壳包）：{', '.join(missing[:5])}。"
-            "建议执行：uv pip install --reinstall \"nvidia-cudnn-cu13\" \"nvidia-nccl-cu13\" 等对应包。"
-        ),
+        reason=(f"检测到 nvidia 依赖包文件缺失（空壳包）：{', '.join(missing[:5])}。" '建议执行：uv pip install --reinstall "nvidia-cudnn-cu13" "nvidia-nccl-cu13" 等对应包。'),
     )
 
 
@@ -144,10 +210,7 @@ def _cuda_lib_resolvable_check(gpu: GpuSpec, env: EnvSpec, model: ModelSpec | No
     return CompatIssue(
         level="block",
         rule_id="cuda_lib_resolvable",
-        reason=(
-            f"CUDA 运行库无法解析：{', '.join(missing)}。"
-            "请将对应 nvidia 库目录加入 LD_LIBRARY_PATH 或 /etc/ld.so.conf.d/ 后执行 ldconfig。"
-        ),
+        reason=(f"CUDA 运行库无法解析：{', '.join(missing)}。" "请将对应 nvidia 库目录加入 LD_LIBRARY_PATH 或 /etc/ld.so.conf.d/ 后执行 ldconfig。"),
     )
 
 
@@ -195,6 +258,7 @@ def _register() -> None:
     register_rule(CompatRule(id="fp8_quant_cc", engines=("vllm", "sglang"), check=_fp8_quant_cc_check))
     register_rule(CompatRule(id="fp4_quant_blackwell", engines=("vllm",), check=_fp4_quant_blackwell_check))
     register_rule(CompatRule(id="vllm_torch_abi", engines=("vllm",), check=_vllm_torch_abi_check))
+    register_rule(CompatRule(id="torch_cuda_build", engines=("vllm", "sglang"), check=_torch_cuda_build_check))
     register_rule(CompatRule(id="nvidia_pkg_complete", engines=("vllm", "sglang"), check=_nvidia_pkg_complete_check))
     register_rule(CompatRule(id="cuda_lib_resolvable", engines=("vllm", "sglang"), check=_cuda_lib_resolvable_check))
     register_rule(CompatRule(id="engine_dep_missing", engines=("vllm",), check=_engine_dep_missing_check))

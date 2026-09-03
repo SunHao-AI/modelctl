@@ -378,6 +378,63 @@ def test_vllm_torch_abi_skip_when_no_req(tmp_path):
     assert run_compat("vllm", GpuSpec(), _env(tmp_path, ""), None) == []
 
 
+def _cuda_issues(engine, tmp_path, packages, vllm_reqs="Requires-Dist: torch==2.13.0\n"):
+    env = _env(tmp_path, vllm_reqs, packages=packages)
+    return [i for i in run_compat(engine, GpuSpec(), env, None) if i.rule_id == "torch_cuda_build"]
+
+
+def test_torch_cuda_build_blocks_cu12(tmp_path):
+    """torch 无 local 标签但绑定 nvidia-*-cu12 → block（PyPI 旧版默认 cu12x 的场景）。"""
+    issues = _cuda_issues("vllm", tmp_path, {"torch": "2.9.1", "nvidia-nccl-cu12": "2.26.2"})
+    assert issues and issues[0].level == "block" and "cu12" in issues[0].reason
+
+
+def test_torch_cuda_build_passes_cu13(tmp_path):
+    issues = _cuda_issues("vllm", tmp_path, {"torch": "2.13.0", "nvidia-nccl-cu13": "2.29.7"})
+    assert issues == []
+
+
+def test_torch_cuda_build_reads_torch_local_tag(tmp_path):
+    """torch 版本带 +cu130（官方 index 的 major*10+minor 记法）→ 判定 cu13 通过。"""
+    assert _cuda_issues("vllm", tmp_path, {"torch": "2.13.0+cu130"}) == []
+
+
+def test_torch_cuda_build_blocks_torch_local_cu128_tag(tmp_path):
+    """+cu128 记法应折算成主版本 12 并 block，而不是误当 128 通过。"""
+    issues = _cuda_issues("vllm", tmp_path, {"torch": "2.13.0+cu128"})
+    assert issues and "cu12" in issues[0].reason
+
+
+def test_torch_cuda_build_skips_when_unresolvable(tmp_path):
+    """CPU-only torch（无标签也无 nvidia-*-cu* 包）→ 无法判定，不误报。"""
+    assert _cuda_issues("vllm", tmp_path, {"torch": "2.13.0"}) == []
+
+
+def test_torch_cuda_build_skips_env_without_torch(tmp_path):
+    """环境不含 torch（llamacpp 等）→ 规则不适用。"""
+    sp = tmp_path / "sp2"
+    dist = sp / "llama_cpp_python-0.3.0.dist-info"
+    dist.mkdir(parents=True)
+    (dist / "METADATA").write_text("Name: llama_cpp_python\nVersion: 0.3.0\n", encoding="utf-8")
+    env = EnvSpec.from_env(site_packages=sp)
+    assert [i for i in run_compat("llamacpp", GpuSpec(), env, None) if i.rule_id == "torch_cuda_build"] == []
+
+
+def test_torch_cuda_build_override_env_escapes(tmp_path, monkeypatch):
+    """MODELCTL_TORCH_CUDA_MAJOR=12 放宽检查：cu12 构建放行（旧卡环境逃生口）。"""
+    monkeypatch.setenv("MODELCTL_TORCH_CUDA_MAJOR", "12")
+    issues = _cuda_issues(
+        "vllm", tmp_path, {"torch": "2.9.1", "nvidia-cudnn-cu12": "9.2.0"}, "Requires-Dist: torch==2.9.1\n"
+    )
+    assert issues == []
+
+
+def test_torch_cuda_build_triggers_on_sglang(tmp_path):
+    """规则注册了 sglang：cu12 构建同样应 block。"""
+    issues = _cuda_issues("sglang", tmp_path, {"torch": "2.9.1", "nvidia-cudnn-cu12": "9.2.0"}, "")
+    assert issues and issues[0].level == "block"
+
+
 def test_nvidia_pkg_complete_block(tmp_path):
     env = _env(tmp_path, nvidia_missing=True)
     issues = run_compat("vllm", GpuSpec(), env, None)

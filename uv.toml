@@ -1,19 +1,29 @@
-# modelctl 默认 PyPI 镜像：阿里（国内网络保障 Parse/Install 速度）。
+# PyPI index 优先级（uv 语义：先声明的 index 优先级最高，不是 default=true 最高）。
+#
+# ⚠ uv 的 `default = true` 含义与直觉相反：它把该 index 移到优先级列表**末尾**
+# （最低优先级），作用是「替代 PyPI 作为兜底源」，而不是「设为主源」。
+# 误用 default=true 会让解析流量全部落到 files.pythonhosted.org（跨境、易超时）。
+#
+# 因此这里按优先级从高到低显式声明，且**不要**给镜像加 default=true：
+#   1. 清华源（同步最全、大 wheel 单连接最快）
+#   2. 阿里云源（清华缺包时兜底）
+#   3. 官方 PyPI（前两者都缺时兜底）
+# uv 采用 first-match 策略：命中第一个含该包的 index 即停止，故顺序即优先级。
 [[index]]
-url = "https://mirrors.aliyun.com/pypi/simple/"
-default = true
+name = "tuna"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 
-# PyTorch 官方 cu130 index：显式 index（explicit = true 表示只有显式指名此 index 的依赖才路由过来，
-# 不影响默认 PyPI 路由）。当需要在 pyproject 中写
-#   torch @ https://download.pytorch.org/whl/cu130 （配合 [tool.uv.sources]）
-# 时才会走该 index；保留此条目是为了在工程内统一声明，避免依赖者在终端临时拼 --index-url。
 [[index]]
-name = "pytorch-cu13"
-url = "https://download.pytorch.org/whl/cu130"
-explicit = true
+name = "aliyun"
+url = "https://mirrors.aliyun.com/pypi/simple"
 
-# 官方 PyPI：作为阿里镜像的兜底（uv 多 index 解析：当包在 default 找不到时按声明顺序 fallback）。
-# 这是 PEP 658-style 隐式多 index：uv 同时查询所有 index，不存在或 404 时自动回退查询下一个，
-# 不需要在命令行临时拼 `uv sync --extra-index-url ...`。
 [[index]]
 url = "https://pypi.org/simple/"
+
+# 刻意不再声明 PyTorch 官方 cu130 index：
+# - 它曾以 explicit = true 存在，但全仓库无 [tool.uv.sources] 引用，从未生效；
+# - torch 的 CUDA 版本由 vllm 钉死的 torch 版本决定（vllm 0.27.1 → torch==2.13.0，
+#   PyPI 默认 Linux wheel 已是 CUDA 13：cuda-toolkit 13.0 + nvidia-*-cu13）；
+# - 且 download.pytorch.org 无国内镜像同步，指向它会把 526 MB 的 torch wheel
+#   变成跨境下载，与本文件加速目标相悖。
+# CUDA 构建的正确性改由启动前校验保证：compat_rules 的 torch_cuda_build 规则。

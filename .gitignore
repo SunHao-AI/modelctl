@@ -22,6 +22,10 @@ dist/
 build/
 *.egg-info/
 
+# 反面豁免：docs/known-pitfalls/build/ 是"构建与依赖"类问题文档目录，
+# 会被上面的 Python 产物规则 `build/` 误伤（git 忽略整个目录后不再下沉匹配）
+!docs/known-pitfalls/build/
+
 # 构建产物 / 下载的模型
 llama.cpp/
 model-gguf/
@@ -33,6 +37,10 @@ model-gguf/
 *.swp
 .python-header.yaml
 data/
+
+# 引擎 venv 的锁文件：由 modelctl env setup 在目标平台重新解析生成
+# （Linux/CUDA 与开发机解析结果不同），故不入库；顶层 uv.lock 不受此规则影响
+envs/*/uv.lock
 
 # vllm 请求级审计日志 (按天 JSONL 分片, 含 token 用量, 不入库)
 /data/audit/

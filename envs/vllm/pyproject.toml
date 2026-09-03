@@ -7,20 +7,5 @@ dependencies = [
     "vllm>=0.27,<0.28",
 ]
 
-[tool.uv]
-# 注意：本文件一旦声明 [tool.uv]，uv 就不再向上查找项目根 uv.toml，
-# 因此根 uv.toml 里的阿里 default index 对本子项目不生效，必须在此重复声明。
-[[tool.uv.index]]
-name = "aliyun-pypi"
-url = "https://mirrors.aliyun.com/pypi/simple"
-default = true
-
-# torch cu13 explicit index（从项目根 uv.toml 迁移，保持子项目自包含、uv sync 可复现）
-[[tool.uv.index]]
-name = "pytorch-cu13"
-url = "https://download.pytorch.org/whl/cu130"
-explicit = true
-
-# 官方 PyPI 兜底（与根 uv.toml 对齐）：阿里镜像缺失的包按声明顺序回退查询。
-[[tool.uv.index]]
-url = "https://pypi.org/simple/"
+# index 配置继承项目根 uv.toml（本文件刻意不写 [tool.uv]：uv 一旦发现 [tool.uv]
+# 就停止向上查找，会丢失根配置的镜像优先级，详见根 uv.toml 顶部说明）。
