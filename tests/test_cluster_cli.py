@@ -79,6 +79,31 @@ def test_join_token_rotate_on_center(monkeypatch) -> None:
 
 
 def test_nodes_requires_center_url(monkeypatch) -> None:
+    """未设 CLUSTER_CENTER_URL 时回探本机 webui；中心未启用集群（404）→ 退出码 2。
+
+    不打桩会真连 127.0.0.1:WEBUI_PORT：本机若恰有匹配 API_KEY 的 webui 在跑则 rc==0（flaky）。
+    """
+    import modelctl.core.cluster.center_probe as cp
+
     monkeypatch.setenv("CLUSTER_ROLE", "both")
     monkeypatch.delenv("CLUSTER_CENTER_URL", raising=False)
+    called: list[str] = []
+
+    def fake_get_json(url, api_key="", timeout=5.0):
+        called.append(url)
+        return 404, {}
+
+    monkeypatch.setattr(cp, "get_json", fake_get_json)
     assert _main(["cluster", "nodes"]) == 2
+    assert len(called) == 1, "应只发一次中心请求"
+    assert called[0].startswith("http://127.0.0.1"), f"回退 base 应为本机 webui，实际 {called[0]}"
+    assert called[0].endswith("/admin/api/cluster/nodes")
+
+
+def test_center_probe_unreachable_schemeless_url_no_traceback() -> None:
+    """center_url 缺 scheme（如 mycenter）：urlopen 的 ValueError 须折叠为不可达，不得裸 traceback。"""
+    from modelctl.core.cluster.center_probe import check_join
+
+    ok, node_token, message = check_join("mycenter", "JT-1", "w-1")
+    assert ok is False and node_token == ""
+    assert "中心不可达" in message

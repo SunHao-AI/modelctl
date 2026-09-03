@@ -24,17 +24,19 @@ import urllib.request
 
 def _request(method: str, url: str, payload: dict | None, api_key: str, timeout: float) -> tuple[int, dict]:
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    if api_key:
-        req.add_header("Authorization", f"Bearer {api_key}")
     try:
+        # Request 构造须在 try 内：URL 缺 scheme 时其 _parse() 即抛 ValueError（urlopen 之前）
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("Content-Type", "application/json")
+        if api_key:
+            req.add_header("Authorization", f"Bearer {api_key}")
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — 内网 http，scheme 由调用方保证
             body = resp.read().decode("utf-8", errors="replace")
             return resp.status, _safe_json(body)
     except urllib.error.HTTPError as exc:
         return exc.code, _safe_json(exc.read().decode("utf-8", errors="replace"))
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        # ValueError：center_url 缺 scheme（如 "mycenter"）时 Request/urlopen 直接抛，须一并折叠
         return -1, {"error": str(exc)}
 
 

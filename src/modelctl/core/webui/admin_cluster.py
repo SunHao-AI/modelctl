@@ -25,7 +25,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from modelctl.core.cluster import config, tokens, wsproto
 from modelctl.core.cluster.nodes import AuthError, NodeRegistry
@@ -109,9 +109,9 @@ async def rotate_join_token(_base: None = Depends(require_auth)):
 
 
 class _JoinCheckBody(BaseModel):
-    node_id: str
+    node_id: str = Field(min_length=1, max_length=64)
     key: str
-    lan: str = ""
+    lan: str = Field(default="", max_length=64)
     host_ip: str = ""
     hostname: str = ""
 
@@ -131,13 +131,16 @@ async def join_check(body: _JoinCheckBody):
         result = reg.store.upsert_node(node_id=body.node_id, node_token=node_token, lan_id=body.lan,
                                        role="worker", host_ip=body.host_ip, hostname=body.hostname,
                                        engines=None, now=time.time())
-        if result == "joined":
-            reg.store.set_node_status(body.node_id, "offline")  # 预注册：等待首次 WS hello
+        # 预注册恒 offline（joined/rejoined 皆然）：upsert 会置 online，须立即回落，
+        # 真实 online 只属于 WS hello；否则 offline 节点可经 join-check 伪装在线且 lease=NULL。
+        reg.store.set_node_status(body.node_id, "offline")
         reg.store.append_event("node.join_check", node_id=body.node_id, payload={"result": result})
         return {"ok": True, "node_token": node_token}
     known = reg.store.find_node_by_token(body.key)
     if known is None:
         return JSONResponse(status_code=401, content={"detail": "无效的 join/node token"})
+    if str(known["node_id"]) != body.node_id:
+        return JSONResponse(status_code=401, content={"detail": "node_id 与节点令牌不匹配"})
     return {"ok": True, "node_token": str(known["node_token"])}
 
 

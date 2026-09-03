@@ -138,3 +138,37 @@ def test_join_check_bad_token_401(center_client) -> None:
     r = center_client.post("/admin/api/cluster/join-check",
                            json={"node_id": "w-x", "key": "bogus", "lan": ""})
     assert r.status_code == 401
+
+
+def test_join_check_rejoin_keeps_offline(center_client) -> None:
+    """rejoined 分支也必须恒置 offline：join-check 是预注册，online 只属于 WS hello。"""
+    import modelctl.core.webui.admin_cluster as ac
+
+    jt = center_client.post("/admin/api/cluster/join-tokens/rotate", headers=_h()).json()["join_token"]
+    r1 = center_client.post("/admin/api/cluster/join-check", json={"node_id": "w-r", "key": jt, "lan": ""})
+    assert r1.status_code == 200
+    nodes = center_client.get("/admin/api/cluster/nodes", headers=_h()).json()["nodes"]
+    assert [n for n in nodes if n["node_id"] == "w-r"][0]["status"] == "offline"
+    # 模拟该节点曾真实上线（WS hello 后会处于 online），再走一次 join-check（rejoined）
+    ac.get_registry().store.set_node_status("w-r", "online")
+    r2 = center_client.post("/admin/api/cluster/join-check", json={"node_id": "w-r", "key": jt, "lan": ""})
+    assert r2.status_code == 200 and r2.json()["ok"] is True
+    nodes = center_client.get("/admin/api/cluster/nodes", headers=_h()).json()["nodes"]
+    target = [n for n in nodes if n["node_id"] == "w-r"][0]
+    assert target["status"] == "offline", "rejoin 不得把节点伪装成 online"
+
+
+def test_join_check_node_token_wrong_id_401(center_client) -> None:
+    """node_token 命中他人节点时不得 200：防止把矛盾的 (node_id, NT) 写进 worker .env。"""
+    jt = center_client.post("/admin/api/cluster/join-tokens/rotate", headers=_h()).json()["join_token"]
+    r = center_client.post("/admin/api/cluster/join-check", json={"node_id": "w-owner", "key": jt, "lan": ""})
+    nt = r.json()["node_token"]
+    bad = center_client.post("/admin/api/cluster/join-check", json={"node_id": "w-impostor", "key": nt, "lan": ""})
+    assert bad.status_code == 401
+
+
+def test_join_check_empty_node_id_422(center_client) -> None:
+    """空 node_id 属输入校验失败：422 拒绝，不得落库污染台账。"""
+    jt = center_client.post("/admin/api/cluster/join-tokens/rotate", headers=_h()).json()["join_token"]
+    r = center_client.post("/admin/api/cluster/join-check", json={"node_id": "", "key": jt, "lan": ""})
+    assert r.status_code == 422
