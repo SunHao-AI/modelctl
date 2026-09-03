@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { computed } from 'vue';
 import { useRoute } from 'vue-router';
 
 const route = useRoute();
@@ -18,20 +17,12 @@ const menus: MenuItem[] = [
   { to: '/envs', label: '环境', icon: 'envs' },
   { to: '/probe', label: '体检', icon: 'probe' },
   { to: '/audit', label: '审计', icon: 'audit' },
+  { to: '/cluster/nodes', label: '集群', icon: 'cluster' },
   { to: '/config', label: '配置', icon: 'config' },
   { to: '/settings', label: '设置', icon: 'settings' },
 ];
 
 // 通过前缀匹配判定当前激活项（精确优先）
-// 注：<script setup> 禁止顶层 export 语句（Vue SFC 约束），此处改为模块内变量
-const activeKey = computed(() => {
-  const cur = route.path;
-  for (const m of menus) {
-    if (cur === m.to || cur.startsWith(`${m.to}/`)) return m.to;
-  }
-  return '';
-});
-
 function isActive(item: MenuItem) {
   return route.path === item.to || route.path.startsWith(`${item.to}/`);
 }
@@ -78,6 +69,8 @@ function isActive(item: MenuItem) {
           <template v-else-if="m.icon === 'config'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg></template>
           <!-- settings -->
           <template v-else-if="m.icon === 'settings'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20v-6" /><path d="M5 4h14l-2 4H7l-2-4z" /><path d="M19 8v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V8" /></svg></template>
+          <!-- cluster -->
+          <template v-else-if="m.icon === 'cluster'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="8.5" y="14" width="7" height="7" rx="1" /><path d="M6.5 10v1.5h11V10M12 11.5V14" /></svg></template>
           <!-- fallback -->
           <svg v-else class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9" /></svg>
         </span>
