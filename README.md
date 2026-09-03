@@ -20,7 +20,7 @@ modelctl/
 ├── docs/
 │   └── DeepSeek-V4-Flash后台启动指南.md   # 部署与运维详细指南
 ├── src/modelctl/
-│   ├── cli.py                      # 统一 CLI 入口（start/stop/restart/status/list/probe/stats）
+│   ├── cli.py                      # 统一 CLI 入口（start/stop/restart/status/list/probe/stats/gateway/webui）
 │   ├── __main__.py                 # python -m modelctl 入口
 │   ├── core/                       # 核心模块：envfile / profile / capabilities / process / stats / envs（引擎 venv 管理）
 │   ├── engines/                    # 引擎适配器：base / llamacpp / ollama / vllm / sglang / unsloth
@@ -523,32 +523,33 @@ modelctl env setup gateway
 
 ### 8. 一键启停（modelctl all）
 
-`modelctl all` 把**默认模型 + 统一网关（gateway）+ 用量统计（stats）**三件套作为一个整体管理：
+`modelctl all` 把**默认模型 + 统一网关（gateway）+ Web 管理控制台（webui）+ 用量统计（stats）**四件套作为一个整体管理：
 
 ```bash
-# 启动：默认模型 → gateway → stats
+# 启动：默认模型 → gateway → webui → stats
 modelctl all start
 
-# 停止：stats → gateway → 全部运行中模型（含非默认）
+# 停止：stats → webui → gateway → 全部运行中模型（含非默认）
 modelctl all stop
 
-# 重启：仅默认模型停后启，gateway / stats 重启
+# 重启：仅默认模型停后启，gateway / webui / stats 重启
 modelctl all restart
 
-# 状态汇总：三件套逐项 [ok]
+# 状态汇总：四件套逐项 [ok]
 modelctl all status
 ```
 
 **四动作语义**
 
 - **start / restart** 仅操作默认模型：默认模型取 `GATEWAY_DEFAULT_MODEL`（profile 的 name 或其 alias），未设置回退 `deepseek-v4-flash`，也可用 `--model <name>` 临时指定；`--timeout` 控制模型健康检查超时（默认 300s）
-- **stop** 除 gateway / stats 外，会停止**全部运行中**的模型（包括经 `modelctl start <name>` 启动的非默认模型），避免遗留进程
-- **status** 汇总三件套状态，恒 exit 0
+- **stop** 除 webui / gateway / stats 外，会停止**全部运行中**的模型（包括经 `modelctl start <name>` 启动的非默认模型），避免遗留进程
+- **status** 汇总四件套状态，恒 exit 0
 
 单组件同样支持四动作：
 
 ```bash
 modelctl gateway start|stop|restart|status
+modelctl webui start|stop|restart|status
 modelctl stats start|stop|restart|status
 ```
 
@@ -560,6 +561,46 @@ bash script/modelctl-all.sh status
 ```
 
 **失败语义**：逐组件尝试并汇总（某组件失败仍继续后续组件），任一组件 `[error]` 使 start / restart 返回 exit 2、stop 返回 exit 1（status 恒 exit 0）；可再 `modelctl status` 细查模型状态（网关/统计用 `modelctl gateway status` / `modelctl stats status`）。
+
+### 9. Web 管理控制台（modelctl webui）
+
+`modelctl webui` 启动 **单进程 FastAPI** 管理面，在原有 `/v1/*`（OpenAI 兼容代理，nginx 依赖）之外挂上 `/admin/api/*`（管理 API）与前端 SPA（`web/dist`，Vue 3 构建产物）。**与 `modelctl gateway start` 是同一份 FastAPI 代码**（`gateway.py::create_app(admin=True)`）两个端口：gateway 专职数据面（5003），webui 兼管理面（4173），互不影响（端口、PID 文件、实例名独立）。
+
+```bash
+# 启动 Web UI（默认读 .env 的 WEBUI_HOST/WEBUI_PORT，缺省 127.0.0.1:4173）
+modelctl webui start
+
+# 命令行覆盖端口 / 绑定地址
+modelctl webui start --port 8080 --host 0.0.0.0
+
+# 停止 / 重启 / 状态（复用 gateway venv，无需额外依赖）
+modelctl webui stop
+modelctl webui restart
+modelctl webui status
+
+# 浏览器自动打开控制台（仅 start/restart 后提示，stop/status 不打）
+# 见下方「browser 行为」
+```
+
+**端口优先级**：命令行 `--port` > `.env` 的 `WEBUI_PORT` > 代码默认 `4173`。与 `GATEWAY_PORT`（默认 5003）不冲突，可同时运行。
+
+**前端 dist 要求**：前端构建产物在 `web/dist`（由 `npm run build` 在 `web/` 目录下生成）。dist 缺失时仍暴露 `/admin/api` 与 `/v1`，仅浏览器直连域名根会得到 404 JSON；启动日志会提示 "（dist/ 缺失，仅 /admin/api 可用；先 npm run build）"。
+
+**登录**：浏览器访问后登录页只需输入 `.env` 中的 `API_KEY`（Bearer Token），复用 modelctl 现有鉴权；无独立密码体系。
+
+**依赖**：webui 与 gateway 完全共享 gateway venv（`fastapi / uvicorn / httpx`），首次 `modelctl webui start` 自动 `uv sync --project gateway` 落到 `.venvs/gateway`，无需重复 `env setup`。
+
+**启动日志**：webui 子进程的 stdout / stderr 由 `start_detached` 重定向到 `log_dir()/launch-modelctl-webui.log`（与 model profile 启动日志同目录——`LOG_DIR` 环境变量决定，缺省项目根上级的 `../logs/`，每次 start 覆盖不追加）。`modelctl webui status` 不读该文件，只探 PID + `/admin/api/health` 端口。
+
+**与 gateway 进程的差异**：
+
+| 维度 | `modelctl gateway start` | `modelctl webui start` |
+|---|---|---|
+| 模块 | `modelctl.core.gateway` | `modelctl.core.webui.server` |
+| 实例名 / PID 文件 | `llm-gateway` | `modelctl-webui` |
+| 端口 | `GATEWAY_PORT`（默认 5003） | `WEBUI_PORT`（默认 4173） |
+| 挂载路由 | 仅 `/v1/*` | `/v1/*` + `/admin/api/*` + 前端 SPA |
+| admin 标志 | `create_app(admin=False)` | `create_app(admin=True)` |
 
 ## 文档
 
