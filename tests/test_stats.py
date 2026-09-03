@@ -1164,3 +1164,287 @@ def test_run_server_poll_interval_default_sixty_and_pass_ttft_only(monkeypatch, 
     collector = captured["handler"].collectors["t"]
     assert collector.poll_interval == 60.0
     assert collector.bench_ttft_only is False
+
+
+# ---------- 家族（group）路由：?model=<group> 解析到可用成员 ----------
+
+
+def _mk_group_target(name, group, priority, port, mapping=None, usage_cfg=None):
+    from modelctl.core.stats import StatsTarget
+    return StatsTarget(
+        name=name,
+        data_dir=Path("data/cache"),
+        metrics_url=f"http://127.0.0.1:{port}/metrics",
+        mapping=mapping if mapping is not None else {"prompt_total": ["x"]},
+        usage_cfg=usage_cfg or {},
+        group=group,
+        engine_priority=priority,
+    )
+
+
+def test_build_groups_sorts_by_engine_priority():
+    from modelctl.core.stats import _build_groups
+
+    vllm = _mk_group_target("qwen3.8-flash-next-vllm", "qwen3.8-flash-next", 0, 8110)
+    sglang = _mk_group_target("qwen3.8-flash-next-sglang", "qwen3.8-flash-next", 1, 8111)
+    solo = _mk_group_target("deepseek-v4", None, 5, 8120)
+    groups = _build_groups([sglang, solo, vllm])
+    # vllm 优先（engine_priority 小者在前），group 为 None 的 target 不进任何家族索引
+    assert list(groups["qwen3.8-flash-next"]) == [vllm, sglang]
+    assert "deepseek-v4" not in groups
+
+
+def _set_group_groups(vllm, sglang):
+    from modelctl.core.stats import UsageHandler
+
+    UsageHandler.targets = [vllm, sglang]
+    UsageHandler.groups = {"qwen3.8-flash-next": [vllm, sglang]}
+    UsageHandler.collectors = {
+        "qwen3.8-flash-next-vllm": MagicMock(),
+        "qwen3.8-flash-next-sglang": MagicMock(),
+    }
+    UsageHandler.start_time = time.time()
+    return UsageHandler.__new__(UsageHandler)
+
+
+def test_resolve_group_target_returns_first_available_member(monkeypatch):
+    import modelctl.core.process as P
+
+    vllm = _mk_group_target("qwen3.8-flash-next-vllm", "qwen3.8-flash-next", 0, 8110)
+    sglang = _mk_group_target("qwen3.8-flash-next-sglang", "qwen3.8-flash-next", 1, 8111)
+    handler = _set_group_groups(vllm, sglang)
+
+    monkeypatch.setattr(P, "is_running", lambda name: name == "qwen3.8-flash-next-vllm")
+    monkeypatch.setattr(P, "pid_file", lambda name: Path("data/cache") / f"{name}.pid")
+
+    # 家族路由返回第一个可用成员（vllm），而非"未知模型"
+    assert handler._resolve_group_target("qwen3.8-flash-next") is vllm
+
+
+def test_resolve_group_target_external_started_healthy(monkeypatch):
+    """外部启动（无 PID 文件）+ /health 2xx 也视为可用，参与家族路由。"""
+    import urllib.error
+    import modelctl.core.process as P
+
+    vllm = _mk_group_target("qwen3.8-flash-next-vllm", "qwen3.8-flash-next", 0, 8110)
+    sglang = _mk_group_target("qwen3.8-flash-next-sglang", "qwen3.8-flash-next", 1, 8111)
+    handler = _set_group_groups(vllm, sglang)
+
+    monkeypatch.setattr(P, "is_running", lambda name: False)
+    monkeypatch.setattr(P, "pid_file", lambda name: Path("data/cache") / f"{name}.pid")
+    # 首个成员健康自检 2xx，第二个成员抛 urllib.error（异常 → 跳过）
+    responses = {"8110": 200, "8111": urllib.error.URLError("down")}
+
+    class _FakeResp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def _fake_open_local(req, timeout=2.0):
+        url = req.full_url
+        port = url.split("127.0.0.1:")[1].split("/")[0]
+        outcome = responses.get(port)
+        if isinstance(outcome, int):
+            return _FakeResp() if 200 <= outcome < 300 else (_ for _ in ()).throw(urllib.error.URLError("bad"))
+        raise outcome
+
+    monkeypatch.setattr(P, "open_local", _fake_open_local)
+
+    assert handler._resolve_group_target("qwen3.8-flash-next") is vllm
+
+
+def test_resolve_group_target_no_available_returns_none(monkeypatch):
+    import urllib.error
+    import modelctl.core.process as P
+
+    vllm = _mk_group_target("qwen3.8-flash-next-vllm", "qwen3.8-flash-next", 0, 8110)
+    sglang = _mk_group_target("qwen3.8-flash-next-sglang", "qwen3.8-flash-next", 1, 8111)
+    handler = _set_group_groups(vllm, sglang)
+
+    monkeypatch.setattr(P, "is_running", lambda name: False)
+    monkeypatch.setattr(P, "pid_file", lambda name: Path("data/cache") / f"{name}.pid")
+    monkeypatch.setattr(
+        P,
+        "open_local",
+        lambda req, timeout=2.0: (_ for _ in ()).throw(urllib.error.URLError("down")),
+    )
+
+    assert handler._resolve_group_target("qwen3.8-flash-next") is None
+
+
+def test_resolve_payload_falls_back_to_group(monkeypatch):
+    import modelctl.core.process as P
+    from modelctl.core.stats import UsageHandler
+
+    vllm = _mk_group_target("qwen3.8-flash-next-vllm", "qwen3.8-flash-next", 0, 8110)
+    sglang = _mk_group_target("qwen3.8-flash-next-sglang", "qwen3.8-flash-next", 1, 8111)
+    handler = _set_group_groups(vllm, sglang)
+
+    collector = MagicMock()
+    collector.get_snapshot.return_value = {
+        "ok": True,
+        "error": None,
+        "prompt_total": 100.0,
+        "predicted_total": 50.0,
+        "prompt_rate": 10.0,
+        "predicted_rate": 5.0,
+        "ttft_ms": 120.0,
+        "ttft_ms_p95": 150.0,
+        "rate_source": "none",
+    }
+    collector.bench_fallback = True
+    collector.bench_ttft_only = True
+    UsageHandler.collectors = {"qwen3.8-flash-next-vllm": collector}
+
+    monkeypatch.setattr(P, "is_running", lambda name: name == "qwen3.8-flash-next-vllm")
+    monkeypatch.setattr(P, "pid_file", lambda name: Path("data/cache") / f"{name}.pid")
+
+    payload = handler._resolve_payload("qwen3.8-flash-next")
+    # ?model=<group> 自动路由到可用成员，而非"未知模型"
+    assert payload["model"] == "qwen3.8-flash-next-vllm"
+    assert payload["prompt_rate"] == 10.0
+
+
+def test_resolve_payload_group_prefers_available_over_first_scan(monkeypatch):
+    """group 路由命中 vllm 成员，即使映射为 None 的首个成员在 targets 前列也不该被误用。"""
+    import modelctl.core.process as P
+    from modelctl.core.stats import StatsTarget, UsageHandler
+
+    # 首个成员 mapping=None（不支持统计），但同 group 内有可用 vllm 成员
+    lame = StatsTarget(
+        name="qwen3.8-flash-next-llamacpp",
+        data_dir=Path("data/cache"),
+        metrics_url="http://127.0.0.1:8120/metrics",
+        mapping=None,
+        group="qwen3.8-flash-next",
+        engine_priority=2,
+        usage_cfg={},
+    )
+    vllm = _mk_group_target("qwen3.8-flash-next-vllm", "qwen3.8-flash-next", 0, 8110)
+    UsageHandler.targets = [lame, vllm]
+    UsageHandler.groups = {"qwen3.8-flash-next": [vllm, lame]}
+    UsageHandler.start_time = time.time()
+
+    collector = MagicMock()
+    collector.get_snapshot.return_value = {
+        "ok": True,
+        "error": None,
+        "prompt_total": 100.0,
+        "predicted_total": 50.0,
+        "prompt_rate": 10.0,
+        "predicted_rate": 5.0,
+        "ttft_ms": 120.0,
+        "ttft_ms_p95": 150.0,
+        "rate_source": "none",
+    }
+    collector.bench_fallback = True
+    collector.bench_ttft_only = True
+    UsageHandler.collectors = {"qwen3.8-flash-next-vllm": collector}
+
+    monkeypatch.setattr(P, "is_running", lambda name: name == "qwen3.8-flash-next-vllm")
+    monkeypatch.setattr(P, "pid_file", lambda name: Path("data/cache") / f"{name}.pid")
+
+    handler = UsageHandler.__new__(UsageHandler)
+    payload = handler._resolve_payload("qwen3.8-flash-next")
+    assert payload["model"] == "qwen3.8-flash-next-vllm"
+
+
+def test_resolve_tier_payload_falls_back_to_group(monkeypatch):
+    import modelctl.core.process as P
+    from modelctl.core.stats import UsageHandler
+
+    vllm = _mk_group_target(
+        "qwen3.8-flash-next-vllm",
+        "qwen3.8-flash-next",
+        0,
+        8110,
+        usage_cfg={"price_in": 1.0, "price_out": 2.0, "budget": 100},
+    )
+    sglang = _mk_group_target("qwen3.8-flash-next-sglang", "qwen3.8-flash-next", 1, 8111)
+    handler = _set_group_groups(vllm, sglang)
+
+    collector = MagicMock()
+    collector.get_snapshot.return_value = {
+        "ok": True,
+        "error": None,
+        "prompt_total": 100.0,
+        "predicted_total": 50.0,
+        "prompt_rate": 10.0,
+        "predicted_rate": 5.0,
+        "ttft_ms": 0.0,
+        "ttft_ms_p95": 0.0,
+    }
+    UsageHandler.collectors = {"qwen3.8-flash-next-vllm": collector}
+
+    monkeypatch.setattr(P, "is_running", lambda name: name == "qwen3.8-flash-next-vllm")
+    monkeypatch.setattr(P, "pid_file", lambda name: Path("data/cache") / f"{name}.pid")
+
+    result = handler._resolve_tier_payload("qwen3.8-flash-next")
+    assert isinstance(result, list)
+    # tier 视图同样支持 ?model=<group> 自动路由
+    assert result[0]["planName"] == "qwen3.8-flash-next-vllm"
+    assert result[0]["isValid"] is True
+
+
+def test_run_server_injects_groups(tmp_path, monkeypatch):
+    from modelctl.core import stats as stats_mod
+    from modelctl.core.stats import StatsTarget
+
+    captured: dict = {}
+
+    class _FakeCollector:
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    class _FakeServer:
+        def __init__(self, addr, handler) -> None:
+            captured["handler"] = handler
+
+        def serve_forever(self) -> None:
+            raise KeyboardInterrupt
+
+        def server_close(self) -> None:
+            pass
+
+    monkeypatch.setenv("USAGE_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(stats_mod, "UsageCollector", lambda *a, **k: _FakeCollector())
+    monkeypatch.setattr(stats_mod, "ThreadingHTTPServer", _FakeServer)
+
+    targets = [
+        StatsTarget(
+            name="qwen3.8-flash-next-vllm",
+            data_dir=tmp_path,
+            metrics_url="http://127.0.0.1:8110/metrics",
+            mapping={"prompt_total": ["x"]},
+            group="qwen3.8-flash-next",
+            engine_priority=0,
+            usage_cfg={},
+        ),
+        StatsTarget(
+            name="qwen3.8-flash-next-sglang",
+            data_dir=tmp_path,
+            metrics_url="http://127.0.0.1:8111/metrics",
+            mapping={"prompt_total": ["x"]},
+            group="qwen3.8-flash-next",
+            engine_priority=1,
+            usage_cfg={},
+        ),
+    ]
+    try:
+        stats_mod.run_server(targets=targets)
+    except KeyboardInterrupt:
+        pass
+
+    handler = captured["handler"]
+    # run_server 启动时静态构建家族索引：group -> 按引擎优先级排序的成员
+    assert list(handler.groups["qwen3.8-flash-next"]) == [
+        targets[0],
+        targets[1],
+    ]

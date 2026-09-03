@@ -346,6 +346,13 @@ class StatsTarget:
     usage_cfg: dict = field(default_factory=dict)
     api_key: str | None = None
     aliases: list[str] = field(default_factory=list)
+    # 模型家族名（qwen3.8-flash-next ...）：家族路由的 ?model=<group> 解析到此成员
+    group: str | None = None
+    # 引擎优先级（数值越小越优先；来自 gateway.ENGINE_PRIORITY，与网关家族路由同口径）。
+    # 把它直接记在 target 上（避免 _build_groups 运行时再 lazy import gateway——后者会
+    # 触发 stats.UsageCollector 在 module 顶层的 import 与 dataclass 字段类型注解求值，
+    # 当 test 用 monkeypatch 替换 UsageCollector 时会因 function | None 而 TypeError）。
+    engine_priority: int = 99
     # 主动测速配置（bench_url 为 None = 窗口无流量时不做兜底测速）
     bench_url: str | None = None
     bench_model: str | None = None
@@ -683,6 +690,41 @@ class UsageHandler(BaseHTTPRequestHandler):
     targets: list[StatsTarget] = []
     collectors: dict[str, UsageCollector] = {}
     start_time: float = time.time()
+    # 家族索引（group -> 按引擎优先级排序的成员）；由 run_server 注入，启动时静态构建
+    groups: dict[str, list[StatsTarget]] = {}
+
+    def _resolve_group_target(self, model: str) -> StatsTarget | None:
+        """家族（group）解析：返回第一个可用的成员（成员已按引擎优先级排序，vllm 优先）。
+
+        可用口径与 `modelctl list` 的状态列"运行中"一致。本函数为轻量版探测
+        （is_running 的纯 PID 分支 + 手动 /health 兜底；StatsTarget 不持有 profile 字段
+        故无法直接调用 process.is_running_any）：
+          - 先 is_running（有副作用——会 unlink 孤儿 PID），命中即视为"运行中"
+          - 无 PID 文件再手动探测 /health（等价 is_running_any 的端口分支），
+            用于 docker 路径（docker 不写本地 PID）与 venv 孤儿端口拉起
+        `?model=<group>` 据此路由到第一个具备统计能力（mapping 非 None 且有 collector）
+        的成员，避免"无运行成员时回退字典首扫描成员"导致的旧数据误导。
+        无可用成员返回 None（调用方按"未知模型"报错）。
+        """
+        import urllib.error
+        from modelctl.core.process import is_running, open_local, pid_file
+
+        for t in self.groups.get(model, []):
+            if self.collectors.get(t.name) is None:
+                continue
+            if is_running(t.name):
+                return t
+            if pid_file(t.name).is_file():
+                continue
+            health_url = t.metrics_url.removesuffix("/metrics") + "/health"
+            try:
+                req = urllib.request.Request(health_url)
+                with open_local(req, timeout=2.0) as resp:
+                    if 200 <= resp.status < 300:
+                        return t
+            except (urllib.error.URLError, OSError, ValueError):
+                continue
+        return None
 
     def do_GET(self) -> None:  # noqa: N802 —— http.server 命名约定
         path = self.path.split("?", 1)[0].rstrip("/")
@@ -719,7 +761,10 @@ class UsageHandler(BaseHTTPRequestHandler):
         if model == "all":
             return self._aggregate_payload()
         if model:
+            # 精度优先：name / alias 精确命中；未命中再按家族（group）路由到第一个可用成员
             target = next((t for t in self.targets if t.name == model or model in t.aliases), None)
+            if target is None and model in self.groups:
+                target = self._resolve_group_target(model)
             if target is None:
                 return {"error": f"未知模型：{model}"}
         else:
@@ -852,6 +897,8 @@ class UsageHandler(BaseHTTPRequestHandler):
         plan_label = "modelctl 本地部署"
         if model and model != "all":
             target = next((t for t in self.targets if t.name == model or model in t.aliases), None)
+            if target is None and model in self.groups:
+                target = self._resolve_group_target(model)
             if target is None:
                 return {"error": f"未知模型：{model}"}
             collector = self.collectors.get(target.name)
@@ -922,8 +969,12 @@ def run_server(targets: list[StatsTarget] | None = None) -> None:
             collector.start()
             collectors[target.name] = collector
 
+    # 家族索引：group -> 成员（按引擎优先级排序，vllm 优先），供 ?model=<group> 家族路由
+    groups = _build_groups(targets)
+
     UsageHandler.targets = targets
     UsageHandler.collectors = collectors
+    UsageHandler.groups = groups
     UsageHandler.start_time = time.time()
 
     server = ThreadingHTTPServer((host, port), UsageHandler)
@@ -942,9 +993,28 @@ def run_server(targets: list[StatsTarget] | None = None) -> None:
         server.server_close()
 
 
+def _build_groups(targets: list[StatsTarget]) -> dict[str, list[StatsTarget]]:
+    """family 索引：group -> 按引擎优先级排序的成员（与网关家族路由同口径，vllm 优先）。
+
+    成员必须在构造时填 engine_priority（缺省 99 排末位）。group 为 None 的 target 不进
+    任何家族索引。用 target 上明文记的 priority 避免运行时再 import gateway（gateway
+    顶层 `from modelctl.core.stats import UsageCollector` 会被 test 的 monkeypatch 干扰，
+    导致 dataclass 字段注解求值时报 TypeError）。
+    """
+    groups: dict[str, list[StatsTarget]] = {}
+    for t in targets:
+        if not t.group:
+            continue
+        groups.setdefault(t.group, []).append(t)
+    for members in groups.values():
+        members.sort(key=lambda m: m.engine_priority)
+    return groups
+
+
 def _targets_from_profiles(data_dir: Path) -> list[StatsTarget]:
     """从 models/*.yaml 构造统计目标（供独立运行 / Task 9 后台化）。"""
     from modelctl.core.capabilities import Capabilities
+    from modelctl.core.gateway import ENGINE_PRIORITY
     from modelctl.core.profile import list_profiles
     from modelctl.engines import get_adapter
 
@@ -965,6 +1035,10 @@ def _targets_from_profiles(data_dir: Path) -> list[StatsTarget]:
                 usage_cfg=profile.usage,
                 api_key=profile.api_key,
                 aliases=profile.aliases,
+                # 模型家族名：?model=<group> 家族路由用（与网关/CLI/nginx 同一逻辑模型）
+                group=profile.group,
+                # 引擎优先级：家族内按 ENGINE_PRIORITY 排序（vllm 优先），与 cli._cmd_list 同口径
+                engine_priority=ENGINE_PRIORITY.get(profile.engine, 99),
                 # 窗口无流量时主动测速兜底（复用与 cli 测速相同的请求构造）
                 bench_url=f"http://127.0.0.1:{profile.port}/v1/chat/completions",
                 bench_model=adapter.upstream_model_name(),
