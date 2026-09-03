@@ -430,8 +430,11 @@ def resolve_model(
 def is_model_healthy(model: GatewayModel, timeout: float = 2.0) -> bool:
     """后端存活探测（单次探测，连接失败立即返回 False，不重试等待）。
 
-    不再复用 process.wait_health（其内部 sleep 重试会让未运行模型各耗时约 2s，
-    /v1/models 对注册表全部模型串行探测时会累积到十几秒）。
+    注：本函数在 2026-09-02 分支中已无 src/ 内部调用者——family 路由与
+    is_model_available 均改用 ``process.is_running_any``（同时判定端口健康 +
+    venv PID 文件存活，无副作用不 unlink）。保留本函数仅因
+    ``tests/test_gateway.py::test_is_model_healthy_fails_fast_on_connection_error``
+    对其做单元测试；该测试删除后可一并移除本函数。
     """
     api_key = model.upstream_api_key()
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
