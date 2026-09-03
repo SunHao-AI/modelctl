@@ -102,6 +102,25 @@ def test_events_ordering_and_filter(store: ClusterStore) -> None:
     assert [e["kind"] for e in store.recent_events(node_id="w-1")] == ["node.join"]
 
 
+def test_recent_events_same_ts_stable_order(store: ClusterStore) -> None:
+    """同一 ts 的多条事件按 id 倒序稳定返回（ORDER BY ts DESC, id DESC）。"""
+    store.append_event("node.join", node_id="w-1", now=5.0)
+    store.append_event("token.rotate", node_id="w-1", now=5.0)
+    assert [e["kind"] for e in store.recent_events()] == ["token.rotate", "node.join"]
+
+
+def test_sweep_after_failed_write_no_transaction_leak(store: ClusterStore) -> None:
+    """写方法 DML 失败不得让后续 sweep 抛 'within a transaction'（autocommit 加固）。"""
+    store.upsert_node(node_id="w-1", node_token="t", lan_id="", role="worker",
+                      host_ip="", hostname="", engines=None, now=0.0)
+    store.touch_heartbeat("w-1", now=0.0, lease_s=90)
+    try:  # 制造 DML 失败：set_node_status 非法值在 UPDATE 前 raise，不残留事务
+        store.set_node_status("w-1", "stalee")
+    except ValueError:
+        pass
+    assert store.sweep_expired(now=1000.0, lease_s=90) == [("w-1", "offline")]
+
+
 def test_mask_tail() -> None:
     assert mask_tail("") == "***"
     assert mask_tail("abcdef") == "***cdef"

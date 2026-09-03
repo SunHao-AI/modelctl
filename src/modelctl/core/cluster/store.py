@@ -105,6 +105,12 @@ class ClusterStore:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
+            # autocommit：禁用 LEGACY 隐式 BEGIN，避免 DML 在 auto-BEGIN 与 commit 之间
+            # 抛错（如跨进程 database is locked）残留 in_transaction，导致 sweep_expired
+            # 的显式 BEGIN IMMEDIATE 抛 "cannot start a transaction within a transaction"。
+            # 各写方法的 commit() 在无活动事务时是 no-op；原子性由 self._lock +
+            # sweep_expired 的显式 BEGIN IMMEDIATE/COMMIT/ROLLBACK 保证。
+            self._conn.isolation_level = None
             # CLI 与常驻 center 进程可能共库：WAL 提升并发读写，busy_timeout 缓解锁冲突
             self._conn.execute("PRAGMA journal_mode=WAL;")
             self._conn.execute("PRAGMA busy_timeout=5000;")
@@ -247,7 +253,7 @@ class ClusterStore:
         if node_id:
             sql += " WHERE node_id=?"
             params.append(node_id)
-        sql += " ORDER BY ts DESC LIMIT ?"
+        sql += " ORDER BY ts DESC, id DESC LIMIT ?"
         params.append(limit)
         with self._lock:
             rows = self._db().execute(sql, params).fetchall()
