@@ -174,6 +174,22 @@ def build_parser() -> argparse.ArgumentParser:
                     help="setup 时从本地 wheel 目录安装（uv --find-links），绕开跨境 PyPI 下载")
     ep.add_argument("--offline", action="store_true",
                     help="配合 --wheels 使用：完全禁用网络，要求目录内依赖已自闭包")
+    # ── 集群管理面（设计文档 §4.2 M0 子集：init/join/nodes/status/join-token）──
+    cp = sub.add_parser("cluster", help="分布式集群管理面（单中心 + worker 注册）")
+    csub = cp.add_subparsers(dest="action", required=True)
+    csub.add_parser("init", help="中心初始化：建 SQLite 台账 + 生成/复用 join token")
+    cj = csub.add_parser("join", help="worker 加入集群：预检 token 并写 .env")
+    cj.add_argument("--center", required=True, help="中心地址，如 http://192.168.77.210:4173")
+    cj.add_argument("--token", required=True, help="中心 cluster init 打印的 join token")
+    cj.add_argument("--node-id", required=True, help="本节点集群内唯一 ID（如 w-210）")
+    cj.add_argument("--lan", default="", help="所属局域网标签（展示/分组用）")
+    cj.add_argument("--role", choices=["worker", "both"], default="worker",
+                    help="本节点角色（中心机填 both）")
+    csub.add_parser("nodes", help="列出集群节点（读中心 REST，需 CLUSTER_CENTER_URL/API_KEY）")
+    csub.add_parser("status", help="集群摘要（角色/节点计数）")
+    ct = csub.add_parser("join-token", help="查看/轮换 join token（仅中心本机，直读台账）")
+    ct.add_argument("--rotate", action="store_true", help="生成新 join token（旧的立即失效）")
+    ct.add_argument("--rotate-node", default=None, metavar="NODE_ID", help="轮换指定节点的 node_token")
     # §2.2 TensorRT-LLM 引擎编译
     tp = sub.add_parser("trtllm", help="TensorRT-LLM 编译/检查子命令")
     tp.add_argument("action", choices=["build", "status"])
@@ -1138,6 +1154,138 @@ def _cmd_trtllm_status(args, models_dir: Path | None, caps) -> int:
     return 0
 
 
+def _cmd_cluster(args) -> int:
+    if args.action == "init":
+        return _cmd_cluster_init()
+    if args.action == "join":
+        return _cmd_cluster_join(args)
+    if args.action == "nodes":
+        return _cmd_cluster_nodes()
+    if args.action == "status":
+        return _cmd_cluster_status()
+    if args.action == "join-token":
+        return _cmd_cluster_join_token(args)
+    return 2
+
+
+def _cluster_center_base() -> str:
+    from modelctl.core.cluster import config as cluster_config
+    from modelctl.core.webui.server import webui_port
+
+    return cluster_config.center_url() or f"http://127.0.0.1:{webui_port()}"
+
+
+def _cmd_cluster_init() -> int:
+    from modelctl.core.cluster import config as cluster_config
+    from modelctl.core.cluster.nodes import NodeRegistry
+    from modelctl.core.cluster.store import ClusterStore
+
+    if not cluster_config.is_center():
+        logger.error("当前 CLUSTER_ROLE=solo/worker：请先在 .env 设 CLUSTER_ROLE=both（或 control-plane）再 init")
+        return 2
+    store = ClusterStore()
+    store.init_db()
+    token = NodeRegistry(store).ensure_join_token()
+    logger.info(f"集群台账就绪: {store.db_path}")
+    print(f"join token: {token}")
+    print("worker 侧执行: modelctl cluster join --center http://<本机IP>:<WEBUI_PORT> "
+          "--token <上面的token> --node-id <id>")
+    print("提醒: 跨机接入需 WEBUI_HOST=0.0.0.0 并在防火墙放行 webui 端口")
+    return 0
+
+
+def _cmd_cluster_join(args) -> int:
+    from modelctl.core.cluster import center_probe
+    from modelctl.core.envfile import set_env_values
+
+    ok, node_token, message = center_probe.check_join(args.center, args.token, args.node_id, args.lan)
+    if not ok:
+        logger.error(f"join 失败: {message}")
+        return 2
+    values = {"CLUSTER_ROLE": args.role, "CLUSTER_CENTER_URL": args.center.rstrip("/"),
+              "CLUSTER_NODE_ID": args.node_id, "CLUSTER_LAN": args.lan,
+              "CLUSTER_NODE_TOKEN": node_token}
+    set_env_values(values)
+    for key, value in values.items():
+        os.environ[key] = value  # 当前进程立即可用（load_env 是 setdefault 语义）
+    logger.info(f"已加入集群: node_id={args.node_id}（node_token 已写回 .env）")
+    print("下一步: modelctl webui restart 使角色生效，Agent 将随 webui 自动注册")
+    return 0
+
+
+def _cmd_cluster_nodes() -> int:
+    import os as _os
+
+    from modelctl.core.cluster import center_probe
+
+    base = _cluster_center_base()
+    status, body = center_probe.get_json(f"{base}/admin/api/cluster/nodes",
+                                         api_key=_os.environ.get("API_KEY", ""))
+    if status == 404:
+        logger.error("中心未启用集群角色（solo/worker）或路径不存在")
+        return 2
+    if status != 200:
+        logger.error(f"中心返回异常: HTTP {status} {body}")
+        return 2
+    nodes = body.get("nodes", [])
+    _print_table(["节点", "LAN", "角色", "状态", "最后心跳(s)", "租约剩余(s)", "主机"],
+                 [[n.get("node_id", ""), n.get("lan_id") or "-", n.get("role", ""), n.get("status", ""),
+                   "-" if n.get("since_seen_s") is None else f"{n['since_seen_s']:.0f}",
+                   "-" if n.get("lease_left_s") is None else f"{n['lease_left_s']:.0f}",
+                   n.get("hostname") or n.get("host_ip") or "-"] for n in nodes],
+                 dim_indices=(1, 6))
+    return 0
+
+
+def _cmd_cluster_status() -> int:
+    import os as _os
+
+    from modelctl.core.cluster import center_probe
+
+    base = _cluster_center_base()
+    status, body = center_probe.get_json(f"{base}/admin/api/cluster/status",
+                                         api_key=_os.environ.get("API_KEY", ""))
+    if status != 200:
+        logger.error(f"中心返回异常: HTTP {status} {body}")
+        return 2
+    print(f"角色: {body.get('role')}  中心: {body.get('is_center')}  "
+          f"节点: {body.get('nodes_online')} online / {body.get('nodes_total')} total")
+    return 0
+
+
+def _cmd_cluster_join_token(args) -> int:
+    from modelctl.core.cluster import config as cluster_config
+    from modelctl.core.cluster.nodes import NodeRegistry
+    from modelctl.core.cluster.store import ClusterStore
+
+    if not cluster_config.is_center():
+        logger.error("join-token 仅中心本机可用（CLUSTER_ROLE 需 control-plane/both）")
+        return 2
+    store = ClusterStore()
+    store.init_db()
+    if args.rotate_node:
+        new_token = store.rotate_node_token(args.rotate_node)
+        if new_token is None:
+            logger.error(f"节点不存在: {args.rotate_node}")
+            return 2
+        store.append_event("token.rotate", node_id=args.rotate_node, payload={"scope": "node"})
+        print(f"节点 {args.rotate_node} 新 node_token: {new_token}")
+        print("注意: 该 worker 下次重连将被拒，需带此 token 更新 .env 或用 join token 重新加入")
+        return 0
+    if args.rotate:
+        from modelctl.core.cluster import tokens as cluster_tokens
+
+        new_join = cluster_tokens.new_join_token()
+        store.set_meta("join_token", new_join)
+        store.append_event("token.rotate", payload={"scope": "join"})
+        print(f"新 join token: {new_join}")
+        print("旧 token 立即失效；已 join 的节点不受影响")
+        return 0
+    token = NodeRegistry(store).ensure_join_token()
+    print(f"join token: {token}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     # 先扫描 --no-color（在全局 argparse 之前），以便 setup_logging 同步禁用颜色
@@ -1224,6 +1372,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.action == "build":
                 return _cmd_trtllm_build(args, models_dir, caps)
             return _cmd_trtllm_status(args, models_dir, caps)
+        if args.command == "cluster":
+            return _cmd_cluster(args)
     except (ProfileError, RequirementError, EngineEnvError) as error:
         logger.error(str(error))
         return 2
