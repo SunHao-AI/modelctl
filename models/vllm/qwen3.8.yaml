@@ -3,15 +3,11 @@
 # 官方 recipe（recipes.vllm.ai）：混合注意力模型（16/64 全注意力 + 48 线性注意力 + MTP 头），
 # chat 模板以 <think> 开头，必须启用 --reasoning-parser qwen3，否则推理块会进入 content。
 #
-# 【FP8 检查点切换说明】（官方 recipe 推荐）
-# 官方 FP8 检查点 Qwen/Qwen3.8-27B-FP8（block-scaled，约 28.7GiB，单卡可装）可降低约 50% 权重显存：
-#   vllm:
-#     model: Qwen/Qwen3.8-27B-FP8
-#     download:
-#       modelscope_id: Qwen/Qwen3.8-27B-FP8
-#     quantization: fp8
-# 切换前请确认仓库存在（modelctl start 会自动下载，仓库不存在会失败）；
-# 回退：model/modelscope_id 改回 Qwen/Qwen3.8-27B 并清空 quantization 即可恢复 BF16。
+# 【量化：已采用 FP8】（官方 recipe 推荐，2026-09-03 由 BF16 切换）
+# 官方 FP8 检查点 Qwen/Qwen3.8-27B-FP8（block-scaled，约 28.7GiB，单卡可装）相比 BF16 降低约 50% 权重显存：
+#   每卡权重约 6.75 GB → 3.6 GB，8 卡合计释放 ~26 GB，转给 KV/激活，支撑更高并发/更稳长上下文。
+# 硬件：RTX 5880 (CC 8.9) 支持 FP8；27B 为 dense 模型（无 MoE），TP8 直接可用，无需 expert parallel。
+# 回退 BF16：model/modelscope_id 改回 Qwen/Qwen3.8-27B，并把 quantization 设为空字符串。
 group: qwen3.8
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
 port: 8101
@@ -21,11 +17,11 @@ api_key: ${API_KEY}
 vllm:
   # model：HuggingFace 模型 ID 或本地模型目录。
   # 为空/不存在时通过 download 段从 ModelScope 下载并写回本地路径
-  model: Qwen/Qwen3.8-27B
+  model: Qwen/Qwen3.8-27B-FP8
   # download：模型不存在时的自动下载配置（ModelScope，HF 格式仓库）
   download:
     # modelscope_id：ModelScope 仓库 ID（HF 格式）
-    modelscope_id: Qwen/Qwen3.8-27B
+    modelscope_id: Qwen/Qwen3.8-27B-FP8
   # tensor_parallel_size：张量并行 GPU 数（不得超过实际 GPU 数）
   tensor_parallel_size: 8
   # gpu_list：指定使用的 GPU 设备编号（可选，默认不设=使用全部 GPU）；配置后长度必须等于 tensor_parallel_size
@@ -38,8 +34,8 @@ vllm:
   # 若想完全吃满显存，可在 extra_args 手动指定 --kv-cache-memory（见其注释，需按环境实测）
   gpu_memory_utilization: 0.95
   # quantization：量化方式（可选，如 fp8；FP8 需要 CC ≥ 8.9）
-  # 默认 BF16；官方 FP8 检查点可用时改 quantization: fp8（见文件头注释）
-  quantization: ""
+  # 当前采用 fp8（文件头注释：27B-FP8 权重省一半，RTX 5880 CC 8.9 支持）
+  quantization: fp8
   # kv_cache_dtype：KV cache 数据类型（fp8 / fp16 / bf16；fp8 可节省一半 KV 显存，精度损失 <1%）
   kv_cache_dtype: fp8
   # extra_args：透传给 `vllm serve` 的额外参数（空格分隔，按 shlex 拆分）
@@ -52,6 +48,8 @@ vllm:
   #   原为 4，但清洗客户端 --concurrency 64 时服务端恒定 Waiting:59，故上调到 8 提高吞吐；
   #   max_model_len=262144 下 KV 显存随 max_num_seqs 线性增长，再提升前务必确认显存余量，
   #   否则 CUDA graph 阶段易 OOM（参见下方 --kv-cache-memory 崩溃记录，2026-08-25）。
+  #   （2026-09-03 已切 FP8，释放每卡 ~3.6GB 权重余量；若确需更高吞吐，可从 8 起步实测上调：
+  #      8 → 16 → 32，每档都需 modelctl stop + start 重新走 init_engine_core，遇 OOM 即回退）
   # --generation-config vllm：让客户端传入的 temperature/top_k/top_p 生效，
   #   不被模型自带 generation_config.json（Qwen3.8 为 temperature=1.0, top_k=20, top_p=0.95）覆盖
   # --kv-cache-memory=<字节数>：手动指定每卡 KV cache。设置后 vLLM 跳过显存 profiling，
@@ -66,6 +64,7 @@ vllm:
   # 回退方式：从 extra_args 删除 --speculative-config '{\"method\":\"mtp\",\"num_speculative_tokens\":3}' 即可
   # 参考：recipes.vllm.ai 官方 recipe；vLLM MTP 文档（docs.vllm.ai 搜索 "MTP"）
   # batch 调优（可选，与 MTP 正交）：--max-num-batched-tokens 8192 --max-num-seqs 256
+  #   注：上值仅为官方上限参考，当前实际 --max-num-seqs 8（见上方注释），--max-num-batched-tokens 走默认 8192。
   # 请求级审计（网关侧记录每请求 TTFT/tps；见 .env 的 AUDIT_* 与 README「请求级审计」）
   enable_per_request_metrics: true
   # 保证流式末块回传 usage（否则网关侧走 collector 差分估算 token 数）

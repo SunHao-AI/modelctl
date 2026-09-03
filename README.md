@@ -593,6 +593,16 @@ python -m modelctl.core.webui.server
 
 > `action` 是必填位置参数，只接受 `start` / `stop` / `restart` / `status`；缺省会报 `the following arguments are required: action`。
 
+**前端环境自动处理**：`start` / `restart` 前会检查项目根 `dist/`，缺失时**自动补齐整条前端链路**——缺 Node.js 就用系统包管理器装（apt/dnf/yum/zypper 走 NodeSource 拿 Node 22，pacman/apk 直接装；需 root 或 sudo），缺 `web/node_modules` 就 `npm install`（默认走 npmmirror 镜像，用户已自配 `.npmrc` 的 registry 时不覆盖），随后 `npm run build` 产出 `dist/`。取向与 gateway venv 的自动搭建一致：目标是一条 `modelctl webui start` 直接可用。
+
+```bash
+# 交互终端默认自动处理；以下两个开关用于覆盖默认判断
+modelctl webui start --build      # 强制自动安装/构建（非交互场景，如 CI、脚本内）
+modelctl webui start --no-build   # 完全跳过，产物缺失也只启 /admin/api（仅 API 模式）
+```
+
+自动安装会改动机器状态且首次耗时较长，因此**非交互终端**（`ssh host 'modelctl webui start'`、cron、CI）默认只检测不安装，回一条可复制的手动命令清单；需要它在脚本里也自动装就显式加 `--build`。前端不可用**不阻断启动**：`/admin/api` 与 `/v1` 照常可用，仅浏览器访问根路径 404。
+
 **端口优先级**：命令行 `--port` > `.env` 的 `WEBUI_PORT` > 代码默认 `4173`。与 `GATEWAY_PORT`（默认 5003）不冲突，可同时运行。
 
 **登录**：浏览器访问控制台后，登录页只需输入 `.env` 中的 `API_KEY`（作为 Bearer Token），复用 modelctl 现有鉴权；无独立密码体系。SSE 流式端点（任务进度 / 模型日志）因浏览器 `EventSource` 无法携带 header，改用 `?key=<API_KEY>` query 传递同一令牌，鉴权强度与 Bearer 一致。
@@ -605,13 +615,15 @@ python -m modelctl.core.webui.server
 
 前端源码在 `web/`（Vue 3 + Vite + TypeScript + UnoCSS），构建产物由 `web/vite.config.ts` 的 `build.outDir: '../dist'` 输出到**项目根 `dist/`**（非 `web/dist`）。`server.py::dist_dir()` 读的正是项目根 `dist/`，两端一致。
 
+手动构建（与自动处理等价的命令，供排障或单独产出前端时使用）：
+
 ```bash
 cd web
 npm install          # 首次安装依赖
 npm run build        # vue-tsc 类型检查 + vite build，产物落到 ../dist/
 ```
 
-`dist/index.html` 缺失时 webui 仍暴露 `/admin/api` 与 `/v1`，仅浏览器直连域名根会拿到 404；启动日志会提示 `（dist/ 缺失，仅 /admin/api 可用；先 npm run build）`。
+`dist/index.html` 缺失且未触发自动构建（`--no-build` 或非交互终端）时，webui 仍暴露 `/admin/api` 与 `/v1`，仅浏览器直连域名根会拿到 404；启动日志会提示 `（仅 /admin/api 可用；……）` 并附下一步命令。
 
 #### 9.3 本地开发（前端热更新联调）
 
@@ -619,13 +631,15 @@ npm run build        # vue-tsc 类型检查 + vite build，产物落到 ../dist/
 
 ```bash
 # 终端 1：起后端管理 API（二选一）
-modelctl webui start                              # 后台守护形态
+modelctl webui start --no-build                   # 后台守护形态（--no-build 免去构建 dist/）
 uv run python -m modelctl.core.webui.server       # 前台形态，日志直接可见，便于调试
 
 # 终端 2：起前端 dev server（vite 默认 5173，host 0.0.0.0）
 cd web
 npm run dev
 ```
+
+开发期页面由 vite 提供，`dist/` 用不上，加 `--no-build` 避免白跑一次构建（前台形态不经过自动处理，无需该参数）。
 
 浏览器访问 `http://127.0.0.1:5173`，用 `.env` 的 `API_KEY` 登录即可联调。
 

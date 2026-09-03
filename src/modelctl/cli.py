@@ -154,6 +154,11 @@ def build_parser() -> argparse.ArgumentParser:
     wp.add_argument("action", choices=["start", "stop", "restart", "status"])
     wp.add_argument("--port", type=int, default=None, help="监听端口（默认 .env 的 WEBUI_PORT 或 4173）")
     wp.add_argument("--host", default=None, help="绑定地址（默认 .env 的 WEBUI_HOST 或 127.0.0.1）")
+    # 前端环境自动处理开关：start/restart 时若 dist/ 缺失自动装 Node/依赖并构建；
+    # 非交互终端（ssh host 'cmd' / CI / cron）默认仅检测+给指引，--build 强制构建、
+    # --no-build 完全跳过自动处理（与现有 gateway venv 自动搭建取向一致）。
+    wp.add_argument("--build", action=argparse.BooleanOptionalAction, default=None,
+                    help="start/restart 时自动处理前端环境（缺 Node 装 Node、缺依赖 npm install、缺产物 npm run build）；非交互终端默认关闭")
     ep = sub.add_parser("env", help="专用虚拟环境管理（vllm / sglang / gateway）")
     ep.add_argument("action", choices=["setup", "list", "remove"])
     ep.add_argument(
@@ -732,11 +737,11 @@ def _cmd_webui(args, models_dir: Path | None, caps) -> int:
     if getattr(args, "host", None):
         os.environ["WEBUI_HOST"] = args.host
     if args.action == "start":
-        r = all_service.start_webui()
+        r = all_service.start_webui(auto_build=getattr(args, "build", None))
     elif args.action == "stop":
         r = all_service.stop_webui()
     elif args.action == "restart":
-        r = all_service.restart_webui()
+        r = all_service.restart_webui(auto_build=getattr(args, "build", None))
     else:
         r = all_service.status_webui()
     (logger.error if r.status == "error" else logger.info)(f"Web UI：{r.detail}")

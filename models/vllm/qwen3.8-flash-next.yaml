@@ -57,7 +57,7 @@ vllm:
   # gpu_list：物理 GPU 编号；长度必须等于 tensor_parallel_size
   gpu_list: "0,1,2,3,4,5,6,7"
   # max_model_len：最大上下文长度（token），原生 262144
-  # ★ 8 卡 RTX 5880 实测（含 MTP，gpu_memory_utilization 0.95）：262144 启动失败
+  # ★ 8 卡 RTX 5880 实测（含 MTP，gpu_memory_utilization 0.95）
   #   每卡可用 KV 2.54 GiB < 需求 3.55 GiB（差 ~1.0 GiB），实测最大支持 ~185600。
   #   MTP 草稿头 + draft KV 是挤占显存的主因；故降到首推档 131072（有充足余量）。
   #   降档阶梯：131072（当前首推） → 65536（多 agent 并发） → 32768（短问答）
@@ -92,7 +92,8 @@ vllm:
   #   --enable-prefix-caching          多 agent 缓存
   #   --no-enable-flashinfer-autotune  官方全程保留
   #   --enable-auto-tool-choice        工具调用（OpenAI 兼容函数调用）
-  #   --tool-call-parser qwen3_xml     官方推荐（注意是 qwen3_xml，部分中文转载误标 qwen3_coder）
+  #   --tool-call-parser qwen3_coder    官方 recipe 采用（Qwen3-Coder XML 格式 <function=/<parameter=>）；
+  #      与 qwen3.8.yaml 相同。vLLM 也有 qwen3_xml（同格式的不同实现，流式解析较新且含 bug），统一用 qwen3_coder。
   #   --reasoning-parser qwen3         混合思考模型的 reasoning_content 拆分
   # 【MTP 投机解码（启用）】——按 repo 已验证写法（同 qwen3.8.yaml）
   #   --speculative-config '{"method":"mtp","num_speculative_tokens":2}'：模型自带 MTP 头，无需 draft。
@@ -100,7 +101,7 @@ vllm:
   #   ⚠ 依赖 vLLM ≥0.9.x MTP 完整支持 + Day-0 镜像已注册 MTP 头；MTP 头/草稿 KV 额外占显存，
   #     本配置 8×RTX 5880 已到 gpu_memory_utilization 0.95，若启动 OOM 优先降 --max-num-seqs，
   #     或从 extra_args 删除 "--speculative-config ..." 回退。
-  extra_args: '--enable-expert-parallel --moe-backend triton --max-num-seqs 64 --max-num-batched-tokens 7168 --enable-prefix-caching --no-enable-flashinfer-autotune --enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3 --speculative-config ''{"method":"mtp","num_speculative_tokens":2}'''
+  extra_args: '--enable-expert-parallel --moe-backend triton --max-num-seqs 64 --max-num-batched-tokens 7168 --enable-prefix-caching --no-enable-flashinfer-autotune --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 --speculative-config ''{"method":"mtp","num_speculative_tokens":2}'''
 
 usage:
   # price_in / price_out：每千 token 计价（元），供 cc-switch 用量统计

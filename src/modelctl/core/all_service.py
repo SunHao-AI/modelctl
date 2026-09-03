@@ -255,11 +255,22 @@ def restart_gateway() -> ComponentResult:
 # ---------------------------------------------------------------------------
 
 
-def start_webui() -> ComponentResult:
+def start_webui(auto_build: bool | None = None) -> ComponentResult:
+    """启动 Web UI 管理面（依赖同网关；前端产物缺失时按 auto_build 自动补齐）。
+
+    auto_build 透传给 webui.frontend.ensure_frontend()：
+    - None  → 交互终端自动装 Node/依赖并构建，非交互只检测给手动指引
+    - True  → 强制执行自动处理；False → 完全跳过（--no-build）
+    前端不可用不阻断启动：/admin/api 与 /v1 仍可用，只在 detail 里带上下一步指引。
+    """
+    from modelctl.core.webui.frontend import ensure_frontend
     from modelctl.core.webui.server import WEBUI_INSTANCE, dist_ready, webui_host, webui_port
 
     if is_running(WEBUI_INSTANCE):
         return ComponentResult("webui", "skipped", "Web UI 已在运行")
+    ok, note = ensure_frontend(auto=auto_build)
+    if not ok:
+        logger.warning(f"前端未就绪，Web UI 将以仅 API 模式启动：{note}")
     # 依赖与网关完全一致（fastapi/uvicorn/httpx），直接复用网关的 venv 保障逻辑
     vendor = _gateway_venv_python()
     if vendor is None:
@@ -288,7 +299,7 @@ def start_webui() -> ComponentResult:
     if data_dir:
         env["USAGE_DATA_DIR"] = data_dir
     pid, _ = start_detached(WEBUI_INSTANCE, cmd, env)
-    hint = "" if dist_ready() else "（dist/ 缺失，仅 /admin/api 可用；先 npm run build）"
+    hint = "" if dist_ready() else f"（仅 /admin/api 可用；{note.splitlines()[0]}）"
     logger.info(f"Web UI 已启动（PID {pid}），监听端口 {port}{hint}")
     detail = f"http://127.0.0.1:{port}" if host in ("0.0.0.0", "::") else f"http://{host}:{port}"
     return ComponentResult("webui", "ok", detail + hint)
@@ -302,12 +313,12 @@ def stop_webui() -> ComponentResult:
     return ComponentResult("webui", "ok", "已停止")
 
 
-def restart_webui() -> ComponentResult:
+def restart_webui(auto_build: bool | None = None) -> ComponentResult:
     from modelctl.core.webui.server import WEBUI_INSTANCE
 
     if is_running(WEBUI_INSTANCE):
         stop_webui()
-    return start_webui()
+    return start_webui(auto_build=auto_build)
 
 
 def status_webui() -> ComponentResult:
