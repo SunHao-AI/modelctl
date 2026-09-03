@@ -42,6 +42,7 @@ CHECKS = [
     ("/admin/api/envs", {}, 200),
     ("/admin/api/probe", {}, 200),
     ("/admin/api/nginx-snippet", {"node": "210", "host": "x"}, 200),
+    ("/admin/api/cluster/status", {}, 404),
     ("/admin/api/config/static", {}, 200),
     ("/v1/models", {}, 200),
 ]

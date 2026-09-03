@@ -44,6 +44,7 @@ _SUBROUTER_MODULES: tuple[tuple[str, str], ...] = (
     ("modelctl.core.webui.admin_envs", "/envs"),
     ("modelctl.core.webui.admin_audit", "/audit"),
     ("modelctl.core.webui.admin_config", ""),
+    ("modelctl.core.webui.admin_cluster", ""),
 )
 
 
