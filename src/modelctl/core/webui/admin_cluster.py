@@ -25,6 +25,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from loguru import logger
+from pydantic import BaseModel
 
 from modelctl.core.cluster import config, tokens, wsproto
 from modelctl.core.cluster.nodes import AuthError, NodeRegistry
@@ -105,6 +106,39 @@ async def rotate_join_token(_base: None = Depends(require_auth)):
     reg.store.set_meta("join_token", fresh)
     reg.store.append_event("token.rotate", payload={"scope": "join"})
     return {"join_token": fresh}
+
+
+class _JoinCheckBody(BaseModel):
+    node_id: str
+    key: str
+    lan: str = ""
+    host_ip: str = ""
+    hostname: str = ""
+
+
+@router.post("/cluster/join-check")
+async def join_check(body: _JoinCheckBody):
+    """CLI join 预检：凭据=请求体 join token（同 WS hello 校验路径，参照 /login 先例）。
+
+    成功即预注册节点（status=offline，WS hello 后转 online）并同步返回 node_token，
+    CLI 直接落 .env，Agent 首连即用节点身份。
+    """
+    if (off := _disabled()) is not None:
+        return off
+    reg = get_registry()
+    if tokens.token_matches(body.key, reg.ensure_join_token()):
+        node_token = tokens.new_node_token()
+        result = reg.store.upsert_node(node_id=body.node_id, node_token=node_token, lan_id=body.lan,
+                                       role="worker", host_ip=body.host_ip, hostname=body.hostname,
+                                       engines=None, now=time.time())
+        if result == "joined":
+            reg.store.set_node_status(body.node_id, "offline")  # 预注册：等待首次 WS hello
+        reg.store.append_event("node.join_check", node_id=body.node_id, payload={"result": result})
+        return {"ok": True, "node_token": node_token}
+    known = reg.store.find_node_by_token(body.key)
+    if known is None:
+        return JSONResponse(status_code=401, content={"detail": "无效的 join/node token"})
+    return {"ok": True, "node_token": str(known["node_token"])}
 
 
 @router.websocket("/ws/cluster")

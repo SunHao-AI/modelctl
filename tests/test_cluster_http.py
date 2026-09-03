@@ -120,3 +120,21 @@ def test_ws_unknown_type_error_does_not_echo_payload(center_client) -> None:
         msg = ws.receive_json()
         assert msg["t"] == "error" and msg["message"] == "未知消息类型"
         assert "INJECT" not in str(msg)
+
+
+def test_join_check_valid_token_registers_offline_node(center_client) -> None:
+    jt = center_client.post("/admin/api/cluster/join-tokens/rotate", headers=_h()).json()["join_token"]
+    r = center_client.post("/admin/api/cluster/join-check",
+                           json={"node_id": "w-c", "key": jt, "lan": "lan-7"})
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert r.json()["node_token"].startswith("NT-")
+    nodes = center_client.get("/admin/api/cluster/nodes", headers=_h()).json()["nodes"]
+    target = [n for n in nodes if n["node_id"] == "w-c"][0]
+    assert target["status"] == "offline"  # 预注册未连接：offline，WS hello 后转 online
+
+
+def test_join_check_bad_token_401(center_client) -> None:
+    center_client.post("/admin/api/cluster/join-tokens/rotate", headers=_h())
+    r = center_client.post("/admin/api/cluster/join-check",
+                           json={"node_id": "w-x", "key": "bogus", "lan": ""})
+    assert r.status_code == 401
