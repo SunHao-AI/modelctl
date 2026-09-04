@@ -72,8 +72,21 @@ CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_node ON events(node_id, ts);
 """
 
+GOAL_JSON_FIELDS: tuple[str, ...] = ("params", "env_overlay", "placement")
+
+#: M1 新增列（改进 B）；只增不删，旧库经 _ensure_columns 幂等补齐
+_NODE_M1_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("capacity_json", "TEXT"),
+    ("runtime_json", "TEXT"),
+    ("gateway_url", "TEXT"),
+    ("last_goal_sync_sha", "TEXT"),
+    ("local_profiles_json", "TEXT"),
+)
+
 _NODE_COLS = ("node_id", "node_token", "lan_id", "role", "host_ip", "hostname",
-              "engines", "created_at", "last_seen", "lease_expiry", "status", "disabled")
+              "engines", "created_at", "last_seen", "lease_expiry", "status", "disabled",
+              "capacity_json", "runtime_json", "gateway_url", "last_goal_sync_sha",
+              "local_profiles_json")
 
 
 def mask_tail(value: str) -> str:
@@ -119,7 +132,18 @@ class ClusterStore:
     def init_db(self) -> None:
         with self._lock:
             self._db().executescript(_SCHEMA)
+            self._ensure_columns()
             self._db().commit()
+
+    def _ensure_columns(self) -> None:
+        """幂等补列（M1 起 nodes 需要）。**只增不删**，绝不改/删既有列。
+
+        全新库为空操作；旧库（M0 早期版本）逐列 ALTER。调用方已持锁，不再取锁。
+        """
+        have = {r["name"] for r in self._db().execute("PRAGMA table_info(nodes)").fetchall()}
+        for name, sql_type in _NODE_M1_COLUMNS:
+            if name not in have:
+                self._db().execute(f"ALTER TABLE nodes ADD COLUMN {name} {sql_type}")
 
     # ---- meta ----
     def get_meta(self, key: str) -> str:
@@ -139,6 +163,10 @@ class ClusterStore:
     def _row_to_node(self, row: sqlite3.Row) -> dict[str, Any]:
         d: dict[str, Any] = {c: row[c] for c in _NODE_COLS}
         d["engines"] = json.loads(row["engines"]) if row["engines"] else None
+        d["capacity"] = json.loads(row["capacity_json"]) if row["capacity_json"] else None
+        d["runtimes"] = json.loads(row["runtime_json"]) if row["runtime_json"] else None
+        d["local_profiles"] = (json.loads(row["local_profiles_json"])
+                               if row["local_profiles_json"] else [])
         return d
 
     def upsert_node(self, *, node_id: str, node_token: str, lan_id: str, role: str,
@@ -235,6 +263,158 @@ class ClusterStore:
                 conn.rollback()
                 raise
         return transitions
+
+    # ---- nodes 容量/运行时/本机 profile 清单（改进 B；None 不覆盖既有值，与 engines 同语义）----
+    def update_node_capacity(self, node_id: str, *, capacity: dict | None,
+                             runtimes: dict | None, local_profiles: list[str] | None = None,
+                             now: float) -> None:
+        with self._lock:
+            row = self._db().execute(
+                "SELECT capacity_json, runtime_json, local_profiles_json FROM nodes WHERE node_id=?",
+                (node_id,)).fetchone()
+            if row is None:
+                return
+            merged_cap = capacity if capacity is not None else (
+                json.loads(row["capacity_json"]) if row["capacity_json"] else None)
+            merged_rt = runtimes if runtimes is not None else (
+                json.loads(row["runtime_json"]) if row["runtime_json"] else None)
+            # local_profiles 用 None 判定而非真值：worker 本机清空 profile 时是 []，
+            # 必须能覆盖旧值（否则 gate 会一直以为 profile 还在）
+            merged_lp = local_profiles if local_profiles is not None else (
+                json.loads(row["local_profiles_json"]) if row["local_profiles_json"] else [])
+            self._db().execute(
+                "UPDATE nodes SET capacity_json=?, runtime_json=?, local_profiles_json=? WHERE node_id=?",
+                (json.dumps(merged_cap, ensure_ascii=False) if merged_cap is not None else None,
+                 json.dumps(merged_rt, ensure_ascii=False) if merged_rt is not None else None,
+                 json.dumps(merged_lp, ensure_ascii=False),
+                 node_id))
+            self._db().commit()
+
+    def set_node_last_goal_sync_sha(self, node_id: str, sha: str) -> None:
+        with self._lock:
+            self._db().execute("UPDATE nodes SET last_goal_sync_sha=? WHERE node_id=?", (sha, node_id))
+            self._db().commit()
+
+    # ---- goals（source of truth；created_* 只在首次插入生效）----
+    def _row_to_goal(self, row: sqlite3.Row) -> dict[str, Any]:
+        d = {k: row[k] for k in row.keys()}
+        for f in GOAL_JSON_FIELDS:
+            d[f] = json.loads(row[f]) if row[f] else None
+        return d
+
+    def upsert_goal(self, *, goal_id: str, node_id: str, profile: str, engine: str,
+                    profile_yaml: str, profile_sha: str, profile_version: str | None,
+                    intent: str, params: dict | None, env_overlay: dict | None,
+                    placement: dict | None, runtime_ref: str | None, target_role: str,
+                    stage: str, created_by: str, now: float) -> None:
+        def j(v: dict | None) -> str | None:
+            return json.dumps(v, ensure_ascii=False) if v is not None else None
+
+        with self._lock:
+            self._db().execute(
+                """INSERT INTO goals(goal_id,node_id,profile,engine,profile_yaml,profile_sha,profile_version,
+                                      intent,params,env_overlay,placement,runtime_ref,target_role,traffic_weight,
+                                      stage,created_by,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(goal_id) DO UPDATE SET
+                     node_id=excluded.node_id, profile=excluded.profile, engine=excluded.engine,
+                     profile_yaml=excluded.profile_yaml, profile_sha=excluded.profile_sha,
+                     profile_version=excluded.profile_version, intent=excluded.intent,
+                     params=excluded.params, env_overlay=excluded.env_overlay,
+                     placement=excluded.placement, runtime_ref=excluded.runtime_ref,
+                     target_role=excluded.target_role, stage=excluded.stage,
+                     stage_reason=NULL, error_class=NULL, updated_at=excluded.updated_at""",
+                (goal_id, node_id, profile, engine, profile_yaml, profile_sha, profile_version,
+                 intent, j(params), j(env_overlay), j(placement), runtime_ref, target_role, 0,
+                 stage, created_by, now, now))
+            self._db().commit()
+
+    def get_goal(self, goal_id: str) -> dict | None:
+        with self._lock:
+            row = self._db().execute("SELECT * FROM goals WHERE goal_id=?", (goal_id,)).fetchone()
+        return self._row_to_goal(row) if row else None
+
+    def list_goals(self, *, node_id: str = "", profile: str = "") -> list[dict]:
+        sql, params, conds = "SELECT * FROM goals", [], []
+        if node_id:
+            conds.append("node_id=?")
+            params.append(node_id)
+        if profile:
+            conds.append("profile=?")
+            params.append(profile)
+        if conds:
+            sql += " WHERE " + " AND ".join(conds)
+        sql += " ORDER BY node_id, profile"
+        with self._lock:
+            return [self._row_to_goal(r) for r in self._db().execute(sql, params).fetchall()]
+
+    _GOAL_MUTABLE = ("intent", "stage", "stage_reason", "error_class", "params",
+                     "env_overlay", "placement", "profile_yaml", "profile_sha", "profile_version")
+
+    def update_goal(self, goal_id: str, *, now: float, **fields: Any) -> dict | None:
+        sets, params = [], []
+        for k, v in fields.items():
+            if k not in self._GOAL_MUTABLE:
+                continue
+            sets.append(f"{k}=?")
+            params.append(json.dumps(v, ensure_ascii=False)
+                          if k in GOAL_JSON_FIELDS and v is not None else v)
+        if not sets:
+            return self.get_goal(goal_id)
+        sets.append("updated_at=?")
+        params.extend([now, goal_id])
+        with self._lock:
+            cur = self._db().execute(f"UPDATE goals SET {', '.join(sets)} WHERE goal_id=?", params)
+            self._db().commit()
+            if not cur.rowcount:
+                return None
+        return self.get_goal(goal_id)
+
+    def delete_goal(self, goal_id: str) -> dict | None:
+        snapshot = self.get_goal(goal_id)
+        if snapshot is None:
+            return None
+        with self._lock:
+            self._db().execute("DELETE FROM goals WHERE goal_id=?", (goal_id,))
+            self._db().commit()
+        return snapshot
+
+    # ---- model_states（心跳全量覆盖式写入）----
+    def upsert_model_state(self, *, node_id: str, profile: str, state: str,
+                           gpu: list[int] | None, port: int | None, pid: int | None,
+                           reason: str = "", error_class: str = "", now: float) -> None:
+        with self._lock:
+            self._db().execute(
+                """INSERT INTO model_states(node_id,profile,state,gpu,port,pid,reason,error_class,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(node_id,profile) DO UPDATE SET
+                     state=excluded.state, gpu=excluded.gpu, port=excluded.port, pid=excluded.pid,
+                     reason=excluded.reason, error_class=excluded.error_class,
+                     updated_at=excluded.updated_at""",
+                (node_id, profile, state, json.dumps(gpu) if gpu else None, port, pid,
+                 reason, error_class, now))
+            self._db().commit()
+
+    def list_model_states(self, *, node_id: str = "") -> list[dict]:
+        sql, params = "SELECT * FROM model_states", []
+        if node_id:
+            sql += " WHERE node_id=?"
+            params.append(node_id)
+        sql += " ORDER BY node_id, profile"
+        with self._lock:
+            rows = self._db().execute(sql, params).fetchall()
+        out = []
+        for r in rows:
+            d = {k: r[k] for k in r.keys()}
+            d["gpu"] = json.loads(r["gpu"]) if r["gpu"] else None
+            out.append(d)
+        return out
+
+    def delete_model_state(self, node_id: str, profile: str) -> None:
+        with self._lock:
+            self._db().execute("DELETE FROM model_states WHERE node_id=? AND profile=?",
+                               (node_id, profile))
+            self._db().commit()
 
     # ---- events ----
     def append_event(self, kind: str, *, node_id: str | None = None, goal_id: str | None = None,
