@@ -660,7 +660,9 @@ def parse_ack(data: Any) -> dict[str, Any]:
         out["sync"] = sync
     actions = data.get("actions")
     if isinstance(actions, list):
-        out["actions"] = [parse_action(a) for a in actions]
+        # 只收 dict 条目：`"junk"` 进 parse_action 会捏造 seq=0 的空动作（幽灵回执），
+        # 与测试 drops_malformed_entries 的语义（**丢弃**畸形条目）直接冲突。
+        out["actions"] = [parse_action(a) for a in actions if isinstance(a, dict)]
     return out
 
 
@@ -6717,7 +6719,7 @@ Run: `uv run pytest tests/test_cluster_goal_cli.py tests/test_cluster_cli.py -q`
 Expected: `33 passed`（新文件）+ 既有 CLI 用例全绿。注意 `test_cluster_goal_cli.py` 里有两条直测 `center_probe` 的用例**不经过** `probe` 夹具——它们是唯一真打桩 `urllib.request.urlopen` 的地方，防止 `put_json/delete_json` 写成同一种 method。
 
 Run: `uv run pytest tests/ -q -k "cluster"`
-Expected: Task 1–12 全部集群用例 PASS（M0 的 `test_cluster_http.py`/`test_cluster_ws.py` 回归不破）。若 CI 环境缺 fastapi，webui 侧用例会 skip，属既有状态。
+Expected: Task 1–12 全部集群用例 PASS（M0 的 `test_cluster_http.py`（含 WS 用例）回归不破）。若 CI 环境缺 fastapi，webui 侧用例会 skip，属既有状态。注意本地 `-k cluster` 整跑会因 test_gateway/test_audit 缺 httpx 收集中断（既有债务），需 `--ignore=tests/test_gateway.py --ignore=tests/test_audit.py --ignore=tests/test_gateway_context_switch.py` 或显式列文件。
 
 - [ ] **Step 7: 提交**
 
