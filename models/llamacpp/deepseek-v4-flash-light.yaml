@@ -12,8 +12,8 @@ variant: light
 api_key: ${API_KEY}
 
 llamacpp:
-  # model：本地 GGUF 模型路径（首个分片）。为空/不存在时通过 download 段自动下载；
-  # 下载成功后此字段会被自动覆盖为本地绝对路径（原文件备份为 .yaml.bak）
+  # model：本地 GGUF 模型路径（首个分片），留空即可。为空/不存在时按 download 段下载到
+  # $MODEL_ROOT/<仓库名>；落地路径由 MODEL_ROOT + modelscope_id 确定，本文件不会被改写
   model: ""
   # draft：DSpark 草稿模型路径；留空自动在模型同目录发现 dspark*.gguf
   draft: ""

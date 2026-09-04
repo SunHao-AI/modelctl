@@ -10,9 +10,10 @@ port: 18889
 api_key: ${API_KEY}
 
 llamacpp:
-  # model：本地 GGUF 模型路径。为空/不存在时通过 download 段自动下载；
-  # 下载成功后此字段会被覆盖为本地绝对路径（原文件备份 .yaml.bak）
-  model: /raid5/sh/model/model-gguf/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf
+  # model：本地 GGUF 模型路径（可选，留空即可）。
+  # 为空/不存在时按 download 段下载到 $MODEL_ROOT/<仓库名> 后直接使用；
+  # 落地路径由 MODEL_ROOT + modelscope_id 确定，本文件不会被改写（保持 git 干净）
+  model: ""
   # download：模型不存在时的自动下载配置（ModelScope，GGUF 格式）
   download:
     # modelscope_id：ModelScope 仓库 ID

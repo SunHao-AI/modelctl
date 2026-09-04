@@ -110,8 +110,9 @@ usage:
 ```
 
 > **model 字段可留空自动下载**：若 `model` 为空或指向的 GGUF 不存在，且配置了 `download` 段，
-> 首次启动会自动从 ModelScope 下载指定量化分片，并把本地绝对路径**持久化写回** YAML 的 `model`
-> 字段（原文件备份为 `.yaml.bak`）。下次启动直接复用本地文件，不再触发下载。
+> 首次启动会自动从 ModelScope 下载指定量化分片到 `$MODEL_ROOT/<仓库名>`。落地路径由
+> `MODEL_ROOT` + `modelscope_id` 确定性推导，**YAML 不会被改写**（保持 git 干净）。
+> 下次启动本地分片已就位则直接复用，不再触发下载。
 > 下载目录由 `.env` 的 `MODEL_ROOT` 控制。
 
 ## 启动 / 停止 / 重启 / 状态
@@ -189,8 +190,8 @@ tail -f ${LOG_DIR}/llama-server-18888-*.log
 2. 修改 `models/llamacpp/deepseek-v4-flash.yaml` 中的 `model` 路径（例如换 `UD-Q4_K_XL/`）
 3. 重新启动：`bash script/modelctl.sh start deepseek-v4-flash-llamacpp`
 
-> 若首次启动时 `model` 留空、由 `download` 段自动下载并写回了路径，再次换量化时需同时修改
-> `model` 与 `download.quant`（或先删除已写回的 `model` 路径让其重新下载）。
+> 若首次启动时 `model` 留空、由 `download` 段自动下载，再次换量化时只需修改 `download.quant`
+> 并重新启动（`model` 不会被写回，无需清理）。
 
 如需调整 `extra_args` 等额外参数，目前 llamacpp 引擎尚未支持该字段，请直接修改 `build_command()` 输出或提交 issue。
 
@@ -198,7 +199,7 @@ tail -f ${LOG_DIR}/llama-server-18888-*.log
 
 | YAML 字段 | 默认值 | 说明 |
 | --- | --- | --- |
-| `model` | `UD-Q8_K_XL/...-00001-of-00005.gguf` | GGUF 模型第一个分片；留空 + `download` 段时自动下载并写回本地路径 |
+| `model` | `UD-Q8_K_XL/...-00001-of-00005.gguf` | GGUF 模型第一个分片；留空 + `download` 段时自动下载到 `$MODEL_ROOT/<仓库名>`（YAML 不被改写） |
 | `draft` | 空（自动发现） | DSpark 草稿路径 |
 | `port` | `18888` | 服务端口 |
 | `ctx_size` | 空（自动） | **单槽上下文**（每个并发请求完整可用的上下文）。留空自动计算每槽 `1048576`（1M）；启动时总量自动取 `ctx_size × parallel`（llama-server 的 `--ctx-size` 为槽位共享总量） |
@@ -242,7 +243,7 @@ tail -f ${LOG_DIR}/llama-server-18888-*.log
 ### 使用
 
 ```bash
-bash script/modelctl.sh start deepseek-v4-flash-unsloth   # 首次自动从 ModelScope 下载并写回 profile
+bash script/modelctl.sh start deepseek-v4-flash-unsloth   # 首次自动从 ModelScope 下载到 $MODEL_ROOT
 curl http://127.0.0.1:8001/v1/models -H "Authorization: Bearer $UNSLOTH_API_KEY"
 bash script/modelctl.sh status
 ```

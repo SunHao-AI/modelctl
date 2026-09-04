@@ -265,7 +265,6 @@ def test_check_requirements_env_var_degrade_warning(tmp_path, monkeypatch):
 
 
 def test_pre_start_discovers_draft_after_download(tmp_path, monkeypatch):
-    from modelctl.engines import _persist as persist_mod
     from modelctl.engines import llamacpp
 
     (tmp_path / "ds.yaml").write_text(
@@ -288,7 +287,6 @@ def test_pre_start_discovers_draft_after_download(tmp_path, monkeypatch):
 
     # download_gguf 只返回模型分片（auto_draft=None），验证走重新发现分支
     monkeypatch.setattr(llamacpp, "download_gguf", lambda mid, root, quant, wd: (model_shard, None))
-    monkeypatch.setattr(persist_mod, "persist_model_path", lambda *a, **k: None)
     monkeypatch.setattr(llamacpp, "require", lambda *a, **k: None)
     monkeypatch.setattr(llamacpp, "run", lambda *a, **k: None)
 
@@ -400,6 +398,74 @@ def test_pre_start_no_download_section_keeps_warning(tmp_path, monkeypatch):
     adapter.pre_start()
     cmd, _ = adapter.build_command()
     assert "--mmproj" not in cmd
+
+
+def test_pre_start_skips_git_cmake_when_binary_exists(tmp_path, monkeypatch):
+    """产物已编译好：即使机器缺 git/cmake 也应能启动（不应无条件 require）。"""
+    from modelctl.engines import llamacpp
+
+    (tmp_path / "m.gguf").write_bytes(b"0" * 1024)
+    source = tmp_path / "llama.cpp"
+    binary = source / "build" / "bin" / "llama-server"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"x")
+    (tmp_path / "ds.yaml").write_text(
+        f"name: ds\nengine: llamacpp\nport: 18888\nllamacpp:\n"
+        f"  model: {tmp_path}/m.gguf\n  gpu_count: 8\n  source_dir: {source}\n",
+        encoding="utf-8",
+    )
+    caps = probe(nvidia_smi_output=SMI)
+    adapter = get_adapter("llamacpp")(load_profile("ds", tmp_path), caps)
+    adapter.check_requirements()
+
+    def fake_which(name):
+        return None
+
+    monkeypatch.setattr(llamacpp.shutil, "which", fake_which)
+    monkeypatch.setattr(
+        llamacpp, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("产物已存在，不应执行编译"))
+    )
+    adapter.pre_start()  # 不应抛 RequirementError
+
+
+def test_pre_start_requires_cmake_when_needing_build(tmp_path, monkeypatch):
+    """源码存在但未编译且缺 cmake：应报缺少 cmake。"""
+    from modelctl.engines import llamacpp
+
+    (tmp_path / "m.gguf").write_bytes(b"0" * 1024)
+    source = tmp_path / "llama.cpp"
+    source.mkdir()  # 源码在、build 产物不在 → 需要 cmake
+    (tmp_path / "ds.yaml").write_text(
+        f"name: ds\nengine: llamacpp\nport: 18888\nllamacpp:\n"
+        f"  model: {tmp_path}/m.gguf\n  gpu_count: 8\n  source_dir: {source}\n",
+        encoding="utf-8",
+    )
+    caps = probe(nvidia_smi_output=SMI)
+    adapter = get_adapter("llamacpp")(load_profile("ds", tmp_path), caps)
+    adapter.check_requirements()
+
+    monkeypatch.setattr(llamacpp.shutil, "which", lambda name: "/usr/bin/git" if name == "git" else None)
+    with pytest.raises(RequirementError, match="cmake"):
+        adapter.pre_start()
+
+
+def test_pre_start_requires_git_when_source_missing(tmp_path, monkeypatch):
+    """源码目录不存在且缺 git：应报缺少 git（clone 前才校验）。"""
+    from modelctl.engines import llamacpp
+
+    (tmp_path / "m.gguf").write_bytes(b"0" * 1024)
+    (tmp_path / "ds.yaml").write_text(
+        f"name: ds\nengine: llamacpp\nport: 18888\nllamacpp:\n"
+        f"  model: {tmp_path}/m.gguf\n  gpu_count: 8\n  source_dir: {tmp_path / 'llama.cpp'}\n",
+        encoding="utf-8",
+    )
+    caps = probe(nvidia_smi_output=SMI)
+    adapter = get_adapter("llamacpp")(load_profile("ds", tmp_path), caps)
+    adapter.check_requirements()
+
+    monkeypatch.setattr(llamacpp.shutil, "which", lambda _name: None)
+    with pytest.raises(RequirementError, match="git"):
+        adapter.pre_start()
 
 
 def test_ensure_mmproj_local_hit_skips_network(tmp_path, monkeypatch):

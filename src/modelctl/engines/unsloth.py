@@ -34,7 +34,6 @@ from modelctl.core.envfile import PROJECT_ROOT
 from modelctl.core.gpu_lock import acquire_gpu_lock
 from modelctl.core.gpu_utils import GPUValidationError
 from modelctl.core.process import launch_log, wait_health
-from modelctl.engines._persist import persist_model_path
 from modelctl.engines.base import EngineAdapter, RequirementError
 from modelctl.engines.llamacpp import download_gguf
 
@@ -135,8 +134,8 @@ class UnslothAdapter(EngineAdapter):
                 "可配置 HF_ENDPOINT=https://hf-mirror.com 后从 Hugging Face 手动下载 "
                 "unsloth GGUF 仓库，并将本地路径填入 unsloth.model。"
             ) from error
-        assert self.profile.path is not None  # 加载的 profile 必有真实文件路径
-        persist_model_path(self.profile.path, "unsloth", str(model_match.resolve()))
+        # 下载目录由 MODEL_ROOT + modelscope_id 确定性推导，本地已有分片直接复用；
+        # 仅更新内存中的 cfg，不写回 YAML（保持 profile 文件干净、多机可移植）。
         cfg["model"] = str(model_match.resolve())
 
     def build_command(self) -> tuple[list[str], dict[str, str]]:

@@ -9,7 +9,7 @@ api_key: ${API_KEY}
 
 sglang:
   # model：HuggingFace 模型 ID 或本地模型目录。
-  # 为空/不存在时通过 download 段从 ModelScope 下载并写回本地路径
+  # 为空/本地路径不存在时，按 download 段下载到 $MODEL_ROOT/<仓库名> 后直接使用（本文件不会被改写）
   model: Qwen/Qwen3.8-27B
   # download：模型不存在时的自动下载配置（ModelScope，HF 格式仓库）
   download:

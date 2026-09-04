@@ -50,11 +50,37 @@ def ensure_modelscope() -> None:
     ensure_packages("modelscope")
 
 
+def repo_local_dir(modelscope_id: str, local_root: Path) -> Path:
+    """仓库对应的本地落地目录：local_root/<repo_last_part>（路径确定性推导）。
+
+    落地路径完全由 modelscope_id + MODEL_ROOT 决定，因此无需把路径写回 profile YAML：
+    同一台机器下次启动会推导出同一路径，目录存在即复用。
+    """
+    return local_root / modelscope_id.rsplit("/", 1)[-1]
+
+
 def download_repo(modelscope_id: str, local_root: Path) -> Path:
-    """下载 ModelScope 仓库到 local_root/<repo_last_part>，返回本地目录。"""
-    destination = local_root / modelscope_id.rsplit("/", 1)[-1]
+    """下载 ModelScope 仓库到 repo_local_dir()，返回本地目录。
+
+    目录已存在且含权重文件时直接复用，不触发 modelscope 安装与下载。
+    """
+    destination = repo_local_dir(modelscope_id, local_root)
+    if _is_populated(destination):
+        logger.info(f"本地已存在模型目录，跳过下载：{destination}")
+        return destination
     destination.mkdir(parents=True, exist_ok=True)
     logger.info(f"从 ModelScope 下载 {modelscope_id} 到 {destination}")
     # 注意：snapshot_download 的 allow_file_pattern 由调用方决定（本入口拉取全部）。
     _snapshot_download(modelscope_id, str(destination))
     return destination
+
+
+def _is_populated(path: Path) -> bool:
+    """目录存在且含常见权重/配置文件时视为已就位（避免半成品目录被当成已下载）。"""
+    if not path.is_dir():
+        return False
+    names = {p.name for p in path.iterdir()}
+    markers = {"config.json", "model.safetensors", "model.safetensors.index.json"}
+    if markers & names:
+        return True
+    return any(p.suffix == ".safetensors" for p in path.iterdir())

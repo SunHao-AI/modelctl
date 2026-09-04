@@ -227,7 +227,7 @@ def test_unsloth_metrics_disabled_by_config(tmp_path):
     assert a.metrics_mapping() is None
 
 
-def test_unsloth_pre_start_downloads_and_persists(tmp_path, monkeypatch):
+def test_unsloth_pre_start_downloads_without_persist(tmp_path, monkeypatch):
     monkeypatch.setenv("MODEL_ROOT", str(tmp_path / "model-gguf"))
     p = _write(
         tmp_path,
@@ -245,9 +245,10 @@ def test_unsloth_pre_start_downloads_and_persists(tmp_path, monkeypatch):
 
     a.pre_start()
     assert p.engine_config["model"] == str(downloaded.resolve())
+    # 不写回 YAML：profile 文件保持原样（git 干净），也不产生 .bak
     content = p.path.read_text(encoding="utf-8")
-    assert f"model: {downloaded.resolve()}" in content
-    assert (tmp_path / "u.yaml.bak").is_file()
+    assert "model: ''" in content
+    assert not (tmp_path / "u.yaml.bak").exists()
 
 
 def test_unsloth_pre_start_skips_when_model_exists(tmp_path, monkeypatch):
@@ -264,7 +265,6 @@ def test_unsloth_pre_start_skips_when_model_exists(tmp_path, monkeypatch):
         return tmp_path
 
     monkeypatch.setattr("modelctl.engines.unsloth.download_gguf", _fail)
-    monkeypatch.setattr("modelctl.engines.unsloth.persist_model_path", _fail)
 
     a.pre_start()
     assert calls == []

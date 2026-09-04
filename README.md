@@ -6,7 +6,7 @@
 
 - **多引擎支持**：llamacpp（官方 llama.cpp + DSpark 投机解码）、ollama、vllm、sglang、unsloth（无头 API 服务，Unsloth 动态量化 GGUF）
 - **YAML profile**：每模型一个 YAML（`models/<engine>/<name>.yaml`），配置模型路径、端口、引擎参数、用量单价
-- **自动下载**：model 为空/不存在时从 ModelScope 自动下载，并把本地路径持久化写回 YAML（备份 .yaml.bak）
+- **自动下载**：model 为空/不存在时从 ModelScope 自动下载，落地路径由 `MODEL_ROOT` + `modelscope_id` 确定性推导（不改写 YAML）
 - **能力探测与自动降级**：启动前探测 GPU/CC/显存/引擎二进制，硬性不满足拒绝启动并说明原因，可降级项自动降级并告警
 - **统一生命周期**：后台启动、PID 管理、健康检查、优雅停止
 - **用量统计**：`/api/usage` 输出与 cc-switch 兼容，支持多模型按 `?model=` 路由
@@ -184,8 +184,8 @@ ModelScope 下载模型：
 - **vllm / sglang**：`download.modelscope_id`（HF 格式仓库），下载整个仓库目录
 - **ollama**：无需 download 段，由 `ollama pull` 自动处理
 
-下载成功后，本地路径会**持久化写回** profile YAML 的 `model` 字段（原文件备份为 `.yaml.bak`），
-下次启动直接复用本地模型，无需重复下载。
+下载目标目录为 `$MODEL_ROOT/<仓库名>`，完全由 `MODEL_ROOT` + `download.modelscope_id` 确定性推导：
+目录已就位则直接复用不重复下载；**profile YAML 不会被改写**（保持 git 干净、多机可移植）。
 
 环境变量 `MODEL_ROOT` 控制下载目录（默认：项目根目录上级的 `model-gguf/` 或 `model-hf/`）。
 
@@ -254,11 +254,11 @@ bash script/modelctl.sh start qwen3.8-ollama
 bash script/modelctl.sh start qwen3.8-vllm
 
 # 启动 Qwen3.8-27B GGUF（llamacpp，首次运行自动编译 llama.cpp + 从 ModelScope 下载模型）
-# 模型会下载到 .env 中 MODEL_ROOT 指定的位置，下载后路径自动写回 profile YAML
+# 模型会下载到 .env 中 MODEL_ROOT 指定的位置（$MODEL_ROOT/<仓库名>，YAML 不会被改写）
 bash script/modelctl.sh start qwen3.8-llamacpp
 
 # 启动 DeepSeek-V4-Flash（unsloth 无头 API，Unsloth 动态量化 GGUF）
-# 模型从 ModelScope 下载并写回 profile；api_key 取 .env 中 UNSLOTH_API_KEY
+# 模型下载到 $MODEL_ROOT/<仓库名>；api_key 取 .env 中 UNSLOTH_API_KEY
 bash script/modelctl.sh start deepseek-v4-flash-unsloth
 ```
 

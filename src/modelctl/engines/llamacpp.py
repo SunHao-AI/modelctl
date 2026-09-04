@@ -394,15 +394,13 @@ class LlamaCppAdapter(EngineAdapter):
         if cfg.get("download") and (self._model is None or not self._model.is_file()):
             dl = cfg["download"]
             model_root = Path(os.environ.get("MODEL_ROOT") or PROJECT_ROOT.parent / "model-gguf")
+            # 下载目录由 MODEL_ROOT + modelscope_id 确定性推导，本地已有分片直接复用；
+            # 仅更新内存中的 self._model，不写回 YAML（保持 profile 文件干净、多机可移植）。
             self._model, auto_draft = download_gguf(
                 dl["modelscope_id"], model_root, dl.get("quant", "UD-Q8_K_XL"), self._dspark
             )
             if self._draft is None:
                 self._draft = auto_draft
-            from modelctl.engines._persist import persist_model_path
-
-            assert self.profile.path is not None  # 加载的 profile 必有真实文件路径
-            persist_model_path(self.profile.path, "llamacpp", str(self._model.resolve()))
             # model 留空时下载前无法发现草稿，下载后按意图重新发现
             if self._dspark and self._draft is None:
                 self._draft = self._find_draft(cfg)
@@ -421,12 +419,14 @@ class LlamaCppAdapter(EngineAdapter):
                 logger.warning("vision: on 但 download 段未配置 modelscope_id，无法自动获取 mmproj")
             if self._mmproj is None:
                 self.warnings.append("未获取到 mmproj 文件（*mmproj*.gguf），图片输入不可用（文本功能不受影响）")
-        require("git")
-        require("cmake")
+        # git/cmake 仅在"需要 clone 源码"或"需要编译产物"时才必需；
+        # 产物已编译好时不校验，避免缺 cmake 的机器无法启动已就绪的 llama-server
         if not source.exists():
+            require("git")
             source.parent.mkdir(parents=True, exist_ok=True)
             run(["git", "clone", "--depth", "1", OFFICIAL_URL, str(source)])
         if not (source / "build" / "bin" / "llama-server").is_file():
+            require("cmake")
             run(
                 [
                     "cmake",

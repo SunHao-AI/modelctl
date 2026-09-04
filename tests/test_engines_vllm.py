@@ -167,7 +167,7 @@ def test_vllm_requirements_allow_download_only(tmp_path, monkeypatch):
     a.check_requirements()  # model 为空但有 download 段时不应报错
 
 
-def test_vllm_pre_start_downloads_and_persists(tmp_path, monkeypatch):
+def test_vllm_pre_start_downloads_without_persist(tmp_path, monkeypatch):
     p = _write(
         tmp_path,
         "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: ''\n  download:\n    modelscope_id: Qwen/Qwen3-32B\n",
@@ -177,13 +177,13 @@ def test_vllm_pre_start_downloads_and_persists(tmp_path, monkeypatch):
     downloaded = tmp_path / "model-hf" / "Qwen3-32B"
     # import 位于 vllm 模块顶部，monkeypatch 模块属性即可生效。
     monkeypatch.setattr("modelctl.engines.vllm.download_repo", lambda mid, root: downloaded)
-    # 使用真实 persist_model_path，同时验证 YAML 被写回。
 
     a.pre_start()
     assert p.engine_config["model"] == str(downloaded.resolve())
+    # 不写回 YAML：profile 文件保持原样（git 干净），也不产生 .bak
     content = p.path.read_text(encoding="utf-8")
-    assert f"model: {downloaded.resolve()}" in content
-    assert (tmp_path / "m.yaml.bak").is_file()
+    assert "model: ''" in content
+    assert not (tmp_path / "m.yaml.bak").exists()
 
 
 def test_vllm_pre_start_skips_when_model_exists(tmp_path, monkeypatch):
@@ -201,7 +201,6 @@ def test_vllm_pre_start_skips_when_model_exists(tmp_path, monkeypatch):
         return tmp_path
 
     monkeypatch.setattr("modelctl.engines.vllm.download_repo", _fail)
-    monkeypatch.setattr("modelctl.engines.vllm.persist_model_path", _fail)
 
     a.pre_start()  # model 路径已存在，直接返回
     assert calls == []
@@ -619,10 +618,10 @@ def test_stop_patterns_docker_two_modes(tmp_path, monkeypatch):
     assert patterns[1] in expected_cmdline
 
 
-# ---- Task 6: pre_start 写回（docker 复用）+ 全仓 yaml 回归 ----
+# ---- Task 6: pre_start 本地路径解析（docker 复用）+ 全仓 yaml 回归 ----
 
 
-def test_pre_start_persists_local_path_for_docker(tmp_path, monkeypatch):
+def test_pre_start_resolves_local_path_for_docker(tmp_path, monkeypatch):
     """docker 类型 + HF repo id → pre_start 触发下载 → cfg["model"] 更新为本地路径 → build_command 可用。"""
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
     import modelctl.engines.vllm as vllm_mod
@@ -642,11 +641,10 @@ def test_pre_start_persists_local_path_for_docker(tmp_path, monkeypatch):
     )
     a = get_adapter("vllm")(p, CAPS8)
     a.pre_start()
-    # pre_start 把 profile.engine_config["model"] 直接更新为下载目录
+    # pre_start 把 profile.engine_config["model"] 直接更新为下载目录（仅内存，不写回 YAML）
     assert p.engine_config["model"] == str(download_dir.resolve())
-    # yaml 文件内 model 字段也被 persist_model_path 文本级替换
     text = p.path.read_text(encoding="utf-8")
-    assert str(download_dir.resolve()) in text
+    assert str(download_dir.resolve()) not in text
     # build_command 此时可用（model 已是本地路径）
     cmd, _ = a.build_command()
     assert "/models/X" in cmd or f"models{os.sep}X" in " ".join(cmd)

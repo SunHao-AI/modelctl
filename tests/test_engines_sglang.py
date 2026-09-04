@@ -9,7 +9,7 @@
 # @Desc   : SGLang 适配器测试
 # ===============================================================================
 
-"""tests/test_engines_sglang.py — SGLang 适配器下载/persist 测试。"""
+"""tests/test_engines_sglang.py — SGLang 适配器下载测试。"""
 
 import pytest
 
@@ -37,7 +37,7 @@ def test_sglang_requirements_allow_download_only(tmp_path, monkeypatch):
     a.check_requirements()  # model 为空但有 download 段时不应报错
 
 
-def test_sglang_pre_start_downloads_and_persists(tmp_path, monkeypatch):
+def test_sglang_pre_start_downloads_without_persist(tmp_path, monkeypatch):
     p = _write(
         tmp_path,
         "name: s\nengine: sglang\nport: 30000\nsglang:\n  model: ''\n  download:\n    modelscope_id: Qwen/Qwen3-32B\n",
@@ -47,13 +47,13 @@ def test_sglang_pre_start_downloads_and_persists(tmp_path, monkeypatch):
     downloaded = tmp_path / "model-hf" / "Qwen3-32B"
     # import 位于 sglang 模块顶部，monkeypatch 模块属性即可生效。
     monkeypatch.setattr("modelctl.engines.sglang.download_repo", lambda mid, root: downloaded)
-    # 使用真实 persist_model_path，同时验证 YAML 被写回。
 
     a.pre_start()
     assert p.engine_config["model"] == str(downloaded.resolve())
+    # 不写回 YAML：profile 文件保持原样（git 干净），也不产生 .bak
     content = p.path.read_text(encoding="utf-8")
-    assert f"model: {downloaded.resolve()}" in content
-    assert (tmp_path / "m.yaml.bak").is_file()
+    assert "model: ''" in content
+    assert not (tmp_path / "m.yaml.bak").exists()
 
 
 def test_sglang_pre_start_skips_when_model_exists(tmp_path, monkeypatch):
@@ -71,7 +71,6 @@ def test_sglang_pre_start_skips_when_model_exists(tmp_path, monkeypatch):
         return tmp_path
 
     monkeypatch.setattr("modelctl.engines.sglang.download_repo", _fail)
-    monkeypatch.setattr("modelctl.engines.sglang.persist_model_path", _fail)
 
     a.pre_start()  # model 路径已存在，直接返回
     assert calls == []

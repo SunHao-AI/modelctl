@@ -46,8 +46,8 @@ llamacpp:
   # source_dir：llama.cpp 源码目录（建议填上面头部注释里 PR 副本的绝对路径）。
   #   留空=回退环境变量 LLAMACPP_SOURCE_DIR，再回退默认主线；point 到已编译副本时无需再动构建。
   source_dir: /raid5/sh/code/llama.cpp-qwen38-flash-next
-  # model：本地 GGUF 模型路径。为空/不存在时通过 download 段自动下载；
-  # 下载成功后此字段会被覆盖为本地绝对路径（原文件备份 .yaml.bak）
+  # model：本地 GGUF 模型路径，留空即可。为空/不存在时按 download 段下载到
+  # $MODEL_ROOT/<仓库名>；落地路径由 MODEL_ROOT + modelscope_id 确定，本文件不会被改写
   model: ""
   # download：模型不存在时的自动下载配置（ModelScope，GGUF 格式）
   download:

@@ -22,7 +22,6 @@ from modelctl.core.envfile import PROJECT_ROOT
 from modelctl.core.gpu_lock import acquire_gpu_lock
 from modelctl.core.gpu_utils import GPUValidationError
 from modelctl.engines._download import download_repo
-from modelctl.engines._persist import persist_model_path
 from modelctl.engines.base import EngineAdapter, RequirementError
 
 
@@ -59,10 +58,9 @@ class AphroditeAdapter(EngineAdapter):
             if cfg.get("download"):
                 modelscope_id = cfg["download"]["modelscope_id"]
                 model_root = Path(os.environ.get("MODEL_ROOT") or PROJECT_ROOT.parent / "model-hf")
+                # 落地路径由 MODEL_ROOT + modelscope_id 确定性推导，目录已存在即复用；
+                # 仅更新内存中的 cfg，不写回 YAML（保持 profile 文件干净、多机可移植）。
                 local_dir = download_repo(modelscope_id, model_root)
-                if self.profile.path is None:
-                    raise RequirementError(f"{self.profile.name}：profile 文件路径缺失")
-                persist_model_path(self.profile.path, "aphrodite", str(local_dir.resolve()))
                 cfg["model"] = str(local_dir.resolve())
 
     def build_command(self) -> tuple[list[str], dict[str, str]]:

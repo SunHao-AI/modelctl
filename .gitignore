@@ -44,6 +44,10 @@ data/
 # （Linux/CUDA 与开发机解析结果不同），故不入库；顶层 uv.lock 不受此规则影响
 envs/*/uv.lock
 
+# gateway 子环境锁文件：服务器上 `uv sync --project gateway` 会按本机重新解析改写，
+# 与 envs/*/uv.lock 同理不入库（缺失时由 modelctl all/webui 自动 uv sync 重建）
+gateway/uv.lock
+
 # vllm 请求级审计日志 (按天 JSONL 分片, 含 token 用量, 不入库)
 /data/audit/
 # dev/integration worktree 工作区

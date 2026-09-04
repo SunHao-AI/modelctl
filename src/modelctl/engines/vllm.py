@@ -26,7 +26,6 @@ from modelctl.core.gpu_lock import acquire_gpu_lock
 from modelctl.core.gpu_utils import GPUValidationError
 from modelctl.core.process import docker_container_alive, wait_health
 from modelctl.engines._download import download_repo
-from modelctl.engines._persist import persist_model_path
 from modelctl.engines.base import EngineAdapter, RequirementError
 
 # per-request metrics flag 所需最低 vLLM 版本（2026-08 实测值；>= 该版本 --enable-per-request-metrics 可用）
@@ -119,10 +118,9 @@ class VllmAdapter(EngineAdapter):
             if cfg.get("download"):
                 modelscope_id = cfg["download"]["modelscope_id"]
                 model_root = Path(os.environ.get("MODEL_ROOT") or PROJECT_ROOT.parent / "model-hf")
+                # 落地路径由 MODEL_ROOT + modelscope_id 确定性推导，目录已存在即复用；
+                # 仅更新内存中的 cfg，不写回 YAML（保持 profile 文件干净、多机可移植）。
                 local_dir = download_repo(modelscope_id, model_root)
-                if self.profile.path is None:
-                    raise RequirementError(f"{self.profile.name}：profile 文件路径缺失，无法写回模型路径")
-                persist_model_path(self.profile.path, "vllm", str(local_dir.resolve()))
                 cfg["model"] = str(local_dir.resolve())
         # 精检：模型文件就位后，以 config.json 判定更精确的模型特征
         # 延迟导入 ModelSpec，避免 compat 部分初始化时经 engines/__init__ 回环

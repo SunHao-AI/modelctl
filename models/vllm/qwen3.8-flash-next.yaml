@@ -10,8 +10,8 @@
 #   vllm.docker_image: vllm/vllm-openai:qwen38-flash-next（仅本模型的官方 Day-0 镜像，PyPI 不支持该模型）
 # 生命周期：
 #   1. 首次启动前 docker 自动 pull 该镜像（约 21.8GB）
-#   2. 模型按 download 段从 ModelScope 拉到 $MODEL_ROOT（默认 /raid5/sh/model-hf），
-#      modelctl 写回 yaml `model:` 字段为本地绝对路径（之后的启动不再重复下载）
+#   2. 模型按 download 段从 ModelScope 拉到 $MODEL_ROOT/<仓库名>；落地路径由
+#      MODEL_ROOT + modelscope_id 确定性推导，目录已存在即复用（yaml 不会被改写）
 #   3. 容器使用 nvidia-container-toolkit + --gpus JSON 透传 yaml gpu_list 指定的同卡
 #   4. 容器内 vLLM 绑定 8000，宿主端口 = yaml 顶层 `port`；docker 路径不写 PID 文件
 #   5. modelctl stop 走 stop_docker_instance——docker rm -f + 清本地 PID（容器路径本身不写
@@ -41,8 +41,9 @@ api_key: ${API_KEY}
 
 vllm:
   # model：HuggingFace 模型 ID 或本地模型目录。
-  # 为空/不存在时通过 download 段从 ModelScope 下载并写回本地路径
-  model: /raid5/sh/model/model-gguf/Qwen/Qwen3.8-Flash-Next-FP8
+  # 为空/本地路径不存在时，按 download 段下载到 $MODEL_ROOT/<仓库名> 后直接使用；
+  # 落地路径由 MODEL_ROOT + modelscope_id 确定，本文件不会被改写（保持 git 干净）
+  model: Qwen/Qwen3.8-Flash-Next-FP8
   # docker_image：Day-0 vLLM 专用镜像
   #   - 仅此一个镜像支持本模型；`vllm serve` 在 PyPI vLLM 0.27/0.28 上跑不通本架构
   #   - 镜像内含 Qwen4ExpForConditionalGeneration 注册、QSA attention kernel、FlashQLA 等

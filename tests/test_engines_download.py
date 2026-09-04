@@ -45,6 +45,30 @@ def test_download_repo_uses_modelscope(tmp_path, monkeypatch):
     assert result == tmp_path / "Qwen3.8-27B-GGUF"
 
 
+def test_download_repo_skips_when_already_populated(tmp_path, monkeypatch):
+    """目录已含权重/配置文件 → 直接复用，不触发 modelscope 下载。
+
+    这是取消"写回 YAML"后仍不重复下载的前提：落地路径由 MODEL_ROOT + modelscope_id
+    确定性推导，同一台机器下次启动会推导出同一路径。
+    """
+    calls: list = []
+    monkeypatch.setattr(dl, "_snapshot_download", lambda *a, **k: calls.append(a))
+
+    dest = tmp_path / "Qwen3.8-27B-GGUF"
+    dest.mkdir(parents=True)
+    (dest / "config.json").write_text("{}", encoding="utf-8")
+
+    assert dl.download_repo("unsloth/Qwen3.8-27B-GGUF", tmp_path) == dest
+    assert calls == []
+
+
+def test_repo_local_dir_is_deterministic(tmp_path):
+    """落地路径只由 modelscope_id + local_root 决定（无需持久化即可复用）。"""
+    a = dl.repo_local_dir("unsloth/Qwen3.8-27B-GGUF", tmp_path)
+    b = dl.repo_local_dir("unsloth/Qwen3.8-27B-GGUF", tmp_path)
+    assert a == b == tmp_path / "Qwen3.8-27B-GGUF"
+
+
 # ---- §2.2：aphrodite / lmdeploy 下载 pre_start 路径 ----
 
 def test_aphrodite_pre_start_downloads_when_model_missing(tmp_path, monkeypatch):
@@ -78,10 +102,11 @@ def test_aphrodite_pre_start_downloads_when_model_missing(tmp_path, monkeypatch)
     p = load_profile("m", tmp_path)
     a = get_adapter("aphrodite")(p, Capabilities(gpu_count=8, binaries={"aphrodite": True}))
     a.pre_start()
-    # 写回后 cfg.model 是本地目录（下载产生 .modelscope 子目录）
+    # cfg.model 更新为本地目录（仅内存）
     assert Path(p.engine_config["model"]).is_dir()
-    # YAML 文件已写回（原文件改名 .bak 出现）
-    assert (tmp_path / "m.yaml.bak").is_file()
+    # 不写回 YAML：profile 保持原样，git 干净
+    assert "model: /nonexistent/model" in (tmp_path / "m.yaml").read_text(encoding="utf-8")
+    assert not (tmp_path / "m.yaml.bak").exists()
 
 
 def test_lmdeploy_pre_start_noop_when_model_exists(tmp_path, monkeypatch):
@@ -140,7 +165,8 @@ def test_lmdeploy_pre_start_downloads_when_model_missing(tmp_path, monkeypatch):
     p = load_profile("m", tmp_path)
     a = get_adapter("lmdeploy")(p, Capabilities(gpu_count=8, binaries={"lmdeploy": True}))
     a.pre_start()
-    # 写回后 cfg.model 是本地目录（包含下载产生的 .modelscope/ 标记或本地目录名）
+    # cfg.model 更新为 MODEL_ROOT 下推导出的本地目录（仅内存）
     assert Path(p.engine_config["model"]).is_dir()
-    # YAML 文件已写回（原文件改名 .bak 出现）
-    assert (tmp_path / "m.yaml.bak").is_file()
+    # 不写回 YAML：profile 保持原样，git 干净
+    assert "model: /nonexistent/model" in (tmp_path / "m.yaml").read_text(encoding="utf-8")
+    assert not (tmp_path / "m.yaml.bak").exists()
