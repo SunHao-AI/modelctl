@@ -15,13 +15,12 @@ from __future__ import annotations
 
 import os
 import shlex
-import shutil
 import subprocess
 from pathlib import Path
 
 from loguru import logger
 
-from modelctl.core import envs
+from modelctl.core import docker_setup, envs
 from modelctl.core.envfile import PROJECT_ROOT
 from modelctl.core.gpu_lock import acquire_gpu_lock
 from modelctl.core.gpu_utils import GPUValidationError
@@ -40,11 +39,10 @@ class VllmAdapter(EngineAdapter):
         runtime, _image = self._resolve_runtime()
         if runtime == "docker":
             container_name = f"{self.profile.name}-vllm"
-            # docker / nvidia-smi 都在 PATH；硬拦截不降级
-            if shutil.which("docker") is None:
-                raise RequirementError("docker 命令不在 PATH——docker_image 已配置，请先安装 docker " "（参考 `apt install docker.io docker-compose` 或官网）")
-            if shutil.which("nvidia-smi") is None:
-                raise RequirementError("nvidia-smi 不在 PATH / nvidia-container-toolkit 未就绪——" "docker 方式下 --gpus 设定需要 toolkit 支持，" "请先安装 nvidia-container-toolkit")
+            # docker / nvidia-smi 都在 PATH；硬拦截不降级（检查与指引统一在 core.docker_setup）
+            missing = docker_setup.path_level_missing()
+            if missing:
+                raise RequirementError(f"docker_image 已配置但 Docker 环境未就绪：{'；'.join(missing)}——{docker_setup.MSG_GUIDE}")
             # 清冲突残留容器（幂等）
             try:
                 subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=10)

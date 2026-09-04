@@ -15,11 +15,10 @@ from __future__ import annotations
 
 import os
 import shlex
-import shutil
 import subprocess
 from pathlib import Path
 
-from modelctl.core import envs
+from modelctl.core import docker_setup, envs
 from modelctl.core.envfile import PROJECT_ROOT
 from modelctl.core.gpu_lock import acquire_gpu_lock
 from modelctl.core.gpu_utils import GPUValidationError
@@ -39,10 +38,9 @@ class TokenSpeedAdapter(EngineAdapter):
         cfg = self.profile.engine_config
         runtime, image = self._resolve_runtime()
         if runtime == "docker":
-            if shutil.which("docker") is None:
-                raise RequirementError("docker 命令不在 PATH")
-            if shutil.which("nvidia-smi") is None:
-                raise RequirementError("docker 模式需要 nvidia-container-toolkit")
+            missing = docker_setup.path_level_missing()
+            if missing:
+                raise RequirementError(f"docker_image 已配置但 Docker 环境未就绪：{'；'.join(missing)}——{docker_setup.MSG_GUIDE}")
             # 清冲突残留容器（幂等）
             try:
                 subprocess.run(["docker", "rm", "-f", f"{self.profile.name}-tokenspeed"],

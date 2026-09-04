@@ -42,7 +42,7 @@ from pathlib import Path
 from loguru import logger
 
 import modelctl.core.compat_rules  # noqa: F401 —— 导入即注册内置规则
-from modelctl.core import all_service
+from modelctl.core import all_service, docker_setup
 from modelctl.core.capabilities import ENGINE_BINARIES, ENGINE_INSTALL_HINTS, probe
 from modelctl.core.colors import _apply, color_enabled, display_width, format_status, pad_width
 from modelctl.core.deps import ensure_packages
@@ -74,6 +74,9 @@ from modelctl.engines.base import RequirementError
 # 受管虚拟环境目标：托管引擎（vllm / sglang）+ 独立子项目（gateway）。
 # 与 core.envs.known_targets() 保持单一事实来源；改 envs 配置这里自动跟着变。
 ENV_TARGETS: list[str] = list(known_targets())
+
+# 系统级目标（非 venv）：docker + nvidia-container-toolkit，见 core.docker_setup
+DOCKER_TARGET: str = docker_setup.TARGET
 
 
 def _extract_models_dir(argv: list[str]) -> tuple[Path | None, list[str]]:
@@ -160,20 +163,27 @@ def build_parser() -> argparse.ArgumentParser:
     # --no-build 完全跳过自动处理（与现有 gateway venv 自动搭建取向一致）。
     wp.add_argument("--build", action=argparse.BooleanOptionalAction, default=None,
                     help="start/restart 时自动处理前端环境（缺 Node 装 Node、缺依赖 npm install、缺产物 npm run build）；非交互终端默认关闭")
-    ep = sub.add_parser("env", help="专用虚拟环境管理（vllm / sglang / gateway）")
+    ep = sub.add_parser("env", help="专用虚拟环境管理（vllm / sglang / gateway）+ Docker 系统依赖")
     ep.add_argument("action", choices=["setup", "list", "remove"])
     ep.add_argument(
         "engine",
         nargs="?",
         default=None,
-        choices=ENV_TARGETS,
-        help=f"受管目标：{' / '.join(ENV_TARGETS)}（list 不需要）",
+        choices=ENV_TARGETS + [DOCKER_TARGET],
+        help=f"受管目标：{' / '.join(ENV_TARGETS + [DOCKER_TARGET])}（list 不需要）",
     )
     # 离线/弱网安装：--wheels 指向本地 wheel 目录（uv --find-links），--offline 禁网。
     ep.add_argument("--wheels", default=None, metavar="DIR",
                     help="setup 时从本地 wheel 目录安装（uv --find-links），绕开跨境 PyPI 下载")
     ep.add_argument("--offline", action="store_true",
                     help="配合 --wheels 使用：完全禁用网络，要求目录内依赖已自闭包")
+    # docker 专用：--run 实际执行安装（默认仅诊断+指引）；--registry-mirror 写 daemon.json。
+    ep.add_argument("--run", action="store_true",
+                    help="env setup docker：实际执行安装脚本（Linux + root），默认仅输出诊断与指引")
+    ep.add_argument("--registry-mirror", default=None, metavar="URL", dest="registry_mirrors",
+                    action="append",
+                    help="env setup docker：registry-mirrors 列表（可重复传）；"
+                         "缺省用内置默认多源（docker.1ms.run / docker.xuanyuan.me / docker.m.daocloud.io）")
     # ── 集群管理面（设计文档 §4.2 M0 子集：init/join/nodes/status/join-token）──
     cp = sub.add_parser("cluster", help="分布式集群管理面（单中心 + worker 注册）")
     csub = cp.add_subparsers(dest="action", required=True)
@@ -850,9 +860,11 @@ def _validate_target(target: str | None) -> bool:
 
 
 def _cmd_env_setup(args, models_dir: Path | None, caps) -> int:
+    if args.engine == DOCKER_TARGET:
+        return _cmd_env_setup_docker(args)
     if not _validate_target(args.engine):
         logger.error(
-            f"请指定受管目标（{' / '.join(ENV_TARGETS)}）：modelctl env setup <target>"
+            f"请指定受管目标（{' / '.join(ENV_TARGETS + [DOCKER_TARGET])}）：modelctl env setup <target>"
         )
         return 2
     try:
@@ -872,6 +884,38 @@ def _cmd_env_setup(args, models_dir: Path | None, caps) -> int:
     return 0
 
 
+def _print_docker_checks() -> bool:
+    """打印 Docker 诊断结果表，返回是否全部就绪。"""
+    checks = docker_setup.diagnose()
+    all_ok = all(c.ok for c in checks)
+    for c in checks:
+        state = "正常" if c.ok else "无响应"
+        line = f"  {_status_paint(state)}  {c.label}"
+        if c.detail:
+            line += _table_paint(f"（{c.detail}）", "DIM")
+        print(line)
+    return all_ok
+
+
+def _cmd_env_setup_docker(args) -> int:
+    """env setup docker：诊断 + 安装指引；--run 时实际执行（Linux + root）。"""
+    print(_table_paint("Docker 环境诊断：", "SECTION"))
+    all_ok = _print_docker_checks()
+    if all_ok and not args.run:
+        print(_table_paint("Docker 环境已就绪，无需安装", "SUCCESS"))
+        return 0
+    mirrors = getattr(args, "registry_mirrors", None)
+    if not args.run:
+        print(_table_paint("\n未就绪项的安装指引（可直接复制到 root shell）：", "WARNING"))
+        print(docker_setup.render_instructions(mirrors))
+        print(_table_paint("或自动执行：modelctl env setup docker --run", "DIM"))
+        return 0
+    print(_table_paint(
+        f"开始自动安装（--run），registry-mirrors："
+        f"{', '.join(docker_setup.resolve_registry_mirrors(mirrors))}", "SECTION"))
+    return docker_setup.run_install(mirrors)
+
+
 def _cmd_env_list(args, models_dir: Path | None, caps) -> int:
     states = envs_status()
     print(_table_paint("受管虚拟环境（.venvs/）：", "SECTION"))
@@ -889,6 +933,12 @@ def _cmd_env_list(args, models_dir: Path | None, caps) -> int:
         else:
             print(f"  {target}: {_table_paint('未创建', 'DIM')}（执行 modelctl env setup {target}）")
     print(_table_paint("ollama / llamacpp / unsloth：", "DIM") + _table_paint("原生或官方安装器，无需托管", "DIM"))
+    # 系统级依赖（docker + toolkit）：轻量 PATH 检查，不落子进程
+    missing = docker_setup.path_level_missing()
+    if missing:
+        print(f"  docker: {_table_paint('未就绪', 'ERROR')}（{'；'.join(missing)}；执行 modelctl env setup docker）")
+    else:
+        print(f"  docker: {_table_paint('已就绪', 'SUCCESS')}（docker / nvidia-smi 均在 PATH）")
     return 0
 
 
@@ -896,6 +946,7 @@ def _cmd_env_remove(args, models_dir: Path | None, caps) -> int:
     if not _validate_target(args.engine):
         logger.error(
             f"请指定受管目标（{' / '.join(ENV_TARGETS)}）：modelctl env remove <target>"
+            "（docker 为系统级依赖，不支持 remove）"
         )
         return 2
     try:

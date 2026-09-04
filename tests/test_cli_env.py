@@ -218,3 +218,97 @@ def test_cmd_env_remove_missing_engine(monkeypatch, capsys):
 
     rc = cli._cmd_env_remove(_Args(), None, None)
     assert rc == 2
+
+
+# ---- env setup docker（诊断 / 指引 / --run） ----
+
+
+def _docker_args(run: bool = False, mirrors: list[str] | None = None):
+    class _Args:
+        engine = "docker"
+        wheels = None
+        offline = False
+    a = _Args()
+    a.run = run
+    a.registry_mirrors = mirrors
+    return a
+
+
+def test_parser_env_setup_docker():
+    """parser 接受 docker 目标与 --run；--registry-mirror 可重复传成列表。"""
+    args = cli.build_parser().parse_args(
+        ["env", "setup", "docker", "--run",
+         "--registry-mirror", "https://m1", "--registry-mirror", "https://m2"])
+    assert args.engine == "docker"
+    assert args.run is True
+    assert args.registry_mirrors == ["https://m1", "https://m2"]
+
+
+def test_parser_env_setup_docker_mirror_default_none():
+    """未传 --registry-mirror → None（由 resolve_registry_mirrors 回退内置默认）。"""
+    args = cli.build_parser().parse_args(["env", "setup", "docker"])
+    assert args.registry_mirrors is None
+
+
+def test_env_setup_docker_not_dispatch_to_envs_setup(monkeypatch):
+    """docker 分支绝不能落到托管 venv 的 envs_setup。"""
+    monkeypatch.setattr(
+        cli, "envs_setup",
+        lambda engine, **kw: (_ for _ in ()).throw(AssertionError("docker 不应走 envs_setup")),
+    )
+    monkeypatch.setattr(cli.docker_setup, "diagnose", lambda: [])
+    assert cli._cmd_env_setup(_docker_args(), None, None) == 0
+
+
+def test_cmd_env_setup_docker_all_ok(monkeypatch, capsys):
+    from modelctl.core.docker_setup import Check
+    monkeypatch.setattr(cli.docker_setup, "diagnose", lambda: [
+        Check("docker_cli", "docker CLI", True, ""),
+        Check("nvidia_toolkit", "toolkit", True, ""),
+    ])
+    assert cli._cmd_env_setup(_docker_args(), None, None) == 0
+    out = capsys.readouterr().out
+    assert "已就绪" in out
+
+
+def test_cmd_env_setup_docker_prints_instructions(monkeypatch, capsys):
+    """缺依赖且无 --run → 只打印指引，不调 run_install。"""
+    from modelctl.core.docker_setup import Check
+    monkeypatch.setattr(cli.docker_setup, "diagnose", lambda: [
+        Check("docker_cli", "docker CLI", False, "docker 命令不在 PATH"),
+    ])
+    called: dict = {}
+    monkeypatch.setattr(cli.docker_setup, "render_instructions",
+                        lambda mirrors=None: called.update(mirrors=mirrors) or "SCRIPT")
+    monkeypatch.setattr(cli.docker_setup, "run_install",
+                        lambda mirrors=None: (_ for _ in ()).throw(AssertionError("不该执行安装")))
+    assert cli._cmd_env_setup(_docker_args(mirrors=["https://m"]), None, None) == 0
+    out = capsys.readouterr().out
+    assert "SCRIPT" in out
+    assert called["mirrors"] == ["https://m"]
+
+
+def test_cmd_env_setup_docker_run_delegates(monkeypatch, capsys):
+    """--run → 委托 docker_setup.run_install 并透传镜像列表与退出码。"""
+    from modelctl.core.docker_setup import Check
+    monkeypatch.setattr(cli.docker_setup, "diagnose", lambda: [
+        Check("docker_cli", "docker CLI", False, ""),
+    ])
+    called: dict = {}
+    monkeypatch.setattr(cli.docker_setup, "run_install",
+                        lambda mirrors=None: called.update(mirrors=mirrors) or 5)
+    assert cli._cmd_env_setup(_docker_args(run=True, mirrors=["https://x"]), None, None) == 5
+    assert called["mirrors"] == ["https://x"]
+
+
+def test_cmd_env_list_includes_docker_status(monkeypatch, capsys):
+    """env list 末尾追加 docker 系统依赖状态（PATH 缺失 → 未就绪）。"""
+    monkeypatch.setattr(cli, "envs_status", lambda: {})
+    monkeypatch.setattr(cli.docker_setup, "path_level_missing", lambda: ["docker 命令不在 PATH"])
+    assert cli._cmd_env_list(_Args_empty(), None, None) == 0
+    out = capsys.readouterr().out
+    assert "docker:" in out and "未就绪" in out and "modelctl env setup docker" in out
+
+
+class _Args_empty:
+    pass
