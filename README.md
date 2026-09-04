@@ -12,6 +12,7 @@
 - **用量统计**：`/api/usage` 输出与 cc-switch 兼容，支持多模型按 `?model=` 路由
 - **Web 管理控制台**：`modelctl webui` 单进程同时提供管理 API（`/admin/api/*`）与 Vue 3 控制台，模型启停、日志实时跟随、环境安装、体检、审计均可在浏览器完成
 - **配置外置**：全局配置通过 `.env` 管理，模型级配置通过 profile YAML 管理
+- **分布式集群管理面**：`modelctl cluster` 单中心模式——各节点一条 `cluster join` 注册到中心 webui，心跳/租约判活、令牌准入与吊销，跨 LAN 统一节点视图（推理流量不经过中心）
 
 ## 目录结构
 
@@ -701,6 +702,88 @@ npm run dev
 | 挂载路由 | 仅 `/v1/*` | `/v1/*` + `/admin/api/*` + 前端 SPA |
 | admin 标志 | `create_app(admin=False)` | `create_app(admin=True)` |
 
+### 10. 分布式集群管理面（modelctl cluster）
+
+适用场景：N 台服务器分布在 M 个局域网（N ≥ M），用**一个中心 webui** 统一查看/管理所有节点。取向与 torchrun 类似——每台机器照常跑自己的 `modelctl webui`，额外用一条 `cluster join` 命令注册到中心；但**没有 rank/rendezvous 概念**，中心故障不影响任何节点的本地推理与本地 webui。
+
+> **当前范围（M0）**：节点注册、心跳判活（lease 三态）、节点视图（Web UI「集群节点」页 + `modelctl cluster nodes`）、令牌准入与吊销。跨机模型下发（goal 声明式同步）、集群级起停属 M1+，见设计文档。
+>
+> **数据面零改动**：推理流量仍按 nginx `/{node-id}/llm/*` 规则直连各节点端口，**不经过中心**。
+
+#### 10.1 角色（CLUSTER_ROLE）
+
+| 角色 | 本地跑模型 | 挂集群 API/WS | 节点台账 | 典型机器 |
+|---|---|---|---|---|
+| `solo`（默认） | ✅ | ❌（集群端点一律 404） | — | 未入集群的单机部署，行为与旧版完全一致 |
+| `both` | ✅ | ✅ | ✅ | 中心机自己也跑推理（推荐中心用此值） |
+| `control-plane` | ✅ | ✅ | ✅ | 纯中心（不强调跑模型） |
+| `worker` | ✅ | ❌（只出站连中心 WS） | ❌ | 各 LAN 的工作节点 |
+
+`.env` 集群键位见 [.env.example](.env.example) 末尾「集群」注释块（`CLUSTER_ROLE` / `CLUSTER_CENTER_URL` / `CLUSTER_NODE_ID` / `CLUSTER_LAN` / `CLUSTER_HEARTBEAT_INTERVAL_S=10` / `CLUSTER_LEASE_S=90` 等）。
+
+#### 10.2 中心部署（机器 A）
+
+```bash
+# 1. .env 设角色并放行监听（默认 127.0.0.1 只有本机能访问，集群模式必须显式放开）
+#    CLUSTER_ROLE=both
+#    WEBUI_HOST=0.0.0.0
+#    （建议用防火墙把 WEBUI_PORT 限制到已知 LAN 网段）
+
+# 2. 初始化台账 + 生成 join token（幂等，重复执行复用现有 token 并打印）
+modelctl cluster init
+#  → 台账落 data/cache/cluster-meta.db；打印 JT-xxxx（发给各 worker 用）
+
+# 3. 照常启动 webui
+modelctl webui start
+
+# 4. 查看集群摘要 / 节点表
+modelctl cluster status          # 角色/在线计数
+modelctl cluster nodes           # node_id/LAN/状态/心跳/token 尾号
+```
+
+浏览器登录中心控制台后，侧边栏「集群节点」页实时展示各节点状态（online/stale/offline）、引擎版本、心跳与租约倒计时。
+
+#### 10.3 worker 加入（每台一条命令）
+
+```bash
+# 在 worker 的 modelctl 目录执行（token 来自中心 `modelctl cluster init` 的输出）
+modelctl cluster join --center http://192.168.77.210:4173 --token JT-xxxx --node-id w-210 --lan lan-2
+#  → 预检通过后才写 .env：CLUSTER_ROLE=worker / CLUSTER_CENTER_URL / CLUSTER_NODE_ID / CLUSTER_LAN / CLUSTER_NODE_TOKEN
+#  → token 写错/中心不可达时不落盘，直接报错退出（exit 2）
+
+# 之后照常启动本机 webui——启动时自动拉起后台 Agent（出站 WS 注册 + 周期心跳），无需额外进程
+modelctl webui start
+```
+
+断线自愈：Agent 按 1→2→…→30s 指数退避重连；中心重启后所有 worker 自动重新注册，节点用 node_token 免 join_token 重连，**无需人工干预**。中心按租约判活：`lease_expiry`（默认 90s）过期 → `stale`；`last_seen` 超 3×lease → `offline`；期间该节点推理不受影响。
+
+#### 10.4 令牌管理（仅中心本机）
+
+```bash
+modelctl cluster join-token                    # 查看当前 join token（脱敏尾号）
+modelctl cluster join-token --rotate           # 轮换 join token（旧的立即失效；已入集群节点不受影响）
+modelctl cluster join-token --rotate-node w-210  # 单独吊销/重发某节点令牌（该节点下次重连需重新 join）
+```
+
+信任链：`join token`（一次性准入）→ 中心为节点签发专属 `node_token`（自动写回 worker 的 .env，可单独吊销）→ 后续重连只用 node_token。集群 REST（`/admin/api/cluster/*`）走 webui 同款 `API_KEY` Bearer 鉴权。
+
+#### 10.5 冒烟示例（两台机验证全链路）
+
+```bash
+# 中心（A 机）：
+CLUSTER_ROLE=both modelctl cluster init && modelctl webui start
+modelctl cluster status                # 期望: 角色: both 中心: True 节点: 0 online / 0 total
+
+# worker（B 机）：
+modelctl cluster join --center http://<A>:4173 --token JT-xxxx --node-id w-b1 --lan lan-2
+modelctl webui start
+
+# 中心侧 ≤ 心跳间隔(10s) 内：
+modelctl cluster nodes                 # w-b1 状态 online，租约倒计时滚动
+# kill 掉 B 机 webui 后：约 lease(90s) 后转 stale、3×lease 后转 offline；
+# 重启 B 机 webui（无需重新 join）→ 自动回到 online，node_token 不变
+```
+
 ## 文档
 
 部署前置条件、目录布局、日志/停止/重启、参数速查等详见 [docs/DeepSeek-V4-Flash后台启动指南.md](docs/DeepSeek-V4-Flash后台启动指南.md)。
@@ -708,6 +791,8 @@ npm run dev
 多模型 nginx 路由的部署与测试步骤详见 [docs/nginx/测试指南.md](docs/nginx/测试指南.md)（nginx 参考配置见 [docs/nginx/llm-routing.example.conf](docs/nginx/llm-routing.example.conf)）。
 
 Web 管理控制台的完整设计（信息架构、页面清单、API 契约、SSE 事件协议）详见 [docs/superpowers/specs/2026-09-02-webui-design.md](docs/superpowers/specs/2026-09-02-webui-design.md)。
+
+多机分布式管理面（单中心 + worker 注册/心跳判活/令牌准入，含竞品校准与 M0-M2 分期）详见 [docs/superpowers/specs/2026-09-03-modelctl-cluster-design.md](docs/superpowers/specs/2026-09-03-modelctl-cluster-design.md)；日常用法见上文「10. 分布式集群管理面」。
 
 ## 时区
 
