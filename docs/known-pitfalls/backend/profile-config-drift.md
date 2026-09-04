@@ -206,6 +206,47 @@
     ——`n=0` 模拟"首个 next 就抛"，`n=1` 模拟"吐一条再抛"（同时钉住惰性语义与 fail-closed）。
     反向验证：去掉兜底 → 5 条全红；改成 fail-open → 同样 5 条全红（且能看到它静默选中 vllm）。
 
+## `_load_candidate` 按类型列举异常：深嵌套 YAML 抛 RecursionError、`port: .inf` 抛 OverflowError
+
+- **日期**：2026-09-04（fix round 5）
+- **症状**：round 4 给 `_scan` 兜了 `Exception`，单文件候选这条分支却还按类型列举。
+  `models/vllm/deep.yaml` 写 3000 层 `[` → `yaml.safe_load` 抛 `RecursionError`（实测），
+  `port: .inf` → `int()` 抛 `OverflowError`（实测），两者都冒到 Task 5 的 `goal set` → 500。
+- **根因**：两处列举都低估了被调用方的失败面——`yaml.safe_load` 不只抛 `YAMLError`
+  （递归下降会击穿递归上限）；`int(value)` 不只抛 `TypeError/ValueError`（float('inf') 转
+  整数是 `OverflowError`）。更危险的是**回退寻址要全量扫描逐个候选过 `_load_candidate`**，
+  一处未兜的异常会连带同批所有正常候选一起失效——models 是多人共写的仓库，一份手滑的
+  坏 YAML 即可让整个集群的 goal set 全挂（一坏俱坏）。
+- **解决**：`_load_candidate` 的读取段与解析段各自 `except Exception` 兜底（`UnicodeDecodeError`
+  分支必须排在泛兜**之前**，否则被吞掉后 reason 丢失"不是 UTF-8"这一关键提示）；
+  `_port_reason` 的 `int()` 同样兜 `Exception` 并把异常类型名带进 reason。
+- **要点**：
+  - round 4 的教训要在**同一函数的每条分支**上都补齐："按继承树之上兜"不是某处的补丁，
+    而是整模块的策略；改完 `_scan` 别漏 `_load_candidate`/`_port_reason`。
+  - 兜底顺序即语义：特定异常分支在前、泛兜在后，否则专有的、可行动的提示会退化成
+    `读取失败: UnicodeDecodeError: ...` 这类需要二次翻译的措辞。
+  - 触发条件是**内容而非编码**：一份合法 UTF-8、语义合法的 YAML 也能靠深嵌套把解析器
+    打穿，"文件看起来没问题"不构成免疫证据。
+
+## 文件名寻址的"根目录优先"只有实现没有测试：round 3 只钉了展示名回退那条
+
+- **日期**：2026-09-04（fix round 5）
+- **症状**：无。`_resolve()` 的文件名分支一直走 `_root_first`，行为正确；缺的是把它钉住的
+  用例——round 3 的 `test_display_name_fallback_prefers_root_file` 只覆盖展示名回退分支。
+- **根因**：顺序类规则**每新增一条寻址路径都要重新确认优先级**，而测试同理：实现里两处
+  共用 `_root_first` 不等于两处都被覆盖。临时把文件名分支的 `_root_first(...)` 退化成
+  纯路径序 `[p for p in paths if p.stem == name]`，既有 43 条**全绿**，可见该分支是盲区。
+- **解决**：新增 `test_filename_addressing_prefers_root_file`——根目录 `qwen.yaml`(port 9)
+  + `aaa/qwen.yaml`(port 1)（子目录名首字符排在 stem 前，纯路径序会让子目录那份抢先），
+  断言中心取根目录那份，并 `load_profile("qwen")` 做本地口径双证，同时覆盖 `engine=`
+  显式选边那条独立取首个的分支。反向验证：去掉 `_root_first` → 该条失败并实际返回
+  `aaa\qwen.yaml`（port 1）；恢复后 48 条全绿。
+- **要点**：
+  - "实现已正确"与"有测试保护"是两件事。补对称测试的成本极低，收益是后续任何一次
+    重构（如把 `_root_first` 挪走或改成 set 迭代）都能立刻暴露。
+  - 钉顺序规则必须用**反例数据**：子目录名首字符要排在 stem 之前（`aaa/` < `qwen.yaml`），
+    用 `zzz/` 之类的巧合数据会假绿。
+
 ## profile 默认值全按 8×48GB 数据中心卡设计，小显存单卡照抄必失败
 
 - **日期**：2026-09-04

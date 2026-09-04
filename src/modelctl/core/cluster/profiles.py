@@ -111,13 +111,15 @@ def _port_reason(value: Any) -> str:
 
     只判"有没有 port"是不够的：worker 侧同样只判存在性，坏值会原样落盘，
     直到引擎启动 / load_profile 才炸，排查成本极高，必须在中心就拦下。
+    `int()` 的失败面按继承树之上兜（`Exception`）而非只列 TypeError/ValueError：
+    `port: .inf` 解析成 float('inf')，`int()` 抛的是 `OverflowError`（实测）。
     """
     if value in (None, ""):
         return "profile 缺 port（worker 侧写盘前置校验项）"
     try:
         port = int(value)
-    except (TypeError, ValueError):
-        return f"port 必须是整数，当前 {value!r}"
+    except Exception as exc:  # noqa: BLE001 — OverflowError 等不按类型列举（契约同 _scan）
+        return f"port 必须是整数，当前 {value!r}（{type(exc).__name__}）"
     if not 1 <= port <= 65535:
         return f"port 必须在 1-65535，当前 {port}"
     return ""
@@ -126,22 +128,27 @@ def _port_reason(value: Any) -> str:
 def _load_candidate(path: Path) -> tuple[str, dict[str, Any], str] | str:
     """读取并校验单个候选文件；成功返回 (engine, raw, text)，失败返回 reason 文本。
 
-    尺寸上限用 stat 在**读盘前**判定（超限文件绝不整份进内存）。异常兜底必须含
-    UnicodeDecodeError（ValueError 子类，UTF-16/二进制残留即触发）——本模块契约是
-    "绝不抛异常"，漏一层 Task 5 的 goal set 就直接 500。
+    尺寸上限用 stat 在**读盘前**判定（超限文件绝不整份进内存）。异常兜底必须按
+    **继承树之上**（`Exception`）而非列举想到的几种：`UnicodeDecodeError` 是 ValueError
+    子类、不在 `OSError` 内；`yaml.safe_load` 更不只抛 `YAMLError`——深嵌套 flow 结构
+    击穿递归上限抛 `RecursionError`（实测 3000 层 `[` 即触发）。本模块契约是"绝不抛
+    异常"，漏一类 Task 5 的 goal set 就直接 500；回退寻址要**全量扫描逐个候选**过这里，
+    一份坏文件冒出的异常会连带同批所有正常候选一起失效（一坏俱坏）。
     """
     try:
         if path.stat().st_size > MAX_YAML_BYTES:
             return f"profile 过大（>{MAX_YAML_BYTES} B），拒绝下发"
         text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        return f"读取失败: {exc}"
-    except UnicodeDecodeError as exc:
+    except UnicodeDecodeError as exc:      # 顺序在前：ValueError 子类，不能被下面的泛兜吞掉
         return f"profile 文件不是 UTF-8 编码: {exc}"
+    except Exception as exc:  # noqa: BLE001 — 读取失败绝不冒泡（契约"绝不抛异常"）
+        return f"读取失败: {type(exc).__name__}: {exc}"
     try:
         raw = yaml.safe_load(text)
     except yaml.YAMLError as exc:
         return f"YAML 语法错误: {exc}"
+    except Exception as exc:  # noqa: BLE001 — RecursionError 等不在 YAMLError 继承树内
+        return f"profile 解析失败（{type(exc).__name__}: {exc}）"
     if not isinstance(raw, dict):
         return "profile 顶层必须是映射"
     port_reason = _port_reason(raw.get("port"))

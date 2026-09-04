@@ -416,3 +416,64 @@ def test_partial_scan_never_downgrades_ambiguity_to_silent_pick(tmp_path, monkey
     got = P.read_profile_source("qwen", tmp_path)
     assert got["ok"] is False and "遍历失败" in got["reason"], got
     assert P.find_profile_path("qwen", tmp_path) is None
+
+
+# ---------------- fix round 5：候选读取按继承树兜底 + 文件名分支根目录优先 ----------------
+
+#: 深嵌套 flow 序列：safe_load 递归下降击穿递归上限，抛的是 RecursionError 而非 YAMLError
+DEEP_NESTED_YAML = "port: 1\nx: " + "[" * 3000 + "]" * 3000 + "\n"
+
+
+def test_yaml_recursion_error_never_raises(tmp_path):
+    """`yaml.safe_load` 的失败面比 `YAMLError` 大：深嵌套 flow 结构击穿递归上限抛
+    `RecursionError`（实测 3000 层 `[` 即触发）。round 4 已在 `_scan` 认了"不按类型列举"，
+    单文件读取这条分支却仍按 `OSError`/`UnicodeDecodeError`/`YAMLError` 列举——同一破口。"""
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm" / "deep.yaml").write_text(DEEP_NESTED_YAML, encoding="utf-8")
+    got = P.read_profile_source("deep", tmp_path)
+    assert got["ok"] is False and "解析失败" in got["reason"], got
+    assert "RecursionError" in got["reason"], got    # reason 带异常类型名，运维能定位
+    assert P.find_profile_path("deep", tmp_path) is None
+
+
+@pytest.mark.parametrize("literal", [".inf", "-.inf"])
+def test_port_overflow_never_raises(tmp_path, literal):
+    """`port: .inf` 解析成 float('inf')：`int()` 抛 `OverflowError`（不是 TypeError/
+    ValueError），中心直接 500。core.profile 同样会炸，但那是 worker 侧的显式报错，
+    中心必须先把原因带回 gate 报告。"""
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm" / "p.yaml").write_text(f"port: {literal}\n", encoding="utf-8")
+    got = P.read_profile_source("p", tmp_path)
+    assert got["ok"] is False and "port" in got["reason"], got
+    assert P.find_profile_path("p", tmp_path) is None
+
+
+def test_broken_candidate_never_takes_down_whole_scan(tmp_path):
+    """候选读取必须"坏一份出局一份"：解析期抛非列举类异常若不在此兜住，一份坏 YAML
+    会让整条寻址链路（含展示名回退的全量扫描）一起冒异常——models 目录是多人共写的
+    仓库，一份手滑的坏文件即可让整个集群的 goal set 全挂。"""
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "sglang").mkdir()
+    (tmp_path / "vllm" / "good.yaml").write_text("port: 1\nname: shared\n", encoding="utf-8")
+    (tmp_path / "sglang" / "broken.yaml").write_text(DEEP_NESTED_YAML, encoding="utf-8")
+    got = P.read_profile_source("shared", tmp_path)          # 展示名回退：全量扫描逐个过校验
+    assert got["ok"] is True and got["name"] == "good" and got["engine"] == "vllm", got
+    (tmp_path / "sglang" / "good.yaml").write_text(DEEP_NESTED_YAML, encoding="utf-8")
+    same = P.read_profile_source("good", tmp_path)           # 文件名寻址：同名坏候选出局
+    assert same["ok"] is True and same["engine"] == "vllm" and same["raw"]["port"] == 1, same
+
+
+def test_filename_addressing_prefers_root_file(tmp_path):
+    """文件名分支也要钉"根目录优先"（round 3 只钉了展示名回退那条）：子目录名首字符
+    排在 stem 前时（`aaa/qwen.yaml` < `qwen.yaml`）纯路径序会让子目录那份抢先，中心
+    下发子目录那份、worker `load_profile(文件名)` 解析根目录那份 → 同名两个文件。"""
+    (tmp_path / "aaa").mkdir()
+    (tmp_path / "qwen.yaml").write_text("port: 9\nengine: vllm\n", encoding="utf-8")
+    (tmp_path / "aaa" / "qwen.yaml").write_text("port: 1\nengine: vllm\n", encoding="utf-8")
+    got = P.read_profile_source("qwen", tmp_path)
+    assert got["ok"] is True and got["raw"]["port"] == 9, got
+    assert Path(got["path"]) == tmp_path / "qwen.yaml"
+    assert P.find_profile_path("qwen", tmp_path) == (tmp_path / "qwen.yaml", "vllm")
+    # engine= 显式选边走的是另一条取首个分支，优先级必须一致
+    assert P.read_profile_source("qwen", tmp_path, engine="vllm")["raw"]["port"] == 9
+    assert load_profile("qwen", tmp_path).port == 9          # 本地口径同样命中根目录那份

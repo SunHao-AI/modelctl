@@ -1014,6 +1014,11 @@ Expected: PASS（12 条）
 > fix round 4 追加 5 条（遍历抛 PermissionError 不冒泡且 reason 点名异常类型 /
 > RecursionError + ValueError 参数化 2 条证明"不按类型列举" / 消费期抛异常证明"try 必须
 > 包住整个遍历" / 半份清单不得把歧义降级为静默选引擎），共 **43 条**。
+>
+> fix round 5 追加 5 条（深嵌套 YAML 触发 RecursionError 不冒泡且 reason 点名异常类型 /
+> `port: .inf` 与 `-.inf` 参数化 2 条钉 OverflowError / 一份坏 YAML 不得连带全量回退扫描
+> 一起失效 / 文件名寻址分支的根目录优先对称覆盖 + `engine=` 选边分支 + `load_profile` 双证），
+> 共 **48 条**。
 
 - [ ] **Step 5: 提交**
 
