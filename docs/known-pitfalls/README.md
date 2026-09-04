@@ -15,6 +15,12 @@
 | 2026-09-04 | 构建 / 部署环境 | daemon.json 残留停服 Hub 加速域名，`modelctl start` 健康检查超时 | mirror 域名 DNS 失败是硬失败、不回落官方源，容器从未起；代码里的默认源修好了也要重跑 `--run` 才落到既有 daemon.json。 | [build/docker-install-mirror.md](build/docker-install-mirror.md) |
 | 2026-09-04 | 后端 / 配置管理 | 下载后写回 model 路径导致 git 脏区，服务器 git pull 被挡 | 删除 `_persist` 写回机制；落地路径由 MODEL_ROOT+modelscope_id 确定性推导，目录已就位即复用，YAML 永不改写；gateway/uv.lock 同步 gitignore。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-04 | 后端 / 引擎启动 | 缺 cmake 报错只说"请安装"，不给可执行安装命令 | `require()` 新增 `install_hint()`，按系统包管理器（apt/dnf/yum/zypper/pacman/apk）拼出安装命令并按需加 sudo。 | [backend/engine-launch-args.md](backend/engine-launch-args.md) |
+| 2026-09-04 | 构建 / 部署环境 | nginx 模板里的 `<办公网段>` 占位符让 `nginx -t` 直接 emerg | nginx 不认尖括号约定，`invalid parameter` 硬失败且 `&&` 短路使旧配置继续跑；`allow` 命中的是客户端 IP 而非后端 IP（403 与 502 分属两类故障）。 | [build/nginx-webui-proxy.md](build/nginx-webui-proxy.md) |
+| 2026-09-04 | 构建 / 部署环境 | 模板证书路径未替换，`nginx -t` 报 `cannot load certificate` | `listen ssl` 在解析阶段就加载证书；优先抄同机已有证书路径，自签必须带 SAN（浏览器已忽略 CN，只写 CN 会"nginx 通过、浏览器报错"）。 | [build/nginx-webui-proxy.md](build/nginx-webui-proxy.md) |
+| 2026-09-04 | 构建 / 部署环境 | 公网只暴露单端口时，管理面不能多节点共存 | 单端口下根路径唯一 ⇒ 只能承载一个节点，靠 `server_name` 加 vhost 或顶掉原 `location /`，后者会让 LLM 路由配漏从 502 变成"返回 HTML"。 | [build/nginx-webui-proxy.md](build/nginx-webui-proxy.md) |
+| 2026-09-04 | 前端 / 部署路径 | `/webui` 子路径访问 SPA 白屏，nginx 单独做不到 | 入口 HTML、`/assets/`、`/admin/api/` 三个根级命名空间必须同时可达且 Router base 要一致；补 location 只解决资源不解决路由，改动面是 6 个前端文件。 | [build/nginx-webui-proxy.md](build/nginx-webui-proxy.md) |
+| 2026-09-04 | 前端 / SSE 寻址 | 后端返回的 `stream_url` 其实没人消费 | 前端 `openTaskStream()` 用 `taskId` 自行拼绝对路径，改子路径时后端 6 处 `stream_url` 是无关项，真正要改的是前端 3 处 EventSource 拼接。 | [build/nginx-webui-proxy.md](build/nginx-webui-proxy.md) |
+| 2026-09-04 | 构建 / 部署环境 | Web UI 默认绑 127.0.0.1，跨机 nginx 反代必 502 | `webui_host()` 的安全默认所致；作为反代中心的节点需 `WEBUI_HOST=0.0.0.0`，其余节点保持回环不暴露。 | [build/nginx-webui-proxy.md](build/nginx-webui-proxy.md) |
 
 ## 目录约定
 
