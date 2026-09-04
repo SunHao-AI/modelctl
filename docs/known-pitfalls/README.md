@@ -32,6 +32,10 @@
 | 2026-09-04 | 后端 / 引擎指标 | 混合注意力下 `--enable-prefix-caching` 自动切 Mamba `align` mode（experimental） | `align` 按 800-token 块做 GDN 循环状态快照，是唯一让 48/64 GDN 层进缓存的通路；qwen3.8 实测命中率 0→73%、prompt 峰值 5,096→1733 tokens/s，代价仅 KV 池 -0.87%。 | [backend/vllm-kv-cache-metrics.md](backend/vllm-kv-cache-metrics.md) |
 | 2026-09-04 | 后端 / 配置管理 | profile 的 alias 与自动推导 name 同名，整个 profile 被静默跳过 | `{group}-{engine}` 恰好等于 alias 时 `_parse_aliases` 抛错，而 `list_profiles` 只 warning+continue → 配置凭空消失；新增 profile 必须 `load_profile()` 实加载确认。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-04 | 后端 / 引擎启动 | profile 默认值全按 8×48GB 设计，小显存单卡照抄必失败 | `gpu_count` 缺省 8、`dspark` 缺省 on、`ctx_size` 缺省 **1M**；6GB 单卡须逐个显式覆盖，且 vllm/sglang 托管 venv **仅 Linux** 可建。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-04 | 后端 / 集群下发 | 同名 profile 散在多引擎子目录，按排序首个"猜"engine 会下发到错误引擎 | 本仓 `models/*/qwen3.8.yaml` 有 8 份；下发侧改为"歧义即拒 + `engine=` 显式选边"，且两个入口共用同一套定位校验。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-04 | 后端 / 集群下发 | 中心只校验"有没有 port"，坏 port 一路下发到引擎启动才炸 | 中心与 `core.profile` 必须同口径（int 可转 + 1-65535）；双侧纵深防御口径不一致 = 校验形同虚设。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-04 | 后端 / 集群下发 | 非 UTF-8 profile 破功"绝不抛异常"，超尺寸文件还先整份读进内存 | `UnicodeDecodeError` 是 `ValueError` 子类不在 `OSError`/`YAMLError` 内；上限须用 `stat().st_size` 在读盘前判定。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-04 | 后端 / 集群下发 | cluster 寻址只认文件名，用户照 UI 展示名下发必 404 | 展示名回退命中后**归一为文件 stem**（goal/写盘只认它，`display_name` 仅回显），推导复用 `_resolve_group` 单点口径，镜像一致性不破坏。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 
 ## 目录约定
 

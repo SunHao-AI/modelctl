@@ -9,6 +9,8 @@
 # @Desc   : cluster/profiles.py 中心侧 profile 源读取（原文/sha/路径安全）
 # ===============================================================================
 
+from pathlib import Path
+
 import pytest
 
 from modelctl.core.cluster import profiles as P
@@ -94,3 +96,157 @@ def test_find_profile_path_returns_none_for_root_file_without_engine(tmp_path):
     """根目录 YAML 且无显式 engine：engine 决定 worker 写盘子目录，宁可拒发也不猜。"""
     (tmp_path / "loose.yaml").write_text("port: 1\n", encoding="utf-8")
     assert P.find_profile_path("loose", tmp_path) is None
+
+
+# ---------------- fix round 1：port 范围 / 同名歧义 / 绝不抛异常 ----------------
+
+@pytest.mark.parametrize("bad", ["notanumber", "0", "99999", "-1", "[]"])
+def test_port_must_be_int_in_range(tmp_path, bad):
+    """中心必须按 core.profile 的同一口径拦掉非法 port：worker 只校验"有没有 port"，
+    放行的话坏值会落到磁盘上，直到引擎启动/load_profile 才炸，排查成本极高。"""
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm" / "p.yaml").write_text(f"port: {bad}\n", encoding="utf-8")
+    got = P.read_profile_source("p", tmp_path)
+    assert got["ok"] is False and "port" in got["reason"], got
+
+
+def test_port_accepts_numeric_string(tmp_path):
+    """`port: "8101"` 是 YAML 字符串但 int() 可转，core.profile 同样放行——不能误拒。"""
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm" / "p.yaml").write_text('port: "8101"\n', encoding="utf-8")
+    assert P.read_profile_source("p", tmp_path)["ok"] is True
+
+
+def test_same_stem_across_engines_is_refused_not_guessed(tmp_path):
+    """同名文件散落在多个引擎子目录（本仓 qwen3.8.yaml 有 8 份）：静默取排序首个会把
+    模型下发到错误引擎，必须拒发并列出候选，让调用方改用可寻址的唯一名。"""
+    for eng in ("aphrodite", "vllm", "sglang"):
+        (tmp_path / eng).mkdir()
+        (tmp_path / eng / "qwen.yaml").write_text("port: 1\n", encoding="utf-8")
+    got = P.read_profile_source("qwen", tmp_path)
+    assert got["ok"] is False
+    assert "歧义" in got["reason"] and "aphrodite" in got["reason"] and "vllm" in got["reason"]
+
+
+def test_same_stem_same_engine_root_file_wins(tmp_path):
+    """同引擎的重名不是歧义（core.profile.load_profile 同样根目录优先，行为保持一致）。"""
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "qwen.yaml").write_text("port: 9\nengine: vllm\n", encoding="utf-8")
+    (tmp_path / "vllm" / "qwen.yaml").write_text("port: 1\n", encoding="utf-8")
+    got = P.read_profile_source("qwen", tmp_path)
+    assert got["ok"] is True and got["engine"] == "vllm" and got["raw"]["port"] == 9
+
+
+def test_unknown_engine_file_does_not_make_viable_one_ambiguous(tmp_path):
+    """engine 不可判定的同名文件不该把可用那份一起拖成"歧义"——它本就该被忽略。"""
+    (tmp_path / "evil").mkdir()
+    (tmp_path / "evil" / "qwen.yaml").write_text("port: 1\n", encoding="utf-8")
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm" / "qwen.yaml").write_text("port: 1\n", encoding="utf-8")
+    got = P.read_profile_source("qwen", tmp_path)
+    assert got["ok"] is True and got["engine"] == "vllm"
+
+
+def test_engine_argument_breaks_the_ambiguity(tmp_path):
+    """歧义不是死路：调用方（Task 12 的 `--engine`）显式选边即可，选错引擎名则报可用引擎。"""
+    for eng in ("aphrodite", "vllm"):
+        (tmp_path / eng).mkdir()
+        (tmp_path / eng / "qwen.yaml").write_text(f"port: {1 if eng == 'vllm' else 2}\n", encoding="utf-8")
+    got = P.read_profile_source("qwen", tmp_path, engine="VLLM")
+    assert got["ok"] is True and got["engine"] == "vllm" and got["raw"]["port"] == 1
+    bad = P.read_profile_source("qwen", tmp_path, engine="sglang")
+    assert bad["ok"] is False and "sglang" in bad["reason"] and "aphrodite" in bad["reason"]
+    assert P.find_profile_path("qwen", tmp_path, engine="vllm") == (Path(got["path"]), "vllm")
+
+
+def test_non_utf8_file_never_raises(tmp_path):
+    """契约"绝不抛异常"：UTF-16/二进制残留会让 read_text 抛 UnicodeDecodeError
+    （ValueError 子类，不在 OSError/YAMLError 内），Task 5 未包 try → REST 500。"""
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm" / "bin.yaml").write_bytes(b"\xff\xfeport: 1\n")
+    got = P.read_profile_source("bin", tmp_path)
+    assert got["ok"] is False and "UTF-8" in got["reason"]
+
+
+def test_oversize_file_rejected_without_reading_it(tmp_path, monkeypatch):
+    """尺寸上限必须在读盘**前**用 stat 判定，否则 10 GB 的 YAML 会先整份进内存。"""
+    (tmp_path / "vllm").mkdir()
+    big = tmp_path / "vllm" / "big.yaml"
+    big.write_text("port: 1\npad: " + "x" * (P.MAX_YAML_BYTES + 10), encoding="utf-8")
+    def boom(*a, **k):
+        raise AssertionError("超尺寸文件不应被整份读取")
+
+    monkeypatch.setattr(P.Path, "read_text", boom)
+    got = P.read_profile_source("big", tmp_path)
+    assert got["ok"] is False and "过大" in got["reason"]
+
+
+def test_find_profile_path_agrees_with_read(tmp_path):
+    """两个入口共用同一套定位/校验：否则 Task 5 用 read、worker 侧用 find 会各判一次。"""
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm" / "qwen.yaml").write_text("port: 1\n", encoding="utf-8")
+    got = P.read_profile_source("qwen", tmp_path)
+    assert P.find_profile_path("qwen", tmp_path) == (Path(got["path"]), got["engine"])
+    (tmp_path / "sglang").mkdir()
+    (tmp_path / "sglang" / "qwen.yaml").write_text("port: 2\n", encoding="utf-8")
+    assert P.find_profile_path("qwen", tmp_path) is None
+
+
+# ---------------- fix round 1（条款④）：展示名回退寻址 ----------------
+
+def test_display_name_fallback_returns_file_stem(tmp_path):
+    """用户视角的名字是展示名（core.profile 口径 {group}-{engine}），goal 内部必须是文件名：
+    中心/worker 同路径同内容，sha 漂移检测才成立。"""
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm" / "qwen.yaml").write_text("port: 1\n", encoding="utf-8")
+    got = P.read_profile_source("qwen-vllm", tmp_path)  # 无 qwen-vllm.yaml，按展示名命中 qwen.yaml
+    assert got["ok"] is True and got["name"] == "qwen" and got["display_name"] == "qwen-vllm"
+    assert P.find_profile_path("qwen-vllm", tmp_path) == (tmp_path / "vllm" / "qwen.yaml", "vllm")
+
+
+def test_display_name_from_explicit_yaml_field(tmp_path):
+    """YAML 显式 name: 优先于自动拼接（与 _to_profile 同口径，含 variant 拼接）。"""
+    (tmp_path / "sglang").mkdir()
+    (tmp_path / "sglang" / "llama-light.yaml").write_text("port: 1\nvariant: light\n", encoding="utf-8")
+    got = P.read_profile_source("llama-sglang-light", tmp_path)
+    assert got["ok"] is True and got["name"] == "llama-light"
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm" / "misc.yaml").write_text("port: 2\nname: renamed\n", encoding="utf-8")
+    assert P.read_profile_source("renamed", tmp_path)["name"] == "misc"
+
+
+def test_filename_match_wins_over_display_name_match(tmp_path):
+    """文件名与展示名同时可命中时文件名优先：寻址语义唯一，防止某天新增展示名撞名
+    把用户明确指定的文件换掉。"""
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm" / "qwen-vllm.yaml").write_text("port: 1\n", encoding="utf-8")
+    (tmp_path / "sglang").mkdir()
+    (tmp_path / "sglang" / "other.yaml").write_text("port: 2\nname: qwen-vllm\n", encoding="utf-8")
+    got = P.read_profile_source("qwen-vllm", tmp_path)
+    assert got["ok"] is True and got["engine"] == "vllm" and got["raw"]["port"] == 1
+
+
+def test_display_name_ambiguity_and_engine_pick(tmp_path):
+    """展示名命中多个引擎候选 → 沿用文件名同款歧义规则，engine= 显式选边后 name=文件 stem。"""
+    for eng, fname, port in (("vllm", "a", 1), ("sglang", "b", 2)):
+        (tmp_path / eng).mkdir()
+        (tmp_path / eng / f"{fname}.yaml").write_text(f"port: {port}\nname: shared\n", encoding="utf-8")
+    got = P.read_profile_source("shared", tmp_path)
+    assert got["ok"] is False and "歧义" in got["reason"]
+    picked = P.read_profile_source("shared", tmp_path, engine="sglang")
+    assert picked["ok"] is True and picked["name"] == "b" and picked["display_name"] == "shared"
+
+
+def test_display_name_equal_filename_omits_key(tmp_path):
+    """展示名与文件名一致时省略 display_name，避免下游回显 'qwen (qwen)'。"""
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm" / "explicit.yaml").write_text("port: 1\nname: explicit\n", encoding="utf-8")
+    assert "display_name" not in P.read_profile_source("explicit", tmp_path)
+
+
+def test_display_name_fallback_applies_same_validation(tmp_path):
+    """回退扫描不能成为校验旁路：展示名指向坏 port 文件时按未命中处理，绝不放行。"""
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm" / "bad.yaml").write_text("port: 0\nname: wanted\n", encoding="utf-8")
+    got = P.read_profile_source("wanted", tmp_path)
+    assert got["ok"] is False and "不存在" in got["reason"]

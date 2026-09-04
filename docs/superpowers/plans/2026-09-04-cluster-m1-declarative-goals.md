@@ -740,6 +740,11 @@ git commit -m "feat(cluster): wsproto v2 增加 sync/action/result 与心跳扩�
   - `read_profile_source(name: str, models_dir: Path | None = None) -> dict`
     - 成功：`{"name","engine","path","yaml","sha","version","raw","ok": True}`
     - 失败：`{"name","ok": False,"reason": str}`（**绝不抛异常**，gate 要聚合 reason）
+    - **校验口径与拒绝条件**（fix round 1 明确，两个入口共用同一套定位/校验）：
+      ① `port` 与 `core.profile._to_profile` 同口径——`int()` 可转且落在 1-65535（worker 侧只判"有没有 port"，坏值会落盘到引擎启动才炸）；
+      ② 同名文件散落在**多个引擎子目录**（本仓 `models/*/qwen3.8.yaml` 有 8 份）→ 判"歧义"拒发并列出候选，绝不按排序猜一个（猜错即把模型下发到错误引擎）；调用方用新增的 `engine=` 显式选边（Task 12 的 `--engine`，缺省 None=不指定，签名向后兼容），同引擎重名仍根目录优先；
+      ③ 尺寸上限用 `stat().st_size` 在**读盘前**判定；异常兜底必须含 `UnicodeDecodeError`（UTF-16/二进制残留即触发）；
+      ④ **寻址名兼容（用户裁决 2026-09-04）**：`<profile>` 允许**文件名**（`qwen3.8`）或**展示名**（`qwen3.8-vllm`；`core.profile._to_profile` 口径——YAML 显式 `name:` > `{group}-{engine}[-{variant}]`）。文件名候选全部未命中时才做**展示名回退**：扫描 models_dir 全部 `*.yaml`，逐个过 `_load_candidate` 同套校验后按展示名匹配。文件名命中**优先于**展示名命中；展示名命中多个引擎候选时沿用 ② 的歧义规则（`engine=` 选边）。**goal 内部一律用文件名**：成功返回 `name` = 文件 stem（即 goal.profile、worker 写盘文件名），另带 `display_name` = 展示名（回显用；与 name 相同时可省略）。下游 Task 5/8/12 只见文件名，镜像一致性（中心/worker 同路径同内容 → sha 漂移检测成立）由此保证。
 
 - [ ] **Step 1: 写失败测试** — 创建 `tests/test_cluster_profiles.py`
 
@@ -989,6 +994,11 @@ def read_profile_source(name: str, models_dir: Path | None = None) -> dict[str, 
 
 Run: `uv run pytest tests/test_cluster_profiles.py -q`
 Expected: PASS（12 条）
+
+> fix round 1 追加 19 条（port 范围 5 参数化 + 数字字符串 port + 多引擎歧义 + 同引擎根目录优先 +
+> 未知 engine 不参与歧义 + `engine=` 选边 + 非 UTF-8 不抛 + 超尺寸不读盘 + find/read 结论一致 +
+> 条款④展示名回退 6：回退命中归一文件 stem / 显式 `name:` 与 variant 口径 / 文件名优先 /
+> 展示名歧义 + 选边 / 同名省略 `display_name` / 回退不旁路校验），共 **31 条**。
 
 - [ ] **Step 5: 提交**
 
@@ -6346,6 +6356,8 @@ def delete_json(url: str, api_key: str = "", timeout: float = 5.0) -> tuple[int,
             return
         p.add_argument("--create", action="store_true",
                        help="允许在无 goal 的节点上新建（缺省只更新已有 goal）")
+        p.add_argument("--engine", default="", metavar="ENGINE",
+                       help="同名 profile 散落在多个引擎子目录时显式选边（决定 worker 写盘目录）")
         p.add_argument("--gpus", default="", metavar="0,1",
                        help="绑定 GPU 序号列表（中心解析校验，CLI 不重复一套）")
         p.add_argument("--env", action="append", default=None, metavar="K=V",

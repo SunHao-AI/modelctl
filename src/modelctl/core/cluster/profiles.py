@@ -33,7 +33,7 @@ from typing import Any
 import yaml
 
 from modelctl.core.envfile import PROJECT_ROOT
-from modelctl.core.profile import KNOWN_ENGINES
+from modelctl.core.profile import KNOWN_ENGINES, _resolve_group
 
 #: 与 core.profile 的命名现实一致：ASCII 字母数字开头，允许 . _ -，总长 ≤ 64
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -56,32 +56,149 @@ def default_profile_version(sha: str) -> str:
     return f"{_dt.date.today().isoformat()}-{sha[len('sha256:'):13]}"
 
 
-def find_profile_path(name: str, models_dir: Path | None = None) -> tuple[Path, str] | None:
-    """按 name 定位 (path, engine)。查找顺序与 core.profile.load_profile 一致。
+def display_name_of(raw: dict[str, Any], path: Path, engine: str) -> str:
+    """展示名，与 core.profile._to_profile 同口径：YAML 显式 `name:` > {group}-{engine}[-{variant}]。
 
-    engine 判定：YAML 显式 `engine:` 优先，否则取父目录名；两者都必须落在
-    KNOWN_ENGINES 内——engine 决定 worker 侧写入哪个引擎子目录，猜错会让模型
-    加载到错误引擎，宁可拒发。
+    复用 `_resolve_group` 而非复制推导逻辑——展示名一旦两套口径，CLI 里能寻址的
+    名字与 UI/网关展示的名字就会分裂（用户裁决 2026-09-04 条款④）。
     """
+    explicit = raw.get("name")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+    group = _resolve_group(raw, path)
+    variant = str(raw.get("variant", "") or "")
+    base = f"{group}-{engine}"
+    return f"{base}-{variant}" if variant else base
+
+
+def _candidate_paths(root: Path, name: str) -> list[Path]:
+    """根目录优先，其次递归排序——与 core.profile.load_profile 的查找顺序一致。"""
+    return [p for p in [root / f"{name}.yaml", *sorted(root.rglob(f"{name}.yaml"))] if p.is_file()]
+
+
+def _port_reason(value: Any) -> str:
+    """port 校验与 core.profile._to_profile 同口径（int 可转且 1-65535）。
+
+    只判"有没有 port"是不够的：worker 侧同样只判存在性，坏值会原样落盘，
+    直到引擎启动 / load_profile 才炸，排查成本极高，必须在中心就拦下。
+    """
+    if value in (None, ""):
+        return "profile 缺 port（worker 侧写盘前置校验项）"
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return f"port 必须是整数，当前 {value!r}"
+    if not 1 <= port <= 65535:
+        return f"port 必须在 1-65535，当前 {port}"
+    return ""
+
+
+def _load_candidate(path: Path) -> tuple[str, dict[str, Any], str] | str:
+    """读取并校验单个候选文件；成功返回 (engine, raw, text)，失败返回 reason 文本。
+
+    尺寸上限用 stat 在**读盘前**判定（超限文件绝不整份进内存）。异常兜底必须含
+    UnicodeDecodeError（ValueError 子类，UTF-16/二进制残留即触发）——本模块契约是
+    "绝不抛异常"，漏一层 Task 5 的 goal set 就直接 500。
+    """
+    try:
+        if path.stat().st_size > MAX_YAML_BYTES:
+            return f"profile 过大（>{MAX_YAML_BYTES} B），拒绝下发"
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return f"读取失败: {exc}"
+    except UnicodeDecodeError as exc:
+        return f"profile 文件不是 UTF-8 编码: {exc}"
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        return f"YAML 语法错误: {exc}"
+    if not isinstance(raw, dict):
+        return "profile 顶层必须是映射"
+    port_reason = _port_reason(raw.get("port"))
+    if port_reason:
+        return port_reason
+    explicit = raw.get("engine")
+    engine = (explicit.strip().lower() if isinstance(explicit, str) and explicit.strip()
+              else path.parent.name.lower())
+    if engine not in KNOWN_ENGINES:
+        return (f"engine {engine!r} 不在 KNOWN_ENGINES（{sorted(KNOWN_ENGINES)}）内，"
+                "请显式设置 engine: 或放入已知引擎子目录")
+    return engine, raw, text
+
+
+def _resolve(root: Path, name: str, engine: str | None = None) -> tuple[Path, str, dict[str, Any], str] | str:
+    """定位 + 校验的唯一入口；成功 (path, engine, raw, text)，失败 reason。
+
+    寻址名（用户裁决 2026-09-04 条款④）：先按**文件名**匹配，文件名候选全部未命中
+    才做**展示名回退**（扫描全部 *.yaml，逐个过 `_load_candidate` 同套校验后按
+    `display_name_of` 匹配）；文件名命中优先于展示名命中。成功时 `path.stem` 即
+    goal 内部使用的规范文件名——goal/写盘一律文件名，镜像一致性由此保证。
+
+    engine 决定 worker 侧写入哪个引擎子目录、由哪个引擎启动：同名文件散落在
+    **多个引擎子目录**（本仓 models/*/qwen3.8.yaml 即有 8 份）时静默取排序首个
+    会把模型下发到错误引擎，故拒发并列出候选；调用方用 `engine=` 显式选边
+    （同引擎内重名仍按根目录优先，与 core.profile.load_profile 一致）。展示名
+    命中多个引擎候选时沿用同一歧义规则。
+    """
+    viable: list[tuple[Path, str, dict[str, Any], str]] = []
+    paths = _candidate_paths(root, name)
+    if paths:
+        last_reason = ""
+        for path in paths:
+            got = _load_candidate(path)
+            if isinstance(got, str):
+                last_reason = got
+                continue
+            viable.append((path, *got))
+        if not viable:
+            return last_reason or f"profile {name!r} 不可用"
+    else:
+        # 展示名回退：展示名不是路径成分，全目录扫描无穿越风险；未通过校验的文件
+        # 静默跳过——它们与本次寻址无关，其报错进 last_reason 只会误导用户
+        for path in sorted(root.rglob("*.yaml")):
+            got = _load_candidate(path)
+            if isinstance(got, str):
+                continue
+            if display_name_of(got[1], path, got[0]) == name:
+                viable.append((path, *got))
+        if not viable:
+            return f"profile {name!r} 不存在（models/<engine>/*.yaml 的文件名与展示名均未匹配）"
+    if engine:
+        wanted = engine.strip().lower()
+        picked = [hit for hit in viable if hit[1] == wanted]
+        if not picked:
+            got_engines = ", ".join(sorted({e for _, e, _, _ in viable}))
+            return (f"profile {name!r} 在 engine {wanted!r} 下不存在（该名的可用引擎：{got_engines}）")
+        return picked[0]
+    engines = {engine for _, engine, _, _ in viable}
+    if len(engines) > 1:
+        hits = ", ".join(str(p.relative_to(root)) for p, *_ in viable)
+        return (f"profile {name!r} 存在歧义：多个引擎子目录都有该 profile（{hits}），"
+                "engine 决定 worker 写盘目录与启动引擎，请用 --engine 指定其一")
+    return viable[0]
+
+
+def find_profile_path(name: str, models_dir: Path | None = None,
+                      engine: str | None = None) -> tuple[Path, str] | None:
+    """按 name（文件名或展示名）定位 (path, engine)；与 read 共用同一套定位/校验。"""
+    if not is_safe_name(name):
+        return None
     root = models_dir or PROJECT_ROOT / "models"
     if not root.is_dir():
         return None
-    for path in [root / f"{name}.yaml", *sorted(root.rglob(f"{name}.yaml"))]:
-        if not path.is_file():
-            continue
-        try:
-            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError):
-            continue  # 交由 read_profile_source 给出具体 reason
-        engine = raw.get("engine") if isinstance(raw, dict) else None
-        engine = engine.strip().lower() if isinstance(engine, str) and engine.strip() else path.parent.name.lower()
-        if engine in KNOWN_ENGINES:
-            return path, engine
-    return None
+    got = _resolve(root, name, engine)
+    if isinstance(got, str):
+        return None
+    path, resolved, _, _ = got
+    return path, resolved
 
 
-def read_profile_source(name: str, models_dir: Path | None = None) -> dict[str, Any]:
+def read_profile_source(name: str, models_dir: Path | None = None,
+                        engine: str | None = None) -> dict[str, Any]:
     """读取下发源；一切失败返回 {"ok": False, "reason": ...}，**绝不抛异常**。
+
+    入参 `name` 允许**文件名**或**展示名**（条款④）；成功返回的 `name` 恒为文件
+    stem——goal.profile 与 worker 写盘文件名都用它，`display_name` 仅供回显。
 
     返回的 `yaml` 是待下发原文（含未插值占位符），`raw` 是同一文本的解析结果
     （未插值），供 gate 做 GPU 数/显存估算——刻意不走 load_profile 的插值路径，
@@ -92,42 +209,15 @@ def read_profile_source(name: str, models_dir: Path | None = None) -> dict[str, 
     root = models_dir or PROJECT_ROOT / "models"
     if not root.is_dir():
         return {"name": name, "ok": False, "reason": f"profile {name!r} 不存在（{root} 目录缺失）"}
-
-    # 先按文件定位，再判定 engine，以便对"engine 未知"给出精确 reason（而非笼统"不存在"）
-    candidates = [p for p in [root / f"{name}.yaml", *sorted(root.rglob(f"{name}.yaml"))] if p.is_file()]
-    if not candidates:
-        return {"name": name, "ok": False,
-                "reason": f"profile {name!r} 不存在（models/<engine>/{name}.yaml 未找到）"}
-
-    last_reason = ""
-    for path in candidates:
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError as exc:
-            last_reason = f"读取失败: {exc}"
-            continue
-        if len(text.encode("utf-8")) > MAX_YAML_BYTES:
-            last_reason = f"profile 过大（>{MAX_YAML_BYTES} B），拒绝下发"
-            continue
-        try:
-            raw = yaml.safe_load(text)
-        except yaml.YAMLError as exc:
-            last_reason = f"YAML 语法错误: {exc}"
-            continue
-        if not isinstance(raw, dict):
-            last_reason = "profile 顶层必须是映射"
-            continue
-        if raw.get("port") in (None, ""):
-            last_reason = "profile 缺 port（worker 侧写盘前置校验项）"
-            continue
-        explicit = raw.get("engine")
-        engine = (explicit.strip().lower() if isinstance(explicit, str) and explicit.strip()
-                  else path.parent.name.lower())
-        if engine not in KNOWN_ENGINES:
-            last_reason = (f"engine {engine!r} 不在 KNOWN_ENGINES（{sorted(KNOWN_ENGINES)}）内，"
-                           "请显式设置 engine: 或放入已知引擎子目录")
-            continue
-        sha = profile_sha(text)
-        return {"name": name, "engine": engine, "path": str(path), "yaml": text,
-                "sha": sha, "version": default_profile_version(sha), "raw": raw, "ok": True}
-    return {"name": name, "ok": False, "reason": last_reason or f"profile {name!r} 不可用"}
+    got = _resolve(root, name, engine)
+    if isinstance(got, str):
+        return {"name": name, "ok": False, "reason": got}
+    path, resolved, raw, text = got
+    stem = path.stem
+    display = display_name_of(raw, path, resolved)
+    sha = profile_sha(text)
+    result: dict[str, Any] = {"name": stem, "engine": resolved, "path": str(path), "yaml": text,
+                              "sha": sha, "version": default_profile_version(sha), "raw": raw, "ok": True}
+    if display != stem:  # 与文件名相同时省略，避免下游回显出现 "qwen (qwen)"
+        result["display_name"] = display
+    return result
