@@ -2980,7 +2980,1467 @@ git add src/modelctl/core/cluster/sync.py tests/test_cluster_sync_writer.py
 git commit -m "feat(cluster): worker 侧快照落盘（原子写 + 漂移/剪枝 + 不可信输入拒绝）"
 ```
 
-<!-- MORE8 -->
+---
+
+### Task 9: `cluster/reconcile.py`——worker 侧状态机（8 态 stage + 错误分类 + 心跳快照）
+
+本模块是 M1 的执行核心，也是四条形态规则的落地点，实现前务必逐条对齐：
+
+1. **只调度，不执行**。起停原语完全复用 `all_service.start_profile/stop_profile`（含引擎适配器、模型下载、GPU 锁、健康检查），reconcile 只决定"**这一轮要不要调、朝哪个方向调**"。集群层绝不自行 `Popen`、绝不自己等端口。
+2. **失败即终态**。任何失败 → `FAILED` + `reason` + `error_class`，此后 `_step` 对该 goal **直接早退**，直到中心 `retry` 或 goal 内容/intent 变化。没有重试计数器、没有退避队列——一个下载失败的 70B 模型不该让 worker 每 5s 重跑一次 40GB 网络请求。
+3. **手动指令压过声明式 intent**。`stop` 是**黏性**的：停止成功后**不清** `manual` 位，否则下一轮又按 `intent=start` 把模型拉起来（用户点"停止"看到它自己复活，是最恶劣的 UX）。`restart` 是**一次性**的：本轮只停，清位后下一轮由 intent 拉回。`retry` 只重置状态、不改方向。
+4. **profile 标识一律用中心侧 stem**。中心 `goal.profile` 是文件 stem，而 PID 文件、GPU 锁持有者、`is_running_any` 探测用的是 `Profile.name`（YAML 里可显式覆盖，缺省才等于 stem）。二者错配会让"集群起的模型"在本地台账里查无此人。唯一可靠解：**`profile.load_profile_at(path)` 从下发文件本身解析 Profile**，本模块不再自己拼 name。
+
+**单写者模型（本任务最重要的约束）**：所有副作用（写盘、起进程、停进程、改 `_recs`）**只发生在 reconcile 循环线程**。Agent(WS) 线程只能做两类事：
+
+- **投递**：`offer_snapshot`（快照）、`handle_actions`（指令，同时把 result 帧投进 `_results`）——**必须无锁**。`_step` 里的 start 最长阻塞 `start_timeout_s()`（默认 300s），若 Agent 线程为此等 `_lock`，心跳就会停摆超过 lease（90s），中心会把一台正在拉 70B 模型的健康节点判成 stale 并标离线。线程安全靠 CPython 的原子操作达成：投递用 `list.extend/append` 与整体赋值，取空用 `a, self._x = self._x, a`。
+- **读缓存**：`snapshot()` / `flush_results()`。`_lock` 只用于互斥"循环线程 vs 外部直调 `apply_snapshot`/`reconcile_once`"（测试与 CLI 路径）。
+
+**快照每拍重建，不缓存上一轮结果**：若 `_collect` 复用上一轮的 stage，那 300s 冷启动期间中心看到的 stage 恒为 `SYNCED`，dashboard 上"点了启动、五分钟没反应"和"根本没收到指令"完全无法区分。因此 `_collect()` 每次读 `sync.read_state` + 实时 `_recs` 组装，`STARTING` 才可见（配套：起进程前先落 `STARTING` 并 `_save()`）。
+
+**Files:**
+- Create: `src/modelctl/core/cluster/reconcile.py`
+- Modify: `src/modelctl/core/cluster/config.py`（`reconcile_interval_s()` / `start_timeout_s()`）
+- Modify: `src/modelctl/core/profile.py`（`load_profile_at()`，纯增量，无行为变更）
+- Test: `tests/test_cluster_reconcile.py`
+
+**Interfaces:**
+- Consumes: `cluster.sync.read_state/apply_snapshot/scan_drift`（Task 8）、`cluster.profiles.profile_sha`（Task 3）、`cluster.wsproto.VALID_ACTIONS/make_result`（Task 2）、`cluster.goals.ENV_OVERLAY_ALLOWLIST/SECRET_KEY_HINTS`（Task 5，**函数内 import**：goals 会连带 import `store`，worker 不需要中心的 sqlite）、`core.profile.KNOWN_ENGINES/load_profile`、`core.envs.MANAGED_ENGINES/has_env`、`core.capabilities.probe/all_vram_total_mb/free_vram_total_mb`、`core.process.cache_dir/pid_file`、`core.gpu_lock.list_gpu_locks`、`core.envfile.PROJECT_ROOT`
+- Produces:
+  - 常量：`STATE_FILE = "cluster-reconcile.json"`、`DEGRADE_LIMIT = 3`
+  - 8 态：`PENDING_PROFILE_SYNC / PROFILE_SYNCED / RUNTIME_OK / STARTING / READY / DEGRADED / FAILED / STOPPED` + `VALID_STAGES`
+  - `ERROR_CLASSES`（9 项）、`classify_error(detail) -> str`（有序子串规则表，兜底 `runtime_capability`）
+  - `runtime_readiness(engine, raw, caps) -> tuple[bool, str, str]`（(ok, reason, error_class)）
+  - `local_profile_paths(models_dir) -> dict[str, Path]`（stem → 路径；忽略 `.master`/`.tmp`/隐藏）
+  - `@dataclass Outcome: status: str; detail: str = ""`
+  - `profile_sha_safe(path) -> str`、`_raw_of(text) -> dict`
+  - `class Reconciler`：`offer_snapshot / handle_actions / flush_results / apply_snapshot / reconcile_once / snapshot / heartbeat_payload / run`
+  - 单例：`current()`、`start_reconciler_in_background()`
+- 心跳扩展段形状（Task 2 `parse_heartbeat_v2` 的六个键，Task 4 gate 与 Task 7 `_sync_stages` 都依赖它）：
+  `profiles` 按 **profile 名** 建键 → `{goal_id, stage, state, reason, error_class, managed, port, pid, gpu, at}`；`goal_sync = {"revision": str}`；`drift = [goal_id]`；`local_profiles = [stem]`；`capacity = {"gpu_count", "vram_total_mb", "vram_free_mb"}`；`runtimes = {engine: {"ok": bool}}`
+
+- [ ] **Step 1: 写失败测试** — 创建 `tests/test_cluster_reconcile.py`
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : tests/test_cluster_reconcile.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/9/4 11:00
+# @Desc   : worker 侧 reconciler（8 态 stage / 错误分类 / 手动优先 / 心跳快照）
+# ===============================================================================
+
+import os
+
+import pytest
+
+from modelctl.core.capabilities import Capabilities
+from modelctl.core.cluster import config, reconcile
+from modelctl.core.cluster import profiles as P
+from modelctl.core.cluster import sync
+from modelctl.core.cluster.reconcile import (
+    DEGRADED, FAILED, PENDING_PROFILE_SYNC, PROFILE_SYNCED, READY, STARTING, STOPPED,
+    Outcome, Reconciler, classify_error, local_profile_paths, profile_sha_safe,
+    runtime_readiness,
+)
+
+YAML_A = "port: 8101\napi_key: ${API_KEY}\n"
+YAML_B = "port: 8102\napi_key: ${API_KEY}\n"
+
+_CAPS = Capabilities(gpu_count=4, gpu_indices=[0, 1, 2, 3],
+                     vram_total_mb_per_gpu=[40960] * 4)
+
+
+@pytest.fixture(autouse=True)
+def _assume_venvs_ready(monkeypatch):
+    """绝大多数用例只关心状态机，不该被"本机没建 vllm venv / 缺 API_KEY"绊住。
+
+    `has_env` 必须 `setattr` 到 **reconcile 命名空间**：reconcile 在模块顶层
+    `from core.envs import has_env` 已绑定函数对象，改 envs 里的同名属性无效。
+    `API_KEY` 是必须的：`load_profile_at` 走 `_interpolate`，profile YAML 里的
+    `${API_KEY}` 缺变量会抛 ProfileError，让所有状态机用例统一挂在"解析失败"上。
+    """
+    monkeypatch.setattr(reconcile, "has_env", lambda target: True)
+    monkeypatch.setenv("API_KEY", "sk-test-local")
+
+
+# --------------------------------------------------------------------------- 纯函数
+
+@pytest.mark.parametrize("detail,expected", [
+    ("[gpu_lock] GPU 0 已被 deepseek 占用", "gpu_lock"),
+    ("gpu_list 指定的卡位不存在", "profile_invalid"),          # 早于 gpu_lock 规则
+    ("端口 8101 已被占用（nginx:80）", "port_conflict"),
+    ("vllm 专用环境未创建，执行 modelctl env setup vllm", "venv_missing"),
+    ("引擎 ollama 的二进制在 PATH 中找不到", "venv_missing"),
+    ("llamacpp 未安装", "venv_missing"),
+    ("显存不足：需要 80GiB，实际 40GiB", "oom"),
+    ("CUDA out of memory", "oom"),
+    ("CUDA error: device-side assert", "oom"),
+    ("模型下载失败（网络不可达）", "model_download_failed"),
+    ("模型下载超时", "model_download_failed"),
+    ("profile 必填字段 model 缺失", "profile_invalid"),
+    ("port 必须是整数", "profile_invalid"),
+    ("max_model_len 超过实际显存", "runtime_capability"),
+    ("该量化格式不支持当前 GPU 计算能力", "runtime_capability"),
+])
+def test_classify_error_rules_in_priority_order(detail, expected):
+    assert classify_error(detail) == expected
+
+
+def test_classify_error_falls_back_to_runtime_capability():
+    assert classify_error("") == "runtime_capability"
+    assert classify_error("完全没见过的报错") == "runtime_capability"
+
+
+def test_runtime_readiness_managed_engine_with_venv():
+    ok, reason, cls = runtime_readiness("vllm", {}, _CAPS)
+    assert ok is True and reason == "" and cls == ""
+
+
+def test_runtime_readiness_docker_image_skips_venv(monkeypatch):
+    """docker runtime 不需要 venv：免检路径必须真实可达，否则是死代码。"""
+    monkeypatch.setattr(reconcile, "has_env", lambda target: False)
+    ok, _reason, _cls = runtime_readiness("vllm", {"docker_image": "vllm/vllm:latest"}, _CAPS)
+    assert ok is True
+
+
+def test_runtime_readiness_managed_engine_without_venv(monkeypatch):
+    monkeypatch.setattr(reconcile, "has_env", lambda target: False)
+    ok, reason, cls = runtime_readiness("vllm", {}, _CAPS)
+    assert ok is False and cls == "venv_missing" and "env setup" in reason
+
+
+def test_runtime_readiness_unmanaged_engine_uses_binary_probe():
+    caps = Capabilities(binaries={"ollama": False})
+    ok, _reason, cls = runtime_readiness("ollama", {}, caps)
+    assert ok is False and cls == "venv_missing"
+    assert runtime_readiness("ollama", {}, Capabilities(binaries={"ollama": True}))[0] is True
+
+
+def test_local_profile_paths_skips_sidecars(tmp_path):
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "ollama").mkdir()
+    (tmp_path / "vllm" / "qwen.yaml").write_text(YAML_A, encoding="utf-8")
+    (tmp_path / "vllm" / "qwen.yaml.master").write_text(YAML_B, encoding="utf-8")
+    (tmp_path / "vllm" / ".qwen.yaml.tmp").write_text(YAML_B, encoding="utf-8")
+    (tmp_path / "ollama" / "deepseek.yaml").write_text(YAML_B, encoding="utf-8")
+    got = local_profile_paths(tmp_path)
+    assert sorted(got) == ["deepseek", "qwen"]
+    assert got["qwen"] == tmp_path / "vllm" / "qwen.yaml"
+
+
+def test_local_profile_paths_stem_collision_is_deterministic(tmp_path):
+    for engine in ("ollama", "vllm"):
+        (tmp_path / engine).mkdir()
+        (tmp_path / engine / "dup.yaml").write_text(YAML_A, encoding="utf-8")
+    assert local_profile_paths(tmp_path)["dup"] == tmp_path / "ollama" / "dup.yaml"
+
+
+def test_profile_sha_safe_missing_file_returns_empty(tmp_path):
+    assert profile_sha_safe(tmp_path / "nope.yaml") == ""
+    p = tmp_path / "x.yaml"
+    p.write_text(YAML_A, encoding="utf-8")
+    assert profile_sha_safe(p) == P.profile_sha(YAML_A)
+
+
+# --------------------------------------------------------------------------- 替身与夹具
+
+class Recorder:
+    """起停替身：共享一份运行态，让 start/stop 真的翻转 up/alive。"""
+
+    def __init__(self) -> None:
+        self.up: dict[str, bool] = {}
+        self.dead: set[str] = set()
+        self.starts: list[str] = []
+        self.stops: list[str] = []
+        self.start_detail = ""
+        self.stop_detail = ""
+
+    def start(self, prof, caps, timeout):
+        self.starts.append(prof.name)
+        if self.start_detail:
+            return Outcome("error", self.start_detail)
+        self.dead.discard(prof.name)
+        self.up[prof.name] = True
+        return Outcome("ok", f"http://127.0.0.1:{prof.port}")
+
+    def stop(self, prof, caps, models_dir):
+        self.stops.append(prof.name)
+        if self.stop_detail:
+            return Outcome("error", self.stop_detail)
+        self.up[prof.name] = False
+        self.dead.add(prof.name)       # 真实 stop 会带走进程：alive 必须同步翻转
+        return Outcome("ok", "已停止")
+
+    def probe(self, prof):
+        alive = prof.name not in self.dead
+        return {"up": bool(self.up.get(prof.name)), "alive": alive, "port": prof.port,
+                "pid": 4242 if alive else None, "gpus": [0] if self.up.get(prof.name) else [],
+                "name": prof.name}
+
+
+def _goal(profile="qwen", engine="vllm", *, text=YAML_A, intent="start", goal_id=None):
+    return {"goal_id": goal_id or f"{profile}@@w-1", "profile": profile, "engine": engine,
+            "yaml": text, "sha": P.profile_sha(text), "version": "v1", "intent": intent,
+            "params": None, "env_overlay": None}
+
+
+def _snap(*goals, revision="rev-1"):
+    return {"revision": revision, "goals": list(goals)}
+
+
+@pytest.fixture()
+def dirs(tmp_path):
+    models, cache = tmp_path / "models", tmp_path / "cache"
+    cache.mkdir()
+    return models, cache
+
+
+def _rt(dirs, rec=None):
+    models, cache = dirs
+    rec = rec or Recorder()
+    rt = Reconciler(models_dir=models, cache_dir=cache, starter=rec.start,
+                    stopper=rec.stop, prober=rec.probe, caps=_CAPS)
+    return rt, rec
+
+
+# --------------------------------------------------------------------------- 状态机配方
+
+def test_fresh_goal_goes_start_to_ready(dirs):
+    rt, rec = _rt(dirs)
+    rt.apply_snapshot(_snap(_goal()), now=1.0)
+    rt.reconcile_once(now=2.0)
+    assert rec.starts == ["qwen"]
+    got = rt.snapshot()["profiles"]["qwen"]
+    assert got["stage"] == READY and got["state"] == "running" and got["managed"] is True
+
+
+def test_snapshot_missing_file_waits_for_sync(dirs):
+    rt, rec = _rt(dirs)
+    rt.reconcile_once(now=1.0)
+    assert rec.starts == []
+
+
+def test_start_failure_is_terminal_and_classified(dirs):
+    rt, rec = _rt(dirs)
+    rec.start_detail = "端口 8101 已被占用（nginx:80）"
+    rt.apply_snapshot(_snap(_goal()), now=1.0)
+    rt.reconcile_once(now=2.0)
+    first = rt.snapshot()["profiles"]["qwen"]
+    assert first["stage"] == FAILED and first["error_class"] == "port_conflict"
+    rt.reconcile_once(now=3.0)
+    assert rec.starts == ["qwen"]                       # 不自动重试
+    assert rt.snapshot()["profiles"]["qwen"]["stage"] == FAILED
+
+
+def test_retry_action_resets_failed_goal(dirs):
+    rt, rec = _rt(dirs)
+    rec.start_detail = "显存不足：需要 80GiB"
+    g = _goal()
+    rt.apply_snapshot(_snap(g), now=1.0)
+    rt.reconcile_once(now=2.0)
+    assert rt.snapshot()["profiles"]["qwen"]["error_class"] == "oom"
+    rec.start_detail = ""
+    rt.handle_actions([{"seq": 7, "action": "retry", "goal_id": g["goal_id"],
+                        "profile": "qwen"}], now=3.0)
+    out = list(rt.flush_results())
+    assert out[0]["ok"] is True and out[0]["seq"] == 7
+    rt.reconcile_once(now=4.0)
+    assert rec.starts == ["qwen", "qwen"]
+    assert rt.snapshot()["profiles"]["qwen"]["stage"] == READY
+
+
+def test_intent_stop_stops_and_stays_stopped(dirs):
+    rt, rec = _rt(dirs)
+    rt.apply_snapshot(_snap(_goal()), now=1.0)
+    rt.reconcile_once(now=2.0)
+    rt.apply_snapshot(_snap(_goal(intent="stop")), now=3.0)
+    rt.reconcile_once(now=4.0)
+    rt.reconcile_once(now=5.0)
+    assert rec.stops == ["qwen"]
+    assert rec.starts == ["qwen"]                       # 没有被 intent 再拉起来
+    assert rt.snapshot()["profiles"]["qwen"]["stage"] == STOPPED
+
+
+def test_manual_stop_survives_intent_start(dirs):
+    """手动 stop 压过声明式 intent=start，且位不清（清了就复活）。"""
+    rt, rec = _rt(dirs)
+    g = _goal()
+    rt.apply_snapshot(_snap(g), now=1.0)
+    rt.reconcile_once(now=2.0)
+    rt.handle_actions([{"seq": 1, "action": "stop", "goal_id": g["goal_id"],
+                        "profile": "qwen"}], now=3.0)
+    rt.reconcile_once(now=4.0)
+    assert rec.stops == ["qwen"]
+    rt.reconcile_once(now=5.0)
+    rt.reconcile_once(now=6.0)
+    assert rec.starts == ["qwen"]                       # 关键：手动位仍在，未被重新拉起
+    assert rt.snapshot()["profiles"]["qwen"]["stage"] == STOPPED
+
+
+def test_manual_stop_is_cleared_by_goal_change(dirs):
+    rt, rec = _rt(dirs)
+    g = _goal()
+    rt.apply_snapshot(_snap(g), now=1.0)
+    rt.reconcile_once(now=2.0)
+    rt.handle_actions([{"seq": 1, "action": "stop", "goal_id": g["goal_id"],
+                        "profile": "qwen"}], now=3.0)
+    rt.reconcile_once(now=4.0)
+    # 中心改了 YAML（sha 变）→ 视为"中心重新表达了一次意图"，手动位失效
+    rt.apply_snapshot(_snap(_goal(text=YAML_B)), now=5.0)
+    rt.reconcile_once(now=6.0)
+    assert rec.starts == ["qwen", "qwen"]
+    assert rt.snapshot()["profiles"]["qwen"]["stage"] == READY
+
+
+def test_restart_action_stops_once_and_intent_pulls_back(dirs):
+    rt, rec = _rt(dirs)
+    g = _goal()
+    rt.apply_snapshot(_snap(g), now=1.0)
+    rt.reconcile_once(now=2.0)
+    rt.handle_actions([{"seq": 1, "action": "restart", "goal_id": g["goal_id"],
+                        "profile": "qwen"}], now=3.0)
+    rt.reconcile_once(now=4.0)
+    assert rec.stops == ["qwen"]
+    # restart 本轮只负责停：manual 已清，但"拉起"发生在下一拍（一拍只做一件事）
+    assert rt.snapshot()["profiles"]["qwen"]["stage"] == STOPPED
+    rt.reconcile_once(now=5.0)
+    assert rec.starts == ["qwen", "qwen"]
+    assert rt.snapshot()["profiles"]["qwen"]["stage"] == READY
+
+
+def test_unknown_action_or_goal_rejected_in_result(dirs):
+    rt, rec = _rt(dirs)
+    rt.apply_snapshot(_snap(_goal()), now=1.0)
+    rt.handle_actions([
+        {"seq": 1, "action": "destroy", "goal_id": "qwen@@w-1", "profile": "qwen"},
+        {"seq": 2, "action": "stop", "goal_id": "ghost@@w-1", "profile": "ghost"},
+    ], now=2.0)
+    out = list(rt.flush_results())
+    assert [r["ok"] for r in out] == [False, False]
+    assert list(rt.flush_results()) == []               # 已取走，不重复回传
+    rt.reconcile_once(now=3.0)
+    assert rec.stops == []                              # 被拒的指令绝不进执行队列
+
+
+def test_health_lost_with_dead_process_fails_immediately(dirs):
+    rt, rec = _rt(dirs)
+    rt.apply_snapshot(_snap(_goal()), now=1.0)
+    rt.reconcile_once(now=2.0)
+    rec.dead.add("qwen")          # 进程不存在：健康检查必然同时失败
+    rec.up["qwen"] = False
+    rt.reconcile_once(now=3.0)
+    got = rt.snapshot()["profiles"]["qwen"]
+    assert got["stage"] == FAILED and got["error_class"] == "health_lost"
+    assert rec.starts == ["qwen"]                          # 不自动重拉
+
+
+def test_health_lost_with_live_process_degrades_then_fails(dirs):
+    rt, rec = _rt(dirs)
+    rt.apply_snapshot(_snap(_goal()), now=1.0)
+    rt.reconcile_once(now=2.0)
+    rec.up["qwen"] = False                              # 进程还在，只是 /health 不通
+    rt.reconcile_once(now=3.0)
+    assert rt.snapshot()["profiles"]["qwen"]["stage"] == DEGRADED
+    rt.reconcile_once(now=4.0)
+    assert rt.snapshot()["profiles"]["qwen"]["stage"] == DEGRADED
+    rt.reconcile_once(now=5.0)                          # 第 DEGRADE_LIMIT 次 → 终态
+    got = rt.snapshot()["profiles"]["qwen"]
+    assert got["stage"] == FAILED and got["error_class"] == "health_lost"
+
+
+def test_missing_venv_never_calls_starter(dirs, monkeypatch):
+    monkeypatch.setattr(reconcile, "has_env", lambda target: False)
+    rt, rec = _rt(dirs)
+    rt.apply_snapshot(_snap(_goal()), now=1.0)
+    rt.reconcile_once(now=2.0)
+    assert rec.starts == []
+    got = rt.snapshot()["profiles"]["qwen"]
+    assert got["stage"] == FAILED and got["error_class"] == "venv_missing"
+
+
+def test_state_survives_process_restart(dirs):
+    """手动位/终态跨进程存活：新实例首拍绝不能复活已停/已失败的 goal。"""
+    rec = Recorder()
+    rt, _ = _rt(dirs, rec)
+    rt.apply_snapshot(_snap(_goal()), now=1.0)
+    rt.reconcile_once(now=2.0)
+    assert (dirs[1] / reconcile.STATE_FILE).is_file()
+    rt2, _ = _rt(dirs, rec)        # 共享运行态：模型仍在服务
+    rt2.reconcile_once(now=3.0)    # 未显式 _load：循环自己会从状态文件恢复
+    assert rt2._recs["qwen@@w-1"]["stage"] == READY
+    assert rec.starts == ["qwen"]  # 已 READY 的不重复起
+
+
+def test_rejected_snapshot_goal_never_reaches_ready(dirs):
+    rt, rec = _rt(dirs)
+    bad = _goal(profile="../evil")
+    rt.apply_snapshot(_snap(_goal(), bad), now=1.0)
+    rt.reconcile_once(now=2.0)
+    assert rec.starts == ["qwen"]
+    assert "../evil" not in rt.snapshot()["profiles"]
+
+
+# --------------------------------------------------------------------------- 心跳快照
+
+def test_heartbeat_payload_shape(dirs):
+    rt, _rec = _rt(dirs)
+    rt.apply_snapshot(_snap(_goal()), now=1.0)
+    rt.reconcile_once(now=2.0)
+    rt._local.setdefault("solo-local", {"goal_id": "", "stage": READY, "state": "running",
+                                        "reason": "", "error_class": "", "managed": False,
+                                        "port": 9999, "pid": 1, "gpu": [3], "at": 2.0})
+    got = rt.heartbeat_payload()
+    assert sorted(got) == ["capacity", "drift", "goal_sync", "local_profiles", "profiles",
+                           "runtimes"]
+    assert got["goal_sync"] == {"revision": "rev-1"}
+    assert got["profiles"]["qwen"]["stage"] == READY
+    assert got["profiles"]["solo-local"]["managed"] is False
+    assert "qwen" in got["local_profiles"]
+    assert set(got["runtimes"]) == {"llamacpp", "ollama", "vllm", "sglang", "unsloth",
+                                    "aphrodite", "lmdeploy", "tensorrt_llm", "tokenspeed"}
+    assert got["capacity"]["gpu_count"] == 4
+
+
+def test_goal_without_rec_derives_stage_from_disk(dirs):
+    """goal 已落盘但本进程还没跑过（worker 刚重启）→ stage 由磁盘 sha 推导，
+    且绝不能在这一步顺手把进程起起来（要等 reconcile 循环正式拍）。"""
+    models, cache = dirs
+    g = _goal()
+    sync.apply_snapshot(_snap(g), models_dir=models, cache_dir=cache, now=1.0)
+    rt, rec = _rt(dirs)
+    snap = rt.snapshot()
+    assert snap["revision"] == "rev-1"
+    assert snap["profiles"]["qwen"]["stage"] == PROFILE_SYNCED
+    assert snap["profiles"]["qwen"]["state"] == "synced"
+    assert rec.starts == []
+    (models / "vllm" / "qwen.yaml").write_text("port: 7777\n", encoding="utf-8")
+    assert rt.snapshot()["profiles"]["qwen"]["stage"] == PENDING_PROFILE_SYNC
+
+
+def test_drift_reported_once_repaired_by_resync(dirs):
+    rt, _rec = _rt(dirs)
+    models, cache = dirs
+    rt.apply_snapshot(_snap(_goal()), now=1.0)
+    (models / "vllm" / "qwen.yaml").write_text("port: 9999\n", encoding="utf-8")
+    assert rt.snapshot()["drift"] == ["qwen@@w-1"]
+    rt.apply_snapshot(_snap(_goal()), now=2.0)          # 同 revision 会被短路
+    assert rt.snapshot()["drift"] == ["qwen@@w-1"]
+    rt.apply_snapshot({"revision": "rev-2", "goals": [_goal()], "force": True}, now=3.0)
+    assert rt.snapshot()["drift"] == []
+
+
+# --------------------------------------------------------------------------- env_overlay
+
+def test_env_overlay_applied_and_restored_exactly(dirs, monkeypatch):
+    seen: dict[str, str | None] = {}
+    rt, rec = _rt(dirs)
+    g = _goal(env_overlay={"MODEL_ROOT": "/mnt/nas/models"})
+
+    def spy_start(prof, caps, timeout):
+        seen["MODEL_ROOT"] = os.environ.get("MODEL_ROOT")
+        return rec.start(prof, caps, timeout)
+
+    rt._starter = spy_start
+    monkeypatch.setenv("MODEL_ROOT", "/original")
+    rt.apply_snapshot(_snap(g), now=1.0)
+    rt.reconcile_once(now=2.0)
+    assert seen["MODEL_ROOT"] == "/mnt/nas/models"
+    assert os.environ["MODEL_ROOT"] == "/original"      # 精确复原，不污染全局
+
+
+def test_secret_keys_in_overlay_never_reach_environ(dirs, monkeypatch):
+    """白名单外一律丢弃：整份 overlay 作废（宁可少给，不可多给）。"""
+    seen: dict[str, str | None] = {}
+    rt, rec = _rt(dirs)
+    g = _goal(env_overlay={"MODEL_ROOT": "/m", "DEEPSEEK_API_KEY": "sk-leak"})
+
+    def spy_start(prof, caps, timeout):
+        seen["MODEL_ROOT"] = os.environ.get("MODEL_ROOT")
+        seen["DEEPSEEK_API_KEY"] = os.environ.get("DEEPSEEK_API_KEY")
+        return rec.start(prof, caps, timeout)
+
+    rt._starter = spy_start
+    monkeypatch.delenv("MODEL_ROOT", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    rt.apply_snapshot(_snap(g), now=1.0)
+    rt.reconcile_once(now=2.0)
+    assert seen == {"MODEL_ROOT": None, "DEEPSEEK_API_KEY": None}
+
+
+# --------------------------------------------------------------------------- 投递路径与配置
+
+def test_delivery_paths_do_not_take_the_lock(dirs):
+    """中心宕机不起、心跳不停摆：起进程最长 300s 期间 Agent 线程投递 ack 必须返回。
+
+    若 offer/handle 路径与 `_lock` 绑定，`t.join` 会一直等到 release.set()，本用例
+    的第一个 `join(2)` 超时即失败——这正是"节点正在拉 70B 模型却被中心标 stale"的根因。
+    """
+    import threading
+
+    rt, rec = _rt(dirs)
+    started, release = threading.Event(), threading.Event()
+
+    def slow_start(prof, caps, timeout):
+        started.set()
+        release.wait(5)
+        return Outcome("ok", "done")
+
+    rt._starter = slow_start
+    rt.apply_snapshot(_snap(_goal()), now=1.0)
+    t = threading.Thread(target=rt.reconcile_once, kwargs={"now": 2.0})
+    t.start()
+    assert started.wait(5)
+    rt.offer_snapshot(_snap(_goal(), revision="rev-2"))
+    rt.handle_actions([{"seq": 1, "action": "retry", "goal_id": "qwen@@w-1",
+                        "profile": "qwen"}], now=2.5)
+    frames = list(rt.flush_results())
+    assert frames and frames[0]["seq"] == 1                  # 投递真的被受理（非空判据）
+    t.join(2)
+    assert t.is_alive()                                      # 主线程从未被 reconcile 阻塞
+    release.set()
+    t.join(5)
+    assert not t.is_alive()
+    rt._drain_snapshot(now=3.0)                              # 新快照排在阻塞结束之后应用
+    assert rt.snapshot()["revision"] == "rev-2"
+    assert rec.starts == ["qwen"]                            # retry 未提前打断本轮
+
+
+def test_reconcile_config_floors(monkeypatch):
+    monkeypatch.delenv("CLUSTER_RECONCILE_INTERVAL_S", raising=False)
+    monkeypatch.delenv("CLUSTER_START_TIMEOUT_S", raising=False)
+    assert config.reconcile_interval_s() == 5
+    assert config.start_timeout_s() == 300
+    monkeypatch.setenv("CLUSTER_RECONCILE_INTERVAL_S", "0")
+    monkeypatch.setenv("CLUSTER_START_TIMEOUT_S", "1")
+    assert config.reconcile_interval_s() == 5            # 低于 floor 回退默认
+    assert config.start_timeout_s() == 300
+
+
+def test_local_only_profiles_are_reported_unmanaged(dirs):
+    """本地手起的模型（无 goal）也必须进心跳，否则中心会以为节点空转。"""
+    models, cache = dirs
+    (models / "ollama").mkdir(parents=True)
+    (models / "ollama" / "local.yaml").write_text(YAML_B, encoding="utf-8")
+    rt, rec = _rt(dirs)
+    rt._prober = lambda prof: {"up": True, "alive": True, "port": prof.port, "pid": 7,
+                               "gpus": [], "name": prof.name}
+    rt.reconcile_once(now=1.0)
+    got = rt.snapshot()["profiles"]["local"]
+    assert got["managed"] is False and got["stage"] == READY
+    assert rec.starts == []                              # 未托管的绝不代客起停
+```
+
+- [ ] **Step 2: 运行确认失败**
+
+Run: `uv run pytest tests/test_cluster_reconcile.py -q`
+Expected: FAIL —— `ModuleNotFoundError: No module named 'modelctl.core.cluster.reconcile'`
+
+- [ ] **Step 3: 实现——配置项与 `load_profile_at`**
+
+在 `src/modelctl/core/cluster/config.py` 末尾追加（沿用既有 `_int_env`，勿改现有函数）：
+
+```python
+_DEFAULT_RECONCILE_S = 5
+_DEFAULT_START_TIMEOUT_S = 300
+
+
+def reconcile_interval_s() -> int:
+    """worker 本地逼近期望状态的周期。刻意独立于心跳周期（见 reconcile 模块头）。"""
+    return _int_env("CLUSTER_RECONCILE_INTERVAL_S", _DEFAULT_RECONCILE_S, floor=1)
+
+
+def start_timeout_s() -> int:
+    """单次启动等待引擎就绪的上限；与 all_service.start_all(timeout=300) 同默认。"""
+    return _int_env("CLUSTER_START_TIMEOUT_S", _DEFAULT_START_TIMEOUT_S, floor=5)
+```
+
+在 `src/modelctl/core/profile.py` 的 `load_profile` 之后追加（复用既有 `_load_profile_from_path`，无新解析逻辑）：
+
+```python
+def load_profile_at(path: Path) -> Profile:
+    """按**绝对路径**加载 profile —— 集群下发文件的唯一正确入口。
+
+    `load_profile(name)` 靠目录扫描按 name 匹配，而中心只认文件 stem；YAML 里
+    显式写了 `name:` 时两者会分叉（PID/GPU 锁用 name，中心用 stem）。直接按路径
+    加载再把 `Profile.name` 交给下游，可让"集群下发的文件"与"本地台账记录"
+    天然是同一条记录。
+
+    `_load_profile_from_path` 内部会做 `${VAR}` 插值，worker 本地 .env 缺变量时抛
+    `ProfileError`——调用方必须捕获（reconcile 把它折叠成一次 FAILED 而非中断整轮）。
+    """
+    return _load_profile_from_path(Path(path))
+```
+
+- [ ] **Step 4: 实现——`src/modelctl/core/cluster/reconcile.py`**
+
+先写模块头与纯函数（状态机不依赖任何可变全局，便于单测）：
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : src/modelctl/core/cluster/reconcile.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/9/4 11:00
+# @Desc   : worker 侧 reconciler（把实际状态逼向中心期望状态）
+# ===============================================================================
+
+"""core/cluster/reconcile.py — worker 侧声明式状态机。
+
+四条形态规则：只调度不执行 / 失败即终态 / 手动压过 intent / profile 标识用中心侧 stem。
+
+线程模型（单写者）：**所有副作用只在 reconcile 循环线程**。WS(Agent) 线程只能
+`offer_snapshot` / `offer_actions` / `handle_actions`（投递）与 `snapshot` /
+`flush_results`（读缓存）。投递路径**绝不可加锁**：`_step` 的 start 最长阻塞
+`config.start_timeout_s()`（默认 300s），Agent 线程若等 `_lock` 就会让心跳停摆
+超过 lease(90s)，中心据此把健康节点标成 stale。线程安全靠 CPython 原子操作：
+`list.append` 投递、`a, self._x = self._x, a` 取空。`_lock` 只互斥"循环线程 vs
+外部直调 apply_snapshot/reconcile_once"（测试与 CLI 路径）。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable
+
+import yaml
+from loguru import logger
+
+from modelctl.core.capabilities import (
+    Capabilities, all_vram_total_mb, free_vram_total_mb, probe,
+)
+from modelctl.core.cluster import config, sync, wsproto
+from modelctl.core.cluster.profiles import profile_sha
+from modelctl.core.envfile import PROJECT_ROOT
+from modelctl.core.envs import MANAGED_ENGINES, has_env
+from modelctl.core.gpu_lock import list_gpu_locks
+from modelctl.core.profile import KNOWN_ENGINES, load_profile_at
+
+STATE_FILE = "cluster-reconcile.json"
+
+#: 连续 N 拍"进程还在但健康检查不通"才降级为 FAILED；单拍抖动（引擎 GC、
+#: 权重热加载）不该惊动中心。进程消失（alive=False）不适用此计数，直接终态。
+DEGRADE_LIMIT = 3
+
+#: 能力探测（nvidia-smi / which）开销大且在起进程期间会被反复调用，缓存 30s
+_CAPS_TTL_S = 30.0
+
+# --- 8 态 stage（spec §7.2）--------------------------------------------------
+PENDING_PROFILE_SYNC = "PENDING_PROFILE_SYNC"   # 中心已声明，本地还没有这份文件
+PROFILE_SYNCED = "PROFILE_SYNCED"               # 文件已落盘且 sha 相符
+RUNTIME_OK = "RUNTIME_OK"                       # 运行时具备启动条件
+STARTING = "STARTING"                           # 正在起（含下载权重/健康检查等待）
+READY = "READY"
+DEGRADED = "DEGRADED"                           # 进程在但健康检查连续失败
+FAILED = "FAILED"                               # 终态：需 retry 或 goal 变更
+STOPPED = "STOPPED"
+
+VALID_STAGES: tuple[str, ...] = (
+    PENDING_PROFILE_SYNC, PROFILE_SYNCED, RUNTIME_OK, STARTING,
+    READY, DEGRADED, FAILED, STOPPED,
+)
+
+#: stage → 中心 `model_states.state`（与单机 CLI 的八态对齐，dashboard 一套渲染）
+_STATE_OF_STAGE: dict[str, str] = {
+    PENDING_PROFILE_SYNC: "pending", PROFILE_SYNCED: "synced", RUNTIME_OK: "ready_to_start",
+    STARTING: "starting", READY: "running", DEGRADED: "degraded",
+    FAILED: "failed", STOPPED: "stopped",
+}
+
+ERROR_CLASSES: tuple[str, ...] = (
+    "venv_missing", "gpu_lock", "oom", "startup_timeout", "model_download_failed",
+    "runtime_capability", "profile_invalid", "port_conflict", "health_lost",
+)
+
+#: 有序子串规则表：先具体后笼统。`[gpu_lock]` 带方括号前缀（gpu_lock.py 的报错格式），
+#: 必须早于 `gpu_list`（profile 字段名），否则"卡位被占"会被误判成"profile 写错"。
+_ERROR_RULES: tuple[tuple[str, str], ...] = (
+    ("[gpu_lock]", "gpu_lock"),
+    ("gpu_list", "profile_invalid"),
+    ("端口", "port_conflict"),
+    ("专用环境未创建", "venv_missing"),
+    ("PATH 中找不到", "venv_missing"),
+    ("未安装", "venv_missing"),
+    ("环境未就绪", "venv_missing"),
+    ("显存不足", "oom"),
+    ("out of memory", "oom"),
+    ("CUDA error", "oom"),
+    ("下载失败", "model_download_failed"),
+    ("下载超时", "model_download_failed"),
+    ("必填", "profile_invalid"),
+    ("必须是", "profile_invalid"),
+    ("超过实际", "runtime_capability"),
+    ("不支持", "runtime_capability"),
+    ("需 vLLM", "runtime_capability"),
+    ("需 SGLang", "runtime_capability"),
+    ("健康检查超时", "startup_timeout"),
+    ("进程提前退出", "startup_timeout"),
+)
+
+
+def classify_error(detail: str) -> str:
+    """把引擎/编排的中文报错映射到 error_class（中心据此分类展示/告警）。
+
+    兜底 `runtime_capability` 而非 `unknown`：运维看到"环境能力不足"会去查
+    驱动/显存/引擎版本，这恰是未分类报错最常见的真实原因；`unknown` 什么也不提示。
+    """
+    text = detail or ""
+    for needle, cls in _ERROR_RULES:
+        if needle in text:
+            return cls
+    return "runtime_capability"
+
+
+def _raw_of(text: str) -> dict[str, Any]:
+    """profile YAML 原文 → 顶层映射（只为读 docker_image 一类免检字段）。
+
+    解析失败返回 {}：`sync._validate` 已在写盘前拒过语法错误，这里宽容是为了
+    "本地被人改坏的文件"不该让 reconciler 抛异常中断整轮调度。
+    """
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def runtime_readiness(engine: str, raw: dict[str, Any],
+                      caps: Capabilities) -> tuple[bool, str, str]:
+    """运行时是否具备启动该引擎的条件 → (ok, reason, error_class)。
+
+    托管引擎看 venv，但 YAML 显式声明 `docker_image` 时用容器 runtime，venv
+    不参与（这条路径必须可达，否则是死代码）；非托管引擎看 `probe()` 的 PATH 结果。
+    """
+    if engine in MANAGED_ENGINES:
+        if str(raw.get("docker_image", "")).strip():
+            return True, "", ""
+        if has_env(engine):
+            return True, "", ""
+        return False, f"{engine} 专用环境未创建，执行：modelctl env setup {engine}", "venv_missing"
+    if caps.binaries.get(engine):
+        return True, "", ""
+    hint = "确认二进制已安装并在 PATH 中"
+    return False, f"引擎 {engine} 的二进制在 PATH 中找不到，{hint}", "venv_missing"
+
+
+def profile_sha_safe(path: Path) -> str:
+    """读文件算 sha；任何 IO 失败 → ""（调用方按"不匹配"处理，不抛异常）。"""
+    try:
+        return profile_sha(path.read_text(encoding="utf-8"))
+    except OSError:
+        return ""
+
+
+def local_profile_paths(models_dir: Path) -> dict[str, Path]:
+    """models/ 下所有 profile 文件的 stem → 绝对路径。
+
+    跳过三类"看起来像 YAML 但不是 profile"的文件：`.master` 备份（sync 覆盖前
+    留的）、`.tmp`（原子写中间态）、隐藏文件。stem 冲突时按引擎名**字典序取第一**
+    并告警——真实仓库里同 stem 跨引擎属病态配置，但确定性优先于"随机覆盖"，
+    否则同一台机器两次心跳会给出不同结论。
+    """
+    out: dict[str, Path] = {}
+    root = Path(models_dir)
+    if not root.is_dir():
+        return out
+    for engine_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        for f in sorted(engine_dir.glob("*.yaml")):
+            if f.name.startswith(".") or f.name.endswith((".master", ".tmp")):
+                continue
+            stem = f.stem
+            if stem in out:
+                logger.warning(f"models/ 下 stem 冲突：{stem} 取 {out[stem]}，忽略 {f}")
+                continue
+            out[stem] = f
+    return out
+
+
+@dataclass
+class Outcome:
+    """起停替身的统一返回（形状与 all_service.ComponentResult 一致）。"""
+
+    status: str
+    detail: str = ""
+
+
+def _default_cache_dir() -> Path:
+    from modelctl.core.process import cache_dir
+
+    return cache_dir()
+
+
+def _default_starter(profile: Any, caps: Capabilities, timeout: float) -> Outcome:
+    """生产起进程入口：委派 all_service（延迟 import，避免拖慢 worker 启动）。"""
+    from modelctl.core.all_service import start_profile
+
+    try:
+        got = start_profile(profile, caps, timeout)
+    except Exception as exc:  # RequirementError / 适配器内部异常 / 下载异常
+        return Outcome("error", str(exc))
+    return Outcome(got.status, got.detail)
+
+
+def _default_stopper(profile: Any, caps: Capabilities, models_dir: Path | None) -> Outcome:
+    from modelctl.core.all_service import stop_profile
+
+    try:
+        got = stop_profile(profile, caps, models_dir)
+    except Exception as exc:
+        return Outcome("error", str(exc))
+    return Outcome(got.status, got.detail)
+
+
+def _default_prober(profile: Any) -> dict[str, Any]:
+    """观测单个 profile → {up, alive, port, pid, gpus, name}。
+
+    `up` = 健康检查通（引擎真的能服务）；`alive` = PID 文件里的进程还活着。
+    两者的差集是 DEGRADED 与 FAILED 的分水岭，不可合并成一个布尔。
+    """
+    from modelctl.core.process import is_pid_alive, is_running_any, pid_file
+
+    up = is_running_any(profile.name, profile)
+    pid = None
+    path = pid_file(profile.name)
+    try:
+        pid = int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        pid = None
+    alive = is_pid_alive(pid) if pid else False
+    gpus = [idx for idx, owner in list_gpu_locks().items() if owner == profile.name]
+    return {"up": bool(up), "alive": bool(alive), "port": profile.port,
+            "pid": pid, "gpus": gpus, "name": profile.name}
+
+
+def _usable_overlay(raw: Any) -> dict[str, str]:
+    """中心下发的 env_overlay → 可注入进程环境的白名单子集。
+
+    **整份作废**而不是逐键过滤：一份含 `*_API_KEY` 的 overlay 说明调用方误解了
+    env_overlay 的用途（密钥必须留在 worker 本地 .env），逐键过滤会让运维以为
+    "密钥已生效"却在下发链路里明文传输——这是需要被立刻发现并纠正的用法错误。
+    """
+    from modelctl.core.cluster.goals import ENV_OVERLAY_ALLOWLIST, SECRET_KEY_HINTS
+
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    out: dict[str, str] = {}
+    for key, value in raw.items():
+        k = str(key)
+        if any(hint in k.upper() for hint in SECRET_KEY_HINTS):
+            logger.warning(f"env_overlay 含疑似密钥键 {k}，整份 overlay 已丢弃")
+            return {}
+        if k not in ENV_OVERLAY_ALLOWLIST:
+            logger.warning(f"env_overlay 含非白名单键 {k}，整份 overlay 已丢弃")
+            return {}
+        out[k] = str(value)
+    return out
+
+
+class _OverlayScope:
+    """在 with 块内注入 overlay，退出时**逐键精确复原**（含"原本不存在 → 删除"）。
+
+    不能整体备份/还原 os.environ 快照：起进程期间其他线程（webui 请求处理）也在
+    读写环境，全量还原会吞掉它们的变更。
+    """
+
+    def __init__(self, overlay: dict[str, str]) -> None:
+        self._overlay = overlay
+        self._saved: dict[str, str | None] = {}
+
+    def __enter__(self) -> "_OverlayScope":
+        for key, value in self._overlay.items():
+            self._saved[key] = os.environ.get(key)
+            os.environ[key] = value
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        for key, before in self._saved.items():
+            if before is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = before
+```
+
+再写 `Reconciler` 类（接在 `_OverlayScope` 之后）：
+
+```python
+class Reconciler:
+    """worker 侧单写者状态机。
+
+    `starter/stopper/prober/caps` 全部可注入：起停真进程与 nvidia-smi 探测在 CI 与
+    单测里不可用，而"该不该调"的判断逻辑（本任务的全部价值）必须能被完整测到。
+    """
+
+    def __init__(self, models_dir: Path | None = None, cache_dir: Path | None = None, *,
+                 starter: Callable[..., Outcome] | None = None,
+                 stopper: Callable[..., Outcome] | None = None,
+                 prober: Callable[[Any], dict[str, Any]] | None = None,
+                 caps: Capabilities | None = None) -> None:
+        self._models = Path(models_dir) if models_dir else PROJECT_ROOT / "models"
+        self._cache = Path(cache_dir) if cache_dir else _default_cache_dir()
+        self._starter = starter or _default_starter
+        self._stopper = stopper or _default_stopper
+        self._prober = prober or _default_prober
+        self._caps = caps
+        self._lock = threading.RLock()
+        # goal_id → {sha, intent, stage, reason, error_class, manual, degrade, path,
+        #            engine, profile, port, pid, gpu, at}
+        self._recs: dict[str, dict[str, Any]] = {}
+        self._loaded = False
+        # 投递槽：_incoming 只留最新一份快照（旧的已被更新覆盖，执行它没有意义）
+        self._incoming: list[dict[str, Any]] = []
+        self._pending: list[dict[str, Any]] = []
+        self._results: list[dict[str, Any]] = []
+        self._caps_cache: tuple[float, Capabilities] | None = None
+        #: models/ 里"没有对应 goal"的本地 profile 观测结果（本地手起的模型也要上报）
+        self._local: dict[str, dict[str, Any]] = {}
+
+    # ------------------------------------------------------------------ 状态持久化
+
+    def _state_path(self) -> Path:
+        return self._cache / STATE_FILE
+
+    def _load(self) -> None:
+        """恢复上一进程的手动位与终态。
+
+        不持久化的话，worker 每次重启都会把"运维手动停掉的模型"重新拉起、把
+        "已判定失败的 goal"再撞一次——重启进程不是清除人工决策的理由。
+        """
+        if self._loaded:
+            return
+        self._loaded = True
+        try:
+            data = json.loads(self._state_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        recs = data.get("profiles") if isinstance(data, dict) else None
+        if not isinstance(recs, dict):
+            return
+        for goal_id, rec in recs.items():
+            if isinstance(rec, dict) and rec.get("stage") in VALID_STAGES:
+                self._recs[str(goal_id)] = rec
+
+    def _save(self) -> None:
+        """状态文件是"尽力而为"的加速件，写失败只告警：心跳回流才是权威上报。"""
+        path = self._state_path()
+        tmp = path.with_name(path.name + ".tmp")
+        payload = {"updated_at": time.time(), "profiles": self._recs}
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError as exc:
+            logger.warning(f"集群 reconciler 状态落盘失败（不影响运行）: {exc}")
+
+    # ------------------------------------------------------------------ 投递（无锁）
+
+    def offer_snapshot(self, snapshot: dict[str, Any]) -> None:
+        """Agent 线程投递中心快照。**不得加锁**（见模块头线程模型）。"""
+        if isinstance(snapshot, dict):
+            self._incoming = [snapshot]
+
+    def handle_actions(self, actions: list[dict[str, Any]], *, now: float | None = None) -> None:
+        """校验并受理手动指令，result 帧进 `_results` **唯一出口**（Agent 侧统一
+        `flush_results()` 取走回传；本方法不返回帧，避免同一 ack 被发送两次）。
+
+        "受理"≠"已执行"：detail 明说"下一轮生效"，避免 dashboard/CLI 把 ≤5s 的
+        异步生效窗口谎报成瞬时完成。真正的状态变化由下一拍 `_step` 产生并随心跳回流。
+        未知 action / 本机没有该 goal → ok=False 且**不入队**（否则中心先收到
+        "已拒绝"，worker 却又在下一轮把它当有效指令处理）。
+        """
+        self._load()
+        now = time.time() if now is None else now
+        out: list[dict[str, Any]] = []
+        goals = {str(g.get("goal_id", "")): g for g in sync.read_state(self._cache)["goals"]}
+        for act in actions:
+            action = str(act.get("action", ""))
+            goal_id = str(act.get("goal_id", ""))
+            seq = act.get("seq", 0)
+            if action not in wsproto.VALID_ACTIONS:
+                out.append(wsproto.make_result(seq, False, f"不支持的指令 {action!r}"))
+                continue
+            goal = goals.get(goal_id)
+            if goal is None:
+                out.append(wsproto.make_result(seq, False, f"本机没有目标 {goal_id}"))
+                continue
+            self._pending.append({"seq": seq, "action": action, "goal_id": goal_id,
+                                  "ok_seen": now})
+            name = str(goal.get("profile", goal_id))
+            out.append(wsproto.make_result(seq, True, f"{name} 已受理，下一轮生效"))
+        if out:
+            self._results.extend(out)      # 无锁：list.extend 是原子的
+
+    def flush_results(self) -> list[dict[str, Any]]:
+        """取走并清空待回传的 result 帧（原子换表，Agent 线程可安全调用）。"""
+        out, self._results = self._results, []
+        return out
+
+    # ------------------------------------------------------------------ 快照应用
+
+    def apply_snapshot(self, snapshot: dict[str, Any], *, now: float | None = None) -> sync.SyncResult:
+        """落盘中心快照并让后续拍次看到新 goal（外部直调路径，带锁）。"""
+        now = time.time() if now is None else now
+        with self._lock:
+            return self._apply_locked(snapshot, now)
+
+    def _apply_locked(self, snapshot: dict[str, Any], now: float) -> sync.SyncResult:
+        self._load()
+        out = sync.apply_snapshot(snapshot, models_dir=self._models,
+                                  cache_dir=self._cache,
+                                  force=bool(snapshot.get("force")), now=now)
+        state = sync.read_state(self._cache)
+        present = {str(g["goal_id"]): g for g in state["goals"]}
+        for goal_id in list(self._recs):
+            if goal_id not in present:
+                del self._recs[goal_id]          # goal 已从快照消失 = 记录一并作废
+        for goal_id, goal in present.items():
+            self._ensure_rec(goal_id, goal, now)
+        self._save()
+        return out
+
+    def _drain_snapshot(self, *, now: float) -> None:
+        """循环线程消费投递槽（原子取空后应用，与外部直调互斥）。"""
+        pending, self._incoming = self._incoming, []
+        for snapshot in pending:
+            with self._lock:
+                self._apply_locked(snapshot, now)
+
+    def _ensure_rec(self, goal_id: str, goal: dict[str, Any], now: float) -> None:
+        """goal 内容或 intent 变化 → 整条重置（含清手动位）。
+
+        重置是"中心重新表达了一次意图"的信号：运维改了 YAML 里的端口或把 intent
+        从 stop 改成 start，都意味着此前的人工干预/失败判定不再适用。
+        """
+        sha, intent = str(goal.get("sha", "")), str(goal.get("intent", "start"))
+        rec = self._recs.get(goal_id)
+        if rec is not None and rec.get("sha") == sha and rec.get("intent") == intent:
+            return
+        self._recs[goal_id] = {"sha": sha, "intent": intent, "stage": PENDING_PROFILE_SYNC,
+                               "reason": "", "error_class": "", "manual": "",
+                               "degrade": 0, "engine": str(goal.get("engine", "")),
+                               "profile": str(goal.get("profile", "")),
+                               "path": str(goal.get("path", "")),
+                               "env_overlay": goal.get("env_overlay"),
+                               "port": None, "pid": None, "gpu": [], "at": now}
+
+    def _apply_manual(self, actions: list[dict[str, Any]], *, now: float) -> None:
+        for act in actions:
+            goal_id = str(act.get("goal_id", ""))
+            rec = self._recs.get(goal_id)
+            if rec is None:
+                continue
+            action = str(act.get("action", ""))
+            if action == "retry":
+                rec.update({"stage": PENDING_PROFILE_SYNC, "reason": "", "error_class": "",
+                            "manual": "", "degrade": 0, "at": now})
+            elif action in ("stop", "restart", "start"):
+                rec["manual"] = action
+                rec["at"] = now
+
+    # ------------------------------------------------------------------ 执行
+
+    def _fail(self, rec: dict[str, Any], detail: str, now: float) -> None:
+        rec.update({"stage": FAILED, "reason": detail, "error_class": classify_error(detail),
+                    "degrade": 0, "at": now})
+
+    def _managed_path(self, rec: dict[str, Any]) -> Path | None:
+        """goal → 本地 YAML 路径。
+
+        优先用 sync 落盘时登记的**绝对路径**（那才是真写出来的位置），回退按
+        engine/profile 重算——覆盖"状态文件被删但 YAML 还在"的半损坏场景。
+        """
+        path = str(rec.get("path", ""))
+        if path and Path(path).is_file():
+            return Path(path)
+        engine, profile = str(rec.get("engine", "")), str(rec.get("profile", ""))
+        if not engine or not profile:
+            return None
+        guess = self._models / engine / f"{profile}.yaml"
+        return guess if guess.is_file() else None
+
+    def _observe(self, rec: dict[str, Any]) -> dict[str, Any]:
+        """按**下发文件本身**解析 Profile 再观测（stem↔name 一致性的唯一保证）。"""
+        path = self._managed_path(rec)
+        if path is None:
+            return {}
+        try:
+            prof = load_profile_at(path)
+        except Exception as exc:  # ProfileError / yaml 错误 / 字段非法
+            return {"up": False, "alive": False, "port": None, "pid": None, "gpus": [],
+                    "name": str(rec.get("profile", "")), "profile_error": str(exc)}
+        got = dict(self._prober(prof))
+        got["profile"] = prof
+        return got
+
+    def _step(self, goal_id: str, goal: dict[str, Any], rec: dict[str, Any],
+              caps: Capabilities, now: float) -> None:
+        """单个 goal 的一拍推进。顺序敏感，改动前先读注释。"""
+        # 失败即终态：早退，绝不重复撞同一个错误（本任务规则 2）
+        if rec["stage"] == FAILED:
+            return
+        path = self._managed_path(rec)
+        if path is None:
+            rec.update({"stage": PENDING_PROFILE_SYNC,
+                        "reason": "等待中心下发 profile 文件", "at": now})
+            return
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            rec.update({"stage": PENDING_PROFILE_SYNC,
+                        "reason": "profile 文件不可读，等待重新下发", "at": now})
+            return
+        want = str(rec.get("sha", ""))
+        got = profile_sha(text)
+        if want and got != want:
+            rec.update({"stage": PENDING_PROFILE_SYNC,
+                        "reason": "本地 profile 文件与中心声明不一致（漂移），等待重新下发",
+                        "at": now})
+            return
+
+        # **必须在写 PROFILE_SYNCED 之前**取上一拍：否则"上一拍是否 READY"永远为假，
+        # 健康降级判据彻底失效（每个 READY 的模型都会在第一拍被判成 SYNCED→重新起）。
+        prev = str(rec.get("stage", ""))
+        rec["path"], rec["engine"] = str(path), str(goal.get("engine", rec.get("engine", "")))
+        rec["profile"] = str(goal.get("profile", rec.get("profile", "")))
+        if prev not in (STARTING, READY, DEGRADED):
+            rec["stage"] = PROFILE_SYNCED
+
+        manual = str(rec.get("manual", ""))
+        intent = manual or str(goal.get("intent", "start"))
+
+        # ---- 方向为停：先停，本轮到此为止（restart 是"停完下轮由 intent 拉起"）
+        if intent in ("stop", "restart"):
+            obs = self._observe(rec)
+            if obs.get("up") or obs.get("alive"):
+                prof = obs.get("profile")
+                if prof is None:
+                    self._fail(rec, "profile 解析失败，无法定位进程", now)
+                    return
+                with _OverlayScope(_usable_overlay(goal.get("env_overlay"))):
+                    out = self._stopper(prof, caps, self._models)
+                if out.status == "error":
+                    self._fail(rec, out.detail or "停止失败", now)
+                    return
+                rec.update({"stage": STOPPED, "reason": "", "error_class": "",
+                            "degrade": 0, "pid": None, "gpu": [], "at": now})
+            else:
+                rec.update({"stage": STOPPED, "reason": "", "error_class": "",
+                            "degrade": 0, "at": now})
+            # 手动 stop **不清位**：清了下轮按 intent=start 复活（规则 3）
+            if intent == "restart":
+                rec["manual"] = ""
+            return
+
+        # ---- 方向为起：已在服务 → READY
+        obs = self._observe(rec)
+        if obs.get("up"):
+            rec.update({"stage": READY, "reason": "", "error_class": "", "degrade": 0,
+                        "port": obs.get("port"), "pid": obs.get("pid"),
+                        "gpu": list(obs.get("gpus") or []), "at": now})
+            return
+
+        # ---- 上一拍在服务、这一拍不通：进程没了直接终态，进程还在才计数降级
+        if prev in (READY, DEGRADED):
+            if not obs.get("alive"):
+                self._fail(rec, "进程已退出，健康检查不再可达（health_lost）", now)
+                rec["error_class"] = "health_lost"
+                return
+            degrade = int(rec.get("degrade", 0)) + 1
+            if degrade >= DEGRADE_LIMIT:
+                self._fail(rec, f"连续 {degrade} 次健康检查失败，进程仍在但不可服务", now)
+                rec["error_class"] = "health_lost"
+                return
+            rec.update({"stage": DEGRADED, "degrade": degrade,
+                        "reason": "健康检查连续失败（进程仍在）", "at": now})
+            return
+
+        # ---- 运行时不具备条件：不撞进程，直接终态并说明怎么修
+        ok, reason, cls = runtime_readiness(str(rec.get("engine", "")), _raw_of(text), caps)
+        if not ok:
+            rec.update({"stage": FAILED, "reason": reason, "error_class": cls,
+                        "degrade": 0, "at": now})
+            return
+        rec["stage"] = RUNTIME_OK
+
+        prof = obs.get("profile")
+        if prof is None:
+            try:
+                prof = load_profile_at(path)
+            except Exception as exc:
+                self._fail(rec, f"profile 解析失败：{exc}", now)
+                return
+
+        # **先落 STARTING 再阻塞起进程**：否则 300s 冷启动期间中心只能看到
+        # PROFILE_SYNCED，"指令没到"与"正在启动"在 dashboard 上无法区分。
+        rec.update({"stage": STARTING, "reason": "", "error_class": "", "at": now})
+        self._save()
+        with _OverlayScope(_usable_overlay(goal.get("env_overlay"))):
+            out = self._starter(prof, caps, float(config.start_timeout_s()))
+        if out.status == "error":
+            self._fail(rec, out.detail or "启动失败", now)
+            return
+
+        after = self._observe(rec)
+        if after.get("up"):
+            rec.update({"stage": READY, "port": after.get("port"), "pid": after.get("pid"),
+                        "gpu": list(after.get("gpus") or []), "reason": "",
+                        "error_class": "", "degrade": 0, "at": now})
+        else:
+            # skipped（已在运行）或起完还没过健康检查：保持 STARTING，下一拍再判
+            rec.update({"port": after.get("port"), "pid": after.get("pid"), "at": now})
+
+    def _observe_unmanaged(self, now: float) -> None:
+        """本地存在但**没有 goal** 的 profile：只观测、只上报，绝不代客起停。
+
+        这些是运维在 worker 本机手起的模型。集群接管它们需要 M2 的"收养"流程；
+        M1 若擅自 stop，等于中心悄悄杀掉了不属于它管理的进程。
+        """
+        managed = {str(p) for p in sync.managed_paths(self._cache)}
+        seen: set[str] = set()
+        for stem, path in local_profile_paths(self._models).items():
+            if str(path) in managed:
+                continue
+            seen.add(stem)
+            try:
+                prof = load_profile_at(path)
+            except Exception:
+                continue
+            got = self._prober(prof)
+            stage = READY if got.get("up") else (STOPPED if not got.get("alive") else DEGRADED)
+            self._local.setdefault(stem, {"goal_id": "", "stage": stage,
+                                          "state": _STATE_OF_STAGE[stage], "reason": "",
+                                          "error_class": "", "managed": False,
+                                          "port": got.get("port"), "pid": got.get("pid"),
+                                          "gpu": list(got.get("gpus") or []), "at": now})
+            self._local[stem]["stage"] = stage
+            self._local[stem]["state"] = _STATE_OF_STAGE[stage]
+            self._local[stem]["at"] = now
+        for stem in set(self._local) - seen:
+            del self._local[stem]
+
+    def reconcile_once(self, *, now: float | None = None) -> None:
+        """一拍：应用投递 → 处理指令 → 逐个推进 → 观测本地 → 落盘。"""
+        now = time.time() if now is None else now
+        self._drain_snapshot(now=now)
+        with self._lock:
+            self._load()
+            pending, self._pending = self._pending, []
+            self._apply_manual(pending, now=now)
+            caps = self._capabilities()
+            state = sync.read_state(self._cache)
+            goals = {str(g["goal_id"]): g for g in state["goals"]}
+            for goal_id, goal in goals.items():
+                rec = self._recs.get(goal_id)
+                if rec is None:
+                    self._ensure_rec(goal_id, goal, now)
+                    rec = self._recs[goal_id]
+                try:
+                    self._step(goal_id, goal, rec, caps, now)
+                except Exception as exc:  # 单个 goal 的异常不得中断整轮调度
+                    logger.exception(f"reconcile {goal_id} 异常")
+                    self._fail(rec, f"内部异常：{exc}", now)
+            self._observe_unmanaged(now)
+            self._save()
+
+    # ------------------------------------------------------------------ 上报
+
+    def _capabilities(self) -> Capabilities:
+        if self._caps is not None:
+            return self._caps
+        now = time.time()
+        hit = self._caps_cache
+        if hit and now - hit[0] < _CAPS_TTL_S:
+            return hit[1]
+        got = probe()
+        self._caps_cache = (now, got)
+        return got
+
+    def _capacity(self, caps: Capabilities) -> dict[str, Any]:
+        return {"gpu_count": caps.gpu_count, "vram_total_mb": all_vram_total_mb(caps),
+                "vram_free_mb": free_vram_total_mb(caps)}
+
+    def _runtimes(self, caps: Capabilities) -> dict[str, dict[str, Any]]:
+        """遍历**全部** KNOWN_ENGINES：只报"装过的"会让中心无法区分"没装"与"没探测"，
+        于是 gate 会把不可用的引擎放行到这台节点上。"""
+        out: dict[str, dict[str, Any]] = {}
+        for engine in sorted(KNOWN_ENGINES):
+            ok = has_env(engine) if engine in MANAGED_ENGINES else bool(caps.binaries.get(engine))
+            out[engine] = {"ok": bool(ok)}
+        return out
+
+    def _collect(self) -> dict[str, Any]:
+        """每拍重建快照（不缓存上一轮），保证 STARTING/DEGRADED 实时可见。"""
+        self._load()
+        state = sync.read_state(self._cache)
+        caps = self._capabilities()
+        drift = sync.scan_drift(self._cache, self._models)
+        profiles: dict[str, dict[str, Any]] = {}
+        stems: list[str] = []
+        for stem in local_profile_paths(self._models):
+            stems.append(stem)
+        for goal in state["goals"]:
+            goal_id = str(goal["goal_id"])
+            name = str(goal.get("profile", ""))
+            rec = self._recs.get(goal_id)
+            if rec is None:
+                # 本进程尚未跑过这一条（worker 刚重启）：用磁盘 sha 推导最小可用 stage
+                path = Path(str(goal.get("path", "")))
+                synced = bool(goal.get("sha")) and profile_sha_safe(path) == str(goal["sha"])
+                stage = PROFILE_SYNCED if synced else PENDING_PROFILE_SYNC
+                port, pid, gpu = None, None, []
+            else:
+                stage = str(rec.get("stage", PENDING_PROFILE_SYNC))
+                port, pid, gpu = rec.get("port"), rec.get("pid"), list(rec.get("gpu") or [])
+            entry = {"goal_id": goal_id, "stage": stage,
+                     "state": _STATE_OF_STAGE.get(stage, "pending"),
+                     "reason": str((rec or {}).get("reason", "")),
+                     "error_class": str((rec or {}).get("error_class", "")),
+                     "managed": True, "port": port, "pid": pid, "gpu": gpu,
+                     "at": (rec or {}).get("at")}
+            # setdefault：有 goal 的条目**不被本地同名观测覆盖**（goal 侧信息更全）
+            profiles.setdefault(name, entry)
+        for name, entry in self._local.items():
+            profiles.setdefault(name, dict(entry))
+        return {"revision": state["revision"], "profiles": profiles, "drift": drift,
+                "local_profiles": sorted(set(stems)), "capacity": self._capacity(caps),
+                "runtimes": self._runtimes(caps)}
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return self._collect()
+
+    def heartbeat_payload(self) -> dict[str, Any]:
+        """心跳扩展段（Task 2 的六个键）。缺失段由 Agent 侧决定"整段省略"。"""
+        got = self.snapshot()
+        return {"profiles": got["profiles"], "goal_sync": {"revision": got["revision"]},
+                "drift": got["drift"], "local_profiles": got["local_profiles"],
+                "capacity": got["capacity"], "runtimes": got["runtimes"]}
+
+    # ------------------------------------------------------------------ 循环
+
+    def run(self, stop_event: threading.Event) -> None:
+        """后台循环。reconcile 周期与心跳周期**刻意不同步**：本地收敛不该等心跳，
+        心跳也不该被本地收敛拖慢（两条时间线各自独立自愈）。"""
+        interval = config.reconcile_interval_s()
+        logger.info(f"集群 reconciler 启动（周期 {interval}s，模型目录 {self._models}）")
+        while not stop_event.is_set():
+            try:
+                self.reconcile_once()
+            except Exception:
+                logger.exception("集群 reconciler 单轮异常（已忽略，继续下一轮）")
+            stop_event.wait(interval)
+        logger.info("集群 reconciler 已停止")
+
+
+# --------------------------------------------------------------------------- 进程内单例
+
+_CURRENT: Reconciler | None = None
+_CURRENT_LOCK = threading.Lock()
+_STOP: threading.Event | None = None
+
+
+def current() -> Reconciler | None:
+    return _CURRENT
+
+
+def start_reconciler_in_background() -> Reconciler | None:
+    """按角色闸门启动。
+
+    **刻意不看 `center_url`**：中心宕机或未配置时，worker 仍必须按**最后已知的
+    goal** 维持推理服务（spec §8.1：中心故障不得影响已下发的推理）。若在此处
+    要求 center_url，一次中心重启就会让全部 worker 忘记该跑什么模型。
+    """
+    global _CURRENT, _STOP
+    with _CURRENT_LOCK:
+        if _CURRENT is not None:
+            return _CURRENT
+        if not config.is_worker():
+            return None
+        rt = Reconciler()
+        stop = threading.Event()
+        thread = threading.Thread(target=rt.run, args=(stop,),
+                                  name="cluster-reconcile", daemon=True)
+        _CURRENT, _STOP = rt, stop
+        thread.start()
+        return rt
+
+
+def _stop_event() -> threading.Event | None:
+    """测试/优雅退出用。"""
+    return _STOP
+```
+
+- [ ] **Step 4b: 修正 Task 8 的 `apply_snapshot` 以支持 `force`**
+
+Task 11 的"中心强制重下发"需要打破同 revision 短路，参数在此一次性加好（默认 `False`，
+Task 8 既有 22 条测试不受影响）。把 `sync.apply_snapshot` 签名与短路分支改为：
+
+```python
+def apply_snapshot(snapshot: dict[str, Any], *, models_dir: Path, cache_dir: Path,
+                   now: float, force: bool = False) -> SyncResult:
+    """把中心快照落盘。同 revision 直接短路（幂等 + 省 IO）；`force=True` 打破短路。
+
+    `force` 供中心 `POST /nodes/{id}/sync` 使用：本地文件被人为改坏时，revision
+    并未变化，若不强制就会**永远修不好**（漂移被短路跳过，只上报不修复）。
+    """
+    ...
+    if revision and not force and state["revision"] == revision:
+        result.skipped = [str(g["goal_id"]) for g in goals]
+        result.drift = scan_drift(cache_dir, models_dir)
+        return result
+```
+
+并在 `tests/test_cluster_sync_writer.py` 追加 2 条：
+
+```python
+def test_force_breaks_revision_short_circuit(dirs):
+    models, cache = dirs
+    g = _goal()
+    apply_snapshot({"revision": "r1", "goals": [g]}, models_dir=models, cache_dir=cache, now=1.0)
+    (models / "vllm" / "qwen.yaml").write_text("port: 9999\n", encoding="utf-8")
+    same = apply_snapshot({"revision": "r1", "goals": [g]}, models_dir=models, cache_dir=cache, now=2.0)
+    assert same.written == [] and same.drift == [g["goal_id"]]      # 默认：只报不修
+    forced = apply_snapshot({"revision": "r1", "goals": [g]}, models_dir=models,
+                            cache_dir=cache, now=3.0, force=True)
+    assert forced.written == [g["goal_id"]] and forced.drift == []  # 强制：重写并修好
+
+
+def test_reconcile_forwards_force_flag_from_snapshot(dirs):
+    """reconcile 侧只透传：快照里带 force 就强制（避免两处各写一套判断）。"""
+```
+
+（第二条已在 Step 1 的 `test_drift_reported_once_repaired_by_resync` 覆盖，此处仅登记意图。）
+
+- [ ] **Step 5: 运行确认通过**
+
+Run: `uv run pytest tests/test_cluster_reconcile.py -q`
+Expected: PASS（31 条）
+
+Run: `uv run pytest tests/ -q -k "cluster"`
+Expected: PASS（Task 1–9 全部 cluster 用例；`runtimes` 键变更不影响 Task 4/7 已有断言，若失败先检查 `_runtimes` 是否遍历了全量 `KNOWN_ENGINES`）
+
+Run: `uv run ruff check src/modelctl/core/cluster/reconcile.py src/modelctl/core/cluster/config.py src/modelctl/core/profile.py tests/test_cluster_reconcile.py; uv run mypy src/modelctl/core/cluster/reconcile.py`
+Expected: 全部通过（reconcile 里 `Any` 密集，`_observe` 返回 dict 时混入 `profile` 对象——保持 `dict[str, Any]` 注解，勿收窄）
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add src/modelctl/core/cluster/reconcile.py src/modelctl/core/cluster/config.py src/modelctl/core/profile.py src/modelctl/core/cluster/sync.py tests/test_cluster_reconcile.py tests/test_cluster_sync_writer.py
+git commit -m "feat(cluster): worker 侧 reconciler（8 态 stage + 错误分类 + 心跳快照）"
+```
+
+<!-- MORE9 -->
+
 
 
 
