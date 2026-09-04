@@ -42,6 +42,8 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
+# 仓库标准文件头（CLAUDE.md 规范）逐字包含 coding 行；Python 3 默认 UTF-8，该行冗余但保留
+ignore = ["UP009"]
 
 [tool.mypy]
 python_version = "3.12"
