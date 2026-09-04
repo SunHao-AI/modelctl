@@ -44,6 +44,9 @@ def isolated_runtime_dirs(tmp_path, monkeypatch):
     # USAGE_DATA_DIR：stats 与网关的 token 累计目录（默认 data/usage-data），不隔离会把
     # 测试累计写进仓库 data/，且跨用例污染费率/预算断言。
     monkeypatch.setenv("USAGE_DATA_DIR", str(tmp_path / "usage-data"))
+    # HF_ENDPOINT delenv：unsloth build_command 会真实注入该值到子进程 env（见 engines/unsloth.py），
+    # 开发者 .env 里的镜像地址泄漏会让"未配置 HF_ENDPOINT"的用例断言到意外的 env 键。
+    monkeypatch.delenv("HF_ENDPOINT", raising=False)
     monkeypatch.delenv("GATEWAY_DEFAULT_MODEL", raising=False)
     monkeypatch.delenv("GATEWAY_CONTEXT_SWITCH", raising=False)
     # CLUSTER_* delenv：同 GATEWAY_* 口径——开发者 .env 里的 CLUSTER_ROLE 等经 load_env()

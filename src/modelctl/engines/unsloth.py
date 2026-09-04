@@ -155,7 +155,9 @@ class UnslothAdapter(EngineAdapter):
         # 不传 --api-key：run 自管认证，key 自动生成后打印到启动日志。
         if cfg.get("extra_args"):
             cmd += shlex.split(str(cfg["extra_args"]))
-        env = {"HF_HOME": os.environ["HF_HOME"]} if os.environ.get("HF_HOME") else {}
+        # HF_HOME / HF_ENDPOINT 非空才注入：前者是权重缓存根，后者是 HF 镜像端点——
+        # pre_start 的报错文案建议"配 HF_ENDPOINT 后从 HF 手动下载"，此处注入才让它真生效。
+        env = {k: v for k in ("HF_HOME", "HF_ENDPOINT") if (v := os.environ.get(k))}
         gpus = self.selected_gpus()
         if gpus:
             env.update(self.cuda_visible_devices(gpus))
