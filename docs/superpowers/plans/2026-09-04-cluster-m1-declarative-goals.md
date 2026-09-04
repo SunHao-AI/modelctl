@@ -4901,9 +4901,10 @@ git commit -m "feat(cluster): Agent 接线 reconciler（ack 投递 + 心跳扩�
 
 **Files:**
 - Modify: `src/modelctl/core/webui/admin_cluster.py`（新增 8 个端点 + `_fmt_ts`/`_goal_views`/`_goals` 辅助 + WS 循环世代表与 `result` 分支）
-- Modify: `src/modelctl/core/cluster/nodes.py`（`mark_force_sync` / `_consume_force_sync` + sync 捎带条件）
+- Modify: `src/modelctl/core/cluster/nodes.py`（`mark_force_sync` / `_consume_force_sync` + sync 捎带条件 + `node_view` 增 `capacity_text`）
 - Modify: `src/modelctl/core/cluster/wsproto.py`（`parse_result`）
 - Modify: `tests/test_cluster_wsproto_v2.py`（追加 3 条 `parse_result` 用例）
+- Modify: `web/src/api/cluster.ts` + `web/src/views/ClusterNodesView.vue`（capacity 列，Global Constraints 之 M1 前端最小增量）
 - Test: `tests/test_cluster_goals_http.py`
 
 **Interfaces:**
@@ -5247,6 +5248,23 @@ def test_model_verb_requires_existing_goal_404(center) -> None:
 
 
 # ---------------- 单节点详情 / 导出 / 闸门 ----------------
+def test_nodes_list_exposes_capacity_text(center) -> None:
+    """Global Constraints：capacity 由后端格式化成展示串，前端/CLI 不二次加工。"""
+    body = center.get("/admin/api/cluster/nodes", headers=_h()).json()
+    w1 = [n for n in body["nodes"] if n["node_id"] == "w-1"][0]
+    assert w1["capacity_text"] == "4 卡 / 154 GiB"     # 157280 MiB → 153.6 → 四舍五入 154
+
+
+def test_capacity_text_dash_when_missing(center) -> None:
+    reg = ac.get_registry()
+    # 传 {} 才是"清空"——capacity=None 是"不覆盖"（Task 1 的合并语义），w-2 夹具已带容量
+    reg.store.update_node_capacity("w-2", capacity={}, runtimes=None,
+                                   local_profiles=None, now=time.time())
+    body = center.get("/admin/api/cluster/nodes", headers=_h()).json()
+    w2 = [n for n in body["nodes"] if n["node_id"] == "w-2"][0]
+    assert w2["capacity_text"] == "-"
+
+
 def test_node_detail_groups_goals_and_states(center) -> None:
     _create(center)
     r = center.get("/admin/api/cluster/nodes/w-1", headers=_h())
@@ -5415,6 +5433,30 @@ def parse_result(data: Any) -> dict[str, Any]:
         self._force_sync.discard(node_id)
         return True
 ```
+
+**capacity 展示串（Global Constraints：后端格式化，前端/CLI 不二次加工）**。`nodes.py` 顶部加模块级纯函数（无第三方依赖），并在 `node_view` 里挂一个派生键。之所以格式化放后端：CLAUDE.md 规定"后端已格式化的字段前端直接展示"，且 CLI `cluster nodes` 若将来要用同一串也只读一处。
+
+```python
+def capacity_text(capacity: dict | None) -> str:
+    """把心跳上报的容量映射格式化为"4 卡 / 154 GiB"。缺任一字段一律 "-"。
+
+    vram_total_mb → GiB 四舍五入取整（展示用，精确值仍在 capacity 原始字段里）。
+    """
+    if not isinstance(capacity, dict):
+        return "-"
+    gpus, vram = capacity.get("gpu_count"), capacity.get("vram_total_mb")
+    if not isinstance(gpus, int) or not isinstance(vram, int) or gpus <= 0 or vram <= 0:
+        return "-"
+    return f"{gpus} 卡 / {round(vram / 1024)} GiB"
+```
+
+`node_view` 在 `view["lease_left_s"] = ...` 之后、`return view` 之前追加一行：
+
+```python
+        view["capacity_text"] = capacity_text(node.get("capacity"))
+```
+
+（`capacity` 原始 dict 仍随 `node_view` 下发——`node_view` 只剔 `node_token`。CLI/详情视图要用精确值时读 `capacity`，表格展示读 `capacity_text`。157280 MiB → round(153.59) → `154 GiB`。）
 
 ### 3c. `src/modelctl/core/cluster/goals.py`（`remove_goals` 之后追加）
 
@@ -5855,6 +5897,27 @@ async def ws_cluster(ws: WebSocket):
             _CONNS.release(node_id, epoch)   # 只摘自己的 epoch，绝不误杀新连接
 ```
 
+- [ ] **Step 4b: 前端 capacity 列**（Global Constraints 之 M1 前端最小增量，纯展示）
+
+`web/src/api/cluster.ts` 的 `NodeView` 接口在 `lease_left_s` 之后补两行：
+
+```ts
+  capacity: Record<string, number> | null;
+  capacity_text: string;
+```
+
+`web/src/views/ClusterNodesView.vue` 三处：表头「角色」与「状态」之间插一列、数据行对应插一格、空表 `colspan` 7 → 8：
+
+```html
+          <th class="py-2 pr-4">容量</th>
+```
+
+```html
+          <td class="py-2 pr-4 text-slate-400">{{ n.capacity_text }}</td>
+```
+
+（`capacity_text` 由后端格式化，前端直接插值——不做 `Math.round`、不拼 "GiB"，与项目"后端已格式化字段前端不二次加工"规范一致。无测试框架的前端改动，靠 `vue-tsc` 保证类型闭合。）
+
 - [ ] **Step 5: 运行确认通过**
 
 Run: `uv run pytest tests/test_cluster_goals_http.py tests/test_cluster_wsproto_v2.py -q`
@@ -5866,8 +5929,8 @@ Expected: PASS（Task 1–11）。M0 的 `tests/test_cluster_http.py` 必须**�
 - [ ] **Step 6: 提交**
 
 ```bash
-git add src/modelctl/core/webui/admin_cluster.py src/modelctl/core/cluster/nodes.py src/modelctl/core/cluster/goals.py src/modelctl/core/cluster/wsproto.py tests/test_cluster_goals_http.py tests/test_cluster_wsproto_v2.py
-git commit -m "feat(cluster): goal 控制面 REST + 强制 sync + WS 世代表与指令回执落账"
+git add src/modelctl/core/webui/admin_cluster.py src/modelctl/core/cluster/nodes.py src/modelctl/core/cluster/goals.py src/modelctl/core/cluster/wsproto.py tests/test_cluster_goals_http.py tests/test_cluster_wsproto_v2.py web/src/api/cluster.ts web/src/views/ClusterNodesView.vue
+git commit -m "feat(cluster): goal 控制面 REST + 强制 sync + WS 世代表与指令回执落账 + 节点容量列"
 ```
 
 ---
