@@ -4891,8 +4891,990 @@ git add src/modelctl/core/cluster/agent.py src/modelctl/core/webui/server.py tes
 git commit -m "feat(cluster): Agent 接线 reconciler（ack 投递 + 心跳扩展段 + result 回传）"
 ```
 
-<!-- MORE10 -->
+### Task 11: `admin_cluster.py` v2——goal REST + 强制同步 + WS 世代表/result 落账
 
+把前面 10 个任务的能力暴露成控制面：goal CRUD（过 gate）、失败重试、强制全量 sync、远程启停、全量导出；同时把 WS 循环补完——接入 Task 6 的世代表（同 node_id 后来者胜）并落账 worker 回传的 `result` 帧。
+
+三条贯穿本任务的原则：
+
+1. **端点是薄层，判定全在 core**。REST 只做「消毒入参 → 调 `GoalService`/`NodeRegistry` → 消毒出参」。gate、revision、白名单、状态机全在 core 层，CLI（Task 12）走同一批端点，两套入口不可能出现行为分叉。
+2. **投递交给心跳，端点绝不直连 worker**。POST 类端点只写台账/入队/打标记，返回「已受理」。任何"返回时已生效"的暗示都是谎报——worker 最长 `CLUSTER_HEARTBEAT_INTERVAL_S` 后才动作。retry 尤其如此：中心**不**乐观改写 stage，否则节点离线时 dashboard 会显示一个假的 `PENDING_PROFILE_SYNC`。
+3. **不新增反向通道**。spec §6.5 里的 `GET /nodes/{id}/log` 与 `GET /cluster/audit` 需要中心主动拉 worker，与本里程碑「worker 只出站」的既定立场冲突（§8.3、计划头部偏离说明），故本任务不做，留给 M2 的 `audit.query` 反向请求帧。
+
+**Files:**
+- Modify: `src/modelctl/core/webui/admin_cluster.py`（新增 8 个端点 + `_fmt_ts`/`_goal_views`/`_goals` 辅助 + WS 循环世代表与 `result` 分支）
+- Modify: `src/modelctl/core/cluster/nodes.py`（`mark_force_sync` / `_consume_force_sync` + sync 捎带条件）
+- Modify: `src/modelctl/core/cluster/wsproto.py`（`parse_result`）
+- Modify: `tests/test_cluster_wsproto_v2.py`（追加 3 条 `parse_result` 用例）
+- Test: `tests/test_cluster_goals_http.py`
+
+**Interfaces:**
+- Consumes: `NodeRegistry`（T7：`handle_heartbeat` 返回 ack dict、`push_action`、`store`）、`GoalService`（T5：`set_goals`/`remove_goals`/`snapshot_for`）、`gate.NodeVerdict`（T4）、`conns.ConnectionRegistry`（T6）、`wsproto.parse_heartbeat_v2` / `make_error` / `dumps`（T2）
+- Produces（REST，全部 `/admin/api` 前缀、过 `require_auth`、非中心角色 404）：
+  - `GET  /cluster/goals?node_id=&profile=` → `{"goals": [GoalView]}`
+  - `POST /cluster/goals`（`_GoalCreateBody`）→ `{"created","skipped","errors","report","reason","goals"}`；仅 `reason` 非空（入参非法/profile 源不可用）→ 400
+  - `PUT  /cluster/goals/{goal_id}`（`_GoalUpdateBody`，`exclude_unset` 语义）→ `{"goal": GoalView}`
+  - `DELETE /cluster/goals/{goal_id}` → `{"removed": [...], "missing": [...]}`
+  - `POST /cluster/goals/{goal_id}/retry` → `{"queued": bool}`
+  - `POST /cluster/nodes/{node_id}/sync` → `{"queued": true}`（下一枚 ack 无条件带 `sync.force=true`）
+  - `POST /cluster/nodes/{node_id}/model/{profile}/{verb}`，`verb ∈ start|stop|restart` → `{"queued": bool}`
+  - `GET  /cluster/nodes/{node_id}` → `{"node", "goals", "model_states"}`
+  - `GET  /cluster/export` → `{"exported_at", "role", "nodes", "goals", "model_states"}`
+- Produces（`NodeRegistry` 扩展）：`mark_force_sync(node_id) -> None`、私有 `_consume_force_sync(node_id) -> bool`、`__init__` 增 `self._force_sync: set[str]`
+- Produces（wsproto）：`parse_result(data) -> {"seq": int, "ok": bool, "detail": str}`
+- Produces（模块级）：`admin_cluster._CONNS: ConnectionRegistry`（测试直接换实例复位）
+
+`GoalView`（spec §7.5 的 goal 视图表，REST 是唯一投影点，CLI/dashboard 共用）：
+`{"goal_id","node_id","profile","engine","intent","stage","reason","error_class","target_role","profile_version","state","gpu","port","age_s","created_at","updated_at"}`
+——`created_at/updated_at` 在此格式化为 `YYYY-MM-DD HH:mm:ss`（项目规范），`age_s` 保留数值给排序，**不含 `profile_yaml`**（列表载荷不背整份 YAML，导出才给）。
+
+- [ ] **Step 1: 写失败测试** — 创建 `tests/test_cluster_goals_http.py`
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : tests/test_cluster_goals_http.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/9/4 10:00
+# @Desc   : goal REST（创建/更新/删除/retry/强制同步/远程启停/导出）+ WS 世代表与 result 落账
+# ===============================================================================
+"""admin_cluster v2：goal 控制面端点与 WS 世代仲裁。
+
+端点断言只盯两件事：① 台账/快照的真实变化（不信任响应体自述）；
+② ack 里真正出现了应有的 sync/action（递交确实发生）。
+"""
+from __future__ import annotations
+
+import re
+import time
+
+import pytest
+
+pytest.importorskip("fastapi")
+pytest.importorskip("websockets")
+from fastapi.testclient import TestClient  # noqa: E402
+
+from modelctl.core.cluster import conns  # noqa: E402
+from modelctl.core.gateway import create_app  # noqa: E402
+
+KEY = "test_key_12345"
+YAML = "port: 8101\napi_key: ${API_KEY}\nengine_config:\n  tensor_parallel_size: 2\n"
+GOALS = "/admin/api/cluster/goals"
+
+
+def _h():
+    return {"Authorization": f"Bearer {KEY}"}
+
+
+@pytest.fixture()
+def center(monkeypatch, tmp_path):
+    """中心角色 + 在线节点 w-1（4 卡 / vllm 可用 / 已有 qwen profile 文件）。"""
+    monkeypatch.setenv("API_KEY", KEY)
+    monkeypatch.setenv("CLUSTER_ROLE", "both")
+    models = tmp_path / "models"
+    (models / "vllm").mkdir(parents=True)
+    (models / "vllm" / "qwen.yaml").write_text(YAML, encoding="utf-8")
+    monkeypatch.setattr("modelctl.core.cluster.goals.MODELS_DIR", models)
+
+    import modelctl.core.webui.admin_cluster as ac
+
+    ac._REGISTRY = None
+    ac._CONNS = conns.ConnectionRegistry()
+    app = create_app(admin=True)
+    with TestClient(app) as c:
+        reg = ac.get_registry()
+        reg.store.upsert_node(node_id="w-1", node_token="NT-1", lan_id="lan-1", role="worker",
+                              host_ip="", hostname="", engines=None, now=time.time())
+        reg.store.upsert_node(node_id="w-2", node_token="NT-2", lan_id="lan-2", role="worker",
+                              host_ip="", hostname="", engines=None, now=time.time())
+        reg.store.update_node_capacity(
+            "w-1", capacity={"gpu_count": 4, "vram_total_mb": 157280},
+            runtimes={"vllm": {"ok": True}}, local_profiles=["qwen"], now=time.time())
+        reg.store.update_node_capacity(
+            "w-2", capacity={"gpu_count": 4, "vram_total_mb": 157280},
+            runtimes={"vllm": {"ok": True}}, local_profiles=[], now=time.time())
+        yield c
+    ac._REGISTRY = None
+    ac._CONNS = conns.ConnectionRegistry()
+
+
+def _create(client, **over):
+    body = {"profile": "qwen", "node_ids": ["w-1"], "create": True}
+    body.update(over)
+    return client.post(GOALS, json=body, headers=_h())
+
+
+def _heartbeat(ws, **payload):
+    body = {"profiles": {}}
+    body.update(payload)      # 不用 dict({"profiles": {}}, **payload)：键冲突时行为不明确
+    ws.send_json({"t": "heartbeat", "payload": body})
+    return ws.receive_json()
+
+
+# ---------------- 列表 / 创建 ----------------
+def test_goals_list_empty(center) -> None:
+    assert center.get(GOALS, headers=_h()).json()["goals"] == []
+
+
+def test_create_goal_reports_gate_and_writes_ledger(center) -> None:
+    r = _create(center)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["created"] == 1 and body["reason"] == ""
+    assert "w-1" in body["report"]
+    assert [g["goal_id"] for g in center.get(GOALS, headers=_h()).json()["goals"]] == ["qwen@@w-1"]
+
+
+def test_create_goal_missing_profile_422(center) -> None:
+    assert center.post(GOALS, json={"node_ids": ["w-1"]}, headers=_h()).status_code == 422
+
+
+def test_create_goal_unknown_node_400(center) -> None:
+    r = _create(center, node_ids=["ghost"])
+    assert r.status_code == 400 and "节点" in r.json()["detail"]
+
+
+def test_create_goal_bad_intent_400(center) -> None:
+    assert _create(center, intent="reboot").status_code == 400
+
+
+def test_create_goal_duplicate_gpus_400(center) -> None:
+    """重复卡位是典型误操作：`0,0` 会被 gate 当成 1 卡需求，静默接受比报错更危险。"""
+    assert _create(center, gpus="0,0").status_code == 400
+
+
+def test_create_goal_gpus_land_in_params_and_placement(center) -> None:
+    import modelctl.core.webui.admin_cluster as ac
+
+    _create(center, gpus="2,3")
+    goal = ac.get_registry().store.get_goal("qwen@@w-1")
+    assert goal["params"]["gpu_list"] == [2, 3] and goal["placement"]["gpu_count"] == 2
+
+
+def test_create_goal_bad_target_role_400(center) -> None:
+    assert _create(center, target_role="standby").status_code == 400
+
+
+def test_create_goal_secret_overlay_400(center) -> None:
+    r = _create(center, env_overlay={"API_KEY": "sk-leak"})
+    assert r.status_code == 400 and "凭据" in r.json()["detail"]
+
+
+def test_create_goal_dry_run_writes_nothing(center) -> None:
+    body = _create(center, dry_run=True).json()
+    assert body["created"] == 1 and "[dry-run]" in body["report"]
+    assert center.get(GOALS, headers=_h()).json()["goals"] == []
+
+
+def test_create_goal_all_nodes_creates_every_candidate(center) -> None:
+    """create=True 时 w-2 本机没有 qwen 文件也算 ok（快照下发后由 worker 写盘）。"""
+    body = _create(center, node_ids=None, all_nodes=True, create=True).json()
+    assert body["created"] == 2
+    assert len(center.get(GOALS, headers=_h()).json()["goals"]) == 2
+
+
+def test_create_goal_all_nodes_without_create_skips_missing_profile(center) -> None:
+    """未加 create：w-1 已有文件 → ok；w-2 无文件 → 逐节点 skip（不是整体失败）。"""
+    body = _create(center, node_ids=None, all_nodes=True, create=False).json()
+    assert body["created"] == 1 and body["skipped"] == 1
+    assert [g["node_id"] for g in center.get(GOALS, headers=_h()).json()["goals"]] == ["w-1"]
+
+
+def test_create_goal_offline_node_is_skipped_not_created(center) -> None:
+    import modelctl.core.webui.admin_cluster as ac
+
+    ac.get_registry().store.set_node_status("w-1", "offline")
+    body = _create(center).json()
+    assert body["created"] == 0 and body["skipped"] == 1
+
+
+def test_list_goals_filters_by_node_and_profile(center) -> None:
+    _create(center, node_ids=None, all_nodes=True)
+    assert len(center.get(f"{GOALS}?node_id=w-1", headers=_h()).json()["goals"]) == 1
+    assert center.get(f"{GOALS}?profile=nope", headers=_h()).json()["goals"] == []
+
+
+# ---------------- 视图形状 ----------------
+def test_goal_view_exposes_stage_and_runtime_facts(center) -> None:
+    _create(center)
+    jt = _jt(center)
+    with center.websocket_connect("/admin/api/ws/cluster") as ws:
+        ws.send_json({"t": "hello", "v": 2, "node_id": "w-1", "lan": "lan-1",
+                      "key": jt, "meta": {}})
+        assert ws.receive_json()["t"] == "welcome"
+        _heartbeat(ws, profiles={"qwen": {"stage": "READY", "state": "READY",
+                                          "port": 8101, "gpu": [0, 1], "pid": 4321}})
+    # WS 关闭后再查台账：回流已落库，视图不依赖长连接存活
+    goal = center.get(GOALS, headers=_h()).json()["goals"][0]
+    assert goal["stage"] == "READY" and goal["port"] == 8101 and goal["gpu"] == [0, 1]
+    assert "profile_yaml" not in goal
+
+
+def test_goal_view_times_are_project_format(center) -> None:
+    _create(center)
+    goal = center.get(GOALS, headers=_h()).json()["goals"][0]
+    pattern = r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$"
+    assert re.match(pattern, goal["created_at"]) and re.match(pattern, goal["updated_at"])
+    assert goal["age_s"] >= 0
+
+
+# ---------------- 更新 ----------------
+def test_update_goal_params_bumps_snapshot_revision(center) -> None:
+    import modelctl.core.webui.admin_cluster as ac
+
+    _create(center)
+    before = ac.get_registry().goals.snapshot_for("w-1")["revision"]
+    r = center.put(f"{GOALS}/qwen@@w-1", json={"params": {"gpu_list": [2, 3]}}, headers=_h())
+    assert r.status_code == 200 and r.json()["goal"]["goal_id"] == "qwen@@w-1"
+    assert ac.get_registry().goals.snapshot_for("w-1")["revision"] != before
+
+
+def test_update_goal_intent_persists(center) -> None:
+    _create(center)
+    center.put(f"{GOALS}/qwen@@w-1", json={"intent": "stop"}, headers=_h())
+    assert center.get(GOALS, headers=_h()).json()["goals"][0]["intent"] == "stop"
+
+
+def test_update_goal_empty_body_400(center) -> None:
+    _create(center)
+    assert center.put(f"{GOALS}/qwen@@w-1", json={}, headers=_h()).status_code == 400
+
+
+def test_update_goal_bad_env_overlay_400(center) -> None:
+    _create(center)
+    r = center.put(f"{GOALS}/qwen@@w-1", json={"env_overlay": {"NOPPE": "1"}}, headers=_h())
+    assert r.status_code == 400
+
+
+def test_update_goal_missing_404(center) -> None:
+    r = center.put(f"{GOALS}/ghost@@w-1", json={"intent": "stop"}, headers=_h())
+    assert r.status_code == 404
+
+
+# ---------------- 删除 ----------------
+def test_delete_goal_disappears_from_snapshot(center) -> None:
+    import modelctl.core.webui.admin_cluster as ac
+
+    _create(center)
+    r = center.delete(f"{GOALS}/qwen@@w-1", headers=_h())
+    assert r.status_code == 200 and r.json()["removed"] == ["qwen@@w-1"]
+    assert ac.get_registry().goals.snapshot_for("w-1")["goals"] == []
+
+
+def test_delete_goal_missing_404(center) -> None:
+    assert center.delete(f"{GOALS}/qwen@@ghost", headers=_h()).status_code == 404
+
+
+# ---------------- retry / 强制同步 / 远程启停 ----------------
+def test_retry_goal_queues_action_for_next_ack(center) -> None:
+    _create(center)
+    rev = center_revision(center, "w-1")      # 先取 revision：WS 上下文内不再发 HTTP 请求
+    r = center.post(f"{GOALS}/qwen@@w-1/retry", headers=_h())
+    assert r.status_code == 200 and r.json()["queued"] is True
+    jt = _jt(center)
+    with center.websocket_connect("/admin/api/ws/cluster") as ws:
+        ws.send_json({"t": "hello", "v": 2, "node_id": "w-1", "lan": "", "key": jt,
+                      "meta": {}})
+        ws.receive_json()
+        ack = _heartbeat(ws, goal_sync={"revision": rev})
+    assert ack["actions"][0]["action"] == "retry"
+    assert ack["actions"][0]["goal_id"] == "qwen@@w-1"
+
+
+def test_retry_goal_keeps_reported_stage_untouched(center) -> None:
+    """中心绝不乐观改写 stage：节点离线时假 PENDING 比真 FAILED 更有害。"""
+    import modelctl.core.webui.admin_cluster as ac
+
+    _create(center)
+    ac.get_registry().goals.mark_stage("qwen@@w-1", "FAILED", error_class="oom", now=time.time())
+    center.post(f"{GOALS}/qwen@@w-1/retry", headers=_h())
+    assert ac.get_registry().store.get_goal("qwen@@w-1")["stage"] == "FAILED"
+
+
+def test_retry_unknown_goal_404(center) -> None:
+    assert center.post(f"{GOALS}/ghost@@w-1/retry", headers=_h()).status_code == 404
+
+
+def test_force_sync_makes_ack_carry_snapshot(center) -> None:
+    _create(center)
+    rev = center_revision(center, "w-1")
+    jt = _jt(center)
+    assert center.post("/admin/api/cluster/nodes/w-1/sync", headers=_h()).status_code == 200
+    with center.websocket_connect("/admin/api/ws/cluster") as ws:
+        ws.send_json({"t": "hello", "v": 2, "node_id": "w-1", "lan": "", "key": jt,
+                      "meta": {}})
+        ws.receive_json()
+        ack = _heartbeat(ws, goal_sync={"revision": rev})   # revision 相同也必须带
+    assert ack["sync"]["force"] is True and ack["sync"]["revision"] == rev
+
+
+def test_force_sync_is_one_shot(center) -> None:
+    """一次性：第二拍 revision 已一致就恢复不带快照，否则每 10s 白传全量 YAML。"""
+    _create(center)
+    jt = _jt(center)
+    center.post("/admin/api/cluster/nodes/w-1/sync", headers=_h())
+    with center.websocket_connect("/admin/api/ws/cluster") as ws:
+        ws.send_json({"t": "hello", "v": 2, "node_id": "w-1", "lan": "", "key": jt,
+                      "meta": {}})
+        ws.receive_json()
+        rev = _heartbeat(ws, goal_sync={"revision": ""})["sync"]["revision"]
+        assert "sync" not in _heartbeat(ws, goal_sync={"revision": rev})
+
+
+def test_force_sync_unknown_node_404(center) -> None:
+    r = center.post("/admin/api/cluster/nodes/ghost/sync", headers=_h())
+    assert r.status_code == 404
+
+
+@pytest.mark.parametrize("verb", ["start", "stop", "restart"])
+def test_model_verb_queues_action(center, verb) -> None:
+    _create(center)
+    r = center.post("/admin/api/cluster/nodes/w-1/model/qwen/stop", headers=_h())
+    assert r.status_code == 200 and r.json()["queued"] is True
+
+
+def test_model_verb_unknown_verb_400(center) -> None:
+    _create(center)
+    r = center.post("/admin/api/cluster/nodes/w-1/model/qwen/purge", headers=_h())
+    assert r.status_code == 400
+
+
+def test_model_verb_requires_existing_goal_404(center) -> None:
+    """未托管的 profile 不能远程操作：worker 侧 handle_actions 同样会拒绝。"""
+    r = center.post("/admin/api/cluster/nodes/w-1/model/ghost/stop", headers=_h())
+    assert r.status_code == 404
+
+
+# ---------------- 单节点详情 / 导出 / 闸门 ----------------
+def test_node_detail_groups_goals_and_states(center) -> None:
+    _create(center)
+    r = center.get("/admin/api/cluster/nodes/w-1", headers=_h())
+    body = r.json()
+    assert body["node"]["node_id"] == "w-1"
+    assert [g["goal_id"] for g in body["goals"]] == ["qwen@@w-1"]
+
+
+def test_node_detail_missing_404(center) -> None:
+    assert center.get("/admin/api/cluster/nodes/ghost", headers=_h()).status_code == 404
+
+
+def test_export_covers_nodes_goals_states_without_tokens(center) -> None:
+    _create(center)
+    body = center.get("/admin/api/cluster/export", headers=_h()).json()
+    assert re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", body["exported_at"])
+    assert len(body["nodes"]) == 2 and len(body["goals"]) == 1
+    assert body["goals"][0]["profile_yaml"]            # 导出是 restore 素材，必须含原文
+    assert all("node_token" not in n for n in body["nodes"])
+
+
+def test_solo_role_returns_404_on_goal_endpoints(monkeypatch) -> None:
+    monkeypatch.setenv("API_KEY", KEY)
+    monkeypatch.setenv("CLUSTER_ROLE", "solo")
+    import modelctl.core.webui.admin_cluster as ac
+
+    ac._REGISTRY = None
+    app = create_app(admin=True)
+    with TestClient(app) as c:
+        assert c.get(GOALS, headers=_h()).status_code == 404
+        assert c.post(GOALS, json={"profile": "qwen", "node_ids": ["w-1"]}, headers=_h()).status_code == 404
+        assert c.post("/admin/api/cluster/nodes/w-1/sync", headers=_h()).status_code == 404
+    ac._REGISTRY = None
+
+
+# ---------------- WS：result 落账 + 世代表 ----------------
+def test_ws_result_frame_recorded_as_event(center) -> None:
+    import modelctl.core.webui.admin_cluster as ac
+
+    jt = _jt(center)
+    with center.websocket_connect("/admin/api/ws/cluster") as ws:
+        ws.send_json({"t": "hello", "v": 2, "node_id": "w-1", "lan": "", "key": jt,
+                      "meta": {}})
+        ws.receive_json()
+        ws.send_json({"t": "result", "seq": 3, "ok": False, "detail": "本机没有目标 x@@w-1"})
+        assert ws.receive_json()["t"] == "ack"
+    events = ac.get_registry().store.recent_events(limit=10, node_id="w-1")
+    result = [e for e in events if e["kind"] == "action.result"][0]
+    assert result["payload"] == {"seq": 3, "ok": False, "detail": "本机没有目标 x@@w-1"}
+
+
+def test_second_connection_for_same_node_supersedes_first(center) -> None:
+    """同 node_id 后来者胜：旧连接下一次发送即被踢，避免 action 双投/投给僵尸。"""
+    jt = _jt(center)
+
+    def _hello(ws) -> None:
+        ws.send_json({"t": "hello", "v": 2, "node_id": "w-1", "lan": "", "key": jt, "meta": {}})
+        assert ws.receive_json()["t"] == "welcome"
+
+    from starlette.websockets import WebSocketDisconnect
+
+    with center.websocket_connect("/admin/api/ws/cluster") as old:
+        _hello(old)
+        with center.websocket_connect("/admin/api/ws/cluster") as new:
+            _hello(new)
+            old.send_json({"t": "heartbeat", "payload": {"profiles": {}}})
+            assert old.receive_json()["t"] == "error"
+            with pytest.raises(WebSocketDisconnect):
+                old.receive_json()
+            # 新连接不受旧连接退场影响（release 只摘自己的 epoch）
+            assert _heartbeat(new, profiles={})["t"] == "ack"
+
+
+def _jt(client) -> str:
+    return client.post("/admin/api/cluster/join-tokens/rotate", headers=_h()).json()["join_token"]
+
+
+def center_revision(client, node_id: str) -> str:
+    import modelctl.core.webui.admin_cluster as ac
+
+    return ac.get_registry().goals.snapshot_for(node_id)["revision"]
+```
+
+- [ ] **Step 2: 追加 wsproto 消毒用例** — 在 `tests/test_cluster_wsproto_v2.py` 末尾追加
+
+```python
+def test_parse_result_sanitizes_shape():
+    assert wsproto.parse_result({"t": "result", "seq": 4, "ok": True, "detail": "已受理"}) == {
+        "seq": 4, "ok": True, "detail": "已受理"}
+
+
+def test_parse_result_ok_missing_is_unknown_not_false():
+    """缺 ok 字段 → None（未知），不得折叠成 False：台账假报"指令失败"会误导排障。"""
+    assert wsproto.parse_result({"t": "result", "seq": 1})["ok"] is None
+    assert wsproto.parse_result({"t": "result", "seq": 1, "ok": "yes"})["ok"] is None
+
+
+def test_parse_result_rejects_non_dict_and_bool_seq():
+    assert wsproto.parse_result(None) == {"seq": 0, "ok": None, "detail": ""}
+    assert wsproto.parse_result({"seq": True, "ok": True, "detail": 5}) == {
+        "seq": 0, "ok": True, "detail": ""}
+```
+
+- [ ] **Step 2b: 运行确认失败**
+
+Run: `uv run pytest tests/test_cluster_goals_http.py tests/test_cluster_wsproto_v2.py -q`
+Expected: FAIL —— 两处必须同时出现：`ImportError: cannot import name 'conns'`（测试夹具引用 Task 6 模块，若 Task 6 已落地则改为 `AttributeError: module 'modelctl.core.webui.admin_cluster' has no attribute '_CONNS'`）与 `AttributeError: module 'modelctl.core.cluster.wsproto' has no attribute 'parse_result'`。REST 用例此刻应全部报 404/405（路由尚未注册），而非 500——若看到 500，先排查夹具本身（`MODELS_DIR` patch 或 `ac._REGISTRY` 未复位）。
+
+- [ ] **Step 3: 实现——协议消毒 + 中心强制同步标记**
+
+### 3a. `src/modelctl/core/cluster/wsproto.py`（接在 `parse_ack` 之后追加）
+
+```python
+def parse_result(data: Any) -> dict[str, Any]:
+    """result 帧消毒（中心侧使用；`ok` 三态：True/False/None=未知）。
+
+    `ok` 与 seq/action 不同：**不能**把"字段缺失/类型不对"折叠成 False。中心拿它
+    落 `action.result` 事件供排障，假报一次"指令失败"足以让运维对着一台好机器
+    查半天；None 才诚实地表达"worker 回了但没告诉我们结果"。
+    """
+    if not isinstance(data, dict):
+        return {"seq": 0, "ok": None, "detail": ""}
+    ok = data.get("ok")
+    detail = data.get("detail")
+    return {"seq": _safe_seq(data), "ok": ok if isinstance(ok, bool) else None,
+            "detail": str(detail)[:500] if isinstance(detail, str) else ""}
+```
+
+### 3b. `src/modelctl/core/cluster/nodes.py`
+
+`__init__` 内在 `self._seq_base` 之后追加一行（连同注释）：
+
+```python
+        # 待处理的"强制全量 sync"标记（REST 打标 → 下一枚 ack 消费掉）
+        self._force_sync: set[str] = set()
+```
+
+`handle_heartbeat` 里 sync 捎带段改为（**唯一改动是 `forced` 这一路**，其余保持 Task 7）：
+
+```python
+            forced = self._consume_force_sync(node_id)
+            if snapshot["revision"] != reported or forced:
+                ack["sync"] = dict(snapshot, force=True) if forced else snapshot
+                self.store.set_node_last_goal_sync_sha(node_id, snapshot["revision"])
+```
+
+（注意：`forced` 为真时即便 revision 与 worker 上报值一致也必须带快照——这正是"强制"的全部含义：worker 本地文件被改坏而 revision 未变，短路会让漂移永不自愈。）
+
+文件尾部（`list_node_views` 之后）追加两个方法：
+
+```python
+    # ---- 强制全量 sync（REST 打标，心跳消费）----
+    def mark_force_sync(self, node_id: str) -> None:
+        """打标"下次心跳无条件带全量快照"。set 而非 dict[bool]：幂等天然成立。
+
+        刻意不落 SQLite：强制 sync 是"此刻这次运维动作"，中心重启即作废是可接受的
+        ——重启后 worker 重连时 revision 若已一致，说明确实没有内容要补发。
+        节点若一直离线，标记会留存到它下次上线，属期望行为（那正是最想修盘的时刻）。
+        """
+        self._force_sync.add(node_id)
+
+    def _consume_force_sync(self, node_id: str) -> bool:
+        """取走并清除标记：**一次性**。否则该节点每 10s 收一份全量 YAML 直到永远。"""
+        if node_id not in self._force_sync:
+            return False
+        self._force_sync.discard(node_id)
+        return True
+```
+
+### 3c. `src/modelctl/core/cluster/goals.py`（`remove_goals` 之后追加）
+
+REST 的 PUT 必须经 GoalService 而不是直穿 `store.update_goal`：`env_overlay` 白名单与 `intent`
+枚举是 core 的不变式，放进端点就等于"绕开 CLI 就能下发密钥"。
+
+```python
+    _UPDATABLE: tuple[str, ...] = ("intent", "params", "env_overlay", "placement",
+                                   "runtime_ref", "target_role", "profile_version")
+
+    def update_goal(self, goal_id: str, *, fields: dict[str, Any],
+                    created_by: str = "", now: float | None = None) -> tuple[dict | None, str]:
+        """按需更新单个 goal 的可变字段。返回 (最新 goal 行或 None, 错误文案)。
+
+        `fields` 由调用方以 `model_dump(exclude_unset=True)` 产出——**未提供的键不
+        动**（Pydantic 默认值不是用户意图，混进来会把未填字段刷成默认值）。空 fields
+        视为调用方错误：没有任何字段要改却刷新 updated_at，会让"最后修改时间"说谎。
+        目标不存在 → (None, "")，由调用方转 404。
+
+        校验与 `set_goals` 同源（intent/target_role 枚举、env_overlay 白名单）：PUT 是
+        已存在 goal 的唯一改参通道，此处放松等于"下发时拦住、改参时放行"。
+        """
+        now = time.time() if now is None else now
+        goal = self.store.get_goal(goal_id)
+        if goal is None:
+            return None, ""
+        clean = {k: v for k, v in fields.items() if k in self._UPDATABLE}
+        if not clean:
+            return None, f"没有可更新字段（可更新：{list(self._UPDATABLE)}）"
+        if "intent" in clean:
+            if clean["intent"] not in VALID_INTENTS:
+                return None, f"非法 intent {clean['intent']!r}（仅 {VALID_INTENTS}）"
+            clean["intent"] = str(clean["intent"])
+        if "target_role" in clean and clean["target_role"] not in VALID_TARGET_ROLES:
+            return None, f"非法 target_role {clean['target_role']!r}（仅 {VALID_TARGET_ROLES}）"
+        if "env_overlay" in clean:
+            overlay, err = validate_env_overlay(clean["env_overlay"])
+            if err:
+                return None, err
+            clean["env_overlay"] = overlay          # None = 明确清空覆盖项
+        for key in ("params", "placement"):
+            if key in clean and not isinstance(clean[key], dict):
+                return None, f"{key} 必须是映射"
+        if "profile_version" in fields:
+            clean["profile_version"] = str(fields["profile_version"])
+        updated = self.store.update_goal(goal_id, now=now, **clean)
+        if updated is None:
+            return None, ""
+        self.store.append_event("goal.update", node_id=str(goal["node_id"]), goal_id=goal_id,
+                                payload={"profile": str(goal["profile"]),
+                                         "fields": sorted(clean), "operator": created_by}, now=now)
+        return updated, ""
+```
+
+- [ ] **Step 4: 实现——`src/modelctl/core/webui/admin_cluster.py` 薄层**
+
+顶部 import 段改为（新增 `datetime`、`conns`、`goals` 相关与 `pad` 无关）：
+
+```python
+import datetime as _dt
+import json
+import time
+from typing import Any
+
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
+from loguru import logger
+from pydantic import BaseModel, Field
+
+from modelctl.core.cluster import config, conns, tokens, wsproto
+from modelctl.core.cluster.goals import GoalService, goal_id_of
+from modelctl.core.cluster.nodes import AuthError, NodeRegistry
+from modelctl.core.cluster.store import ClusterStore
+from modelctl.core.gpu_utils import GPUValidationError, parse_gpu_list
+from modelctl.core.webui.admin_auth import require_auth
+
+router = APIRouter()
+
+_REGISTRY: NodeRegistry | None = None
+#: WS 世代表（同 node_id 后来者胜）。测试直接赋新实例复位，不经 get_registry()。
+_CONNS = conns.ConnectionRegistry()
+
+_SWEEP_INTERVAL_S = 10.0
+_last_sweep = 0.0
+
+#: 远程启停允许的动词；`retry` 只在 goal 端点暴露（语义是"重置失败状态"，不是起停）
+_MODEL_VERBS: frozenset[str] = frozenset({"start", "stop", "restart"})
+```
+
+`get_registry()` 按 Task 7 Step 4 已改为注入 `GoalService`，本任务再补一个便捷属性（保持单例语义）：
+
+```python
+def get_registry() -> NodeRegistry:
+    """NodeRegistry 进程内单例（懒建库）。测试经 admin_cluster._REGISTRY=None 重置。"""
+    global _REGISTRY
+    if _REGISTRY is None:
+        store = ClusterStore()
+        store.init_db()
+        _REGISTRY = NodeRegistry(store, goals=GoalService(store))
+    return _REGISTRY
+```
+
+在 `_sweep_if_due()` 之后插入投影/消毒辅助：
+
+```python
+def _goals() -> GoalService:
+    """goal 唯一写入口（与 WS 共用同一 NodeRegistry.store，台账才一致）。"""
+    return get_registry().goals
+
+
+def _fmt_ts(value: Any) -> str:
+    """epoch float → 项目规范时间串；缺值/非法返回空串（不显示 None）。"""
+    if not isinstance(value, (int, float)):
+        return ""
+    try:
+        return _dt.datetime.fromtimestamp(float(value)).strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, OSError, OverflowError):
+        return ""
+
+
+def _node_id_of_goal(goal_id: str) -> str:
+    """goal_id = `<profile>@@<node_id>`：node_id 取末段（profile 理论上可含 @@）。"""
+    return goal_id.rsplit("@@", 1)[-1] if "@@" in goal_id else ""
+
+
+def _goal_view(goal: dict[str, Any], state: dict[str, Any] | None, *,
+               with_yaml: bool = False, now: float | None = None) -> dict[str, Any]:
+    """goal 视图（spec §7.5 表格行）：声明侧字段 + model_states 的运行事实。
+
+    连接键是 `(node_id, profile)`：worker 上报的是 profile 名（与它磁盘上的文件
+    名同源），goal_id 对 worker 是透明串，两侧只在中心台账里join。
+    刻意不含 profile_yaml——列表载荷不背整份 YAML，导出走 `with_yaml=True`。
+    """
+    now = time.time() if now is None else now
+    created = goal.get("created_at")
+    updated = goal.get("updated_at")
+    view: dict[str, Any] = {
+        "goal_id": goal["goal_id"], "node_id": goal["node_id"], "profile": goal["profile"],
+        "engine": goal["engine"], "intent": goal["intent"], "stage": goal["stage"],
+        "reason": goal.get("stage_reason") or "", "error_class": goal.get("error_class") or "",
+        "target_role": goal.get("target_role") or "", "profile_version": goal.get("profile_version") or "",
+        "state": (state or {}).get("state") or "", "gpu": (state or {}).get("gpu"),
+        "port": (state or {}).get("port"), "pid": (state or {}).get("pid"),
+        "created_at": _fmt_ts(created), "updated_at": _fmt_ts(updated),
+        "age_s": round(now - created, 1) if isinstance(created, (int, float)) else None,
+    }
+    if with_yaml:
+        view["profile_yaml"] = goal.get("profile_yaml") or ""
+    return view
+
+
+def _goal_views(rows: list[dict[str, Any]], *, now: float) -> list[dict[str, Any]]:
+    states = {(s["node_id"], s["profile"]): s for s in get_registry().store.list_model_states()}
+    return [_goal_view(g, states.get((g["node_id"], g["profile"])), now=now) for g in rows]
+```
+
+> `_goal_view` 里 `pid` 供 CLI/后续 dashboard 排障用；spec §7.5 表格里没有该列，属允许的额外字段。
+
+### 4a. goal 端点（追加在 `cluster_events` 之后、`rotate_join_token` 之前）
+
+```python
+# ================================ 目标状态（M1，spec §6.5）================================
+class _GoalCreateBody(BaseModel):
+    profile: str = Field(min_length=1, max_length=64)
+    node_ids: list[str] | None = None
+    all_nodes: bool = False
+    intent: str = "start"
+    create: bool = False
+    params: dict | None = None
+    env_overlay: dict | None = None
+    gpus: str = ""
+    lan_allow: list[str] | None = None
+    runtime_ref: str | None = None
+    target_role: str = "primary"
+    dry_run: bool = False
+
+
+class _GoalUpdateBody(BaseModel):
+    """PUT 载荷：全部可选 + `exclude_unset`，未提供的字段一律不动。
+
+    刻意**不提供** `profile` / `node_ids`：改目标节点等价于换 goal_id，必须
+    "先 create 新 goal 再 remove 旧 goal"，否则历史 stage/事件与 model_states
+    会与新节点的运行事实串台。
+    """
+
+    intent: str | None = None
+    params: dict | None = None
+    env_overlay: dict | None = None
+    placement: dict | None = None
+    runtime_ref: str | None = None
+    target_role: str | None = None
+    profile_version: str | None = Field(default=None, max_length=64)
+
+
+def _bad_request(reason: str) -> JSONResponse:
+    """core 层业务失败统一 400（与既有端点的 401/404 一样只回固定短文案）。"""
+    return JSONResponse(status_code=400, content={"detail": reason})
+
+
+@router.get("/cluster/goals")
+async def list_goals(node_id: str = Query("", max_length=64),
+                     profile: str = Query("", max_length=64),
+                     _base: None = Depends(require_auth)):
+    if (off := _disabled()) is not None:
+        return off
+    _sweep_if_due()
+    rows = get_registry().store.list_goals(node_id=node_id, profile=profile)
+    return {"goals": _goal_views(rows, now=time.time())}
+
+
+@router.post("/cluster/goals")
+async def create_goals(body: _GoalCreateBody, _base: None = Depends(require_auth)):
+    """批量下发 goal（过 placement gate）。gate 的 skip 是 200 + report，不是 HTTP 错误。
+
+    只有"参数本身非法/无任何候选节点"才 400：逐节点容量不足是运维要逐行读的
+    **结果**，不是请求失败——把 20 个节点里 3 个装不下变成 400，CLI 就拿不到报告了。
+    """
+    if (off := _disabled()) is not None:
+        return off
+    try:
+        gpu_list = parse_gpu_list(body.gpus or "")   # 非法/重复即抛 GPUValidationError
+    except GPUValidationError as exc:
+        return _bad_request(f"非法 gpus {body.gpus!r}：{exc}")
+    result = _goals().set_goals(profile=body.profile, node_ids=body.node_ids,
+                                all_nodes=body.all_nodes, intent=body.intent,
+                                create=body.create, params=body.params,
+                                env_overlay=body.env_overlay, gpu_list=gpu_list,
+                                lan_allow=body.lan_allow, runtime_ref=body.runtime_ref,
+                                target_role=body.target_role, created_by="api",
+                                dry_run=body.dry_run, now=time.time())
+    if result["reason"]:
+        return _bad_request(result["reason"])
+    now = time.time()
+    rows = [] if body.dry_run else get_registry().store.list_goals(profile=body.profile)
+    return {"created": result["created"], "skipped": result["skipped"],
+            "errors": result["errors"], "report": result["report"],
+            "goals": _goal_views(rows, now=now)}
+
+
+@router.put("/cluster/goals/{goal_id}")
+async def update_goal(goal_id: str, body: _GoalUpdateBody, _base: None = Depends(require_auth)):
+    """更新 goal 的声明式字段；worker 侧由 revision 变化自动重新写盘并重置状态机。"""
+    if (off := _disabled()) is not None:
+        return off
+    goal, reason = _goals().update_goal(goal_id, fields=body.model_dump(exclude_unset=True),
+                                        created_by="api", now=time.time())
+    if reason:
+        return _bad_request(reason)
+    if goal is None:
+        return JSONResponse(status_code=404, content={"detail": f"目标 {goal_id} 不存在"})
+    return {"goal": _goal_view(goal, None, now=time.time())}
+
+
+@router.delete("/cluster/goals/{goal_id}")
+async def delete_goal(goal_id: str, _base: None = Depends(require_auth)):
+    """删除 goal。worker 侧删除无需额外指令：goal 从下一份快照消失即剪枝语义（§6.4）。"""
+    if (off := _disabled()) is not None:
+        return off
+    if get_registry().store.get_goal(goal_id) is None:
+        return JSONResponse(status_code=404, content={"detail": f"目标 {goal_id} 不存在"})
+    out = _goals().remove_goals(profile=goal_id.rsplit("@@", 1)[0],
+                                node_ids=[_node_id_of_goal(goal_id)], created_by="api")
+    return {"removed": out["removed"], "missing": out["missing"]}
+
+
+@router.post("/cluster/goals/{goal_id}/retry")
+async def retry_goal(goal_id: str, _base: None = Depends(require_auth)):
+    """人工重试失败的 goal（spec §8.1：失败是终态，只有 retry 或 goal 变更能走出）。
+
+    只做两件事：入队 retry 指令 + 记事件。**刻意不改 stage**——节点可能已离线，
+    中心乐观写成 PENDING_PROFILE_SYNC 会让 dashboard 在故障机器上显示假的重启中。
+    真正的状态回落由 worker 下一拍 reconcile 上报。
+    """
+    if (off := _disabled()) is not None:
+        return off
+    reg = get_registry()
+    goal = reg.store.get_goal(goal_id)
+    if goal is None:
+        return JSONResponse(status_code=404, content={"detail": f"目标 {goal_id} 不存在"})
+    queued = reg.push_action(str(goal["node_id"]), "retry", goal_id=goal_id)
+    reg.store.append_event("goal.retry", node_id=str(goal["node_id"]), goal_id=goal_id,
+                           payload={"queued": queued, "operator": "api"}, now=time.time())
+    return {"queued": queued}
+```
+
+### 4b. 节点/模型/导出端点（追加在 4a 之后）
+
+```python
+@router.get("/cluster/nodes/{node_id}")
+async def cluster_node_detail(node_id: str, _base: None = Depends(require_auth)):
+    """单节点详情：台账视图 + 该节点 goals + model_states（dashboard 详情页数据源）。"""
+    if (off := _disabled()) is not None:
+        return off
+    _sweep_if_due()
+    reg = get_registry()
+    node = reg.store.get_node(node_id)
+    if node is None:
+        return JSONResponse(status_code=404, content={"detail": f"节点 {node_id} 不存在"})
+    now = time.time()
+    return {"node": reg.node_view(node, now),
+            "goals": _goal_views(reg.store.list_goals(node_id=node_id), now=now),
+            "model_states": reg.store.list_model_states(node_id=node_id)}
+
+
+@router.post("/cluster/nodes/{node_id}/sync")
+async def force_node_sync(node_id: str, _base: None = Depends(require_auth)):
+    """强制全量 sync：下一枚 ack 无条件带 `sync.force=true`，worker 跳过 revision 短路重写盘。
+
+    离线节点也接受（标记留存到其下次上线）——本地文件被改坏时，人最想立刻修好的
+    正是还没连回来的那台。一次性标记见 `NodeRegistry._consume_force_sync`。
+    """
+    if (off := _disabled()) is not None:
+        return off
+    reg = get_registry()
+    if reg.store.get_node(node_id) is None:
+        return JSONResponse(status_code=404, content={"detail": f"节点 {node_id} 不存在"})
+    reg.mark_force_sync(node_id)
+    reg.store.append_event("node.sync", node_id=node_id, payload={"operator": "api"},
+                           now=time.time())
+    return {"queued": True}
+
+
+@router.post("/cluster/nodes/{node_id}/model/{profile}/{verb}")
+async def model_verb(node_id: str, profile: str, verb: str,
+                     _base: None = Depends(require_auth)):
+    """远程启停单个模型。**必须先有 goal**。
+
+    未托管的 profile 一律 404：中心一旦能对 worker 本机自跑的模型下指令，声明式
+    边界就破了（运维会看到"我没下发过的模型被中心停了"）。worker 侧
+    `Reconciler.handle_actions` 用同一立场兜底（goal 不在本地清单 → ok=False）。
+    """
+    if (off := _disabled()) is not None:
+        return off
+    if verb not in _MODEL_VERBS:
+        return _bad_request(f"不支持的操作 {verb!r}（仅 {sorted(_MODEL_VERBS)}）")
+    reg = get_registry()
+    goal = reg.store.get_goal(goal_id_of(profile, node_id))
+    if goal is None:
+        return JSONResponse(status_code=404,
+                            content={"detail": f"节点 {node_id} 上没有 profile {profile} 的托管目标"})
+    queued = reg.push_action(node_id, verb, goal_id=str(goal["goal_id"]), profile=profile)
+    reg.store.append_event("node.model_action", node_id=node_id, goal_id=str(goal["goal_id"]),
+                           payload={"verb": verb, "queued": queued, "operator": "api"},
+                           now=time.time())
+    return {"queued": queued}
+
+
+@router.get("/cluster/export")
+async def cluster_export(_base: None = Depends(require_auth)):
+    """全量 goal + 节点状态导出（备份/迁移素材；`cluster backup` 属 M2，此处只给数据）。"""
+    if (off := _disabled()) is not None:
+        return off
+    reg = get_registry()
+    now = time.time()
+    return {"exported_at": _fmt_ts(now), "role": config.cluster_role(),
+            "nodes": [reg.node_view(n, now) for n in reg.store.list_nodes()],
+            "goals": [_goal_view(g, None, with_yaml=True, now=now)
+                      for g in reg.store.list_goals()],
+            "model_states": reg.store.list_model_states()}
+```
+
+> 路由顺序无冲突：`GET /cluster/nodes`（M0 既有）与 `GET /cluster/nodes/{node_id}` 是两个不同 path，FastAPI 按精确段匹配；`/cluster/nodes/{id}/sync`、`/cluster/nodes/{id}/model/{profile}/{verb}` 段数不同，不会互相吞。
+
+### 4c. WS 循环改造（整段替换 `ws_cluster`）
+
+```python
+@router.websocket("/ws/cluster")
+async def ws_cluster(ws: WebSocket):
+    """worker 通道：hello（token 鉴权）→ welcome → heartbeat/event/result 循环。
+
+    身份绑定：node_id 只存本连接的局部变量，handle_hello 已强制 NT↔node_id 一致，
+    故后续帧只能落到已鉴权的那个节点，无法伪造他人身份。
+    对端可控输入（raw 帧、mtype）一律不回显原文：错误帧只用固定文案。
+
+    世代表：hello 成功后向 _CONNS 登记 epoch，此后每帧先验 epoch。同 node_id 的旧连接
+    （进程重启后遗留的半开连接）若继续活着，中心的 action 会被投给僵尸或被双份执行，
+    故后来者胜、旧连接下一帧即退场。旧连接被动感知（不主动踢）是接受的取舍：它下一次
+    发送才被踢，而它不发时中心只会用新连接投递，不影响正确性；主动 kick 需给
+    ConnectionRegistry 加反向通知，M2 与 `audit.query` 一并做。
+    """
+    if not config.is_center():
+        await ws.close(code=4404)
+        return
+    await ws.accept()
+    reg = get_registry()
+    node_id = ""
+    epoch = 0
+    try:
+        hello_raw = await ws.receive_text()
+        # parse_type 仅在"可解析且为 dict"时返回非空，故其返回 hello 时下面 loads 必成功
+        if wsproto.parse_type(hello_raw) != "hello":
+            await ws.send_text(wsproto.dumps(wsproto.make_error("首帧须为 hello")))
+            await ws.close(code=4400)
+            return
+        welcome, node_id = reg.handle_hello(wsproto.parse_hello(json.loads(hello_raw)))
+        epoch = _CONNS.join(node_id)
+        await ws.send_text(wsproto.dumps(welcome))
+        while True:
+            raw = await ws.receive_text()
+            if not _CONNS.is_current(node_id, epoch):
+                await ws.send_text(wsproto.dumps(wsproto.make_error("连接已被同节点新连接取代")))
+                await ws.close(code=4409)
+                return
+            mtype = wsproto.parse_type(raw)
+            try:
+                data: dict[str, Any] = json.loads(raw)
+            except (ValueError, TypeError, RecursionError):
+                # RecursionError：深嵌套 JSON 击穿递归上限，与非法 JSON 同等处置
+                await ws.send_text(wsproto.dumps(wsproto.make_error("消息解析失败")))
+                continue
+            if mtype == "heartbeat":
+                ack = reg.handle_heartbeat(node_id, wsproto.parse_heartbeat_v2(data), now=time.time())
+                _sweep_if_due()
+                await ws.send_text(wsproto.dumps(ack))
+            elif mtype == "event":
+                payload = data.get("payload")
+                reg.store.append_event(str(data.get("kind", "")), node_id=node_id,
+                                       payload=payload if isinstance(payload, dict) else None)
+                await ws.send_text(wsproto.dumps({"t": "ack"}))
+            elif mtype == "result":
+                # 指令回执只落账不裁决：ok=False 时改不改状态由 worker 的 reconcile 决定，
+                # 中心重复动作会与"失败即终态 + 人工 retry"的立场冲突。
+                res = wsproto.parse_result(data)
+                reg.store.append_event("action.result", node_id=node_id,
+                                       payload={"seq": res["seq"], "ok": res["ok"],
+                                                "detail": res["detail"]}, now=time.time())
+                await ws.send_text(wsproto.dumps({"t": "ack"}))
+            else:
+                await ws.send_text(wsproto.dumps(wsproto.make_error("未知消息类型")))
+    except WebSocketDisconnect:
+        return
+    except AuthError:
+        await ws.send_text(wsproto.dumps(wsproto.make_error("鉴权失败")))
+        await ws.close(code=4401)
+        return
+    finally:
+        if node_id:
+            _CONNS.release(node_id, epoch)   # 只摘自己的 epoch，绝不误杀新连接
+```
+
+- [ ] **Step 5: 运行确认通过**
+
+Run: `uv run pytest tests/test_cluster_goals_http.py tests/test_cluster_wsproto_v2.py -q`
+Expected: PASS（`test_cluster_goals_http.py` 38 条定义 / 40 个用例——`test_model_verb_queues_action` 参数化 3 次；`test_cluster_wsproto_v2.py` 新增 3 条）
+
+Run: `uv run pytest tests/ -q -k "cluster"`
+Expected: PASS（Task 1–11）。M0 的 `tests/test_cluster_http.py` 必须**一条都不改**仍然全绿——它是本任务的向后兼容回归网（`test_ws_hello_heartbeat_registers_node` 断言 `receive_json()["t"] == "ack"`，新 ack dict 仍满足）。若某条 M0 用例失败，说明薄层改动了既有语义，按新语义修**实现**而不是修测试。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add src/modelctl/core/webui/admin_cluster.py src/modelctl/core/cluster/nodes.py src/modelctl/core/cluster/goals.py src/modelctl/core/cluster/wsproto.py tests/test_cluster_goals_http.py tests/test_cluster_wsproto_v2.py
+git commit -m "feat(cluster): goal 控制面 REST + 强制 sync + WS 世代表与指令回执落账"
+```
+
+---
+
+<!-- MORE11 -->
 
 
 
