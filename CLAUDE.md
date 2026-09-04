@@ -12,6 +12,7 @@
 ### 前端网页设计
 
 - 网页中显示均为虚拟 ID，不显示真实 ID。
+  - **例外（已裁决 2026-09-04）**：集群管理视图（`/cluster/nodes` 等）直接显示 cluster `node_id`——它由运维在 `modelctl cluster join --node-id` 时自定义（如 `w-210`），本身即人工分配的虚拟标识而非敏感真实 ID，掩码反而破坏与 `lan_id`/CLI 输出/nginx 路由的一致性。
 
 ### 时间格式
 
