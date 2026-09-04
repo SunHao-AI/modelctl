@@ -1,5 +1,7 @@
-# 本地配置（含 API 密钥），不入库
+# 本地配置（含 API 密钥），不入库；.env.xxx 变体（如 .env.m0bak 备份）同样是明文密钥
 .env
+.env.*
+!.env.example
 
 # 日志
 logs/
