@@ -85,6 +85,35 @@ uv run modelctl list
 - Python 3.12+、PyYAML
 - `git`、`cmake`、CUDA 工具链、`nvidia-smi`（llamacpp 引擎编译用）
 - 各引擎二进制：`ollama` / `unsloth` / `llamacpp`（按需安装）；`vllm` / `sglang` 通过 `modelctl env setup <engine>` 自动初始化（引擎 venv 在 `.venvs/<engine>/`，与主环境隔离）
+- docker_image 型引擎（vllm Day-0 镜像 / tokenspeed / tensorrt_llm）：宿主机 docker + nvidia-container-toolkit，用 `modelctl env setup docker` 一键准备（见下）
+
+#### 1.1 Docker 系统依赖（docker_image 型引擎）
+
+```bash
+# 仅诊断 + 打印可复制的安装脚本（不做任何变更，任何平台可跑）
+modelctl env setup docker
+
+# 部署机（Linux + root）实际执行安装：docker-ce + nvidia-container-toolkit + runtime 注册
+modelctl env setup docker --run
+```
+
+Docker Hub 大镜像（如 `vllm/vllm-openai` 约 21.8GB）拉取加速由 `registry-mirrors` 提供，
+写入 `/etc/docker/daemon.json`（与 nvidia runtime 配置合并写，互不覆盖）：
+
+```bash
+# 默认：写入内置多源（2026-09 实测可用，按序容灾），无需任何参数
+modelctl env setup docker --run
+
+# 显式指定：可重复传 --registry-mirror，完全覆盖内置默认（不追加）
+modelctl env setup docker --run \
+  --registry-mirror https://docker.1ms.run \
+  --registry-mirror https://your.private.mirror
+```
+
+> 注意：清华 TUNA / 中科大 / 网易的 Docker Hub 加速均已停服，内置默认源已剔除；
+> TUNA 仍保留的是 `docker-ce` **apt 仓库**镜像（安装 deb 包用），二者不要混淆。
+> 换源后 `docker pull` 报 `manifest unknown`（Day-0 专用 tag 未同步）等排障细节见
+> [docs/known-pitfalls/build/docker-install-mirror.md](docs/known-pitfalls/build/docker-install-mirror.md)。
 
 ### 2. 配置 .env 与 profile
 
