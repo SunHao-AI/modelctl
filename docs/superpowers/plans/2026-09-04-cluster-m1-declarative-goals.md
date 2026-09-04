@@ -988,7 +988,7 @@ def read_profile_source(name: str, models_dir: Path | None = None) -> dict[str, 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `uv run pytest tests/test_cluster_profiles.py -q`
-Expected: PASS（13 条）
+Expected: PASS（12 条）
 
 - [ ] **Step 5: 提交**
 
