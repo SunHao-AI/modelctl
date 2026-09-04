@@ -322,7 +322,7 @@ class ClusterStore:
                      profile_version=excluded.profile_version, intent=excluded.intent,
                      params=excluded.params, env_overlay=excluded.env_overlay,
                      placement=excluded.placement, runtime_ref=excluded.runtime_ref,
-                     target_role=excluded.target_role, stage=excluded.stage,
+                     target_role=excluded.target_role, stage='PENDING_PROFILE_SYNC',
                      stage_reason=NULL, error_class=NULL, updated_at=excluded.updated_at""",
                 (goal_id, node_id, profile, engine, profile_yaml, profile_sha, profile_version,
                  intent, j(params), j(env_overlay), j(placement), runtime_ref, target_role, 0,

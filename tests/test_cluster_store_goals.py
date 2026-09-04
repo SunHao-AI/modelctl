@@ -87,13 +87,21 @@ def test_goal_json_none_stays_none(store):
 def test_goal_upsert_same_id_updates_but_keeps_created_at(store):
     gid = _mk_goal(store)
     created = store.get_goal(gid)["created_at"]
+    # 先让 goal 进入带原因的 FAILED，才能验证 upsert 把 stage 与 reason 一起复位
+    store.update_goal(gid, now=150.0, stage="FAILED", stage_reason="venv 缺失",
+                      error_class="venv_missing")
     store.upsert_goal(goal_id=gid, node_id="w-1", profile="qwen-vllm", engine="vllm",
                       profile_yaml="port: 8102\n", profile_sha="sha-b", profile_version="v2",
                       intent="stop", params=None, env_overlay=None, placement=None,
                       runtime_ref=None, target_role="replica", stage="READY",
                       created_by="op2", now=200.0)
     g = store.get_goal(gid)
-    assert g["profile_sha"] == "sha-b" and g["intent"] == "stop" and g["stage"] == "READY"
+    assert g["profile_sha"] == "sha-b" and g["intent"] == "stop"
+    # upsert = 声明式下发：内容变更必须重置收敛起点。调用方即便传 stage="READY"
+    # 也不生效（ON CONFLICT 强制 PENDING_PROFILE_SYNC 并清 reason/error_class）——
+    # 否则任何漏传 stage 的调用都会造成"内容已改、stage 仍 READY"的静默漂移。
+    assert g["stage"] == "PENDING_PROFILE_SYNC"
+    assert not g["stage_reason"] and not g["error_class"]   # ON CONFLICT 清成 NULL
     assert g["created_at"] == created and g["updated_at"] == 200.0
 
 
