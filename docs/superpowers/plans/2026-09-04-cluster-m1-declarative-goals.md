@@ -139,7 +139,8 @@ def test_init_db_adds_m1_columns_idempotently(tmp_path):
     s.init_db()
     s.init_db()  # 第二次：列已存在，不得抛 duplicate column
     cols = {r[1] for r in sqlite3.connect(str(db)).execute("PRAGMA table_info(nodes)")}
-    assert {"capacity_json", "runtime_json", "gateway_url", "last_goal_sync_sha"} <= cols
+    assert {"capacity_json", "runtime_json", "gateway_url", "last_goal_sync_sha",
+            "local_profiles_json"} <= cols
 
 
 def test_update_node_capacity_none_keeps_existing(store):
