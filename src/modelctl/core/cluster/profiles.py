@@ -82,6 +82,17 @@ def _scan(root: Path) -> list[Path]:
     return sorted({p for p in root.rglob("*.yaml") if p.is_file()})
 
 
+def _root_first(paths: list[Path], root: Path) -> list[Path]:
+    """根目录那份排到最前，其余保持原路径序（稳定二次排序，不得依赖 set 迭代序）。
+
+    文件名与展示名两种寻址必须共用同一优先级：`core.profile.load_profile` 与
+    `list_profiles` 都是"根目录优先"，中心若按纯路径序取子目录那份，worker 侧
+    `load_profile(展示名)` 解析到的却是根目录那份——同一个 profile 名在两侧指向
+    不同文件，sha 漂移检测彻底失真。
+    """
+    return sorted(paths, key=lambda p: p.parent != root)
+
+
 def _port_reason(value: Any) -> str:
     """port 校验与 core.profile._to_profile 同口径（int 可转且 1-65535）。
 
@@ -124,10 +135,16 @@ def _load_candidate(path: Path) -> tuple[str, dict[str, Any], str] | str:
     if port_reason:
         return port_reason
     explicit = raw.get("engine")
-    engine = (explicit.strip().lower() if isinstance(explicit, str) and explicit.strip()
-              else path.parent.name.lower())
+    if isinstance(explicit, str) and explicit.strip():
+        # 显式值**不做 lower**：与 core.profile._resolve_engine 同口径。中心若替它
+        # 归一大小写，落盘的文件在 worker 上 load_profile 必炸"未知引擎"。
+        engine = explicit.strip()
+    else:
+        engine = path.parent.name.lower()   # 目录名两侧都 lower（core.profile 同口径）
     if engine not in KNOWN_ENGINES:
-        return (f"engine {engine!r} 不在 KNOWN_ENGINES（{sorted(KNOWN_ENGINES)}）内，"
+        case_hint = ("；engine 值大小写敏感，请用其小写形式"
+                     if engine.lower() in KNOWN_ENGINES else "")
+        return (f"engine {engine!r} 不在 KNOWN_ENGINES（{sorted(KNOWN_ENGINES)}）内{case_hint}，"
                 "请显式设置 engine: 或放入已知引擎子目录")
     return engine, raw, text
 
@@ -148,8 +165,7 @@ def _resolve(root: Path, name: str, engine: str | None = None) -> tuple[Path, st
     """
     viable: list[tuple[Path, str, dict[str, Any], str]] = []
     paths = _scan(root)
-    stems = sorted(p for p in paths if p.stem == name)
-    stems.sort(key=lambda p: p.parent != root)  # 稳定排序：根目录那份提前，余下保持路径序
+    stems = _root_first([p for p in paths if p.stem == name], root)
     if stems:
         last_reason = ""
         for path in stems:
@@ -164,7 +180,7 @@ def _resolve(root: Path, name: str, engine: str | None = None) -> tuple[Path, st
         # 展示名回退：展示名不是路径成分，全目录扫描无穿越风险；未通过校验的文件
         # 静默跳过——它们与本次寻址无关，其报错进 last_reason 只会误导用户
         unsafe_stems: list[str] = []
-        for path in paths:
+        for path in _root_first(paths, root):
             got = _load_candidate(path)
             if isinstance(got, str):
                 continue

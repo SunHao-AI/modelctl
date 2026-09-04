@@ -38,6 +38,8 @@
 | 2026-09-04 | 后端 / 集群下发 | cluster 寻址只认文件名，用户照 UI 展示名下发必 404 | 展示名回退命中后**归一为文件 stem**（goal/写盘只认它，`display_name` 仅回显），推导复用 `_resolve_group` 单点口径，镜像一致性不破坏。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-04 | 后端 / 集群下发 | 展示名回退命中的 stem 未过写盘白名单，中心放行 worker 必拒 | 归一出的 `path.stem` 是 worker 写盘文件名，回退命中后必须再过一次 `is_safe_name`，拒收 reason 点名文件与 stem。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-04 | 后端 / 文件系统 | `rglob` 三重坑：重复命中根目录、匹配目录、重复遍历 | `**` 匹配零层目录使根目录文件在两套候选里各出现一次（歧义清单重复列行）；改用单次全扫 + 集合去重 + `is_file()` 过滤。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-04 | 后端 / 集群下发 | 中心对显式 `engine: VLLM` 替它 lower，worker 侧 load 按未知引擎硬失败 | `core.profile._resolve_engine` 对显式值不 lower，中心多做的归一化=放行下游必拒内容；目录名推断仍 lower，reason 须给大小写提示。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-04 | 后端 / 集群下发 | 展示名回退按路径序取首个，根目录那份被子目录抢先 | 中心下发子目录那份、worker `load_profile(展示名)` 解析根目录那份 → 同名两个文件，sha 漂移失真；统一 `_root_first` 根目录优先。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 
 ## 目录约定
 

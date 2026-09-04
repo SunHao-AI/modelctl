@@ -140,6 +140,45 @@
     断言歧义 reason 括号内候选计数（钉"去重"）。
   - "根候选 + rglob"这种手工拼接候选的写法必然踩零层目录重复，优先"一次全扫 + 过滤"。
 
+## 中心对显式 `engine: VLLM` 替它 lower，本地 load_profile 却按未知引擎硬失败
+
+- **日期**：2026-09-04（fix round 3）
+- **症状**：`models/vllm/a.yaml` 写 `engine: VLLM`，中心 `read_profile_source("a")` 返回
+  `ok=True, engine="vllm"` 并正常下发；worker 落盘后 `load_profile("a")` 报
+  `a.yaml：未知引擎 'VLLM'（支持：[...]）`，goal 永不收敛。
+- **根因**：中心写了 `explicit.strip().lower()`，而 `core.profile._resolve_engine` 对
+  **显式值不做 lower**（只对父目录名 lower）。这是 round 1 坏 port、round 2 不安全 stem
+  的同族问题：中心比 worker 的权威口径更宽松，错误被推到落盘之后才暴露。
+- **解决**：`_load_candidate()` 里显式值只 `strip()` 不 `lower()`（目录名推断仍 lower，
+  与 `_resolve_engine` 完全一致）；`engine.lower() in KNOWN_ENGINES` 时在 reason 追加
+  "engine 值大小写敏感，请用其小写形式"。反向口径同样要防：`models/VLLM/` 这类大写目录
+  本地能跑，中心必须照样放行。
+- **要点**：
+  - "同口径"要逐字段核对到**被 import 的权威实现**，别顺手加一次归一化；`lower()` 这种
+    看似无害的宽容，在"中心校验 + 下游按原文执行"的链路里就是放行下游必拒的内容。
+  - 用例用 `pytest.raises(ProfileError)` + `load_profile()` 做**双证**：中心与本地对同一
+    文件的结论必须一致，单向断言挡不住口径再次分叉。
+
+## 展示名回退只按路径序取首个，根目录那份被子目录抢先 → 中心与 worker 指向不同文件
+
+- **日期**：2026-09-04（fix round 3）
+- **症状**：`models/misc.yaml`（`name: shared`, port 9）+ `models/aaa/other.yaml`
+  （`name: shared`, port 1）时，中心 `read_profile_source("shared")` 返回 `name="other"`
+  （子目录那份），而 worker/本地 `load_profile("shared")` 走 `list_profiles` 的**根目录优先**，
+  解析到 `misc.yaml`。两侧"同一个 profile"其实是两个文件，sha 漂移检测彻底失真。
+- **根因**：文件名寻址做了"根目录优先"的稳定二次排序，展示名回退却直接用 `_scan` 的
+  纯路径序取首个命中。路径序比的是分隔符后的首个字符（`aaa/other.yaml` < `misc.yaml`），
+  **根目录那份不保证排在前面**。
+- **解决**：抽出 `_root_first(paths, root)`（`sorted(paths, key=lambda p: p.parent != root)`，
+  稳定排序），文件名与展示名两条寻址路径共用，与 `core.profile.load_profile` /
+  `list_profiles` 的"根目录优先"三点一致。
+- **要点**：
+  - 同一份候选集**每新增一条寻址路径，都要重新确认优先级规则**；"根目录优先"是
+    core.profile 的既有语义，中心侧任何新路径漏掉它都会造成中心/worker 指向分裂。
+  - 该 bug 是否显形取决于文件名首字符（`aaa/...` < `misc.yaml` 时子目录抢先，
+    `zzz/...` > `misc.yaml` 时根目录恰好先命中），**跨目录名才暴露**——顺序类规则必须
+    用反例文件名钉住，不能靠当前数据巧合通过。
+
 ## profile 默认值全按 8×48GB 数据中心卡设计，小显存单卡照抄必失败
 
 - **日期**：2026-09-04

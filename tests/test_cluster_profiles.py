@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from modelctl.core.cluster import profiles as P
+from modelctl.core.profile import ProfileError, load_profile
 
 
 @pytest.fixture()
@@ -311,3 +312,43 @@ def test_one_directory_walk_per_read(tmp_path, monkeypatch):
     assert calls == ["*.yaml", "*.yaml"], calls
     assert P.read_profile_source("nope", tmp_path)["ok"] is False
     assert calls == ["*.yaml", "*.yaml", "*.yaml"], calls
+
+
+# ---------------- fix round 3：显式 engine 大小写口径 / 回退根目录优先 ----------------
+
+def test_explicit_engine_is_case_sensitive_like_core_profile(tmp_path):
+    """显式 `engine: VLLM` 在本地 load_profile 是硬失败（_resolve_engine 不 lower），
+    中心却 lower 后放行 → 落盘的文件在 worker 上 load 必炸"未知引擎"，goal 永不收敛。
+    与 round 1/2 同类：中心比 worker 的权威口径宽松。父目录推断才允许大小写不敏感
+    （core.profile 对 parent dir 做了 lower）。"""
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm" / "a.yaml").write_text("port: 1\nengine: VLLM\n", encoding="utf-8")
+    got = P.read_profile_source("a", tmp_path)
+    assert got["ok"] is False and "engine" in got["reason"], got
+    assert "大小写" in got["reason"], got          # reason 必须可行动：只说"未知引擎"用户想不到是大小写
+    assert P.find_profile_path("a", tmp_path) is None
+    with pytest.raises(ProfileError):     # 同口径双证：本地加载同一文件同样失败
+        load_profile("a", tmp_path)
+    (tmp_path / "vllm" / "b.yaml").write_text("port: 2\nengine: vllm\n", encoding="utf-8")
+    assert P.read_profile_source("b", tmp_path)["ok"] is True
+
+
+def test_uppercase_parent_dir_still_resolves(tmp_path):
+    """父目录名大写（`models/VLLM/`）：core.profile 对目录名 lower，中心必须同样放行，
+    否则就是反向的口径分叉（本地能跑、中心拒发）。"""
+    (tmp_path / "VLLM").mkdir()
+    (tmp_path / "VLLM" / "q.yaml").write_text("port: 1\n", encoding="utf-8")
+    assert P.read_profile_source("q", tmp_path)["engine"] == "vllm"
+
+
+def test_display_name_fallback_prefers_root_file(tmp_path):
+    """展示名回退必须与文件名寻址、与 core.profile.list_profiles 同为"根目录优先"：
+    否则中心下发的是子目录那份，而 worker 上 load_profile(展示名) 解析到的是根目录那份
+    —— 中心与 worker 各自的"同一个 profile"指向不同文件，sha 漂移检测彻底失真。"""
+    (tmp_path / "aaa").mkdir()
+    (tmp_path / "misc.yaml").write_text("port: 9\nengine: vllm\nname: shared\n", encoding="utf-8")
+    (tmp_path / "aaa" / "other.yaml").write_text("port: 1\nengine: vllm\nname: shared\n", encoding="utf-8")
+    got = P.read_profile_source("shared", tmp_path)
+    assert got["ok"] is True and got["name"] == "misc" and got["raw"]["port"] == 9, got
+    assert P.find_profile_path("shared", tmp_path) == (tmp_path / "misc.yaml", "vllm")
+    assert load_profile("shared", tmp_path).port == 9   # 本地口径同样命中根目录那份

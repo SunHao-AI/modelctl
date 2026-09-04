@@ -747,6 +747,8 @@ git commit -m "feat(cluster): wsproto v2 增加 sync/action/result 与心跳扩�
       ④ **寻址名兼容（用户裁决 2026-09-04）**：`<profile>` 允许**文件名**（`qwen3.8`）或**展示名**（`qwen3.8-vllm`；`core.profile._to_profile` 口径——YAML 显式 `name:` > `{group}-{engine}[-{variant}]`）。文件名候选全部未命中时才做**展示名回退**：扫描 models_dir 全部 `*.yaml`，逐个过 `_load_candidate` 同套校验后按展示名匹配。文件名命中**优先于**展示名命中；展示名命中多个引擎候选时沿用 ② 的歧义规则（`engine=` 选边）。**goal 内部一律用文件名**：成功返回 `name` = 文件 stem（即 goal.profile、worker 写盘文件名），另带 `display_name` = 展示名（回显用；与 name 相同时可省略）。下游 Task 5/8/12 只见文件名，镜像一致性（中心/worker 同路径同内容 → sha 漂移检测成立）由此保证。
       ⑤ **回退命中必须再过 stem 白名单（fix round 2）**：④ 的回退路径只校验过 YAML，却没校验归一出的 stem——展示名可以是任意字符串（YAML 显式 `name:` 允许 CJK），而 stem 是 worker 写盘文件名、Task 8 的 `_validate` 按 `is_safe_name` 拒收。放行即下发一条 worker 必拒、goal 永不收敛的指令（与 round 1 的坏 port 同属"中心放行、worker 必拒"）。故回退命中后对 `path.stem` 再过一次 `is_safe_name`，不合格者出局并在 reason 里点名文件与 stem；同展示名的其它安全候选仍可命中（不能一起拖掉，否则又造一种 404）。
       ⑥ **目录遍历单点收敛（fix round 2）**：抽出 `_scan(root)` 一次性完成遍历（`sorted({...} if p.is_file())`），文件名与展示名两种寻址共用同一份结果。三条现实必须由遍历本身兜住：`rglob` 的 `**` 匹配**零层目录** → 根目录那份会同时出现在"根候选"与递归结果里（不去重则同一文件解析两遍、**歧义清单重复列同一行**，误导用户以为要多选一次边）；`rglob` **也匹配目录**（手建 `vllm/x.yaml/` 即命中）；一次读取只允许遍历一次目录（大 models 目录下重复遍历是纯 IO 浪费）。文件名候选仍"根目录优先 + 路径序"（稳定二次排序，不得依赖 set 迭代序）。
+      ⑦ **显式 `engine:` 大小写与 `core.profile` 同口径（fix round 3）**：中心原先对显式值 `explicit.strip().lower()`，而 `core.profile._resolve_engine` **不 lower**——`engine: VLLM` 本地 `load_profile` 是硬失败（"未知引擎 'VLLM'"），中心却归一成 `vllm` 放行 → 原样落盘的文件在 worker 上永远 load 不了，goal 不收敛（与 round 1 坏 port、round 2 不安全 stem 同属"中心比 worker 宽松"）。故显式值只 `strip()` 不 `lower()`；**父目录推断**两侧都 lower（`_resolve_engine` 对 parent dir 做了 lower），大小写目录名 `models/VLLM/` 仍须放行，否则反向分叉（本地能跑、中心拒发）。拒收 reason 在 `engine.lower() in KNOWN_ENGINES` 时追加"大小写敏感，请用其小写形式"的可行动提示。
+      ⑧ **展示名回退也必须根目录优先（fix round 3）**：④ 的回退按 `_scan` 的纯路径序取首个命中，而"根目录那份"在路径序里**不保证排在子目录之前**（`models/misc.yaml` vs `models/aaa/other.yaml` 比的是分隔符后的首个字符，`aaa` < `misc` 即子目录先命中）。文件名寻址是"根目录优先"、`core.profile.load_profile/list_profiles` 也是"根目录优先"，唯独回退不是 → 中心下发子目录那份、worker 上 `load_profile(展示名)` 却解析根目录那份，**同一个 profile 名在两侧指向不同文件**，sha 漂移检测彻底失真。抽出 `_root_first(paths, root)`（`sorted(..., key=lambda p: p.parent != root)`，稳定）供两种寻址共用。
 
 - [ ] **Step 1: 写失败测试** — 创建 `tests/test_cluster_profiles.py`
 
@@ -1004,6 +1006,9 @@ Expected: PASS（12 条）
 >
 > fix round 2 追加 4 条（回退命中 stem 非安全名拒发且点名文件 / 不安全 stem 不拖累同展示名的
 > 安全候选 / 根目录那份在歧义清单里只列一次 / 一次读取只遍历一次目录且过滤目录项），共 **35 条**。
+>
+> fix round 3 追加 3 条（显式 `engine: VLLM` 拒发且 reason 给大小写提示 + 大写父目录仍放行
+> 反向口径 / 展示名回退根目录优先并与 `load_profile` 双证同文件），共 **38 条**。
 
 - [ ] **Step 5: 提交**
 
