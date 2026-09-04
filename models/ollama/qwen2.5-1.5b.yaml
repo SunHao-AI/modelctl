@@ -1,0 +1,35 @@
+# ollama/qwen2.5-1.5b.yaml —— Qwen2.5-1.5B-Instruct（ollama 引擎，小显存冒烟测试用）
+# 定位：单卡 6GB 级消费卡（如 GTX 1660 Ti 6GB / CC 7.5）上的最小可用配置。
+#       ollama 是三个非托管引擎里对 Windows 最友好的（官方有 Windows 安装包，
+#       无需编译，也无需 .venvs/<engine>），因此在 Windows 开发机上通常只有本条能真正跑通。
+# 学习要点：ollama 引擎无 download 段（模型由 pre_start 的 `ollama pull` 拉取）、
+#       无 api_key（本地服务不做 OpenAI 兼容鉴权）、metrics_mapping 为 None
+#       （无 /metrics 端点，用量统计只能走 bench 兜底，见 .env 的 USAGE_BENCH_*）。
+group: qwen2.5-1.5b
+# 注意：本文件不写 alias。name 自动推导为 qwen2.5-1.5b-ollama，与同家族 llamacpp
+# 成员（name=qwen2.5-1.5b-llamacpp / alias=qwen2.5-1.5b）不冲突；网关按家族名
+# qwen2.5-1.5b 路由到当前运行中的成员。若在此写 alias: qwen2.5-1.5b-ollama 会与
+# name 同名，_parse_aliases 抛 ProfileError 导致整个 profile 被 list_profiles 跳过。
+# port：ollama serve 监听端口（健康检查 http://127.0.0.1:<port>/）。
+# 与现有 ollama/*.yaml 一致用 11434（共享 serve 语义）；ollama 引擎豁免端口占用检查，
+# 若机器上已有 ollama 托盘服务/其他 serve 占着 11434，modelctl 拉起的 serve 会因绑定
+# 失败退出，但 pre_start 的 pull、post_start 的预热与健康检查都会命中已在跑的那个，
+# 表现为"启动成功"——此时 modelctl 并不真正管这个进程，改用空闲端口即可接管。
+port: 11434
+# 注意：ollama 引擎无需 api_key（本地服务，无 OpenAI 兼容鉴权）
+
+ollama:
+  # model：ollama 模型名（<name>:<tag>），本地不存在时 pre_start 自动 `ollama pull`。
+  # qwen2.5:1.5b = Q4_K_M / 986MB / 32K 上下文（ollama 官方库 1.5b 默认 tag 即 Q4_K_M），
+  # 权重加载约 1.3GB，6GB 卡余量充足。想换量化可改 tag（如 1.5b-instruct-q8_0 约 1.65GB）
+  model: qwen2.5:1.5b
+  # keep_alive：模型驻留显存时长（秒）；-1 = 永久驻留，0 = 用完即卸载。
+  # 测试机取 300：空闲 5 分钟自动卸载，避免常驻占着 1.3GB 挡住其他引擎试跑
+  keep_alive: 300
+  # num_parallel：并发请求数（OLLAMA_NUM_PARALLEL）；单卡 6GB 给 1
+  num_parallel: 1
+  # context_length：上下文长度（OLLAMA_CONTEXT_LENGTH）。缺省 32K 会让 KV cache 偏大，
+  # 小显存卡压到 8192（与 llamacpp/qwen2.5-1.5b.yaml 对齐，便于两引擎横向对比）
+  context_length: 8192
+  # gpu_list：限制 serve 可见 GPU（可选）。单卡无需设置；
+  # 注意 ollama 为常驻进程，该限制被所有 ollama 模型共享，无法按单模型隔离

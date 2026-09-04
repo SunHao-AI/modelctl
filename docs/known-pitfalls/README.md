@@ -26,6 +26,8 @@
 | 2026-09-04 | 构建 / 部署环境 | 大镜像 `docker pull` 中途 `short read … EOF`，加镜像源无效 | mirrors 是有序 failover 不是带宽池，加源对传输中断无帮助；`ensure_image()` 利用 layer 复用做重试并按错误三类处置，daemon 级 `max-concurrent-downloads=2` 降低大 layer 互抢（注意它不是 pull 参数、`docker info` 也不显示）。 | [build/docker-install-mirror.md](build/docker-install-mirror.md) |
 | 2026-09-04 | 后端 / 配置管理 | 运行时数据目录默认值散在各调用点，长成三套口径 | logs 落项目根上级、usage 与 cache 撞目录、audit 相对 CWD；统一到 `core/paths.py` 单点解析（相对值按 PROJECT_ROOT）。 | [backend/runtime-data-dir.md](backend/runtime-data-dir.md) |
 | 2026-09-04 | 后端 / 配置管理 | gpu_lock 模块级常量绕过 CACHE_DIR，GPU 互斥静默失效 | 锁目录常量导入时求值，设了 CACHE_DIR 也不生效 → PID 与 .gpu-lock 分家，`list_gpu_locks()` 恒报无冲突；改函数即时解析。 | [backend/runtime-data-dir.md](backend/runtime-data-dir.md) |
+| 2026-09-04 | 后端 / 配置管理 | profile 的 alias 与自动推导 name 同名，整个 profile 被静默跳过 | `{group}-{engine}` 恰好等于 alias 时 `_parse_aliases` 抛错，而 `list_profiles` 只 warning+continue → 配置凭空消失；新增 profile 必须 `load_profile()` 实加载确认。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-04 | 后端 / 引擎启动 | profile 默认值全按 8×48GB 设计，小显存单卡照抄必失败 | `gpu_count` 缺省 8、`dspark` 缺省 on、`ctx_size` 缺省 **1M**；6GB 单卡须逐个显式覆盖，且 vllm/sglang 托管 venv **仅 Linux** 可建。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 
 ## 目录约定
 

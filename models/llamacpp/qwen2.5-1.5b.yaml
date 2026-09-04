@@ -1,0 +1,50 @@
+# llamacpp/qwen2.5-1.5b.yaml —— Qwen2.5-1.5B-Instruct（llama.cpp 引擎，小显存冒烟测试用）
+# 定位：单卡 6GB 级消费卡（如 GTX 1660 Ti 6GB / CC 7.5）上的最小可用配置，
+#       用于验证 modelctl 启停、健康检查、网关路由与用量统计链路，不追求吞吐与质量。
+# 学习要点：与 27B 系列 profile 的三处关键差异 —— gpu_count 必须为 1、
+#       dspark 必须显式 off（缺省是 on）、ctx_size 必须显式给小值（缺省是 1M）。
+group: qwen2.5-1.5b
+# alias：短名别名，网关/nginx 路由可用 `qwen2.5-1.5b` 指代本模型（如 URL /<node>/llm/qwen2.5-1.5b/v1）
+alias: qwen2.5-1.5b
+# port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）；避开 18888-18895/18909
+port: 18896
+# api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值
+api_key: ${API_KEY}
+
+llamacpp:
+  # model：留空 → 按 download 段落到 $MODEL_ROOT/<仓库名>（本文件不会被改写）
+  model: ""
+  # download：ModelScope GGUF 仓库；Q4_K_M 为单文件（约 986MB，非分片），
+  # 命中下载模式 *<quant>*.gguf。若下载后报"未找到首分片"，多为仓库量化文件名
+  # 大小写与本项不一致，去仓库 Files 页核对实际文件名后改本项即可。
+  download:
+    modelscope_id: second-state/Qwen2.5-1.5B-Instruct-GGUF
+    quant: Q4_K_M
+  # parallel：并发槽位。单卡 6GB 只给 1（显存占用随其线性增长）
+  parallel: 1
+  # ctx_size：单槽上下文。缺省是 1,048,576（1M）——小显存卡必须显式压小，
+  # 否则 KV cache 直接 OOM。1.5B 用 q8_0 KV 约 7KB/token，8192 ≈ 60MB
+  ctx_size: 8192
+  # gpu_count：参与推理的 GPU 数。**单卡机器必须写 1**；缺省是 8，
+  # 会被 check_requirements 判为"profile gpu_count=8 超过实际 GPU 数 1"而拒绝启动
+  gpu_count: 1
+  # reasoning：Qwen2.5 非思考模型，无  段，必须 off
+  reasoning: off
+  # reasoning_format：同上，无推理内容需要解析 → none
+  reasoning_format: none
+  # dspark：DSpark 投机解码。**缺省是 on**，本模型无草稿；虽然剩余显存 <11GB
+  # 会被自动降级关闭，但会打一条 warning，故显式 off 保持日志干净
+  dspark: off
+  # vision：Qwen2.5-1.5B 为纯文本模型，仓库无 *mmproj*.gguf，必须 off
+  vision: off
+  # cache_type_k / cache_type_v：KV cache 量化，小显存卡保持 q8_0 省显存
+  cache_type_k: q8_0
+  cache_type_v: q8_0
+  # fit：显存自适应策略，小模型固定参数即可，交给上面几项显式控制
+  fit: off
+  # 采样参数（Qwen2.5 官方推荐值）
+  repeat_penalty: 1.1
+  repeat_last_n: 64
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
