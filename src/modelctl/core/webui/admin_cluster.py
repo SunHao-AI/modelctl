@@ -59,14 +59,21 @@ def _disabled() -> JSONResponse | None:
 
 
 def _sweep_if_due() -> None:
-    """惰性 lease 扫描：任一 REST/WS 事件顺带触发，≥10s 才真正扫一次（免后台线程）。"""
+    """惰性 lease 扫描：任一 REST/WS 事件顺带触发，≥10s 才真正扫一次（免后台线程）。
+
+    台账（SQLite）异常不得传导到长连接：扫描失败仅告警，下轮事件重试，
+    绝不掀掉 worker WS 连接/心跳 ack。
+    """
     global _last_sweep
     now = time.time()
     if now - _last_sweep < _SWEEP_INTERVAL_S:
         return
     _last_sweep = now
-    for node_id, new_status in get_registry().sweep(now=now):
-        logger.info(f"节点 {node_id} 状态迁移 → {new_status}")
+    try:
+        for node_id, new_status in get_registry().sweep(now=now):
+            logger.info(f"节点 {node_id} 状态迁移 → {new_status}")
+    except Exception as exc:  # noqa: BLE001 —— 台账抖动与请求/长连接解耦，任何异常都吞掉
+        logger.warning(f"集群 lease 扫描失败（忽略，下轮重试）: {exc}")
 
 
 @router.get("/cluster/status")

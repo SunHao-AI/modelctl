@@ -14,10 +14,13 @@ collection 阶段 sys.exit 掀翻整个 session；现改为标准用例。
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
-from loguru import logger
 
-from modelctl.core.gateway import create_app
+pytest.importorskip("fastapi")
+
+from fastapi.testclient import TestClient  # noqa: E402
+from loguru import logger  # noqa: E402
+
+from modelctl.core.gateway import create_app  # noqa: E402
 
 KEY = "test_key_12345"
 

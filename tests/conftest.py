@@ -43,6 +43,18 @@ def isolated_runtime_dirs(tmp_path, monkeypatch):
     monkeypatch.setenv("AUDIT_DIR", str(tmp_path / "audit"))
     monkeypatch.delenv("GATEWAY_DEFAULT_MODEL", raising=False)
     monkeypatch.delenv("GATEWAY_CONTEXT_SWITCH", raising=False)
+    # CLUSTER_* delenv：同 GATEWAY_* 口径——开发者 .env 里的 CLUSTER_ROLE 等经 load_env()
+    # 注入后，solo 用例的 404 断言会被"意外启用"的集群角色破坏。cluster 用例在自己的
+    # fixture/用例内 setenv，晚于本 autouse fixture 执行，不受影响。
+    monkeypatch.delenv("CLUSTER_ROLE", raising=False)
+    monkeypatch.delenv("CLUSTER_CENTER_URL", raising=False)
+    monkeypatch.delenv("CLUSTER_NODE_ID", raising=False)
+    monkeypatch.delenv("CLUSTER_LAN", raising=False)
+    monkeypatch.delenv("CLUSTER_JOIN_TOKEN", raising=False)
+    monkeypatch.delenv("CLUSTER_NODE_TOKEN", raising=False)
+    monkeypatch.delenv("CLUSTER_LEASE_S", raising=False)
+    monkeypatch.delenv("CLUSTER_HEARTBEAT_INTERVAL_S", raising=False)
+    monkeypatch.delenv("CLUSTER_WS_INSECURE", raising=False)
 
 
 @pytest.fixture()

@@ -172,3 +172,17 @@ def test_join_check_empty_node_id_422(center_client) -> None:
     jt = center_client.post("/admin/api/cluster/join-tokens/rotate", headers=_h()).json()["join_token"]
     r = center_client.post("/admin/api/cluster/join-check", json={"node_id": "", "key": jt, "lan": ""})
     assert r.status_code == 422
+
+
+def test_sweep_failure_swallowed_endpoint_still_200(center_client, monkeypatch) -> None:
+    """lease 扫描抛异常（模拟 SQLite 抖动）必须被吞掉：端点仍 200，不得掀掉请求/长连接。"""
+    import modelctl.core.webui.admin_cluster as ac
+
+    def _boom(now: float = 0.0):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(ac.get_registry(), "sweep", _boom)
+    monkeypatch.setattr(ac, "_last_sweep", 0.0)  # 强制本轮真正触发 sweep
+    r = center_client.get("/admin/api/cluster/nodes", headers=_h())
+    assert r.status_code == 200
+    assert r.json()["nodes"] == []
