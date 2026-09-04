@@ -169,11 +169,16 @@ def _current_site_packages() -> Path | None:
 
     Windows/uv venv 下 site.getsitepackages() 可能返回 venv 根路径，
     导致包数探测为 0；sys.path 中含 "site-packages" 的条目更可靠。
+
+    必须按**目录名精确匹配**：部分包（如 nvidia_cutlass_dsl）会把
+    `site-packages/<pkg>/dsl_packages` 这类包内子目录注入 sys.path 且排在
+    真正的 site-packages 之前，子串匹配会误命中子目录导致包数/.so 数全为 0。
+    多个精确命中时取层级最浅者（宿主/当前 venv 的 site-packages 在上层）。
     """
-    for p in sys.path:
-        if "site-packages" in p:
-            return Path(p)
-    return None
+    candidates = [Path(p) for p in sys.path if Path(p).name == "site-packages"]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda p: len(p.parts))
 
 
 def _read_installed_packages(sp: Path) -> dict[str, str]:

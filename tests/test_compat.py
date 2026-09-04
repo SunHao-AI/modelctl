@@ -178,6 +178,32 @@ def test_env_spec_env_vars(monkeypatch, tmp_path):
     assert env.env_vars["MODEL_ROOT"] == ""
 
 
+def test_current_site_packages_ignores_package_subdir(tmp_path, monkeypatch):
+    """回归：nvidia_cutlass_dsl 把 site-packages/<pkg>/dsl_packages 注入 sys.path
+    且排在真 site-packages 之前，子串匹配会误命中子目录导致包数/.so 数全为 0。"""
+    sp = tmp_path / "site-packages"
+    nested = sp / "nvidia_cutlass_dsl" / "dsl_packages"
+    nested.mkdir(parents=True)
+    # 嵌套子目录在前，真实 site-packages 在后
+    monkeypatch.setattr(_compat_module.sys, "path", [str(nested), str(sp)])
+    assert _compat_module._current_site_packages() == sp
+
+
+def test_current_site_packages_prefers_shallowest(tmp_path, monkeypatch):
+    """多个精确命中时取层级最浅者（宿主/venv 的 site-packages 在上层）。"""
+    outer = tmp_path / "site-packages"
+    inner = tmp_path / "venv" / "lib" / "python3.12" / "site-packages"
+    inner.mkdir(parents=True)
+    monkeypatch.setattr(_compat_module.sys, "path", [str(inner), str(outer)])
+    assert _compat_module._current_site_packages() == outer
+
+
+def test_current_site_packages_none_when_absent(monkeypatch):
+    """sys.path 无 site-packages 目录（仅有子串命中）时返回 None。"""
+    monkeypatch.setattr(_compat_module.sys, "path", ["/x/site-packages_fake/pkg"])
+    assert _compat_module._current_site_packages() is None
+
+
 def test_resolvable_cuda_libs_glibc_ldconfig(monkeypatch):
     """glibc 系统 ldconfig -p 行含架构注释（如 (libc6,x86-64)），应解析出库名而非注释。"""
 
