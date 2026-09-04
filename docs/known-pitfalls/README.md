@@ -36,6 +36,8 @@
 | 2026-09-04 | 后端 / 集群下发 | 中心只校验"有没有 port"，坏 port 一路下发到引擎启动才炸 | 中心与 `core.profile` 必须同口径（int 可转 + 1-65535）；双侧纵深防御口径不一致 = 校验形同虚设。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-04 | 后端 / 集群下发 | 非 UTF-8 profile 破功"绝不抛异常"，超尺寸文件还先整份读进内存 | `UnicodeDecodeError` 是 `ValueError` 子类不在 `OSError`/`YAMLError` 内；上限须用 `stat().st_size` 在读盘前判定。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-04 | 后端 / 集群下发 | cluster 寻址只认文件名，用户照 UI 展示名下发必 404 | 展示名回退命中后**归一为文件 stem**（goal/写盘只认它，`display_name` 仅回显），推导复用 `_resolve_group` 单点口径，镜像一致性不破坏。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-04 | 后端 / 集群下发 | 展示名回退命中的 stem 未过写盘白名单，中心放行 worker 必拒 | 归一出的 `path.stem` 是 worker 写盘文件名，回退命中后必须再过一次 `is_safe_name`，拒收 reason 点名文件与 stem。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-04 | 后端 / 文件系统 | `rglob` 三重坑：重复命中根目录、匹配目录、重复遍历 | `**` 匹配零层目录使根目录文件在两套候选里各出现一次（歧义清单重复列行）；改用单次全扫 + 集合去重 + `is_file()` 过滤。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 
 ## 目录约定
 

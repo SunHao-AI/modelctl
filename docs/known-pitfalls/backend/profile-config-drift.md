@@ -107,6 +107,39 @@
   - 声明"绝不抛异常"的函数，兜底要按异常**继承树**核对，不能按"想到的那几种"列举。
   - 任何"超限即拒"都要在 IO 之前用元数据判定，读进来再拒只挡住语义、挡不住资源。
 
+## 展示名回退命中的文件 stem 未过写盘白名单，中心放行 worker 必拒
+
+- **日期**：2026-09-04（fix round 2）
+- **症状**：`models/vllm/千问.yaml` 写 `name: ascii-name` 后，`read_profile_source("ascii-name")`
+  返回 `ok=True, name="千问"`；`.hidden.yaml` 同理。goal 下发到 worker 后被 Task 8 的
+  `_validate`（`is_safe_name(profile)`）拒绝落盘，goal 永远停在拒收态且不报错回中心。
+- **根因**：条款④的展示名回退只保证候选 YAML 过 `_load_candidate` 校验，归一出的
+  `path.stem` 却没重新过白名单——展示名（YAML 显式 `name:`）允许任意字符串，文件名却
+  是 worker 写盘路径成分。与 round 1 的坏 port 同属"中心放行、worker 必拒"。
+- **解决**：回退路径命中后对 `path.stem` 再过一次 `is_safe_name`；不合格候选出局并在
+  reason 点名文件与 stem；同展示名的安全候选不受拖累（否则又造一种 404）。
+- **要点**：
+  - 双名字体系中"入口宽、出口严"：外部寻址名可以宽松，但凡是**路径成分**的归一结果
+    必须回到出口侧的同一白名单复核。
+  - 拒收 reason 必须点名是哪个文件/哪个 stem，"不存在"会把用户引向错误排查方向。
+
+## rglob 的三重坑：重复命中根目录、匹配目录、重复遍历
+
+- **日期**：2026-09-04（fix round 2）
+- **症状**：根目录 `models/qwen.yaml` + `models/sglang/qwen.yaml` 触发歧义拒发时，
+  reason 里候选清单为 `qwen.yaml, qwen.yaml, sglang\qwen.yaml`——同一文件列两遍，
+  误导用户以为还有第二个候选要选边；且文件名与展示名两次寻址各遍历一遍全目录。
+- **根因**：`Path.rglob("*.yaml")` 的 `**` 匹配**零层目录**，根目录那份同时出现在
+  "根候选"与递归结果里；`rglob` 还匹配**目录**（手建 `vllm/x.yaml/` 即命中）；
+  条款④引入回退后同一请求遍历两次目录。
+- **解决**：抽出 `_scan(root)` 单一遍历点——`sorted({p for p in root.rglob("*.yaml") if p.is_file()})`，
+  集合去重 + 目录过滤，文件名/展示名两种寻址共用；文件名候选用**稳定二次排序**恢复
+  "根目录优先 + 路径序"（`sort(key=lambda p: p.parent != root)`，不得依赖 set 迭代序）。
+- **要点**：
+  - 测试钉死手段：monkeypatch `Path.rglob` 记录 pattern 调用序列（钉"一次读取一次遍历"），
+    断言歧义 reason 括号内候选计数（钉"去重"）。
+  - "根候选 + rglob"这种手工拼接候选的写法必然踩零层目录重复，优先"一次全扫 + 过滤"。
+
 ## profile 默认值全按 8×48GB 数据中心卡设计，小显存单卡照抄必失败
 
 - **日期**：2026-09-04

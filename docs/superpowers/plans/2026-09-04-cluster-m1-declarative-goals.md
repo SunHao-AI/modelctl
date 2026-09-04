@@ -745,6 +745,8 @@ git commit -m "feat(cluster): wsproto v2 增加 sync/action/result 与心跳扩�
       ② 同名文件散落在**多个引擎子目录**（本仓 `models/*/qwen3.8.yaml` 有 8 份）→ 判"歧义"拒发并列出候选，绝不按排序猜一个（猜错即把模型下发到错误引擎）；调用方用新增的 `engine=` 显式选边（Task 12 的 `--engine`，缺省 None=不指定，签名向后兼容），同引擎重名仍根目录优先；
       ③ 尺寸上限用 `stat().st_size` 在**读盘前**判定；异常兜底必须含 `UnicodeDecodeError`（UTF-16/二进制残留即触发）；
       ④ **寻址名兼容（用户裁决 2026-09-04）**：`<profile>` 允许**文件名**（`qwen3.8`）或**展示名**（`qwen3.8-vllm`；`core.profile._to_profile` 口径——YAML 显式 `name:` > `{group}-{engine}[-{variant}]`）。文件名候选全部未命中时才做**展示名回退**：扫描 models_dir 全部 `*.yaml`，逐个过 `_load_candidate` 同套校验后按展示名匹配。文件名命中**优先于**展示名命中；展示名命中多个引擎候选时沿用 ② 的歧义规则（`engine=` 选边）。**goal 内部一律用文件名**：成功返回 `name` = 文件 stem（即 goal.profile、worker 写盘文件名），另带 `display_name` = 展示名（回显用；与 name 相同时可省略）。下游 Task 5/8/12 只见文件名，镜像一致性（中心/worker 同路径同内容 → sha 漂移检测成立）由此保证。
+      ⑤ **回退命中必须再过 stem 白名单（fix round 2）**：④ 的回退路径只校验过 YAML，却没校验归一出的 stem——展示名可以是任意字符串（YAML 显式 `name:` 允许 CJK），而 stem 是 worker 写盘文件名、Task 8 的 `_validate` 按 `is_safe_name` 拒收。放行即下发一条 worker 必拒、goal 永不收敛的指令（与 round 1 的坏 port 同属"中心放行、worker 必拒"）。故回退命中后对 `path.stem` 再过一次 `is_safe_name`，不合格者出局并在 reason 里点名文件与 stem；同展示名的其它安全候选仍可命中（不能一起拖掉，否则又造一种 404）。
+      ⑥ **目录遍历单点收敛（fix round 2）**：抽出 `_scan(root)` 一次性完成遍历（`sorted({...} if p.is_file())`），文件名与展示名两种寻址共用同一份结果。三条现实必须由遍历本身兜住：`rglob` 的 `**` 匹配**零层目录** → 根目录那份会同时出现在"根候选"与递归结果里（不去重则同一文件解析两遍、**歧义清单重复列同一行**，误导用户以为要多选一次边）；`rglob` **也匹配目录**（手建 `vllm/x.yaml/` 即命中）；一次读取只允许遍历一次目录（大 models 目录下重复遍历是纯 IO 浪费）。文件名候选仍"根目录优先 + 路径序"（稳定二次排序，不得依赖 set 迭代序）。
 
 - [ ] **Step 1: 写失败测试** — 创建 `tests/test_cluster_profiles.py`
 
@@ -999,6 +1001,9 @@ Expected: PASS（12 条）
 > 未知 engine 不参与歧义 + `engine=` 选边 + 非 UTF-8 不抛 + 超尺寸不读盘 + find/read 结论一致 +
 > 条款④展示名回退 6：回退命中归一文件 stem / 显式 `name:` 与 variant 口径 / 文件名优先 /
 > 展示名歧义 + 选边 / 同名省略 `display_name` / 回退不旁路校验），共 **31 条**。
+>
+> fix round 2 追加 4 条（回退命中 stem 非安全名拒发且点名文件 / 不安全 stem 不拖累同展示名的
+> 安全候选 / 根目录那份在歧义清单里只列一次 / 一次读取只遍历一次目录且过滤目录项），共 **35 条**。
 
 - [ ] **Step 5: 提交**
 

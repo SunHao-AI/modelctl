@@ -71,9 +71,15 @@ def display_name_of(raw: dict[str, Any], path: Path, engine: str) -> str:
     return f"{base}-{variant}" if variant else base
 
 
-def _candidate_paths(root: Path, name: str) -> list[Path]:
-    """根目录优先，其次递归排序——与 core.profile.load_profile 的查找顺序一致。"""
-    return [p for p in [root / f"{name}.yaml", *sorted(root.rglob(f"{name}.yaml"))] if p.is_file()]
+def _scan(root: Path) -> list[Path]:
+    """单次目录遍历：root 下全部 YAML **文件**，排序去重。
+
+    三条必须由遍历本身兜住的现实：① rglob 的 `**` 匹配零层目录，根目录那份会同时
+    出现在"根候选"与递归结果里，不去重会把同一文件解析两遍、歧义清单重复列同一行；
+    ② rglob 也匹配目录（手建的 `vllm/whatever.yaml/` 目录即命中），必须过滤；
+    ③ 按文件名与按展示名两种寻址共用这一份结果，一次读取只遍历一次目录。
+    """
+    return sorted({p for p in root.rglob("*.yaml") if p.is_file()})
 
 
 def _port_reason(value: Any) -> str:
@@ -141,10 +147,12 @@ def _resolve(root: Path, name: str, engine: str | None = None) -> tuple[Path, st
     命中多个引擎候选时沿用同一歧义规则。
     """
     viable: list[tuple[Path, str, dict[str, Any], str]] = []
-    paths = _candidate_paths(root, name)
-    if paths:
+    paths = _scan(root)
+    stems = sorted(p for p in paths if p.stem == name)
+    stems.sort(key=lambda p: p.parent != root)  # 稳定排序：根目录那份提前，余下保持路径序
+    if stems:
         last_reason = ""
-        for path in paths:
+        for path in stems:
             got = _load_candidate(path)
             if isinstance(got, str):
                 last_reason = got
@@ -155,13 +163,23 @@ def _resolve(root: Path, name: str, engine: str | None = None) -> tuple[Path, st
     else:
         # 展示名回退：展示名不是路径成分，全目录扫描无穿越风险；未通过校验的文件
         # 静默跳过——它们与本次寻址无关，其报错进 last_reason 只会误导用户
-        for path in sorted(root.rglob("*.yaml")):
+        unsafe_stems: list[str] = []
+        for path in paths:
             got = _load_candidate(path)
             if isinstance(got, str):
                 continue
-            if display_name_of(got[1], path, got[0]) == name:
-                viable.append((path, *got))
+            if display_name_of(got[1], path, got[0]) != name:
+                continue
+            # 展示名可以任意，但归一出的 stem 是 worker 侧写盘文件名（Task 8 按
+            # is_safe_name 拒收）：中心放行 = 下发一条 worker 必拒、永不收敛的 goal
+            if not is_safe_name(path.stem):
+                unsafe_stems.append(f"{path.relative_to(root)}（stem {path.stem!r}）")
+                continue
+            viable.append((path, *got))
         if not viable:
+            if unsafe_stems:
+                return (f"profile {name!r} 命中的文件名不是安全文件名（{'; '.join(unsafe_stems)}），"
+                        "stem 是 worker 侧写盘文件名（仅允许字母数字与 . _ -），请重命名该 YAML")
             return f"profile {name!r} 不存在（models/<engine>/*.yaml 的文件名与展示名均未匹配）"
     if engine:
         wanted = engine.strip().lower()

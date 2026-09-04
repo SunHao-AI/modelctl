@@ -250,3 +250,64 @@ def test_display_name_fallback_applies_same_validation(tmp_path):
     (tmp_path / "vllm" / "bad.yaml").write_text("port: 0\nname: wanted\n", encoding="utf-8")
     got = P.read_profile_source("wanted", tmp_path)
     assert got["ok"] is False and "不存在" in got["reason"]
+
+
+# ---------------- fix round 2：回退 stem 写盘白名单 / 单次遍历去重 ----------------
+
+def test_display_name_fallback_refuses_unsafe_file_stem(tmp_path):
+    """展示名可以任意，但归一出的 stem 是 worker 侧 models/<engine>/ 的写盘文件名：
+    CJK / 隐藏文件的 stem 过不了 worker 的 is_safe_name，中心 ok=True 等于下发一条
+    worker 必拒、永远无法收敛的 goal（与 round 1 的坏 port 同属"中心放行 worker 必拒"）。"""
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm" / "千问.yaml").write_text("port: 1\nname: ascii-name\n", encoding="utf-8")
+    (tmp_path / "vllm" / ".hidden.yaml").write_text("port: 2\nname: dotted\n", encoding="utf-8")
+    for query, stem in (("ascii-name", "千问"), ("dotted", ".hidden")):
+        got = P.read_profile_source(query, tmp_path)
+        assert got["ok"] is False and "安全文件名" in got["reason"], (query, got)
+        assert stem in got["reason"], got          # reason 必须点名是哪个文件，否则用户无从改名
+        assert P.find_profile_path(query, tmp_path) is None
+
+
+def test_display_name_fallback_still_picks_safe_sibling(tmp_path):
+    """不安全 stem 只让该候选出局，不能把同展示名的安全候选一起拖掉（否则等于又造一种 404）。"""
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "ollama").mkdir()
+    (tmp_path / "vllm" / "qwen.yaml").write_text("port: 1\nname: shared\n", encoding="utf-8")
+    (tmp_path / "ollama" / "千问.yaml").write_text("port: 2\nname: shared\n", encoding="utf-8")
+    got = P.read_profile_source("shared", tmp_path)
+    assert got["ok"] is True and got["name"] == "qwen" and got["engine"] == "vllm"
+
+
+def test_root_file_listed_once_in_ambiguity_reason(tmp_path):
+    """rglob 的 `**` 匹配零层目录：根目录那份同时在"根候选"与"递归结果"里，不去重会把
+    同一文件解析两遍，歧义原因里还重复列同一行，误导用户以为有两个候选需要选边。"""
+    (tmp_path / "qwen.yaml").write_text("port: 1\nengine: vllm\n", encoding="utf-8")
+    (tmp_path / "sglang").mkdir()
+    (tmp_path / "sglang" / "qwen.yaml").write_text("port: 2\n", encoding="utf-8")
+    got = P.read_profile_source("qwen", tmp_path)
+    assert got["ok"] is False and "歧义" in got["reason"]
+    hits = got["reason"].split("（", 1)[1].split("）", 1)[0]     # 括号内即候选清单
+    assert hits.count("qwen.yaml") == 2, hits                    # 根目录 1 + sglang 1
+
+
+def test_one_directory_walk_per_read(tmp_path, monkeypatch):
+    """一次读取只允许一次目录遍历：文件名与展示名共用同一份扫描结果；且 rglob 会匹配
+    目录，扫描结果必须只剩文件（目录项进 _load_candidate 只是白跑一趟 stat+read）。"""
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm" / "qwen.yaml").write_text("port: 1\n", encoding="utf-8")
+    (tmp_path / "vllm" / "other.yaml").write_text("port: 2\nname: display-name\n", encoding="utf-8")
+    (tmp_path / "vllm" / "fake-dir.yaml").mkdir()
+    calls: list[str] = []
+    real_rglob = P.Path.rglob
+
+    def spy(self, pattern):
+        calls.append(pattern)
+        return real_rglob(self, pattern)
+
+    monkeypatch.setattr(P.Path, "rglob", spy)
+    assert P.read_profile_source("qwen", tmp_path)["ok"] is True   # 文件名命中
+    assert calls == ["*.yaml"], calls
+    assert P.read_profile_source("display-name", tmp_path)["ok"] is True   # 展示名回退复用同一次遍历
+    assert calls == ["*.yaml", "*.yaml"], calls
+    assert P.read_profile_source("nope", tmp_path)["ok"] is False
+    assert calls == ["*.yaml", "*.yaml", "*.yaml"], calls
