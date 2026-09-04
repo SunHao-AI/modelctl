@@ -226,7 +226,8 @@ async def probe_detail(request: Request, _: None = Depends(require_auth)):
 
     from modelctl.core.capabilities import probe
     from modelctl.core.envfile import PROJECT_ROOT
-    from modelctl.core.gpu_lock import LOCK_DIR, list_gpu_locks
+    from modelctl.core.gpu_lock import list_gpu_locks
+    from modelctl.core.paths import cache_dir
 
     caps = await asyncio.to_thread(probe)
     gpu_locks = await asyncio.to_thread(list_gpu_locks)
@@ -267,7 +268,7 @@ async def probe_detail(request: Request, _: None = Depends(require_auth)):
         },
         "paths": {
             "project_root": str(PROJECT_ROOT),
-            "cache_dir": str(LOCK_DIR),
+            "cache_dir": str(cache_dir()),
             "models_dir": str(PROJECT_ROOT / "models"),
         },
         "version": getattr(mctl, "__version__", ""),

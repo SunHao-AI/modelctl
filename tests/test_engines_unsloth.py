@@ -342,7 +342,7 @@ def test_unsloth_gpu_list_sets_cuda(tmp_path, monkeypatch):
 def test_unsloth_tp_requires_two_gpus(tmp_path, monkeypatch):
     (tmp_path / "m.gguf").write_bytes(b"0" * 1024)
     # check_requirements 会获取 GPU 锁，隔离到临时目录
-    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path / "locks")
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "locks"))
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
     # tensor_parallel on + gpu_list 仅一块 GPU → check_requirements 必须拒绝
     p = _write(
@@ -358,7 +358,7 @@ def test_unsloth_tp_requires_two_gpus(tmp_path, monkeypatch):
 def test_unsloth_gpu_conflict_blocks_second_model(tmp_path, monkeypatch):
     from pathlib import Path as _P
 
-    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path / "locks")
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "locks"))
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
     for name in ("ua", "ub"):
         (_P(tmp_path) / f"{name}.gguf").write_bytes(b"0" * 1024)
@@ -377,7 +377,7 @@ def test_unsloth_gpu_conflict_blocks_second_model(tmp_path, monkeypatch):
 
 def test_unsloth_vram_gate_uses_selected_gpus_only(tmp_path, monkeypatch):
     """gpu_list 仅选中部分 GPU 时，显存预检按选中卡剩余显存计算（镜像 llamacpp selection-aware 用例）。"""
-    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path / "locks")
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "locks"))
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
     # 选中的 GPU 0 几乎无空闲显存，其余卡充裕 → 全量口径足够、按选中卡不足
     caps = Capabilities(gpu_count=4, gpu_indices=[0, 1, 2, 3], compute_capability="9.0",

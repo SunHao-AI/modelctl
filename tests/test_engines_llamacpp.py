@@ -523,7 +523,7 @@ def test_find_first_skips_directory_named_dspark(tmp_path):
 
 def test_llamacpp_gpu_list_sets_cuda_and_tensor_split(tmp_path, monkeypatch):
     # check_requirements 会获取 GPU 锁，隔离到临时目录
-    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path / "locks")
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "locks"))
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
     caps = probe(nvidia_smi_output=SMI)
     adapter = get_adapter("llamacpp")(_profile(tmp_path, "  gpu_list: '0,1'\n"), caps)
@@ -544,7 +544,7 @@ def test_llamacpp_gpu_out_of_range_raises(tmp_path, monkeypatch):
 def test_llamacpp_gpu_conflict_blocks_second_model(tmp_path, monkeypatch):
     from pathlib import Path as _P
 
-    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path / "locks")
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "locks"))
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
     caps = probe(nvidia_smi_output=SMI)  # 8 GPUs → indices 0..7
     for name, gpu_list in (("a", "'0,1'"), ("b", "'1,2'")):
@@ -564,7 +564,7 @@ def test_llamacpp_gpu_conflict_blocks_second_model(tmp_path, monkeypatch):
 def test_llamacpp_vram_gate_uses_selected_gpus_only(tmp_path, monkeypatch):
     from pathlib import Path as _P
 
-    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path / "locks")
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "locks"))
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
     # Build caps where the SELECTED single GPU has little free VRAM but others have plenty.
     from modelctl.core.capabilities import Capabilities

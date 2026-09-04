@@ -21,27 +21,27 @@ from modelctl.engines.base import RequirementError
 
 
 def test_acquire_and_list(tmp_path, monkeypatch):
-    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path)
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path))
     acquire_gpu_lock("a", [0, 1])
     assert list_gpu_locks() == {0: "a", 1: "a"}
 
 
 def test_conflict(tmp_path, monkeypatch):
-    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path)
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path))
     acquire_gpu_lock("a", [0, 1])
     with pytest.raises(RequirementError, match="已被模型 a 占用"):
         acquire_gpu_lock("b", [1, 2])
 
 
 def test_release(tmp_path, monkeypatch):
-    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path)
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path))
     acquire_gpu_lock("a", [0])
     release_gpu_lock("a")
     assert list_gpu_locks() == {}
 
 
 def test_stale_lock_cleanup(tmp_path, monkeypatch, dead_pid):
-    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path)
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path))
     lock = tmp_path / "stale.gpu-lock"
     # 用确定已死的真实 PID（conftest.dead_pid fixture），不假设某个大数一定无效
     lock.write_text(json.dumps({"gpus": [0], "pid": dead_pid, "updated_at": 0}), encoding="utf-8")
@@ -51,7 +51,7 @@ def test_stale_lock_cleanup(tmp_path, monkeypatch, dead_pid):
 
 def test_same_name_reacquire_allowed(tmp_path, monkeypatch):
     # restart of the same model must not conflict with its own (still-live) lock
-    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path)
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path))
     acquire_gpu_lock("a", [0, 1])
     acquire_gpu_lock("a", [0, 1])  # no error
     assert list_gpu_locks() == {0: "a", 1: "a"}
@@ -60,7 +60,7 @@ def test_same_name_reacquire_allowed(tmp_path, monkeypatch):
 def test_conflict_survives_cli_exit_engine_alive(tmp_path, monkeypatch):
     # After start_profile updates the owner to the long-lived engine pid, an overlapping
     # model must still be blocked even though the original *acquire* was done by a (now-gone) CLI.
-    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path)
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path))
     acquire_gpu_lock("a", [0, 1])                 # acquired with current (CLI-like) pid
     update_gpu_lock_owner("a", os.getpid())       # simulate re-pointing owner at a live engine process
     with pytest.raises(RequirementError, match="占用"):
@@ -68,7 +68,7 @@ def test_conflict_survives_cli_exit_engine_alive(tmp_path, monkeypatch):
 
 
 def test_stale_cleaned_when_engine_dead(tmp_path, monkeypatch, dead_pid):
-    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path)
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path))
     acquire_gpu_lock("a", [0])
     update_gpu_lock_owner("a", dead_pid)           # owner died → lock becomes stale
     assert list_gpu_locks().get(0) != "a"          # auto-cleaned on next listing

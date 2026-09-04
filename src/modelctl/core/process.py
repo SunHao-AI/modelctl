@@ -27,7 +27,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from modelctl.core.envfile import PROJECT_ROOT
+from modelctl.core.paths import cache_dir, log_dir
 from modelctl.core.timezone import subprocess_timezone
 
 if typing.TYPE_CHECKING:
@@ -54,19 +54,6 @@ def is_pid_alive(pid: int) -> bool:
         return True
     except OSError:
         return False
-
-
-def log_dir() -> Path:
-    d = Path(os.environ.get("LOG_DIR") or PROJECT_ROOT.parent / "logs")
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def cache_dir() -> Path:
-    """进程元数据目录（PID 文件），默认项目根 data/cache（与用量统计缓存一致）。"""
-    d = Path(os.environ.get("CACHE_DIR") or PROJECT_ROOT / "data" / "cache")
-    d.mkdir(parents=True, exist_ok=True)
-    return d
 
 
 def pid_file(name: str) -> Path:

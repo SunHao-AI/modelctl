@@ -24,6 +24,8 @@
 | 2026-09-04 | 前端 / 部署路径 | 想用 Cookie 定桩在一个端口跑多节点 UI，会停错模型 | 同域 Cookie 不分标签页，`/208/` 页面的 3s 轮询与启停按钮会打到后来打开的 209；Web UI 能停模型删 venv，属真实破坏。三端口 + localStorage 按 origin 隔离才安全。 | [build/nginx-webui-proxy.md](build/nginx-webui-proxy.md) |
 | 2026-09-04 | 构建 / 部署环境 | `--run` 的 daemon.json 合并只追加不清理，坏源永久残留 | 停服 mirror 排在首位时 Docker 第一个就 DNS 失败退出，新追加的好源没机会生效；新增 `DEAD_REGISTRY_MIRRORS` 让 `--run` 幂等收敛，删除也要计入 `changed`。 | [build/docker-install-mirror.md](build/docker-install-mirror.md) |
 | 2026-09-04 | 构建 / 部署环境 | 大镜像 `docker pull` 中途 `short read … EOF`，加镜像源无效 | mirrors 是有序 failover 不是带宽池，加源对传输中断无帮助；`ensure_image()` 利用 layer 复用做重试并按错误三类处置，daemon 级 `max-concurrent-downloads=2` 降低大 layer 互抢（注意它不是 pull 参数、`docker info` 也不显示）。 | [build/docker-install-mirror.md](build/docker-install-mirror.md) |
+| 2026-09-04 | 后端 / 配置管理 | 运行时数据目录默认值散在各调用点，长成三套口径 | logs 落项目根上级、usage 与 cache 撞目录、audit 相对 CWD；统一到 `core/paths.py` 单点解析（相对值按 PROJECT_ROOT）。 | [backend/runtime-data-dir.md](backend/runtime-data-dir.md) |
+| 2026-09-04 | 后端 / 配置管理 | gpu_lock 模块级常量绕过 CACHE_DIR，GPU 互斥静默失效 | 锁目录常量导入时求值，设了 CACHE_DIR 也不生效 → PID 与 .gpu-lock 分家，`list_gpu_locks()` 恒报无冲突；改函数即时解析。 | [backend/runtime-data-dir.md](backend/runtime-data-dir.md) |
 
 ## 目录约定
 

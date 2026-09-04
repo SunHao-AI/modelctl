@@ -41,7 +41,8 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from modelctl.core.envfile import PROJECT_ROOT, load_env
+from modelctl.core.envfile import load_env
+from modelctl.core.paths import usage_data_dir
 
 USAGE_PORT = 5002
 
@@ -934,13 +935,11 @@ def run_server(targets: list[StatsTarget] | None = None) -> None:
 
     环境变量：USAGE_HOST（默认 0.0.0.0）、USAGE_PORT（默认 5002）、
     USAGE_MODE（poll/on-demand）、USAGE_POLL_INTERVAL（默认 60）、
-    USAGE_DATA_DIR（默认 <PROJECT_ROOT>/data/cache）、
+    USAGE_DATA_DIR（默认 <项目根>/data/usage-data，见 core/paths.py）、
     USAGE_BENCH_FALLBACK（测速总开关）、USAGE_BENCH_TTFT_ONLY（ttft 缺口也触发）。
     """
     load_env()  # 先加载 .env，确保 USAGE_DATA_DIR 等配置在 data_dir 计算前生效
-    raw_data_dir = os.environ.get("USAGE_DATA_DIR", "")
-    data_dir = Path(raw_data_dir) if raw_data_dir else PROJECT_ROOT / "data" / "cache"
-    data_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = usage_data_dir()
     if targets is None:
         targets = _targets_from_profiles(data_dir)
 

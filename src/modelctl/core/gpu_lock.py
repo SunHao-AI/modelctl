@@ -22,18 +22,21 @@ import os
 import time
 from pathlib import Path
 
-from modelctl.core.envfile import PROJECT_ROOT
+from modelctl.core.paths import cache_dir
 from modelctl.core.process import is_pid_alive
 
 # 注意：不在模块顶层 import modelctl.engines.base —— engines/__init__ 会立即导入
 # llamacpp/unsloth（它们又在本模块被导入），首个入口是 gpu_lock 时会构成循环导入；
 # 故在 acquire_gpu_lock 内延迟导入 RequirementError。
-LOCK_DIR = PROJECT_ROOT / "data" / "cache"
+#
+# 锁目录 = cache_dir()（受 CACHE_DIR 管辖），与 PID 文件同目录。曾用模块级常量
+# LOCK_DIR = PROJECT_ROOT/"data"/"cache"：模块导入时求值，设了 CACHE_DIR 也不生效，
+# 于是 PID 与 .gpu-lock 分家、list_gpu_locks() 读不到锁 → GPU 互斥静默失效。
 LOCK_SUFFIX = ".gpu-lock"
 
 
 def _lock_path(name: str) -> Path:
-    return LOCK_DIR / f"{name}{LOCK_SUFFIX}"
+    return cache_dir() / f"{name}{LOCK_SUFFIX}"
 
 
 def _read_lock(path: Path) -> dict | None:
@@ -53,9 +56,8 @@ def _read_lock(path: Path) -> dict | None:
 
 def list_gpu_locks() -> dict[int, str]:
     """返回 {gpu_index: owning_model_name}；自动清理失效锁。"""
-    LOCK_DIR.mkdir(parents=True, exist_ok=True)
     result: dict[int, str] = {}
-    for path in sorted(LOCK_DIR.glob(f"*{LOCK_SUFFIX}")):
+    for path in sorted(cache_dir().glob(f"*{LOCK_SUFFIX}")):
         data = _read_lock(path)
         if data is None:
             continue
@@ -71,7 +73,6 @@ def acquire_gpu_lock(name: str, gpus: list[int]) -> None:
 
     if not gpus:
         return
-    LOCK_DIR.mkdir(parents=True, exist_ok=True)
     locks = list_gpu_locks()
     conflicts = {g: locks[g] for g in gpus if g in locks and locks[g] != name}
     if conflicts:

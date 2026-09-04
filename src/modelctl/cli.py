@@ -56,6 +56,7 @@ from modelctl.core.envs import (
 )
 from modelctl.core.logging import setup_logging
 from modelctl.core.nginx_snippet import build_llm_map
+from modelctl.core.paths import audit_dir
 from modelctl.core.process import (
     is_running,
     is_running_any,
@@ -970,8 +971,11 @@ def _cmd_env_remove(args, models_dir: Path | None, caps) -> int:
 
 
 def _audit_dir_from_env() -> Path:
-    """从 env 读 AUDIT_DIR，缺省 data/audit。"""
-    return Path(os.environ.get("AUDIT_DIR", "data/audit"))
+    """审计目录（AUDIT_DIR，默认 <项目根>/data/audit；解析统一在 core/paths.py）。
+
+    .env 由 main() 在命令路由前 load_env() 注入，此处只读解析。
+    """
+    return audit_dir()
 
 
 def _read_audit_entries(

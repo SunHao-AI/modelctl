@@ -39,12 +39,16 @@ vi .env
 | 变量 | 默认值示例 | 说明 |
 | --- | --- | --- |
 | `API_KEY` | `root123456` | API 密钥（供 profile 的 `${API_KEY}` 插值；留空则不校验） |
-| `MODEL_ROOT` | `/raid5/sh/model/model-gguf` | GGUF 模型根目录（llamacpp 下载段保存父目录） |
-| `MODELSCOPE_CACHE` | `/raid5/sh/model/modelscope` | ModelScope 下载缓存目录 |
-| `LLAMACPP_SOURCE_DIR` | `/raid5/sh/code/llama.cpp` | llama.cpp 源码目录（编译用） |
-| `LOG_DIR` | `/raid5/sh/logs` | 启动日志与服务运行日志目录 |
+| `MODEL_ROOT` | `<项目根上级>/model-gguf` | GGUF 模型根目录（llamacpp / unsloth 下载段保存父目录；HF 类引擎默认为同级的 `model-hf/`） |
+| `MODELSCOPE_CACHE` | `~/.cache/modelscope` | ModelScope 下载缓存目录（仅透传给子进程） |
+| `LLAMACPP_SOURCE_DIR` | `<项目根上级>/llama.cpp` | llama.cpp 源码目录（编译用） |
+| `LOG_DIR` | `<项目根>/data/logs` | 启动日志与服务运行日志目录 |
 | `USAGE_HOST` | `0.0.0.0` | 用量统计服务监听地址 |
 | `USAGE_PORT` | `5002` | 用量统计服务监听端口 |
+
+> 运行时数据目录（`LOG_DIR` / `CACHE_DIR` / `USAGE_DATA_DIR` / `AUDIT_DIR`）默认全部落在
+> **项目根 `data/`** 下，无需配置；相对值按项目根解析（不按当前工作目录）。统一解析规则见
+> `src/modelctl/core/paths.py`。示例中的 `/raid5/...` 只是把目录挪到大容量盘的写法。
 
 ### 1.5 models 目录布局
 

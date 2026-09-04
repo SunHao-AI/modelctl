@@ -51,13 +51,10 @@ def _router() -> APIRouter:
 
 
 def _audit_dir() -> Path:
-    """审计目录（env > 默认 data/audit）。"""
-    p = Path(os.environ.get("AUDIT_DIR", "data/audit"))
-    if not p.is_absolute():
-        from modelctl.core.envfile import PROJECT_ROOT
+    """审计目录（AUDIT_DIR，默认 <项目根>/data/audit；解析统一在 core/paths.py）。"""
+    from modelctl.core.paths import audit_dir
 
-        p = PROJECT_ROOT / p
-    return p
+    return audit_dir()
 
 
 def _parse_day(name: str) -> _dt.date | None:

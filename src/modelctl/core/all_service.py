@@ -30,6 +30,7 @@ from loguru import logger
 from modelctl.core.capabilities import Capabilities, probe
 from modelctl.core.deps import ensure_packages
 from modelctl.core.gateway import GATEWAY_PORT
+from modelctl.core.paths import usage_data_dir
 from modelctl.core.process import (
     describe_port_listener,
     is_running,
@@ -239,11 +240,11 @@ def start_gateway() -> ComponentResult:
         cmd, env = _detached_script("modelctl.core.gateway")
     else:
         cmd, env = _detached_script("modelctl.core.gateway", interpreter=str(vendor))
-    # 与 stats 服务共用用量持久化目录（USAGE_DATA_DIR 缺省 data/cache），
-    # 网关累计的 token 由 stats 服务读出，费率/预算计算保持一致
-    data_dir = os.environ.get("USAGE_DATA_DIR")
-    if data_dir:
-        env["USAGE_DATA_DIR"] = data_dir
+    # 与 stats 服务共用用量持久化目录（USAGE_DATA_DIR 缺省 data/usage-data），
+    # 网关累计的 token 由 stats 服务读出，费率/预算计算保持一致。
+    # 总是透传**解析后的绝对路径**：只传"env 是否设置"会让子进程按自己的 PROJECT_ROOT
+    # 重新解析相对值，两侧写入不同目录 → token 累计分家。
+    env["USAGE_DATA_DIR"] = str(usage_data_dir())
     pid, _ = start_detached("llm-gateway", cmd, env)
     port = int(os.environ.get("GATEWAY_PORT", str(GATEWAY_PORT)))
     logger.info(f"网关已启动（PID {pid}），监听端口 {port}")
@@ -309,9 +310,9 @@ def start_webui(auto_build: bool | None = None) -> ComponentResult:
     # 的是本次生效值（CLI --port 覆盖时也走这里，由 webui 参数传入）
     host, port = webui_host(), webui_port()
     env["WEBUI_HOST"], env["WEBUI_PORT"] = host, str(port)
-    data_dir = os.environ.get("USAGE_DATA_DIR")
-    if data_dir:
-        env["USAGE_DATA_DIR"] = data_dir
+    # 同 gateway：webui 内部 create_app(admin=True) 走 get_collector 回退分支读 usage 目录，
+    # 显式传绝对路径避免子进程按自身 PROJECT_ROOT 重算相对值
+    env["USAGE_DATA_DIR"] = str(usage_data_dir())
     pid, _ = start_detached(WEBUI_INSTANCE, cmd, env)
     hint = "" if dist_ready() else f"（仅 /admin/api 可用；{note.splitlines()[0]}）"
     logger.info(f"Web UI 已启动（PID {pid}），监听端口 {port}{hint}")

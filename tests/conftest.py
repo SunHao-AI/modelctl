@@ -27,11 +27,11 @@ def isolated_runtime_dirs(tmp_path, monkeypatch):
 
     CACHE_DIR：可用口径（is_model_available / _instance_state）会读 pid_file(name)
       区分"外部启动"与"PID 异常"，不隔离会让测试结论依赖仓库 data/cache 的真实内容。
-    LOG_DIR：缺省值落到项目外的 <项目根>/../logs（见 core/logging.py）。未显式设置的
-      用例调 cli.main() → setup_logging() 时，loguru 文件 sink 会在该路径打开句柄；
+    LOG_DIR：缺省值为 <项目根>/data/logs（见 core/paths.py）。未显式设置的用例调
+      cli.main() → setup_logging() 时，loguru 文件 sink 会在该路径打开句柄；
       该句柄跨用例存活，被 pytest 的 gc.collect() 析构时 close() 抛 OSError(EBADF)，
       表现为"当时正在跑的用例"莫名失败（与用例自身逻辑无关）。
-    AUDIT_DIR：网关审计日志缺省写 CWD 下 data/audit，不隔离会把测试请求写进仓库。
+    AUDIT_DIR：网关审计日志缺省写 <项目根>/data/audit，不隔离会把测试请求写进仓库。
     GATEWAY_* delenv：cli 入口与 admin 端点会 load_env() 把**开发者本地 .env** 经
       os.environ.setdefault 注入进程（不受 monkeypatch 管辖、跨用例存活）。典型翻车：
       .env 里 GATEWAY_DEFAULT_MODEL=qwen3.8 泄漏后，create_app(default_model=None) 被
@@ -41,6 +41,9 @@ def isolated_runtime_dirs(tmp_path, monkeypatch):
     monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     monkeypatch.setenv("AUDIT_DIR", str(tmp_path / "audit"))
+    # USAGE_DATA_DIR：stats 与网关的 token 累计目录（默认 data/usage-data），不隔离会把
+    # 测试累计写进仓库 data/，且跨用例污染费率/预算断言。
+    monkeypatch.setenv("USAGE_DATA_DIR", str(tmp_path / "usage-data"))
     monkeypatch.delenv("GATEWAY_DEFAULT_MODEL", raising=False)
     monkeypatch.delenv("GATEWAY_CONTEXT_SWITCH", raising=False)
     # CLUSTER_* delenv：同 GATEWAY_* 口径——开发者 .env 里的 CLUSTER_ROLE 等经 load_env()

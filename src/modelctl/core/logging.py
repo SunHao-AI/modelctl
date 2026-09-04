@@ -15,12 +15,11 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
 
 from loguru import logger
 
 from modelctl.core.colors import color_enabled, load_scheme_from_env
-from modelctl.core.envfile import PROJECT_ROOT
+from modelctl.core.paths import log_dir
 
 
 def _build_console_format() -> str:
@@ -31,7 +30,7 @@ def _build_console_format() -> str:
 
 
 def setup_logging() -> None:
-    """配置控制台与文件日志（LOG_DIR，默认项目根上级 logs/）。
+    """配置控制台与文件日志（LOG_DIR，默认 <项目根>/data/logs，见 core/paths.py）。
 
     控制台彩色输出由 colors 模块统一控制（自动检测 NO_COLOR/TERM/CI/TTY），
     文件日志固定无颜色以避免日志污染。
@@ -41,6 +40,4 @@ def setup_logging() -> None:
     logger.remove()
     level = os.environ.get("LOG_LEVEL", "INFO").upper()
     logger.add(sys.stderr, level=level, format=_build_console_format())
-    log_dir = Path(os.environ.get("LOG_DIR") or PROJECT_ROOT.parent / "logs")
-    log_dir.mkdir(parents=True, exist_ok=True)
-    logger.add(log_dir / "modelctl.log", level=level, rotation="10 MB", retention="7 days", encoding="utf-8")
+    logger.add(log_dir() / "modelctl.log", level=level, rotation="10 MB", retention="7 days", encoding="utf-8")

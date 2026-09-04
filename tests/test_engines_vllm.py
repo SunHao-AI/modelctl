@@ -263,7 +263,7 @@ def test_vllm_gpu_out_of_range_raises(tmp_path, monkeypatch):
 
 
 def test_vllm_gpu_conflict_blocks_second_model(tmp_path, monkeypatch):
-    monkeypatch.setattr("modelctl.core.gpu_lock.LOCK_DIR", tmp_path / "locks")
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path / "locks"))
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
     _stub_venv(tmp_path, monkeypatch, "vllm")
     caps = Capabilities(gpu_count=4, gpu_indices=[0, 1, 2, 3], compute_capability="9.0", binaries={"vllm": True})

@@ -64,6 +64,11 @@ modelctl/
 │   ├── src/                        # 前端源码（views / components / api / stores / router）
 │   └── package.json                # 前端脚本：dev（vite 5173）/ build（产物输出 ../dist）
 ├── dist/                           # 前端构建产物（npm run build 生成，webui 挂载为 SPA）
+├── data/                           # 运行时数据（gitignore；LOG_DIR/CACHE_DIR/USAGE_DATA_DIR/AUDIT_DIR 默认落点）
+│   ├── logs/                       # modelctl.log + launch-<name>.log
+│   ├── cache/                      # *.pid / *.gpu-lock / cluster-meta.db
+│   ├── usage-data/                 # 用量累计 <name>.json（stats 与网关共用）
+│   └── audit/                      # 审计 modelctl-YYYY-MM-DD.jsonl
 ├── .env.example                    # 全局配置模板（复制为 .env 后修改）
 ├── .env                            # 本地配置（含密钥，不入库）
 ├── .gitignore
@@ -188,7 +193,9 @@ ModelScope 下载模型：
 下载目标目录为 `$MODEL_ROOT/<仓库名>`，完全由 `MODEL_ROOT` + `download.modelscope_id` 确定性推导：
 目录已就位则直接复用不重复下载；**profile YAML 不会被改写**（保持 git 干净、多机可移植）。
 
-环境变量 `MODEL_ROOT` 控制下载目录（默认：项目根目录上级的 `model-gguf/` 或 `model-hf/`）。
+环境变量 `MODEL_ROOT` 控制下载目录（默认：项目根目录上级的 `model-gguf/`（llamacpp / unsloth
+的 GGUF）或 `model-hf/`（vllm / sglang / lmdeploy / aphrodite / tokenspeed 的 HF 权重）——
+两者是**不同目录**，设置 `MODEL_ROOT` 则两类都改到该根目录下）。
 
 ### 2.6 查看可用模型目录
 
@@ -474,17 +481,18 @@ cc-switch 推荐 extractor 片段：
 })
 ```
 
-查看日志（LOG_DIR 默认 = 项目根目录上级的 `../logs/`）：
+查看日志（`LOG_DIR` 默认 = 项目根的 `data/logs/`，可用 `LOG_DIR` 改到别处）：
 
 ```bash
-tail -f ../logs/launch-deepseek-v4-flash-llamacpp-*.log   # 最近一次启动日志
+tail -f data/logs/launch-deepseek-v4-flash-llamacpp.log   # 最近一次启动日志
+tail -f data/logs/modelctl.log                            # modelctl 自身运行日志
 ```
 
 ### 请求级审计
 
 需要**单次请求**的 token 数 / 性能指标（TTFT, tps, queue time）时，启用本功能：
 
-1. 在 `.env` 配置 `AUDIT_DIR`（默认 `data/audit`）、`AUDIT_RETENTION_DAYS`（默认 30）、
+1. 在 `.env` 配置 `AUDIT_DIR`（默认项目根的 `data/audit`）、`AUDIT_RETENTION_DAYS`（默认 30）、
    `AUDIT_MAX_SIZE_MB`（默认 512）。
 2. 在目标 vLLM profile 的 `vllm:` 段加：
    ```yaml
@@ -639,7 +647,7 @@ modelctl webui start --no-build   # 完全跳过，产物缺失也只启 /admin/
 
 **依赖**：webui 与 gateway 完全共享 gateway venv（`fastapi / uvicorn / httpx`），首次 `modelctl webui start` 自动初始化落到 `.venvs/gateway`，无需重复 `env setup`。
 
-**启动日志**：webui 子进程的 stdout / stderr 由 `start_detached` 重定向到 `log_dir()/launch-modelctl-webui.log`（与 model profile 启动日志同目录——`LOG_DIR` 环境变量决定，缺省项目根上级的 `../logs/`，每次 start 覆盖不追加）。`modelctl webui status` 不读该文件，只探 PID + `/admin/api/health` 端口。
+**启动日志**：webui 子进程的 stdout / stderr 由 `start_detached` 重定向到 `log_dir()/launch-modelctl-webui.log`（与 model profile 启动日志同目录——`LOG_DIR` 环境变量决定，缺省项目根的 `data/logs/`，每次 start 覆盖不追加）。`modelctl webui status` 不读该文件，只探 PID + `/admin/api/health` 端口。
 
 #### 9.2 前端构建与产物路径
 
@@ -821,5 +829,12 @@ Windows 开发机上 `TZ` 会被忽略（无 `time.tzset`，且 UCRT 会把 IANA
 > **迁移说明**：
 > - vllm / sglang 引擎已从主项目 `uv sync --extra vllm` 迁出，改用独立引擎 venv（`.venvs/<engine>/`）。原本执行 `uv sync --extra vllm` 的用户，请改为 `modelctl env setup vllm`（sglang 同理 `modelctl env setup sglang`），首次启动前会自动完成初始化并复用 `.venvs/<engine>/`。
 > - gateway 的 fastapi/uvicorn/httpx 已从主项目 `uv sync --extra gateway` 迁出，独立在 `gateway/` 子项目（`.venvs/gateway/`）。原本执行 `uv sync --extra gateway` 的用户，请改为 `modelctl env setup gateway`；`modelctl gateway start` 在首次执行时会自动初始化。
+> - 运行时数据目录默认统一到项目根 `data/`（`logs` / `cache` / `usage-data` / `audit`，见 `src/modelctl/core/paths.py`）。**显式配置过** `LOG_DIR` / `CACHE_DIR` / `USAGE_DATA_DIR` / `AUDIT_DIR` 的机器不受影响；未配置且想保留历史数据的机器手工迁移：
+>   ```bash
+>   mkdir -p data/logs data/usage-data
+>   mv ../logs/* data/logs/ 2>/dev/null                 # 历史运行/启动日志（旧默认在项目根上级）
+>   mv data/cache/*.json data/usage-data/ 2>/dev/null   # 已积累的用量累计（旧默认与 cache 同目录）
+>   ```
+>   **切换前先停服务**：PID 文件写在旧 `CACHE_DIR`，直接改配置会让 `modelctl status` 误报已停止、`all stop` 停不掉、再 start 撞端口。旧目录有 PID 时先用 `$env:CACHE_DIR=<旧目录>`（Linux 用 `CACHE_DIR=<旧目录>`）逐个 `stats/gateway/webui stop` 再改。
 
 > **部署前必做**：`pyproject.toml` 自 vllm extra 迁出后 `uv.lock` 重新解析过，而仓库内 `uv.lock` 与部署机实际解析（Linux + CUDA 13 平台差异）存在差异。**部署到 Linux CUDA 机器前，务必在目标机器上重新执行 `uv lock` + `uv sync`**，由目标平台完成最终解析，避免直接沿用开发机（Windows）生成的锁文件。

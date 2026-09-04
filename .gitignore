@@ -48,7 +48,5 @@ envs/*/uv.lock
 # 与 envs/*/uv.lock 同理不入库（缺失时由 modelctl all/webui 自动 uv sync 重建）
 gateway/uv.lock
 
-# vllm 请求级审计日志 (按天 JSONL 分片, 含 token 用量, 不入库)
-/data/audit/
 # dev/integration worktree 工作区
 .worktrees/

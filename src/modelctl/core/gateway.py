@@ -38,6 +38,7 @@ from loguru import logger
 from modelctl.core.audit import NoopAuditLog, RequestAuditLog, _new_audit_log
 from modelctl.core.capabilities import Capabilities
 from modelctl.core.envfile import load_env
+from modelctl.core.paths import audit_dir, usage_data_dir
 from modelctl.core.process import is_running_any, open_local
 from modelctl.core.profile import Profile, list_profiles
 from modelctl.core.stats import UsageCollector
@@ -264,20 +265,21 @@ def _build_audit_entry(
     }
 
 
-def get_collector(profile: Profile, adapter: EngineAdapter, data_dir: Path) -> "UsageCollector | None":
+def get_collector(profile: Profile, adapter: EngineAdapter, data_dir: Path | None) -> "UsageCollector | None":
     """按引擎用量能力创建收集器：metrics_mapping 非 None 且其 token 计数器可轮询（非恒 0）。
 
     vLLM 等引擎的 token 计数 gauge 在静默（未用 --enable-metrics）时恒为 0，
     此类引擎返回 None，由网关改用真实请求用量累计（见 proxy 的 record_tokens）。
     其余引擎返回 on-demand 收集器（由调用方注入 GatewayModel.collector）。
+    data_dir 为空时回退 usage_data_dir()，与 stats 服务同一口径。
     """
-    from modelctl.core.process import cache_dir
+    from modelctl.core.paths import usage_data_dir
     from modelctl.core.stats import _parse_env_bool
 
     mapping = adapter.metrics_mapping()
     if mapping is None:
         return None
-    data = data_dir or cache_dir()
+    data = data_dir or usage_data_dir()
     try:
         native_mapping = adapter.native_metrics_mapping()
     except (NotImplementedError, AttributeError):
@@ -462,7 +464,7 @@ def create_app(
 
     环境变量：GATEWAY_DEFAULT_MODEL（默认模型，缺省/未知 model 回退目标）；
     GATEWAY_CONTEXT_SWITCH（JSON 上下文切换规则，见 load_context_switch_rules）。
-    audit_log：请求级审计日志；缺省时按 AUDIT_DIR（默认 data/audit）从 env 构造。
+    audit_log：请求级审计日志；缺省时按 AUDIT_DIR（默认 <项目根>/data/audit）从 env 构造。
     groups：家族索引（group -> 成员列表）；调用方注入 registry 时缺省为空 dict，
     未注入时自动从 models/*.yaml 构建。
     stats_data_dir：用量持久化目录（与 stats 服务共用，使网关累计的 token 跨进程保留）。
@@ -485,9 +487,9 @@ def create_app(
     # FastAPI 默认重定向的 Location 是根相对路径（/v1/），经 B 机 nginx 前缀
     # 路由后客户端跟随重定向会丢失 /<node>/llm 前缀，第二次请求落空（502）。
     # 裸 /v1 由下方 @app.post("/v1") 直接处理，返回明确 404 而非 307。
-    # 请求级审计日志：缺省从 AUDIT_DIR（默认 data/audit）构造；启动幂等的后台清理线程，
-    # 应用关闭时 destroy 回收（绝不阻塞请求路径）。lifespan 管理线程生命周期。
-    audit_log = audit_log or _new_audit_log(Path(os.environ.get("AUDIT_DIR", "data/audit")))
+    # 请求级审计日志：缺省从 AUDIT_DIR（默认 <项目根>/data/audit，见 core/paths.py）构造；
+    # 启动幂等的后台清理线程，应用关闭时 destroy 回收（绝不阻塞请求路径）。lifespan 管理线程生命周期。
+    audit_log = audit_log or _new_audit_log(audit_dir())
 
     @asynccontextmanager
     async def _lifespan(_app: "FastAPI"):
@@ -1075,7 +1077,7 @@ def main() -> None:
     port = int(os.environ.get("GATEWAY_PORT", str(GATEWAY_PORT)))
     read_timeout = float(os.environ.get("GATEWAY_READ_TIMEOUT", "600"))
     default_model = os.environ.get("GATEWAY_DEFAULT_MODEL")
-    data_dir = Path(os.environ.get("USAGE_DATA_DIR", "")) or None  # 与 stats 服务共用持久化目录
+    data_dir = usage_data_dir()  # 与 stats 服务共用持久化目录（同一解析口径，绝不各算一份）
 
     import uvicorn
 
