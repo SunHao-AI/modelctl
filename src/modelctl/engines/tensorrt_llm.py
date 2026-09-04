@@ -71,6 +71,13 @@ class TensorRtLlmAdapter(EngineAdapter):
 
     def pre_start(self) -> None:
         cfg = self.profile.engine_config
+        # docker 路径先确保镜像就位（大镜像跨境拉取易中途 EOF，需显式 pull + 重试）
+        runtime, image = self._resolve_runtime()
+        if runtime == "docker" and not docker_setup.ensure_image(image):
+            raise RequirementError(
+                f"{self.profile.name}：镜像 {image} 未就位，无法启动容器；"
+                "详见日志中的 docker pull 错误分类与对应处置"
+            )
         engine_dir = Path(str(cfg.get("engine_dir") or "")).expanduser()
         if engine_dir.exists() and any(engine_dir.iterdir()):
             return

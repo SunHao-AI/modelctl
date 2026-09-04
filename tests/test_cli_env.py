@@ -223,7 +223,7 @@ def test_cmd_env_remove_missing_engine(monkeypatch, capsys):
 # ---- env setup docker（诊断 / 指引 / --run） ----
 
 
-def _docker_args(run: bool = False, mirrors: list[str] | None = None):
+def _docker_args(run: bool = False, mirrors: list[str] | None = None, limit=None):
     class _Args:
         engine = "docker"
         wheels = None
@@ -231,6 +231,7 @@ def _docker_args(run: bool = False, mirrors: list[str] | None = None):
     a = _Args()
     a.run = run
     a.registry_mirrors = mirrors
+    a.max_concurrent_downloads = limit
     return a
 
 
@@ -238,16 +239,19 @@ def test_parser_env_setup_docker():
     """parser 接受 docker 目标与 --run；--registry-mirror 可重复传成列表。"""
     args = cli.build_parser().parse_args(
         ["env", "setup", "docker", "--run",
-         "--registry-mirror", "https://m1", "--registry-mirror", "https://m2"])
+         "--registry-mirror", "https://m1", "--registry-mirror", "https://m2",
+         "--max-concurrent-downloads", "1"])
     assert args.engine == "docker"
     assert args.run is True
     assert args.registry_mirrors == ["https://m1", "https://m2"]
+    assert args.max_concurrent_downloads == 1
 
 
 def test_parser_env_setup_docker_mirror_default_none():
     """未传 --registry-mirror → None（由 resolve_registry_mirrors 回退内置默认）。"""
     args = cli.build_parser().parse_args(["env", "setup", "docker"])
     assert args.registry_mirrors is None
+    assert args.max_concurrent_downloads is None
 
 
 def test_env_setup_docker_not_dispatch_to_envs_setup(monkeypatch):
@@ -279,9 +283,10 @@ def test_cmd_env_setup_docker_prints_instructions(monkeypatch, capsys):
     ])
     called: dict = {}
     monkeypatch.setattr(cli.docker_setup, "render_instructions",
-                        lambda mirrors=None: called.update(mirrors=mirrors) or "SCRIPT")
+                        lambda mirrors=None, limit=None: called.update(
+                            mirrors=mirrors, limit=limit) or "SCRIPT")
     monkeypatch.setattr(cli.docker_setup, "run_install",
-                        lambda mirrors=None: (_ for _ in ()).throw(AssertionError("不该执行安装")))
+                        lambda mirrors=None, limit=None: (_ for _ in ()).throw(AssertionError("不该执行安装")))
     assert cli._cmd_env_setup(_docker_args(mirrors=["https://m"]), None, None) == 0
     out = capsys.readouterr().out
     assert "SCRIPT" in out
@@ -296,9 +301,25 @@ def test_cmd_env_setup_docker_run_delegates(monkeypatch, capsys):
     ])
     called: dict = {}
     monkeypatch.setattr(cli.docker_setup, "run_install",
-                        lambda mirrors=None: called.update(mirrors=mirrors) or 5)
+                        lambda mirrors=None, limit=None: called.update(
+                            mirrors=mirrors, limit=limit) or 5)
     assert cli._cmd_env_setup(_docker_args(run=True, mirrors=["https://x"]), None, None) == 5
     assert called["mirrors"] == ["https://x"]
+    # 未显式传并发数 → None，由 core 层回退内置默认
+    assert called["limit"] is None
+
+
+def test_cmd_env_setup_docker_passes_limit(monkeypatch, capsys):
+    """--max-concurrent-downloads 原样透传（含 0 = 保留现值的语义）。"""
+    from modelctl.core.docker_setup import Check
+    monkeypatch.setattr(cli.docker_setup, "diagnose", lambda: [
+        Check("docker_cli", "docker CLI", False, ""),
+    ])
+    called: dict = {}
+    monkeypatch.setattr(cli.docker_setup, "run_install",
+                        lambda mirrors=None, limit=None: called.update(limit=limit) or 0)
+    assert cli._cmd_env_setup(_docker_args(run=True, limit=0), None, None) == 0
+    assert called["limit"] == 0
 
 
 def test_cmd_env_list_includes_docker_status(monkeypatch, capsys):

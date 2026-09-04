@@ -184,6 +184,10 @@ def build_parser() -> argparse.ArgumentParser:
                     action="append",
                     help="env setup docker：registry-mirrors 列表（可重复传）；"
                          "缺省用内置默认多源（docker.1ms.run / docker.xuanyuan.me / docker.m.daocloud.io）")
+    ep.add_argument("--max-concurrent-downloads", default=None, metavar="N", type=int,
+                    dest="max_concurrent_downloads",
+                    help="env setup docker：daemon.json max-concurrent-downloads（默认 2，"
+                         "调小可缓解大 layer 并发互抢跨境链路导致的拉取中断；传 0 保留现值）")
     # ── 集群管理面（设计文档 §4.2 M0 子集：init/join/nodes/status/join-token）──
     cp = sub.add_parser("cluster", help="分布式集群管理面（单中心 + worker 注册）")
     csub = cp.add_subparsers(dest="action", required=True)
@@ -905,15 +909,16 @@ def _cmd_env_setup_docker(args) -> int:
         print(_table_paint("Docker 环境已就绪，无需安装", "SUCCESS"))
         return 0
     mirrors = getattr(args, "registry_mirrors", None)
+    limit = getattr(args, "max_concurrent_downloads", None)
     if not args.run:
         print(_table_paint("\n未就绪项的安装指引（可直接复制到 root shell）：", "WARNING"))
-        print(docker_setup.render_instructions(mirrors))
+        print(docker_setup.render_instructions(mirrors, limit))
         print(_table_paint("或自动执行：modelctl env setup docker --run", "DIM"))
         return 0
     print(_table_paint(
         f"开始自动安装（--run），registry-mirrors："
         f"{', '.join(docker_setup.resolve_registry_mirrors(mirrors))}", "SECTION"))
-    return docker_setup.run_install(mirrors)
+    return docker_setup.run_install(mirrors, limit)
 
 
 def _cmd_env_list(args, models_dir: Path | None, caps) -> int:

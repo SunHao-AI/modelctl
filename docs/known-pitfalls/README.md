@@ -22,6 +22,8 @@
 | 2026-09-04 | 前端 / SSE 寻址 | 后端返回的 `stream_url` 其实没人消费 | 前端 `openTaskStream()` 用 `taskId` 自行拼绝对路径，改子路径时后端 6 处 `stream_url` 是无关项，真正要改的是前端 3 处 EventSource 拼接。 | [build/nginx-webui-proxy.md](build/nginx-webui-proxy.md) |
 | 2026-09-04 | 构建 / 部署环境 | Web UI 默认绑 127.0.0.1，跨机 nginx 反代必 502 | `webui_host()` 的安全默认所致；作为反代中心的节点需 `WEBUI_HOST=0.0.0.0`，其余节点保持回环不暴露。 | [build/nginx-webui-proxy.md](build/nginx-webui-proxy.md) |
 | 2026-09-04 | 前端 / 部署路径 | 想用 Cookie 定桩在一个端口跑多节点 UI，会停错模型 | 同域 Cookie 不分标签页，`/208/` 页面的 3s 轮询与启停按钮会打到后来打开的 209；Web UI 能停模型删 venv，属真实破坏。三端口 + localStorage 按 origin 隔离才安全。 | [build/nginx-webui-proxy.md](build/nginx-webui-proxy.md) |
+| 2026-09-04 | 构建 / 部署环境 | `--run` 的 daemon.json 合并只追加不清理，坏源永久残留 | 停服 mirror 排在首位时 Docker 第一个就 DNS 失败退出，新追加的好源没机会生效；新增 `DEAD_REGISTRY_MIRRORS` 让 `--run` 幂等收敛，删除也要计入 `changed`。 | [build/docker-install-mirror.md](build/docker-install-mirror.md) |
+| 2026-09-04 | 构建 / 部署环境 | 大镜像 `docker pull` 中途 `short read … EOF`，加镜像源无效 | mirrors 是有序 failover 不是带宽池，加源对传输中断无帮助；`ensure_image()` 利用 layer 复用做重试并按错误三类处置，daemon 级 `max-concurrent-downloads=2` 降低大 layer 互抢（注意它不是 pull 参数、`docker info` 也不显示）。 | [build/docker-install-mirror.md](build/docker-install-mirror.md) |
 
 ## 目录约定
 

@@ -113,6 +113,14 @@ class VllmAdapter(EngineAdapter):
 
     def pre_start(self) -> None:
         cfg = self.profile.engine_config
+        # docker 路径先确保镜像就位：21.8GB 级 Day-0 镜像跨境拉取极易中途 EOF，
+        # 交给 `docker run` 隐式 pull 会让失败原因消失在 launch 日志里。
+        runtime, image = self._resolve_runtime()
+        if runtime == "docker" and not docker_setup.ensure_image(image):
+            raise RequirementError(
+                f"{self.profile.name}：镜像 {image} 未就位，无法启动容器；"
+                "详见日志中的 docker pull 错误分类与对应处置"
+            )
         model = str(cfg.get("model") or "")
         if not (model and (Path(model).expanduser().is_dir() or Path(model).expanduser().is_file())):
             if cfg.get("download"):

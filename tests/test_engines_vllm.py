@@ -631,6 +631,8 @@ def test_pre_start_resolves_local_path_for_docker(tmp_path, monkeypatch):
     (download_dir / "config.json").write_text("{}", encoding="utf-8")
 
     monkeypatch.setattr(vllm_mod, "download_repo", lambda repo, root: download_dir)
+    # 本例只验 model 路径解析；镜像就位由 ensure_image 负责（另见 test_core_docker_setup）
+    monkeypatch.setattr(vllm_mod.docker_setup, "ensure_image", lambda image: True)
 
     p = _write(
         tmp_path,
