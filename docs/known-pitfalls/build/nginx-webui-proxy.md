@@ -114,16 +114,32 @@ Vite 产物引用 `/assets/`、`createWebHistory()` 无 base。挂 `/208/webui/`
 所以做子路径时"后端返回的 stream_url 带不带前缀"是无关项，真正要改的是前端 3 处拼接。
 反之若将来改成消费 `stream_url`，就得回头处理后端这 6 处。
 
-## 最终采纳：独立端口 + 根路径（零改动）
+## 多节点 Web UI 的两种可行形态（最终采纳三端口）
 
-`listen 5001;` 独立 server 块 + `upstream modelctl_center { server 192.168.77.208:4173; }`，
-根路径整块给 UI ⇒ 前端三处硬编码根路径全部保持原样，且与数据面 :5000 完全隔离
-（不碰 myflaskapp 的 `location /`，无"LLM 配漏从 502 变返回 HTML"的回归风险）。
+根路径唯一 ⇒ 一个 server 块只能承载一个节点的 UI。要同时管 208/209/210：
 
-- 只有中心节点需要 `WEBUI_HOST=0.0.0.0`，其余节点保持回环，攻击面最小。
-- 明文 http 上线时，登录 API_KEY 明文过网：优先 `allow` 固定出口 IP，或后续 `listen 5001 ssl`
-  复用 myflaskapp 证书（同机可共用，见上一节 SAN 要求）。
+**形态 1：三端口（采纳）** `listen 5001/5002/5003` 三个 server 块各指一个节点 :4173。
+
+- 前端与后端零改动，与数据面 :5000 完全隔离（不碰 myflaskapp 的 `location /`，
+  无"LLM 配漏从 502 变返回 HTML"的回归风险）。
+- 登录态天然隔离：token 存 `localStorage`（`stores/auth.ts`），按 origin（含端口）分域，
+  三个标签页各管一个节点互不干扰。
+- 代价：三个节点都要 `WEBUI_HOST=0.0.0.0`，公网多开两个端口，攻击面更大。
+
+**形态 2：单中心 upstream** `upstream modelctl_center { server 192.168.77.208:4173; }`，
+只有中心节点放开绑定，其余保持回环，攻击面最小；换中心改一行。想"一个 UI 管多节点"
+得等中心侧 `/admin/api` 按节点透传（集群 P2，当前 `admin_cluster.py` 未实现）。
+
+**反面形态：Cookie 定桩**（入口 `/208/` 写 `mc_node` Cookie，后续根级请求按 Cookie 分流）
+—— 同域 Cookie 不区分标签页，同时开 208/209 会让 208 页面的 3s 轮询与**启停按钮打到 209**。
+Web UI 能停模型、删 venv，这不是显示错乱而是真实破坏，不可用于生产。
+
+**通用要点**
+
+- 明文 http 上线时登录 API_KEY 明文过网：优先 `allow` 固定出口 IP，或后续 `listen ssl`
+  复用 myflaskapp 证书（同机可共用，见上文 SAN 要求）。
 - 新端口"连不上（超时）"与"403"要分开排：超时多为云安全组/ufw 未放行，与 nginx 无关。
+- 多 server 块的 SSE/超时参数无 include 时是复制粘贴关系，调参必须逐块同步。
 
 ## Web UI 默认绑 127.0.0.1，跨机反代必 502
 

@@ -21,6 +21,7 @@
 | 2026-09-04 | 前端 / 部署路径 | `/webui` 子路径访问 SPA 白屏，nginx 单独做不到 | 入口 HTML、`/assets/`、`/admin/api/` 三个根级命名空间必须同时可达且 Router base 要一致；补 location 只解决资源不解决路由，改动面是 6 个前端文件。 | [build/nginx-webui-proxy.md](build/nginx-webui-proxy.md) |
 | 2026-09-04 | 前端 / SSE 寻址 | 后端返回的 `stream_url` 其实没人消费 | 前端 `openTaskStream()` 用 `taskId` 自行拼绝对路径，改子路径时后端 6 处 `stream_url` 是无关项，真正要改的是前端 3 处 EventSource 拼接。 | [build/nginx-webui-proxy.md](build/nginx-webui-proxy.md) |
 | 2026-09-04 | 构建 / 部署环境 | Web UI 默认绑 127.0.0.1，跨机 nginx 反代必 502 | `webui_host()` 的安全默认所致；作为反代中心的节点需 `WEBUI_HOST=0.0.0.0`，其余节点保持回环不暴露。 | [build/nginx-webui-proxy.md](build/nginx-webui-proxy.md) |
+| 2026-09-04 | 前端 / 部署路径 | 想用 Cookie 定桩在一个端口跑多节点 UI，会停错模型 | 同域 Cookie 不分标签页，`/208/` 页面的 3s 轮询与启停按钮会打到后来打开的 209；Web UI 能停模型删 venv，属真实破坏。三端口 + localStorage 按 origin 隔离才安全。 | [build/nginx-webui-proxy.md](build/nginx-webui-proxy.md) |
 
 ## 目录约定
 
