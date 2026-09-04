@@ -1042,7 +1042,7 @@ goal 下发前的中心侧校验门禁（spec §6.6，Ray Placement Group / auto
 - Produces:
   - `RESULT_OK / RESULT_SKIP / RESULT_ERROR = "ok" / "skip" / "error"`
   - `@dataclass NodeVerdict: node_id: str; result: str; reason: str = ""`
-  - `declared_gpu_count(raw: dict, engine: str) -> int`（vllm/sglang 读 `tensor_parallel_size`，llamacpp 读 `gpu_count`，其余 1；异常一律 1）
+  - `declared_gpu_count(raw: dict, engine: str) -> int`（vllm/sglang/aphrodite/tensorrt_llm/lmdeploy/tokenspeed 读 `tensor_parallel_size`，unsloth 读 `tensor_parallel`，llamacpp/ollama 等其余读 `gpu_count`；字段缺失/异常一律 1）
   - `estimate_vram_mb(raw: dict, engine: str, name: str) -> int | None`（构造未插值 `Profile` → `kv_estimate_for_profile`，任何异常/None → None）
   - `evaluate_gate(*, candidates, source, in_use, existing_goal_ids, lan_allow, create, profile_exists) -> list[NodeVerdict]`
   - `format_gate_report(verdicts: list[NodeVerdict], *, created: int, dry_run: bool) -> str`
@@ -1064,6 +1064,7 @@ goal 下发前的中心侧校验门禁（spec §6.6，Ray Placement Group / auto
 # ===============================================================================
 
 from modelctl.core.cluster import gate as G
+from modelctl.core.colors import display_width
 
 SRC = {"name": "qwen", "ok": True, "engine": "vllm", "yaml": "port: 8101\n",
        "sha": "sha256:" + "a" * 64, "version": "2026-09-04-aaaaaa",
@@ -1071,10 +1072,13 @@ SRC = {"name": "qwen", "ok": True, "engine": "vllm", "yaml": "port: 8101\n",
        "gpu_count": 2, "min_vram_mb": 0, "requested_gpus": []}
 
 
-def _node(nid, *, status="online", gpu_count=4, vram=40960, runtimes=None, lan=""):
+_UNSET = object()   # 哨兵：区分"省略该参数"与"显式传 None（节点从未上报运行时）"
+
+
+def _node(nid, *, status="online", gpu_count=4, vram=40960, runtimes=_UNSET, lan=""):
     return {"node_id": nid, "status": status, "lan_id": lan,
             "capacity": {"gpu_count": gpu_count, "vram_total_mb": vram},
-            "runtimes": {"vllm": {"ok": True}} if runtimes is None else runtimes}
+            "runtimes": {"vllm": {"ok": True}} if runtimes is _UNSET else runtimes}
 
 
 def _ev(candidates=None, **over):
@@ -1143,6 +1147,11 @@ def test_offline_candidate_skipped():
     assert "offline" in _one(candidates=[_node("w-1", status="offline")]).reason
 
 
+def test_stale_candidate_allowed():
+    """stale 必须在白名单内：Task 5 的 --all 会收 stale 节点，gate 若拒发则 goal 永不落。"""
+    assert _one(candidates=[_node("w-1", status="stale")]).result == "ok"
+
+
 def test_source_failure_is_error_and_short_circuits():
     got = _ev(candidates=[_node("w-1"), _node("w-2")], source={"name": "qwen", "ok": False,
                                                                "reason": "YAML 语法错误"})
@@ -1164,11 +1173,25 @@ def test_no_capacity_reported_skips_vram_and_gpu_checks():
     assert _one(candidates=[n], source={**SRC, "min_vram_mb": 999999}).result == "ok"
 
 
+def test_need_gpus_falls_back_to_profile_when_source_omits_gpu_count():
+    """Task 5 未附加 gpu_count 时必须回读 profile 事实（raw 里 tp=2）：1 卡节点该拒。
+
+    回落缺失（恒取 1 卡）会让"节点只有 1 卡却下发 tp=2"一路放行到 worker 才失败。
+    """
+    src = {k: v for k, v in SRC.items() if k != "gpu_count"}
+    v = _one(candidates=[_node("w-1", gpu_count=1)], source=src)
+    assert v.result == "skip" and "需 2 卡" in v.reason
+
+
 def test_declared_gpu_count_per_engine():
     assert G.declared_gpu_count({"engine_config": {"tensor_parallel_size": 4}}, "vllm") == 4
     assert G.declared_gpu_count({"engine_config": {"gpu_count": 2}}, "llamacpp") == 2
     # unsloth 的字段名是 tensor_parallel（与 vram_estimator._ctx_tokens_and_gpus 同源，非 _size）
     assert G.declared_gpu_count({"engine_config": {"tensor_parallel": 3}}, "unsloth") == 3
+    # lmdeploy/tokenspeed 同样读 tensor_parallel_size（engines/lmdeploy.py、engines/tokenspeed.py
+    # 实际取值口径；models/tokenspeed/qwen3.5-397b.yaml 就是 tp=8）；漏补表则回落 gpu_count → 误判 1 卡
+    assert G.declared_gpu_count({"engine_config": {"tensor_parallel_size": 8}}, "tokenspeed") == 8
+    assert G.declared_gpu_count({"engine_config": {"tensor_parallel_size": 1}}, "lmdeploy") == 1
     assert G.declared_gpu_count({}, "vllm") == 1
     assert G.declared_gpu_count({"engine_config": {"tensor_parallel_size": "bad"}}, "vllm") == 1
     assert G.declared_gpu_count(None, "vllm") == 1
@@ -1182,10 +1205,19 @@ def test_estimate_vram_returns_none_on_unparseable_or_missing_model():
 
 
 def test_estimate_vram_returns_int_for_known_model():
+    """架构表命中必须给出确定 MB 数（原计划用例 `is None or isinstance(int)` 两侧都真，
+    int 路径零验证——round(kv,1) 忘了转 int 也照样绿）。qwen3.8-27b 架构表 + 1024 token
+    × fp16 → 64×4×256×2×2×1024 B = 恰好 256MB。"""
     got = G.estimate_vram_mb(
-        {"port": 8101, "engine_config": {"model": "Qwen/Qwen3-8B", "max_model_len": 32768,
+        {"port": 8101, "engine_config": {"model": "/models/qwen3.8-27b", "max_model_len": 1024,
                                          "tensor_parallel_size": 2}}, "vllm", "qwen")
-    assert got is None or isinstance(got, int)   # 架构表命中则给 MB 数，否则 None（不抛）
+    # 契约声明是 int：vram_estimator 返回 round(kv,1) 的 float，256.0 == 256 为真，
+    # 故必须显式钉类型，否则"忘了 int() 转换"这类缺陷测不出来。
+    assert got == 256 and isinstance(got, int)
+    # HF 仓库名不在架构表、本地也无 config.json → None（不抛）
+    assert G.estimate_vram_mb(
+        {"port": 8101, "engine_config": {"model": "Qwen/Qwen3-8B", "max_model_len": 32768,
+                                         "tensor_parallel_size": 2}}, "vllm", "qwen") is None
 
 
 def test_report_lists_every_node_with_result_and_counts():
@@ -1201,12 +1233,27 @@ def test_report_dry_run_prefix_marker_for_cli():
     text = G.format_gate_report([G.NodeVerdict("w-1", "ok")], created=0, dry_run=True)
     assert text.startswith("[dry-run]")
     assert not G.format_gate_report([G.NodeVerdict("w-1", "ok")], created=1, dry_run=False).startswith("[dry-run]")
+
+
+def test_report_pads_cjk_node_id_by_display_width():
+    """node_id 由运维自定义（可含中文），列宽必须按显示宽度算，否则整表右移错位。
+
+    钉的是"reason 起始显示列逐行一致"这个不变量：宽度若按 `len()` 算，
+    `算力节点-2`（len 6 / 显示 10）会把该行 reason 右推 4 列。
+    """
+    got = [G.NodeVerdict("w-1", "ok", "理由甲"),
+           G.NodeVerdict("算力节点-2", "skip", "理由乙"),
+           G.NodeVerdict("w-33", "error", "理由丙")]
+    lines = G.format_gate_report(got, created=1, dry_run=False).split("\n")
+    starts = {display_width(line[:line.index(v.reason)])
+              for line, v in zip(lines[: len(got)], got, strict=True)}
+    assert len(starts) == 1, lines
 ```
 
 - [ ] **Step 2: 运行确认失败**
 
 Run: `uv run pytest tests/test_cluster_gate.py -q`
-Expected: FAIL —`ModuleNotFoundError: No module named 'modelctl.core.cluster.gate'`
+Expected: FAIL —`ImportError: cannot import name 'gate' from 'modelctl.core.cluster'`（`from ... import gate as G` 的失败形态，非 ModuleNotFoundError）
 
 - [ ] **Step 3: 实现** — 创建 `src/modelctl/core/cluster/gate.py`
 
@@ -1239,19 +1286,25 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from modelctl.core.colors import pad_width
+from modelctl.core.colors import display_width, pad_width
 
 RESULT_OK, RESULT_SKIP, RESULT_ERROR = "ok", "skip", "error"
 
-#: 可参与下发的节点状态（offline/disabled 不发；stale 允许但提示）
+#: 可参与下发的节点状态（offline/disabled 不发；stale 允许——心跳仍在只是迟缓，
+#: 中心拒发只会让 goal 永远不落，不如放行由 worker 侧兜底，Task 5 的 --all 同样收 stale）
 _GATEABLE = ("online", "stale")
 
-#: 各引擎"用几张卡"的字段名（与 core.vram_estimator._ctx_tokens_and_gpus 同源）
+#: 各引擎"用几张卡"的字段名（与 core.vram_estimator._ctx_tokens_and_gpus 及
+#: engines/*.py 实际读取的字段同源）。**KNOWN_ENGINES 增删引擎必须同步补表**：
+#: 漏项回落到 `gpu_count`，而 tp 系 profile 根本没这个键——tokenspeed 8 卡 profile
+#: 会被当 1 卡放行，容量维度形同虚设（错误要到 worker 启动才暴露）。
 _GPU_COUNT_KEYS = {
     "vllm": "tensor_parallel_size",
     "sglang": "tensor_parallel_size",
     "aphrodite": "tensor_parallel_size",
     "tensorrt_llm": "tensor_parallel_size",
+    "lmdeploy": "tensor_parallel_size",
+    "tokenspeed": "tensor_parallel_size",
     "llamacpp": "gpu_count",
     "unsloth": "tensor_parallel",
 }
@@ -1403,9 +1456,13 @@ def format_gate_report(verdicts: list[NodeVerdict], *, created: int, dry_run: bo
 
     created 是"将创建/已创建"的 goal 数：dry-run 下为预计数，实跑下为实际数，
     文案前缀 [dry-run] 让调用方与测试都能区分演练与真实下发。
+
+    宽度必须按 `display_width` 取：node_id 由运维在 `cluster join --node-id` 时自
+    定义（CLAUDE.md 例外条款：集群视图直接显示它），含 CJK 时 `len()` 会算窄列位，
+    pad_width 补齐后整表右移错位。
     """
-    width = max((len(v.result) for v in verdicts), default=4)
-    nid_width = max((len(v.node_id) for v in verdicts), default=5)
+    width = max((display_width(_MARKS.get(v.result, v.result)) for v in verdicts), default=4)
+    nid_width = max((display_width(v.node_id) for v in verdicts), default=5)
     head = "[dry-run] " if dry_run else ""
     lines = []
     for v in verdicts:
@@ -1419,7 +1476,7 @@ def format_gate_report(verdicts: list[NodeVerdict], *, created: int, dry_run: bo
 - [ ] **Step 4: 运行确认通过**
 
 Run: `uv run pytest tests/test_cluster_gate.py -q`
-Expected: PASS（20 条）
+Expected: PASS（22 条；初稿 19 + 修订补入 stale 用例、gpu_count 回落用例、CJK 报告对齐用例）
 
 - [ ] **Step 5: 提交**
 

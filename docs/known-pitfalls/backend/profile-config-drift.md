@@ -272,3 +272,72 @@
     都跑不起来；Windows 只有 llamacpp / ollama / unsloth 三个非托管引擎可试。
   - 验证手段：`get_adapter(p.engine)(p, caps).check_requirements()` 配合真机 `probe()`，
     能在不下载权重、不启动引擎的前提下确认 GPU 数/显存/兼容性规则全部通过。
+
+## 中心 gate 的"引擎→GPU 数字段名"表漏一个引擎，8 卡 profile 被当 1 卡放行
+
+- **日期**：2026-09-05（M1 Task 4）
+- **症状**：无显式失败。中心 placement gate（`cluster/gate.py`）对 tokenspeed/lmdeploy
+  profile 做容量粗筛时恒按 1 卡判定，`gpu_count=1` 的节点被判 `ok`；错误要到 worker
+  侧 `check_requirements` 抛 `tensor_parallel_size=8 超过实际 GPU 数` 才暴露。
+- **根因**：gate 用一张 `_GPU_COUNT_KEYS` 表把引擎映射到"用几张卡"的字段名，取不到键
+  就回落 `gpu_count`。tp 系 profile 里**根本没有 `gpu_count` 这个键**，回落的结果是
+  `ec.get("gpu_count", 1)` → 1 而非"不可判"。初稿表里照抄了 vllm/sglang/aphrodite/
+  tensorrt_llm，漏了同样读 `tensor_parallel_size` 的 lmdeploy 与 tokenspeed
+  （`engines/lmdeploy.py`、`engines/tokenspeed.py` 实测；`models/tokenspeed/qwen3.5-397b.yaml`
+  就是 `tensor_parallel_size: 8`）。**"缺字段"与"该引擎不这么配"两种语义被同一个回落吞掉**。
+- **解决**：表按 `KNOWN_ENGINES` 全集补全（含 unsloth 的 `tensor_parallel`，注意不是
+  `_size` 后缀），并在用例里对每个引擎各钉一条 `declared_gpu_count` 断言，表头注释写明
+  "KNOWN_ENGINES 增删引擎必须同步补表"。
+- **要点**：
+  - 中心/worker 两侧的**同一份 profile 事实必须同口径解析**（与本文"坏 port"那条同族）：
+    中心多算或少算一卡，要么误拦正常下发、要么放行必失败的下发，都比直接报错更难排查。
+  - 引擎字段的权威来源是 `engines/*.py` 的 `check_requirements`/`build_command` 实际取值，
+    不是文档也不是 `vram_estimator`；补表时逐个 grep 引擎适配器确认。
+  - 白名单映射表的默认回落值必须**保守且可解释**。回落成"最小的 1"等于把漏配的引擎
+    判成最宽松，方向反了；漏项应显式暴露（用例逐引擎钉死）而不是靠默认值兜。
+
+## 测试工厂用 `None` 当哨兵，与"显式传 None"的用例互斥到计划里的 PASS 根本达不到
+
+- **日期**：2026-09-05（M1 Task 4）
+- **症状**：M1 计划 Task 4 的 `test_runtime_unknown_is_treated_as_unavailable` 写
+  `_node("w-1", runtimes=None)` 断言 `result == "skip"`（节点从未上报 runtimes → 保守 skip），
+  而计划给的工厂是 `def _node(..., runtimes=None)` +
+  `{"vllm": {"ok": True}} if runtimes is None else runtimes`。显式传的 `None` 与"省略参数"
+  撞成同一个哨兵，构造出的节点 runtimes 仍是**健康的** `{"vllm": {"ok": True}}`。
+  实测：配**正确**的 gate 实现，该用例以 `AssertionError: assert 'ok' == 'skip'` 失败 ——
+  计划正文"Expected: PASS"与它自带的测试**互斥**，那条 PASS 永远达不到。
+- **根因**：`None` 既当"缺省"又当"业务值"。本模块里 `runtimes=None`（未上报）是**有语义的
+  业务输入**，恰好是最容易被工厂哨兵吞掉的那类值。这类缺陷不一定表现为"静默假绿"，
+  更表现为**测试与夹具互相矛盾**：照着计划实现必然红，容易被误读成"实现写错了"而去
+  改坏正确的生产代码。
+- **解决**：引入模块级哨兵 `_UNSET = object()`，工厂默认值改 `runtimes=_UNSET`、
+  判断改 `if runtimes is _UNSET`，用例保持原样即通过。同类问题在 `estimate_vram_mb`
+  的用例上还有两处：`assert got is None or isinstance(got, int)` 两侧可同真（int 路径
+  零验证），改成确定值 `assert got == 256`；而 `256.0 == 256` 为真（`vram_estimator` 返回
+  `round(kv, 1)` 的 float），漏掉 `int()` 转换照样绿，必须再钉 `isinstance(got, int)`。
+- **要点**：
+  - 工厂/fixture 的默认参数**不能占用业务上有意义的值**（`None` / `""` / `0` / `[]` 都危险），
+    用 `object()` 哨兵显式区分"没传"与"传了这个值"。
+  - 计划的"Expected: PASS N 条"不是事实。发现**计划自带测试与计划自带夹具矛盾**时，
+    先按实测结论修订计划（与 `parse_ack` 丢弃畸形条目那次同处理），再落实现。
+  - 写完测试做**变异验证**：把被测实现改坏（回落成恒 1 卡、`nid_width` 改 `len()`、
+    去掉 `int()` 转换），确认恰好对应用例转红；三条补强用例都这样验过。
+  - `x is None or isinstance(x, int)` 这类"或"断言几乎总是恒真；要验的就确定地断言。
+  - 浮点返回值别只断言 `== 期望整数`：`256.0 == 256` 为真，类型漂移看不见。
+
+## gate/CLI 报告按 `len()` 取列宽，中文 node_id 让整表右移错位
+
+- **日期**：2026-09-05（M1 Task 4）
+- **症状**：`format_gate_report` 逐节点一行输出，node_id 含中文时该行的 reason 比别的行
+  右移若干列（实测 `算力节点-2` 那行右移 4 列）。
+- **根因**：列宽用 `max(len(v.node_id) ...)` 算，`pad_width` 却按**显示宽度**补空格 ——
+  一个按字符数、一个按 CJK 双宽，两者不匹配。集群视图按 CLAUDE.md 例外条款直接显示
+  `node_id`，而它是运维在 `cluster join --node-id` 时自定义的，完全可能是中文。
+- **解决**：宽度改 `max(display_width(...) ...)`（标记列同理由）。用例钉的是不变量
+  "reason 起始显示列逐行一致"，而不是具体空格数：
+  `display_width(line[:line.index(v.reason)])` 取集合，`len(...) == 1`。
+- **要点**：
+  - 仓库规则"凡字段可能含 CJK 就用 `display_width`/`pad_width`"同样适用于**新写的
+    报告/表格函数**；`pad_width` 补、`len()` 算 = 只修了一半，看起来还在用封装但依旧错位。
+  - 对齐类断言别数空格（改文案/改列宽就得改用例），钉"各列起始位置一致"这个不变量，
+    且数据里必须真的含双宽字符，纯 ASCII 数据会假绿。

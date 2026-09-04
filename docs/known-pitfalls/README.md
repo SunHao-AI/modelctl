@@ -43,6 +43,9 @@
 | 2026-09-04 | 后端 / 文件系统 | `rglob` 自身抛异常没兜，半份清单还把歧义降级成静默选引擎 | `rglob` 惰性 → try 要按**消费点**画；`is_file()` 的 stat 不在 `Path.walk` 保护内，Permission/Value/Recursion 都会上抛。兜 `Exception` 且 **fail-closed** 返回空清单 + reason。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-04 | 后端 / 集群下发 | 候选读取按类型列举异常：深嵌套 YAML 抛 RecursionError、`port: .inf` 抛 OverflowError | `safe_load` 不只抛 `YAMLError`、`int()` 不只抛 TypeError/ValueError；回退寻址全量逐个过候选，一份坏 YAML 会让整批 goal set 全挂（一坏俱坏）。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-04 | 测试 / 覆盖 | 文件名寻址的"根目录优先"只有实现没有测试（round 3 只钉了展示名回退） | 把 `_root_first` 退化成纯路径序，既有 43 条全绿 = 盲区；顺序类规则每条寻址路径都要各自钉，且必须用反例文件名。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-05 | 后端 / 集群下发 | 中心 gate 的"引擎→GPU 数字段名"表漏引擎，8 卡 profile 被当 1 卡放行 | 漏项回落 `gpu_count` 而 tp 系 profile 无此键 → 恒判 1 卡；表须按 KNOWN_ENGINES 全集补，逐引擎钉用例，权威口径是 `engines/*.py` 实际取值。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-05 | 测试 / 覆盖 | 测试工厂用 `None` 当哨兵，与"显式传 None"的用例互斥到计划的 PASS 达不到 | `None` 既当缺省又当业务值（`runtimes=None` 未上报是有语义输入）→ 实现正确也必红；用 `object()` 哨兵分离，另记"恒真或断言/浮点 `==` 整数"两类假绿防护与变异验证。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-05 | 后端 / 终端对齐 | gate 报告按 `len()` 取列宽，中文 node_id 让整表右移错位 | `pad_width` 按显示宽度补、`len()` 按字符算 = 只修一半；宽度改 `display_width`，用例钉"各列起始位置一致"不变量且数据须含双宽字符。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 
 ## 目录约定
 
