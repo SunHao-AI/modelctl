@@ -54,10 +54,10 @@
   src/modelctl/core/cluster/wsproto.py         make_sync/make_action/make_result/parse_action/parse_ack/parse_heartbeat_v2
   src/modelctl/core/cluster/nodes.py           handle_heartbeat v2（回流落库 + ack 组装）+ push_action/drain_actions
   src/modelctl/core/cluster/agent.py           ack 交给 reconciler；心跳合并 reconciler 快照；start_reconciler_in_background
-  src/modelctl/core/cluster/center_probe.py    补 delete_json（goal remove 用）
+  src/modelctl/core/cluster/center_probe.py    补 put_json / delete_json（goal PUT 与 remove 用）
   src/modelctl/core/webui/admin_cluster.py     goals CRUD / retry / node sync / model start|stop|restart / export + WS 世代与令牌复核
   src/modelctl/core/webui/server.py            worker 角色额外启动 reconciler 线程
-  src/modelctl/cli.py                          cluster goal set|list|remove、launch、stop、sync、goals
+  src/modelctl/cli.py                          cluster goal set|list|remove|retry、launch、stop、sync
   .env.example                                 CLUSTER_RECONCILE_INTERVAL_S / CLUSTER_START_TIMEOUT_S
   README.md                                    第 10 节补 "10.6 声明式下发模型（M1）"
 ```
@@ -4439,8 +4439,6 @@ git add src/modelctl/core/cluster/reconcile.py src/modelctl/core/cluster/config.
 git commit -m "feat(cluster): worker 侧 reconciler（8 态 stage + 错误分类 + 心跳快照）"
 ```
 
-<!-- MORE9 -->
-
 ---
 
 ### Task 10: Agent 接线 reconciler（ack 投递 + 心跳扩展段 + result 回传）
@@ -5874,7 +5872,796 @@ git commit -m "feat(cluster): goal 控制面 REST + 强制 sync + WS 世代表�
 
 ---
 
-<!-- MORE11 -->
+### Task 12: CLI `cluster goal/launch/stop/sync` + 配置键 + README 10.6
+
+把 Task 11 的端点接成人能敲的命令。**CLI 一律走中心 REST，绝不直读台账**——与既有
+`cluster nodes/status` 同风格，且保证「CLI 能做的 dashboard 也一定能做」，两套入口不分叉。
+
+四条决定：
+
+1. **`stop` / `remove` / `retry` 是三件不同的事，各占一个命令**（M1 最易被误解之处，README 10.6 用表格明说）：
+
+   | 命令 | 打到哪个端点 | 效果 | YAML 文件 | 模型会不会自己复活 |
+   |---|---|---|---|---|
+   | `cluster stop` | `PUT /goals/{id}` `intent=stop` | 声明式停：reconciler 下一拍停 | 保留 | 不会（intent 已是 stop） |
+   | `cluster goal remove` | `DELETE /goals/{id}` | 撤销托管：goal 从快照消失 → worker 剪枝 | **删除** | 之后本地 `modelctl start` 归本地管 |
+   | `cluster goal retry` | `POST /goals/{id}/retry` | 只把 FAILED 的状态机推回一拍 | 不动 | 由 goal 的 intent 决定 |
+
+2. **`launch` 是 `goal set --intent start` 的别名，不是第二套机制**。spec §4.2 把它单列，但底层若各走一条路径，就会出现"launch 过的模型 goal set 管不住"这类鬼故事。
+3. **`cluster stop` 用 PUT 而不是 `model/{profile}/stop`**。`model/*` 三个端点是 dashboard 的一次性指令通道（M2 前端消费，Task 11 已带测试）；CLI 若也用它，就会出现「中心发了 stop、goal 仍是 start、下一拍模型自己复活」——正是 spec §8.2 要杜绝的双通道。故 M1 的 CLI 不提供对应子命令。
+4. **退出码**：HTTP 非 200 → 2；`created == 0 且 errors > 0`（全候选被 gate 拒）→ 2；`created == 0` 但只有 skip → **0** 并打印"无变更"——幂等重跑不是失败，把第二次执行判成失败会逼所有人写 `|| true`。
+
+**Files:**
+- Modify: `src/modelctl/core/cluster/center_probe.py`（`put_json` / `delete_json`）
+- Modify: `src/modelctl/cli.py`（argparse 增 `goal`/`launch`/`stop`/`sync` + 分发 + 辅助 + 5 个 `_cmd_*`）
+- Modify: `.env.example`（`CLUSTER_RECONCILE_INTERVAL_S` / `CLUSTER_START_TIMEOUT_S`）
+- Modify: `README.md`（新增 10.6；第 10 节开头"当前范围（M0）"引述更新为 M1 现状）
+- Test: `tests/test_cluster_goal_cli.py`
+
+**Interfaces:**
+- Consumes: `center_probe`（`get_json` / `post_json` / 本任务两法）、`_cluster_center_base()`（既有）、`_print_table`（既有，已按 `display_width` 对齐）、`goals.goal_id_of`（goal_id 格式唯一来源，CLI 不自己拼 `@@`）、`goals.VALID_INTENTS` / `VALID_TARGET_ROLES`（供 `choices=`，**函数内 import**）
+- Produces（CLI）：
+  - `cluster goal set <profile> (--node <id>… | --all) [--create] [--dry-run] [--intent start|stop] [--gpus 0,1] [--env K=V …] [--lan-allow lan-1 …] [--target-role …]`
+  - `cluster goal list [--node <id>] [--profile <p>] [--json]`
+  - `cluster goal remove <profile> (--node <id>… | --all)`
+  - `cluster goal retry <profile> --node <id>`
+  - `cluster launch <profile> (--node <id>… | --all) [--create] [--dry-run] …`
+  - `cluster stop <profile> (--node <id>… | --all)`
+  - `cluster sync (--node <id>… | --all)`
+- Produces（`center_probe`）：`put_json(url, payload, api_key="", timeout=5.0)`、`delete_json(url, api_key="", timeout=5.0)`
+- Produces（`cli` 模块级）：`_cluster_api_key` / `_cluster_request` / `_center_detail` / `_goal_node_targets` / `_parse_env_pairs` / `_goal_path` / `_fmt_gpu` / `_goal_nodes_of_profile` / `_resolve_target_nodes` / `_sync_targets` / `_goal_set_impl`
+
+- [ ] **Step 1: 写失败测试** — 创建 `tests/test_cluster_goal_cli.py`
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : tests/test_cluster_goal_cli.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/9/4 10:00
+# @Desc   : cluster goal/launch/stop/sync 子命令（probe 打桩，只断言请求形状与退出码）
+# ===============================================================================
+"""CLI 是 REST 的薄壳：断言"发了什么请求"与"退出码/输出了什么"，不复测 core 判定。"""
+from __future__ import annotations
+
+import pytest
+
+BASE = "http://center:4173"
+GOALS = "/admin/api/cluster/goals"
+
+
+@pytest.fixture(autouse=True)
+def _env(monkeypatch, tmp_path):
+    for k in ("CLUSTER_ROLE", "CLUSTER_CENTER_URL", "CLUSTER_NODE_ID", "CLUSTER_LAN",
+              "CLUSTER_JOIN_TOKEN", "CLUSTER_NODE_TOKEN", "API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("CLUSTER_CENTER_URL", BASE)
+    monkeypatch.setenv("API_KEY", "sk-cli")
+    import modelctl.core.envfile as ef
+
+    monkeypatch.setattr(ef, "PROJECT_ROOT", tmp_path)
+
+
+class Recorder:
+    """记录调用 + 按 (method, path 后缀) 返回预置响应；未预置一律 (200, {})。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+        self._replies: dict[tuple[str, str], tuple[int, dict]] = {}
+
+    def reply(self, method: str, path: str, status: int, body: dict) -> None:
+        self._replies[(method, path)] = (status, body)
+
+    def call(self, method, url, payload, api_key=""):
+        self.calls.append((method, url, payload, api_key))
+        for (m, path), out in self._replies.items():
+            if m == method and url.endswith(path):
+                return out
+        return 200, {}
+
+    def one(self, method: str):
+        return [c for c in self.calls if c[0] == method]
+
+
+@pytest.fixture()
+def probe(monkeypatch):
+    import modelctl.core.cluster.center_probe as cp
+
+    rec = Recorder()
+    monkeypatch.setattr(cp, "get_json",
+                        lambda url, api_key="", timeout=5.0: rec.call("GET", url, None, api_key))
+    monkeypatch.setattr(cp, "post_json",
+                        lambda url, payload, api_key="", timeout=5.0: rec.call("POST", url, payload, api_key))
+    monkeypatch.setattr(cp, "put_json",
+                        lambda url, payload, api_key="", timeout=5.0: rec.call("PUT", url, payload, api_key))
+    monkeypatch.setattr(cp, "delete_json",
+                        lambda url, api_key="", timeout=5.0: rec.call("DELETE", url, None, api_key))
+    return rec
+
+
+def _main(argv):
+    from modelctl import cli
+
+    return cli.main(argv)
+
+
+# ---------------- goal set / launch ----------------
+def test_goal_set_posts_full_body(probe) -> None:
+    assert _main(["cluster", "goal", "set", "qwen", "--node", "w-1", "--create"]) == 0
+    method, url, body, key = probe.calls[0]
+    assert (method, url) == ("POST", BASE + GOALS)
+    assert body["profile"] == "qwen" and body["node_ids"] == ["w-1"]
+    assert body["create"] is True and body["intent"] == "start" and body["dry_run"] is False
+    assert key == "sk-cli"                                  # Bearer 由 API_KEY 提供
+
+
+def test_goal_set_multiple_nodes(probe) -> None:
+    _main(["cluster", "goal", "set", "qwen", "--node", "w-1", "--node", "w-2"])
+    assert probe.calls[0][2]["node_ids"] == ["w-1", "w-2"]
+
+
+def test_goal_set_all_flag(probe) -> None:
+    _main(["cluster", "goal", "set", "qwen", "--all"])
+    body = probe.calls[0][2]
+    assert body["all_nodes"] is True and body["node_ids"] is None
+
+
+def test_goal_set_requires_node_or_all(probe) -> None:
+    assert _main(["cluster", "goal", "set", "qwen"]) == 2
+    assert probe.calls == []                                # 参数不合意时绝不发请求
+
+
+def test_goal_set_node_and_all_conflict(probe) -> None:
+    assert _main(["cluster", "goal", "set", "qwen", "--node", "w-1", "--all"]) == 2
+    assert probe.calls == []
+
+
+def test_goal_set_env_pairs_parsed(probe) -> None:
+    _main(["cluster", "goal", "set", "qwen", "--node", "w-1",
+           "--env", "MODEL_ROOT=/mnt/nas", "--env", "LOG_DIR=/var/log/m"])
+    assert probe.calls[0][2]["env_overlay"] == {"MODEL_ROOT": "/mnt/nas", "LOG_DIR": "/var/log/m"}
+
+
+def test_goal_set_env_pair_without_equals(probe) -> None:
+    assert _main(["cluster", "goal", "set", "qwen", "--node", "w-1", "--env", "NOPPE"]) == 2
+    assert probe.calls == []
+
+
+def test_goal_set_dry_run_and_gpus_passthrough(probe) -> None:
+    _main(["cluster", "goal", "set", "qwen", "--node", "w-1", "--dry-run", "--gpus", "0,1"])
+    body = probe.calls[0][2]
+    assert body["dry_run"] is True and body["gpus"] == "0,1"   # 解析交给中心，CLI 不重复一套
+
+
+def test_goal_set_prints_gate_report(probe, capsys) -> None:
+    probe.reply("POST", GOALS, 200, {"created": 1, "skipped": 0, "errors": 0,
+                                     "report": "[dry-run] [ok] w-1  engine=vllm"})
+    _main(["cluster", "goal", "set", "qwen", "--node", "w-1", "--dry-run"])
+    assert "[dry-run] [ok] w-1" in capsys.readouterr().out     # core 已排好版，CLI 原样打印
+
+
+def test_goal_set_center_400_prints_detail(probe, capsys) -> None:
+    probe.reply("POST", GOALS, 400, {"detail": "env_overlay 禁止下发凭据类键"})
+    assert _main(["cluster", "goal", "set", "qwen", "--node", "w-1"]) == 2
+    assert "凭据类键" in capsys.readouterr().err
+
+
+def test_goal_set_all_candidates_rejected_exit_2(probe) -> None:
+    probe.reply("POST", GOALS, 200, {"created": 0, "skipped": 0, "errors": 2, "report": "r"})
+    assert _main(["cluster", "goal", "set", "qwen", "--all"]) == 2
+
+
+def test_goal_set_only_skips_is_success(probe, capsys) -> None:
+    """幂等重跑：全 skip 也算成功，否则脚本里第二次下发必然非零退出。"""
+    probe.reply("POST", GOALS, 200, {"created": 0, "skipped": 2, "errors": 0, "report": "r"})
+    assert _main(["cluster", "goal", "set", "qwen", "--all"]) == 0
+    assert "无变更" in capsys.readouterr().out
+
+
+def test_goal_set_center_unreachable_exit_2(probe) -> None:
+    probe.reply("POST", GOALS, -1, {"error": "中心不可达"})
+    assert _main(["cluster", "goal", "set", "qwen", "--node", "w-1"]) == 2
+
+
+def test_launch_is_goal_set_with_start_intent(probe) -> None:
+    assert _main(["cluster", "launch", "qwen", "--node", "w-1", "--create"]) == 0
+    body = probe.one("POST")[0][2]
+    assert body["intent"] == "start" and body["create"] is True
+
+
+def test_launch_dry_run_passthrough(probe) -> None:
+    _main(["cluster", "launch", "qwen", "--node", "w-1", "--dry-run"])
+    assert probe.one("POST")[0][2]["dry_run"] is True
+
+
+# ---------------- goal list ----------------
+def test_goal_list_table_columns(probe, capsys) -> None:
+    probe.reply("GET", GOALS, 200, {"goals": [
+        {"node_id": "w-1", "profile": "qwen", "intent": "start", "stage": "READY",
+         "reason": "", "gpu": [0, 1], "port": 8101, "updated_at": "2026-09-04 10:00:00"}]})
+    assert _main(["cluster", "goal", "list"]) == 0
+    out = capsys.readouterr().out
+    assert "w-1" in out and "READY" in out and "8101" in out
+    assert "2026-09-04 10:00:00" in out           # 中心已格式化，CLI 不二次加工
+
+
+def test_goal_list_empty_hint(probe, capsys) -> None:
+    probe.reply("GET", GOALS, 200, {"goals": []})
+    assert _main(["cluster", "goal", "list"]) == 0
+    assert "goal set" in capsys.readouterr().out   # 空表要给出下一步命令
+
+
+def test_goal_list_filters_in_query(probe) -> None:
+    _main(["cluster", "goal", "list", "--node", "w-1", "--profile", "qwen"])
+    url = probe.calls[0][1]
+    assert "node_id=w-1" in url and "profile=qwen" in url
+
+
+def test_goal_list_json_raw(probe, capsys) -> None:
+    probe.reply("GET", GOALS, 200, {"goals": [{"goal_id": "qwen@@w-1"}]})
+    _main(["cluster", "goal", "list", "--json"])
+    assert '"goal_id": "qwen@@w-1"' in capsys.readouterr().out
+
+
+# ---------------- goal remove ----------------
+def test_goal_remove_deletes_by_goal_id(probe) -> None:
+    probe.reply("DELETE", "/admin/api/cluster/goals/qwen%40%40w-1", 200,
+                {"removed": ["qwen@@w-1"], "missing": []})
+    assert _main(["cluster", "goal", "remove", "qwen", "--node", "w-1"]) == 0
+    assert probe.calls[0][0] == "DELETE"
+    assert probe.calls[0][1] == BASE + "/admin/api/cluster/goals/qwen%40%40w-1"
+
+
+def test_goal_remove_all_lists_then_deletes_each(probe) -> None:
+    probe.reply("GET", "/admin/api/cluster/goals?profile=qwen", 200,
+                {"goals": [{"node_id": "w-1"}, {"node_id": "w-2"}]})
+    assert _main(["cluster", "goal", "remove", "qwen", "--all"]) == 0
+    deleted = [c[1] for c in probe.one("DELETE")]
+    assert len(deleted) == 2 and all(u.startswith(BASE + GOALS + "/") for u in deleted)
+
+
+def test_goal_remove_all_without_goals_is_noop(probe) -> None:
+    probe.reply("GET", "/admin/api/cluster/goals?profile=qwen", 200, {"goals": []})
+    assert _main(["cluster", "goal", "remove", "qwen", "--all"]) == 0
+    assert probe.one("DELETE") == []
+
+
+def test_goal_remove_404_exit_2(probe) -> None:
+    probe.reply("DELETE", GOALS + "/qwen%40%40w-1", 404, {"detail": "目标 qwen@@w-1 不存在"})
+    assert _main(["cluster", "goal", "remove", "qwen", "--node", "w-1"]) == 2
+
+
+# ---------------- goal retry / stop / sync ----------------
+def test_goal_retry_posts_retry_endpoint(probe) -> None:
+    assert _main(["cluster", "goal", "retry", "qwen", "--node", "w-1"]) == 0
+    method, url, _, _ = probe.calls[0]
+    assert method == "POST" and url.endswith("/goals/qwen%40%40w-1/retry")
+
+
+def test_goal_retry_requires_node(probe) -> None:
+    assert _main(["cluster", "goal", "retry", "qwen"]) == 2
+    assert probe.calls == []
+
+
+def test_stop_puts_intent_stop_not_action(probe) -> None:
+    """stop 必须是声明式 PUT intent=stop：走 action 会和 goal 打架（模型自己复活）。"""
+    assert _main(["cluster", "stop", "qwen", "--node", "w-1"]) == 0
+    method, url, body, _ = probe.calls[0]
+    assert method == "PUT" and url.endswith("/goals/qwen%40%40w-1")
+    assert body == {"intent": "stop"}
+
+
+def test_stop_all_lists_profile_goals_then_puts(probe) -> None:
+    probe.reply("GET", "/admin/api/cluster/goals?profile=qwen", 200,
+                {"goals": [{"node_id": "w-1"}, {"node_id": "w-2"}]})
+    assert _main(["cluster", "stop", "qwen", "--all"]) == 0
+    assert len(probe.one("PUT")) == 2
+
+
+def test_stop_unknown_goal_exit_2(probe) -> None:
+    probe.reply("PUT", GOALS + "/qwen%40%40ghost", 404, {"detail": "目标不存在"})
+    assert _main(["cluster", "stop", "qwen", "--node", "ghost"]) == 2
+
+
+def test_sync_posts_node_sync_endpoint(probe) -> None:
+    assert _main(["cluster", "sync", "--node", "w-1"]) == 0
+    method, url, _, _ = probe.calls[0]
+    assert method == "POST" and url == BASE + "/admin/api/cluster/nodes/w-1/sync"
+
+
+def test_sync_all_targets_every_listed_node(probe) -> None:
+    probe.reply("GET", "/admin/api/cluster/nodes", 200,
+                {"nodes": [{"node_id": "w-1"}, {"node_id": "w-2"}]})
+    assert _main(["cluster", "sync", "--all"]) == 0
+    urls = [c[1] for c in probe.one("POST")]
+    assert urls == [BASE + "/admin/api/cluster/nodes/w-1/sync",
+                    BASE + "/admin/api/cluster/nodes/w-2/sync"]
+
+
+def test_sync_requires_node_or_all(probe) -> None:
+    assert _main(["cluster", "sync"]) == 2
+    assert probe.calls == []
+
+
+# ---------------- center_probe 新方法 ----------------
+class _Resp:
+    status = 200
+
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+
+def test_put_and_delete_json_use_correct_methods(monkeypatch) -> None:
+    """DELETE 必须真是 DELETE（urllib 默认 POST 语义容易写错）；PUT 亦然。"""
+    import modelctl.core.cluster.center_probe as cp
+
+    seen: list[str] = []
+
+    def fake_urlopen(req, timeout=5.0):
+        seen.append(req.method)
+        return _Resp(b'{"ok": true}')
+
+    monkeypatch.setattr(cp.urllib.request, "urlopen", fake_urlopen)
+    assert cp.put_json("http://c/x", {"a": 1}) == (200, {"ok": True})
+    assert cp.delete_json("http://c/x") == (200, {"ok": True})
+    assert seen == ["PUT", "DELETE"]
+
+
+def test_delete_json_network_error_folded(monkeypatch) -> None:
+    import modelctl.core.cluster.center_probe as cp
+
+    def boom(req, timeout=5.0):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(cp.urllib.request, "urlopen", boom)
+    status, body = cp.delete_json("http://c/x")
+    assert status == -1 and "connection refused" in body["error"]
+```
+
+- [ ] **Step 2: 运行确认失败**
+
+Run: `uv run pytest tests/test_cluster_goal_cli.py -q`
+Expected: 全部失败（用 `probe` 夹具的 31 条以 **error** 形式报告，两条直测 `center_probe` 的以 **failure** 报告）——首条应为 `AttributeError: module 'modelctl.core.cluster.center_probe' has no attribute 'put_json'`（夹具 `monkeypatch.setattr` 未加 `raising=False`，装桩时即抛）。若看到 argparse `invalid choice: 'goal'`，说明夹具未执行或 4a 未落位；若断言里出现 `http://127.0.0.1:4173`，说明 `CLUSTER_CENTER_URL` 没生效（`_env` 夹具被跳过），URL 断言会指向真机 webui（flaky）。
+
+- [ ] **Step 3: 实现 `center_probe.put_json / delete_json`**
+
+在 `src/modelctl/core/cluster/center_probe.py` 的 `post_json` 之后追加（复用 `_request`，异常折叠语义与 GET/POST 完全一致）：
+
+```python
+def put_json(url: str, payload: dict, api_key: str = "", timeout: float = 5.0) -> tuple[int, dict]:
+    return _request("PUT", url, payload, api_key, timeout)
+
+
+def delete_json(url: str, api_key: str = "", timeout: float = 5.0) -> tuple[int, dict]:
+    # payload=None → urllib 不带 body；method="DELETE" 必须显式（Request 默认 POST）
+    return _request("DELETE", url, None, api_key, timeout)
+```
+
+- [ ] **Step 4: 实现 CLI** —— 全部改动在 `src/modelctl/cli.py`，分四段落位。
+
+**4a. argparse 子命令**——插在 `ct.add_argument("--rotate-node", ...)` 之后、`# §2.2 TensorRT-LLM 引擎编译` 之前。三个子命令（set/launch 之外）共用一个局部闭包挂公共参数，避免七份重复 `add_argument`；`choices=` 用的枚举**函数内 import**（`build_parser()` 内、`add_parser("goal")` 之前），否则 `modelctl --help` 会被 goals→gate→vram_estimator→profile 的重依赖链拖慢。
+
+> 注意 `main()` 在路由前有一句 `if getattr(args, "gpus", None): os.environ["MODELCTL_GPUS"] = args.gpus`。`--gpus` 因此会顺带写一次**本进程**的 `MODELCTL_GPUS`——`cluster goal set` 只发 REST、不启进程，写入随进程退出消失，无副作用；卡位真正的载体是请求体里的 `gpus` 字段。不要为绕开它改 `dest`，那会让 `main()` 那句对 `start/restart/all` 的既有语义变得不可预测。
+
+```python
+    # §7.5 M1：goal 声明式下发（launch/stop/sync 是同一台账的三个入口，不是三套机制）
+    from modelctl.core.cluster.goals import VALID_INTENTS, VALID_TARGET_ROLES
+
+    cg = csub.add_parser("goal", help="模型目标状态（goal）：声明式下发/查看/撤销/重试")
+    gsub = cg.add_subparsers(dest="goal_action", required=True)
+
+    def _goal_common(p, *, with_overlays: bool) -> None:
+        p.add_argument("profile", help="profile 名")
+        p.add_argument("--node", action="append", default=None, metavar="NODE_ID",
+                       help="目标节点（可重复传多个）")
+        p.add_argument("--all", action="store_true",
+                       help="set：全部在线候选节点；其余子命令：该 profile 已托管的全部节点")
+        if not with_overlays:
+            return
+        p.add_argument("--create", action="store_true",
+                       help="允许在无 goal 的节点上新建（缺省只更新已有 goal）")
+        p.add_argument("--gpus", default="", metavar="0,1",
+                       help="绑定 GPU 序号列表（中心解析校验，CLI 不重复一套）")
+        p.add_argument("--env", action="append", default=None, metavar="K=V",
+                       help="env_overlay 覆盖（可重复；禁凭据类键，中心白名单裁决）")
+        p.add_argument("--lan-allow", action="append", default=None, metavar="LAN",
+                       help="placement 限定 LAN（可重复）")
+        p.add_argument("--target-role", choices=list(VALID_TARGET_ROLES), default="primary")
+        p.add_argument("--dry-run", action="store_true", help="只跑 gate 报告，不写台账")
+
+    gs = gsub.add_parser("set", help="下发/更新 goal（幂等：重复下发同参数无变更）")
+    _goal_common(gs, with_overlays=True)
+    gs.add_argument("--intent", choices=list(VALID_INTENTS), default="start",
+                    help="期望意图：start 拉起并保活 / stop 声明式停止（默认 start）")
+    gl = gsub.add_parser("list", help="列出 goal（读中心 REST，展示 stage/reason）")
+    gl.add_argument("--node", default="", help="按节点过滤")
+    gl.add_argument("--profile", default="", help="按 profile 过滤")
+    gl.add_argument("--json", action="store_true", help="原样输出中心 JSON")
+    gr = gsub.add_parser("remove", help="撤销托管（DELETE goal：撤文件 + 停模型 + 删台账）")
+    _goal_common(gr, with_overlays=False)
+    gt = gsub.add_parser("retry", help="人工重试 FAILED 的 goal（只推状态机，不改 intent）")
+    _goal_common(gt, with_overlays=False)
+
+    cl = csub.add_parser("launch", help="= goal set --intent start（spec §4.2 别名）")
+    _goal_common(cl, with_overlays=True)
+    cs = csub.add_parser("stop", help="声明式停止（PUT intent=stop；YAML 保留、不会自动复活）")
+    _goal_common(cs, with_overlays=False)
+    cy = csub.add_parser("sync", help="强制节点立即全量同步（不等 revision 变化）")
+    cy.add_argument("--node", action="append", default=None, metavar="NODE_ID")
+    cy.add_argument("--all", action="store_true", help="全部已注册节点")
+```
+
+**4b. 分发**——`_cmd_cluster` 在 `join-token` 分支之前插入：
+
+```python
+    if args.action == "goal":
+        return _cmd_cluster_goal(args)
+    if args.action == "launch":
+        return _cmd_cluster_launch(args)
+    if args.action == "stop":
+        return _cmd_cluster_stop(args)
+    if args.action == "sync":
+        return _cmd_cluster_sync(args)
+```
+
+**4c. 通用辅助**——插在 `_cluster_center_base()` 之后。`_cluster_request` 按方法名从模块属性取函数（`center_probe.get_json` 形式，测试 monkeypatch 模块属性即可打桩）：
+
+```python
+def _cluster_api_key() -> str:
+    import os as _os
+
+    return _os.environ.get("API_KEY", "")
+
+
+def _cluster_request(method: str, path: str, payload: dict | None = None,
+                     *, timeout: float = 10.0) -> tuple[int, dict]:
+    """中心 REST 统一出口：path 以 / 开头、不含 /admin/api 前缀。"""
+    from modelctl.core.cluster import center_probe
+
+    url = f"{_cluster_center_base()}/admin/api{path}"
+    key = _cluster_api_key()
+    if method == "GET":
+        return center_probe.get_json(url, api_key=key, timeout=timeout)
+    if method == "POST":
+        return center_probe.post_json(url, payload or {}, api_key=key, timeout=timeout)
+    if method == "PUT":
+        return center_probe.put_json(url, payload or {}, api_key=key, timeout=timeout)
+    return center_probe.delete_json(url, api_key=key, timeout=timeout)
+
+
+def _center_detail(status, body: dict) -> str:
+    """中心错误文案：detail（FastAPI）> error（urllib 折叠）> reason（gate 汇总）> 状态码。"""
+    for key in ("detail", "error", "reason"):
+        value = body.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return f"HTTP {status}"
+
+
+def _goal_node_targets(args) -> tuple[list[str] | None, bool, str]:
+    """(--node… | --all) 互斥校验；返回 (node_ids|None, all_nodes, 错误文案)。"""
+    node_ids = list(args.node or [])
+    if node_ids and args.all:
+        return None, False, "--node 与 --all 互斥，请二选一"
+    if not node_ids and not args.all:
+        return None, False, "必须指定 --node <NODE_ID> 或 --all"
+    return (node_ids or None), args.all, ""
+
+
+def _parse_env_pairs(pairs: list[str] | None) -> tuple[dict | None, str]:
+    overlay: dict[str, str] = {}
+    for item in pairs or []:
+        key, sep, value = item.partition("=")   # 只切第一个 =：值里允许出现 =
+        if not sep or not key.strip():
+            return None, f"--env 需为 K=V 形式，收到 {item!r}"
+        overlay[key.strip()] = value
+    return overlay, ""
+
+
+def _goal_path(profile: str, node_id: str) -> str:
+    """goal_id 一律经 goal_id_of 生成再 percent-encode（@@ 出现在 URL path 段）。"""
+    from urllib.parse import quote
+
+    from modelctl.core.cluster.goals import goal_id_of
+
+    return f"/cluster/goals/{quote(goal_id_of(profile, node_id), safe='')}"
+
+
+def _fmt_gpu(gpu) -> str:
+    return "-" if not gpu else "[" + ",".join(str(g) for g in gpu) + "]"
+
+
+def _goal_nodes_of_profile(profile: str) -> tuple[list[str], str]:
+    status, body = _cluster_request("GET", f"/cluster/goals?profile={profile}")
+    if status != 200:
+        return [], _center_detail(status, body)
+    return [g["node_id"] for g in body.get("goals", []) if g.get("node_id")], ""
+
+
+def _resolve_target_nodes(args) -> tuple[list[str], str]:
+    """remove/stop/retry 的目标解析：--all = 该 profile **已托管**的节点（不是全集群——
+    对未托管节点 stop/remove 毫无意义，还会打出一串 404）。"""
+    node_ids, _all, err = _goal_node_targets(args)
+    if err:
+        return [], err
+    if node_ids:
+        return node_ids, ""
+    nodes, err = _goal_nodes_of_profile(args.profile)
+    if err:
+        return [], err
+    if not nodes:
+        print(f"profile {args.profile} 当前没有托管中的节点：无需操作")
+    return nodes, ""
+
+
+def _sync_targets(args) -> tuple[list[str], str]:
+    """sync 的 --all = 全部已注册节点（sync 作用于节点而非 goal，没有 profile 可限定）。"""
+    node_ids = list(args.node or [])
+    if node_ids and args.all:
+        return [], "--node 与 --all 互斥，请二选一"
+    if not node_ids and not args.all:
+        return [], "必须指定 --node <NODE_ID> 或 --all"
+    if node_ids:
+        return node_ids, ""
+    status, body = _cluster_request("GET", "/cluster/nodes")
+    if status != 200:
+        return [], _center_detail(status, body)
+    nodes = [n["node_id"] for n in body.get("nodes", []) if n.get("node_id")]
+    if not nodes:
+        print("集群中没有任何已注册节点：无同步目标")
+    return nodes, ""
+```
+
+**4d. 子命令实现**——接在 `_cmd_cluster_join_token` 之后。`goal set` 与 `launch` 共用 `_goal_set_impl`（别名即别名，不许有第二套代码路径）：
+
+```python
+def _cmd_cluster_goal(args) -> int:
+    action = getattr(args, "goal_action", "")
+    if action == "set":
+        return _cmd_cluster_goal_set(args)
+    if action == "list":
+        return _cmd_cluster_goal_list(args)
+    if action == "remove":
+        return _cmd_cluster_goal_remove(args)
+    if action == "retry":
+        return _cmd_cluster_goal_retry(args)
+    return 2
+
+
+def _goal_set_impl(*, profile: str, node_ids: list[str] | None, all_nodes: bool,
+                   intent: str, create: bool, gpus: str, env_overlay: dict | None,
+                   lan_allow: list[str] | None, target_role: str, dry_run: bool) -> int:
+    body = {"profile": profile, "node_ids": node_ids, "all_nodes": all_nodes,
+            "intent": intent, "create": bool(create), "gpus": gpus or "",
+            "target_role": target_role, "dry_run": bool(dry_run)}
+    if env_overlay:
+        body["env_overlay"] = env_overlay
+    if lan_allow:
+        body["lan_allow"] = lan_allow
+    status, resp = _cluster_request("POST", "/cluster/goals", body)
+    if status != 200:
+        logger.error(f"下发失败: {_center_detail(status, resp)}")
+        return 2
+    report = resp.get("report")
+    if report:
+        print(report)          # gate 报告已按 display_width 对齐，CLI 原样打印不重排
+    created, errors = int(resp.get("created", 0)), int(resp.get("errors", 0))
+    if created == 0 and errors:
+        logger.error(f"没有 goal 被下发（{errors} 个候选被 placement gate 拒绝；"
+                     f"用 --dry-run 看逐节点原因）")
+        return 2
+    if created == 0:
+        print("无变更：候选节点已被现有 goal 覆盖，或因 gate 条件不满足被跳过")
+    return 0
+
+
+def _cmd_cluster_goal_set(args) -> int:
+    node_ids, all_nodes, err = _goal_node_targets(args)
+    if err:
+        logger.error(err)
+        return 2
+    env_overlay, err = _parse_env_pairs(args.env)
+    if err:
+        logger.error(err)
+        return 2
+    return _goal_set_impl(profile=args.profile, node_ids=node_ids, all_nodes=all_nodes,
+                          intent=args.intent, create=args.create, gpus=args.gpus,
+                          env_overlay=env_overlay, lan_allow=args.lan_allow,
+                          target_role=args.target_role, dry_run=args.dry_run)
+
+
+def _cmd_cluster_launch(args) -> int:
+    node_ids, all_nodes, err = _goal_node_targets(args)
+    if err:
+        logger.error(err)
+        return 2
+    env_overlay, err = _parse_env_pairs(args.env)
+    if err:
+        logger.error(err)
+        return 2
+    return _goal_set_impl(profile=args.profile, node_ids=node_ids, all_nodes=all_nodes,
+                          intent="start", create=args.create, gpus=args.gpus,
+                          env_overlay=env_overlay, lan_allow=args.lan_allow,
+                          target_role=args.target_role, dry_run=args.dry_run)
+
+
+def _cmd_cluster_goal_list(args) -> int:
+    pairs = (("node_id", args.node), ("profile", args.profile))
+    query = "&".join(f"{k}={v}" for k, v in pairs if v)
+    status, body = _cluster_request("GET", "/cluster/goals" + (f"?{query}" if query else ""))
+    if status != 200:
+        logger.error(f"查询失败: {_center_detail(status, body)}")
+        return 2
+    if args.json:
+        print(json.dumps(body, ensure_ascii=False, indent=2))
+        return 0
+    goals = body.get("goals", [])
+    if not goals:
+        print("没有任何 goal：用 modelctl cluster goal set <profile> --node <id> --create 声明")
+        return 0
+    # updated_at / gpu / port 中心已定型或为次要列，CLI 不二次加工
+    _print_table(["节点", "Profile", "意图", "阶段", "原因", "GPU", "端口", "更新时间"],
+                 [[g.get("node_id", ""), g.get("profile", ""), g.get("intent", ""),
+                   g.get("stage", ""), g.get("reason") or "-", _fmt_gpu(g.get("gpu")),
+                   g.get("port") or "-", g.get("updated_at") or "-"] for g in goals],
+                 dim_indices=(2, 6, 7))
+    return 0
+
+
+def _cmd_cluster_goal_remove(args) -> int:
+    nodes, err = _resolve_target_nodes(args)
+    if err:
+        logger.error(err)
+        return 2
+    rc = 0
+    for node in nodes:
+        status, body = _cluster_request("DELETE", _goal_path(args.profile, node))
+        if status != 200:
+            logger.error(f"撤销失败 {args.profile}@{node}: {_center_detail(status, body)}")
+            rc = 2
+    if nodes and rc == 0:
+        print(f"已撤销 {len(nodes)} 个 goal：节点 reconciler 下一拍剪枝（模型将被停止）")
+    return rc
+
+
+def _cmd_cluster_goal_retry(args) -> int:
+    nodes, err = _resolve_target_nodes(args)
+    if err:
+        logger.error(err)
+        return 2
+    rc = 0
+    for node in nodes:
+        status, body = _cluster_request("POST", _goal_path(args.profile, node) + "/retry")
+        if status != 200:
+            logger.error(f"重试失败 {args.profile}@{node}: {_center_detail(status, body)}")
+            rc = 2
+    if nodes and rc == 0:
+        print(f"已为 {len(nodes)} 个 goal 排队重试（FAILED → 状态机重新推进；"
+              f"节点离线时仅入队）")
+    return rc
+
+
+def _cmd_cluster_stop(args) -> int:
+    """声明式停：PUT intent=stop。刻意不走 /model/{profile}/stop action 通道——
+    那条通道不动 goal，下一拍 reconciler 会照 start 意图把模型再拉起来（spec §8.2 双通道）。"""
+    nodes, err = _resolve_target_nodes(args)
+    if err:
+        logger.error(err)
+        return 2
+    rc = 0
+    for node in nodes:
+        status, body = _cluster_request("PUT", _goal_path(args.profile, node), {"intent": "stop"})
+        if status != 200:
+            logger.error(f"停止失败 {args.profile}@{node}: {_center_detail(status, body)}")
+            rc = 2
+    if nodes and rc == 0:
+        print(f"已声明 stop：{len(nodes)} 个 goal 下一拍由节点侧执行停止（YAML 保留，"
+              f"恢复用 goal set --intent start）")
+    return rc
+
+
+def _cmd_cluster_sync(args) -> int:
+    nodes, err = _sync_targets(args)
+    if err:
+        logger.error(err)
+        return 2
+    rc = 0
+    for node in nodes:
+        status, body = _cluster_request("POST", f"/cluster/nodes/{node}/sync")
+        if status != 200:
+            logger.error(f"强制同步失败 {node}: {_center_detail(status, body)}")
+            rc = 2
+    if nodes and rc == 0:
+        print(f"已排队强制同步 {len(nodes)} 个节点（下一枚心跳 ack 无条件带全量快照）")
+    return rc
+```
+
+- [ ] **Step 5: `.env.example` + README**
+
+`.env.example` 集群注释块末尾（`# CLUSTER_NODE_TOKEN=` 之后）追加 Task 9 的两个 config 键：
+
+```
+# goal 调和节拍间隔秒（worker 侧 reconciler；最小 1，默认 5）
+# CLUSTER_RECONCILE_INTERVAL_S=5
+# 模型启动超时秒（STARTING 超过该时长判 FAILED；最小 5，默认 300）
+# CLUSTER_START_TIMEOUT_S=300
+```
+
+`README.md` 两处：
+
+1. 第 10 节开头的引述 `> **当前范围（M0）**：…` 改为 M1 现状——列出「M1 已可用：goal 声明式下发（`cluster goal/launch/stop/sync`）、stage 状态机与失败分类、强制同步修复漂移」，并把「跨机模型下发…属 M1+」删掉，保留「dashboard 集群页的 goal 视图、日志/审计拉取、主动踢除旧连接属 M2，见设计文档」。
+2. 10.5 之后新增 `#### 10.6 跨机模型下发（M1）`，内容骨架：
+
+````markdown
+#### 10.6 跨机模型下发（M1）
+
+前提：中心与目标节点均已 `cluster join` 且 `cluster nodes` 显示 online；profile YAML 在**中心**的 `models/<engine>/` 下。
+
+| 命令 | 效果 | YAML 文件 | 模型会自己复活吗 |
+|---|---|---|---|
+| `modelctl cluster stop <profile> --node w-210` | 声明式停：reconciler 下一拍停止 | 保留 | 不会（intent 已是 stop） |
+| `modelctl cluster goal remove <profile> --node w-210` | 撤销托管：撤文件 + 停模型 + 删台账 | **删除** | 之后本地 `modelctl start` 归本地管 |
+| `modelctl cluster goal retry <profile> --node w-210` | 只把 FAILED 的状态机推回一拍 | 不动 | 由 goal 的 intent 决定 |
+
+```bash
+# 下发（--create 允许在无该 goal 的节点新建；幂等，重复执行输出"无变更"）
+modelctl cluster goal set qwen --node w-210 --create --gpus 0,1 --env MODEL_ROOT=/mnt/nas
+modelctl cluster launch qwen --all --create          # = goal set --intent start --all
+modelctl cluster goal set qwen --node w-210 --dry-run  # 只跑 placement gate，不写台账
+
+# 查看（stage: PENDING_PROFILE_SYNC → PROFILE_SYNCED → STARTING → READY…）
+modelctl cluster goal list
+modelctl cluster goal list --node w-210 --json
+
+# 停止 / 撤销 / 重试
+modelctl cluster stop qwen --node w-210
+modelctl cluster goal remove qwen --all
+modelctl cluster goal retry qwen --node w-210
+
+# 修复漂移（worker 曾离线错过快照时，不等 revision 变化强制全量下发）
+modelctl cluster sync --node w-210
+```
+
+gate 报告解读：`[ok]`/`[skip]`/`[err]` 逐节点一行（runtimes/空闲显存/本地 profile 三道前置）；`--all` 时部分节点被 skip 属正常，全部被拒才非零退出。**失败不自动重试**：`FAILED` 的 goal 带 `error_class/reason`，人工修复后 `goal retry`——自动重试会在配置性错误上无限烧卡。
+
+CLI 一律走中心 REST（需 `CLUSTER_CENTER_URL` + `API_KEY`），不直读中心台账；dashboard 集群页 M2 接入同一组端点。
+````
+
+- [ ] **Step 6: 运行确认通过**
+
+Run: `uv run pytest tests/test_cluster_goal_cli.py tests/test_cluster_cli.py -q`
+Expected: `33 passed`（新文件）+ 既有 CLI 用例全绿。注意 `test_cluster_goal_cli.py` 里有两条直测 `center_probe` 的用例**不经过** `probe` 夹具——它们是唯一真打桩 `urllib.request.urlopen` 的地方，防止 `put_json/delete_json` 写成同一种 method。
+
+Run: `uv run pytest tests/ -q -k "cluster"`
+Expected: Task 1–12 全部集群用例 PASS（M0 的 `test_cluster_http.py`/`test_cluster_ws.py` 回归不破）。若 CI 环境缺 fastapi，webui 侧用例会 skip，属既有状态。
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add src/modelctl/core/cluster/center_probe.py src/modelctl/cli.py .env.example README.md tests/test_cluster_goal_cli.py
+git commit -m "feat(cluster): cluster goal/launch/stop/sync CLI + M1 配置键与 README 10.6"
+```
+
+---
+
+## 收尾自查（writing-plans 完成条件）
+
+- [ ] 占位符扫描：全文无 `<!-- MORE` / `TODO` / `待补` 残留
+- [ ] spec 覆盖对照：§4.2 CLI 子命令、§6.5 REST、§7.5 goal 视图表、§8.1 状态机、§8.2 双通道禁令——逐节能指到某个 Task；有意推迟项（log/audit 拉取、WS 主动 kick、dashboard goal 视图）在 Task 11/12 正文有明确理由
+- [ ] 跨任务一致性：`GoalView` 字段名、`action.result` 事件名、`goal_id` 格式 `qwen@@w-1`、`CLUSTER_RECONCILE_INTERVAL_S`/`CLUSTER_START_TIMEOUT_S` 键名、WS 帧类型 `t` 值在各 Task 间拼写一致
+- [ ] 每个 Task 的测试用例数与正文声明一致；每个 Step 的 Expected 可机器验证（命令 + 退出码/关键输出）
 
 
 
