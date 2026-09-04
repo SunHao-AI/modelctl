@@ -179,6 +179,33 @@
     `zzz/...` > `misc.yaml` 时根目录恰好先命中），**跨目录名才暴露**——顺序类规则必须
     用反例文件名钉住，不能靠当前数据巧合通过。
 
+## `rglob` 自身抛异常没兜：破"绝不抛异常"契约，半份清单还会把歧义降级成静默选引擎
+
+- **日期**：2026-09-04（fix round 4）
+- **症状**：`_scan()` 只兜了"读单个文件"的异常（round 1 的 `UnicodeDecodeError`），遍历
+  本身裸奔 `sorted({p for p in root.rglob("*.yaml") if p.is_file()})`。models 目录下某个
+  子目录被设 ACL 拒绝 / 符号链接成环时，`read_profile_source` 直接抛 `PermissionError`
+  冒到 Task 5 的 `goal set` → REST 500（与 round 1 同一破口，只是换了抛点）。
+- **根因**：三点叠加——
+  1. `rglob` 是**惰性生成器**，异常在 `sorted()` 消费时才抛。把 try 写成只包住
+     `root.rglob(...)` 这次调用，等于一行没兜；
+  2. `Path.walk` 只吞**它自己那次 scandir** 的 OSError，而 `is_file()` 是消费方**另一次
+     `stat()`**，其 `PermissionError`/ELOOP 不在 pathlib 的忽略清单内，会原样上抛；
+  3. 消费期异常**不止 OSError**：路径含 NUL/无法编码抛 `ValueError`，超深目录树抛
+     `RecursionError`。按"想到的几种"列举必然漏（round 1 的 `UnicodeDecodeError` 同族教训）。
+- **解决**：`_scan()` 用 `try` 包住**整个遍历表达式**，按继承树之上兜 `Exception`；返回
+  `(paths, reason)` 二元组，`_resolve()` 见 reason 立即原样返回。reason 带异常类型名
+  （`PermissionError: ...`）便于运维定位是哪类 IO 故障。
+- **要点**：
+  - **必须 fail-closed**：异常时返回**空清单 + reason**，绝不能把已 yield 的半份结果当
+    完整清单。半份清单会漏掉另一个引擎下的同名文件，把"歧义拒发"降级成"静默下发到排序
+    靠前的引擎"——正是本模块第一条硬约束禁止的"猜"。实测该 fail-open 变体下
+    `read_profile_source("qwen")` 返回 `ok=True, engine="vllm"` 而非拒发，比 500 更难查。
+  - 兜"惰性求值"的异常，try 的范围要按**消费点**画，不是按**调用点**画。
+  - 测试手段：monkeypatch `Path.rglob` 为 `yield from itertools.islice(real, n); raise exc`
+    ——`n=0` 模拟"首个 next 就抛"，`n=1` 模拟"吐一条再抛"（同时钉住惰性语义与 fail-closed）。
+    反向验证：去掉兜底 → 5 条全红；改成 fail-open → 同样 5 条全红（且能看到它静默选中 vllm）。
+
 ## profile 默认值全按 8×48GB 数据中心卡设计，小显存单卡照抄必失败
 
 - **日期**：2026-09-04

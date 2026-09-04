@@ -71,15 +71,28 @@ def display_name_of(raw: dict[str, Any], path: Path, engine: str) -> str:
     return f"{base}-{variant}" if variant else base
 
 
-def _scan(root: Path) -> list[Path]:
-    """单次目录遍历：root 下全部 YAML **文件**，排序去重。
+def _scan(root: Path) -> tuple[list[Path], str]:
+    """单次目录遍历：root 下全部 YAML **文件**，排序去重；失败返回 `([], reason)`。
 
-    三条必须由遍历本身兜住的现实：① rglob 的 `**` 匹配零层目录，根目录那份会同时
+    四条必须由遍历本身兜住的现实：① rglob 的 `**` 匹配零层目录，根目录那份会同时
     出现在"根候选"与递归结果里，不去重会把同一文件解析两遍、歧义清单重复列同一行；
     ② rglob 也匹配目录（手建的 `vllm/whatever.yaml/` 目录即命中），必须过滤；
-    ③ 按文件名与按展示名两种寻址共用这一份结果，一次读取只遍历一次目录。
+    ③ 按文件名与按展示名两种寻址共用这一份结果，一次读取只遍历一次目录；
+    ④ **rglob 是惰性生成器**，异常在 `sorted()` 消费时才抛出，故 try 必须包住整个
+    遍历而不只是那次调用：子目录 ACL 拒绝或符号链接成环会让 `is_file()` 里的
+    `stat()` 抛非忽略类 OSError（`PermissionError`/ELOOP 不在 pathlib 的忽略清单内，
+    不会像 `Path.walk` 那样被静默吞掉），含 NUL/无法编码的路径抛 `ValueError`，超深
+    目录树抛 `RecursionError`。本模块契约是"绝不抛异常"，漏一类 Task 5 的 goal set
+    就直接 500——故按"继承树之上"兜（`Exception`）而非列举想到的几种。
+
+    失败必须 **fail-closed**（返回空清单 + reason），绝不能把已 yield 的半份结果当作
+    完整清单：半份清单会漏掉另一个引擎下的同名文件，把"歧义拒发"降级成"静默下发到
+    错误引擎"，正是本模块第一条硬约束禁止的"猜"。
     """
-    return sorted({p for p in root.rglob("*.yaml") if p.is_file()})
+    try:
+        return sorted({p for p in root.rglob("*.yaml") if p.is_file()}), ""
+    except Exception as exc:  # noqa: BLE001 — 遍历失败绝不冒泡（契约"绝不抛异常"）
+        return [], f"profile 目录遍历失败（{root}）：{type(exc).__name__}: {exc}"
 
 
 def _root_first(paths: list[Path], root: Path) -> list[Path]:
@@ -164,7 +177,9 @@ def _resolve(root: Path, name: str, engine: str | None = None) -> tuple[Path, st
     命中多个引擎候选时沿用同一歧义规则。
     """
     viable: list[tuple[Path, str, dict[str, Any], str]] = []
-    paths = _scan(root)
+    paths, scan_reason = _scan(root)
+    if scan_reason:
+        return scan_reason
     stems = _root_first([p for p in paths if p.stem == name], root)
     if stems:
         last_reason = ""

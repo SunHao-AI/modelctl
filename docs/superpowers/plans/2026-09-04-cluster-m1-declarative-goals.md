@@ -749,6 +749,7 @@ git commit -m "feat(cluster): wsproto v2 增加 sync/action/result 与心跳扩�
       ⑥ **目录遍历单点收敛（fix round 2）**：抽出 `_scan(root)` 一次性完成遍历（`sorted({...} if p.is_file())`），文件名与展示名两种寻址共用同一份结果。三条现实必须由遍历本身兜住：`rglob` 的 `**` 匹配**零层目录** → 根目录那份会同时出现在"根候选"与递归结果里（不去重则同一文件解析两遍、**歧义清单重复列同一行**，误导用户以为要多选一次边）；`rglob` **也匹配目录**（手建 `vllm/x.yaml/` 即命中）；一次读取只允许遍历一次目录（大 models 目录下重复遍历是纯 IO 浪费）。文件名候选仍"根目录优先 + 路径序"（稳定二次排序，不得依赖 set 迭代序）。
       ⑦ **显式 `engine:` 大小写与 `core.profile` 同口径（fix round 3）**：中心原先对显式值 `explicit.strip().lower()`，而 `core.profile._resolve_engine` **不 lower**——`engine: VLLM` 本地 `load_profile` 是硬失败（"未知引擎 'VLLM'"），中心却归一成 `vllm` 放行 → 原样落盘的文件在 worker 上永远 load 不了，goal 不收敛（与 round 1 坏 port、round 2 不安全 stem 同属"中心比 worker 宽松"）。故显式值只 `strip()` 不 `lower()`；**父目录推断**两侧都 lower（`_resolve_engine` 对 parent dir 做了 lower），大小写目录名 `models/VLLM/` 仍须放行，否则反向分叉（本地能跑、中心拒发）。拒收 reason 在 `engine.lower() in KNOWN_ENGINES` 时追加"大小写敏感，请用其小写形式"的可行动提示。
       ⑧ **展示名回退也必须根目录优先（fix round 3）**：④ 的回退按 `_scan` 的纯路径序取首个命中，而"根目录那份"在路径序里**不保证排在子目录之前**（`models/misc.yaml` vs `models/aaa/other.yaml` 比的是分隔符后的首个字符，`aaa` < `misc` 即子目录先命中）。文件名寻址是"根目录优先"、`core.profile.load_profile/list_profiles` 也是"根目录优先"，唯独回退不是 → 中心下发子目录那份、worker 上 `load_profile(展示名)` 却解析根目录那份，**同一个 profile 名在两侧指向不同文件**，sha 漂移检测彻底失真。抽出 `_root_first(paths, root)`（`sorted(..., key=lambda p: p.parent != root)`，稳定）供两种寻址共用。
+      ⑨ **rglob 自身异常兜底且 fail-closed（fix round 4）**：round 1 只兜住了"读单个文件"的异常，**遍历本身**没兜——`_scan` 直接 `sorted({… root.rglob(...) if p.is_file()})`，而：① `rglob` 是**惰性生成器**，异常在 `sorted()` 消费时才抛出，try 只包住 `root.rglob(...)` 那次调用等于没兜；② 消费期的异常**不止 OSError**——子目录 ACL 拒绝/符号链接成环会让 `is_file()` 内的 `stat()` 抛非忽略类 `PermissionError`/ELOOP（`Path.walk` 只吞自己那次 scandir 的 OSError，`is_file()` 是消费方另一次 stat，不在其保护范围），路径无法编码/含 NUL 抛 `ValueError`，超深目录树抛 `RecursionError`。按"想到的几种"列举必然漏（与 round 1 的 `UnicodeDecodeError` 同族），故按继承树之上兜 `Exception`。③ 失败必须 **fail-closed**：`_scan` 返回 `([], reason)`，`_resolve` 见 reason 即原样返回。若只吞异常返回**已 yield 的半份清单**，会漏掉另一个引擎下的同名文件，把"歧义拒发"降级成"静默下发到排序靠前的引擎"——正是本模块第一条硬约束禁止的"猜"（实测该变体下 `read_profile_source` 返回 `ok=True, engine="vllm"`）。
 
 - [ ] **Step 1: 写失败测试** — 创建 `tests/test_cluster_profiles.py`
 
@@ -1009,6 +1010,10 @@ Expected: PASS（12 条）
 >
 > fix round 3 追加 3 条（显式 `engine: VLLM` 拒发且 reason 给大小写提示 + 大写父目录仍放行
 > 反向口径 / 展示名回退根目录优先并与 `load_profile` 双证同文件），共 **38 条**。
+>
+> fix round 4 追加 5 条（遍历抛 PermissionError 不冒泡且 reason 点名异常类型 /
+> RecursionError + ValueError 参数化 2 条证明"不按类型列举" / 消费期抛异常证明"try 必须
+> 包住整个遍历" / 半份清单不得把歧义降级为静默选引擎），共 **43 条**。
 
 - [ ] **Step 5: 提交**
 

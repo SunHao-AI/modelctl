@@ -9,6 +9,7 @@
 # @Desc   : cluster/profiles.py 中心侧 profile 源读取（原文/sha/路径安全）
 # ===============================================================================
 
+import itertools
 from pathlib import Path
 
 import pytest
@@ -352,3 +353,66 @@ def test_display_name_fallback_prefers_root_file(tmp_path):
     assert got["ok"] is True and got["name"] == "misc" and got["raw"]["port"] == 9, got
     assert P.find_profile_path("shared", tmp_path) == (tmp_path / "misc.yaml", "vllm")
     assert load_profile("shared", tmp_path).port == 9   # 本地口径同样命中根目录那份
+
+
+# ---------------- fix round 4：rglob 自身异常兜底 + fail-closed ----------------
+
+def _rglob_fails(real_rglob, exc: BaseException, n: int = 0):
+    """把 rglob 换成"吐 n 条命中后抛"（n=0 即首个 next() 就抛）。
+
+    rglob 是惰性生成器，异常一律在 `sorted()` **消费期**抛出；n>0 用来模拟"遍历到一半
+    才失败"（子目录 ACL 拒绝 / 符号链接成环只挡住其中一支），此时已 yield 的结果是半份。
+    """
+
+    def boom(self, pattern):
+        yield from itertools.islice(real_rglob(self, pattern), n)
+        raise exc
+
+    return boom
+
+
+def test_scan_failure_never_raises(tmp_path, monkeypatch):
+    """契约"绝不抛异常"的最后一条缝隙：此前只兜住了**读单个文件**的异常，遍历本身
+    没兜——子目录被设 ACL 拒绝、目录树超深都会让 rglob 抛出，Task 5 的 goal set 直接 500。"""
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm" / "qwen.yaml").write_text("port: 1\n", encoding="utf-8")
+    monkeypatch.setattr(P.Path, "rglob", _rglob_fails(P.Path.rglob, PermissionError(13, "Permission denied")))
+    got = P.read_profile_source("qwen", tmp_path)
+    assert got["ok"] is False and "遍历失败" in got["reason"], got
+    assert "PermissionError" in got["reason"], got      # reason 要能定位是哪类 IO 故障
+    assert P.find_profile_path("qwen", tmp_path) is None
+
+
+@pytest.mark.parametrize("exc", [RecursionError("maximum recursion depth exceeded"),
+                                 ValueError("embedded null byte")])
+def test_scan_non_oserror_never_raises(tmp_path, monkeypatch, exc):
+    """遍历期的异常不止 OSError：超深目录树抛 RecursionError、路径无法编码/NUL 抛
+    ValueError。按"想到的几种"列举兜底必然漏（与 round 1 的 UnicodeDecodeError 同族）。"""
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm" / "qwen.yaml").write_text("port: 1\n", encoding="utf-8")
+    monkeypatch.setattr(P.Path, "rglob", _rglob_fails(P.Path.rglob, exc))
+    got = P.read_profile_source("qwen", tmp_path)
+    assert got["ok"] is False and "遍历失败" in got["reason"], got
+
+
+def test_scan_error_during_iteration_is_caught(tmp_path, monkeypatch):
+    """rglob 是**惰性生成器**：异常在 `sorted()` 消费时才抛，把 try 只包住
+    `root.rglob(...)` 那次调用等于没兜。"""
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm" / "qwen.yaml").write_text("port: 1\n", encoding="utf-8")
+    monkeypatch.setattr(P.Path, "rglob", _rglob_fails(P.Path.rglob, OSError(40, "Too many levels"), n=1))
+    got = P.read_profile_source("qwen", tmp_path)
+    assert got["ok"] is False and "遍历失败" in got["reason"], got
+
+
+def test_partial_scan_never_downgrades_ambiguity_to_silent_pick(tmp_path, monkeypatch):
+    """半份清单比报错更危险：遍历到一半失败若把已 yield 的结果当完整清单，就会漏掉
+    另一个引擎下的同名文件 → "歧义拒发"被降级成"静默下发到 vllm"，正是本模块第一条
+    硬约束禁止的"猜"。故失败必须 fail-closed（空清单 + reason）。"""
+    (tmp_path / "qwen.yaml").write_text("port: 9\nengine: vllm\n", encoding="utf-8")
+    (tmp_path / "sglang").mkdir()
+    (tmp_path / "sglang" / "qwen.yaml").write_text("port: 2\n", encoding="utf-8")
+    monkeypatch.setattr(P.Path, "rglob", _rglob_fails(P.Path.rglob, PermissionError(13, "denied"), n=1))
+    got = P.read_profile_source("qwen", tmp_path)
+    assert got["ok"] is False and "遍历失败" in got["reason"], got
+    assert P.find_profile_path("qwen", tmp_path) is None

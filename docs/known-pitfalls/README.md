@@ -40,6 +40,7 @@
 | 2026-09-04 | 后端 / 文件系统 | `rglob` 三重坑：重复命中根目录、匹配目录、重复遍历 | `**` 匹配零层目录使根目录文件在两套候选里各出现一次（歧义清单重复列行）；改用单次全扫 + 集合去重 + `is_file()` 过滤。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-04 | 后端 / 集群下发 | 中心对显式 `engine: VLLM` 替它 lower，worker 侧 load 按未知引擎硬失败 | `core.profile._resolve_engine` 对显式值不 lower，中心多做的归一化=放行下游必拒内容；目录名推断仍 lower，reason 须给大小写提示。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-04 | 后端 / 集群下发 | 展示名回退按路径序取首个，根目录那份被子目录抢先 | 中心下发子目录那份、worker `load_profile(展示名)` 解析根目录那份 → 同名两个文件，sha 漂移失真；统一 `_root_first` 根目录优先。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-04 | 后端 / 文件系统 | `rglob` 自身抛异常没兜，半份清单还把歧义降级成静默选引擎 | `rglob` 惰性 → try 要按**消费点**画；`is_file()` 的 stat 不在 `Path.walk` 保护内，Permission/Value/Recursion 都会上抛。兜 `Exception` 且 **fail-closed** 返回空清单 + reason。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 
 ## 目录约定
 
