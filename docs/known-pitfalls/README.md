@@ -14,6 +14,7 @@
 | 2026-09-04 | 构建 / 部署环境 | download.docker.com 国内 TLS 握手失败，docker-ce 无安装候选 | 换清华 docker-ce 镜像源；已内置 `modelctl env setup docker [--run]`，含 daemon.json 合并与过时 docker.io 提示的纠正。 | [build/docker-install-mirror.md](build/docker-install-mirror.md) |
 | 2026-09-04 | 构建 / 部署环境 | daemon.json 残留停服 Hub 加速域名，`modelctl start` 健康检查超时 | mirror 域名 DNS 失败是硬失败、不回落官方源，容器从未起；代码里的默认源修好了也要重跑 `--run` 才落到既有 daemon.json。 | [build/docker-install-mirror.md](build/docker-install-mirror.md) |
 | 2026-09-04 | 后端 / 配置管理 | 下载后写回 model 路径导致 git 脏区，服务器 git pull 被挡 | 删除 `_persist` 写回机制；落地路径由 MODEL_ROOT+modelscope_id 确定性推导，目录已就位即复用，YAML 永不改写；gateway/uv.lock 同步 gitignore。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-04 | 后端 / 引擎启动 | 缺 cmake 报错只说"请安装"，不给可执行安装命令 | `require()` 新增 `install_hint()`，按系统包管理器（apt/dnf/yum/zypper/pacman/apk）拼出安装命令并按需加 sudo。 | [backend/engine-launch-args.md](backend/engine-launch-args.md) |
 
 ## 目录约定
 

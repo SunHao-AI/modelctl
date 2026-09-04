@@ -130,3 +130,31 @@ if profile.engine != "ollama" and port_in_use(profile.port):
 
 **教训**：加「启动前校验」类拦截时，先枚举项目里的**共享后端 / 复用端口**引擎
 （ollama 这类 sidecar 常驻服务最容易踩），它们的「端口已被占用」不是错误而是前提。
+
+## 缺 cmake 报错只说"请安装"，不给出可直接执行的安装命令
+
+**日期**：2026-09-04
+**症状**：`modelctl start qwen3.8-llamacpp` 在 clone 完 llama.cpp 源码后终止：
+
+```
+13:36:34 | ERROR   | 缺少 cmake。请安装后再运行脚本。
+```
+
+用户（尤其远程 GPU 机器）还得自己查发行版对应的安装命令，报错不闭环。
+
+**根因**：`engines/llamacpp.py` 的 `require()` 只检测 `shutil.which(name)`，
+错误消息是固定文案，未携带任何安装指引。
+
+**解决方案**：新增 `install_hint(name)`，按系统实际存在的包管理器
+（apt-get / dnf / yum / zypper / pacman / apk，探测顺序与
+`core/webui/frontend.py::_package_manager` 一致）拼出安装命令，
+非 root 且有 sudo 时自动补 `sudo` 前缀；`require()` 报错消息追加该命令：
+
+```python
+raise RequirementError(f"缺少 {name}。请安装后重试：{install_hint(name)}")
+# Ubuntu root 下 → 缺少 cmake。请安装后重试：apt-get install -y cmake
+```
+
+**教训**：环境缺失类报错（`RequirementError`）应尽量**闭环**——直接给出当前机器
+可复制执行的修复命令，而不是让用户带着错误信息去查文档；项目里已有同类先例
+（`frontend.py::manual_hint`、`docker_setup`），新代码优先复用同一套探测思路。

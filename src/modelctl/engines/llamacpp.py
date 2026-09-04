@@ -40,10 +40,28 @@ def run(command: list[str], *, cwd: Path | None = None) -> None:
     subprocess.run(command, cwd=cwd, check=True)
 
 
+def install_hint(name: str) -> str:
+    """给出缺失工具的安装命令：按系统已有包管理器选择，非 root 且有 sudo 时补 sudo 前缀。"""
+    for probe, argv in (
+        ("apt-get", ("apt-get", "install", "-y")),
+        ("dnf", ("dnf", "install", "-y")),
+        ("yum", ("yum", "install", "-y")),
+        ("zypper", ("zypper", "--non-interactive", "install")),
+        ("pacman", ("pacman", "-S", "--noconfirm")),
+        ("apk", ("apk", "add")),
+    ):
+        if shutil.which(probe) is None:
+            continue
+        is_root = hasattr(os, "geteuid") and os.geteuid() == 0
+        prefix = [] if is_root else (["sudo"] if shutil.which("sudo") else [])
+        return " ".join([*prefix, *argv, name])
+    return f"未识别系统包管理器，请手动安装 {name}"
+
+
 def require(name: str) -> None:
-    """校验 PATH 中存在指定可执行文件，否则抛出 RequirementError。"""
+    """校验 PATH 中存在指定可执行文件，否则抛出带安装命令的 RequirementError。"""
     if shutil.which(name) is None:
-        raise RequirementError(f"缺少 {name}。请安装后再运行脚本。")
+        raise RequirementError(f"缺少 {name}。请安装后重试：{install_hint(name)}")
 
 
 def _on_off(value: object) -> str:
