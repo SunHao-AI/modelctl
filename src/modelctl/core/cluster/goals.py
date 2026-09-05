@@ -112,7 +112,7 @@ class GoalService:
         env_overlay: dict | None = None, gpu_list: list[int] | None = None,
         lan_allow: list[str] | None = None, runtime_ref: str | None = None,
         target_role: str = "primary", created_by: str = "", dry_run: bool = False,
-        now: float | None = None,
+        engine: str | None = None, now: float | None = None,
     ) -> dict[str, Any]:
         """按 gate 结论批量建 goal。永不抛业务异常：一切失败以 verdicts/reason 呈现。"""
         now = time.time() if now is None else now
@@ -124,7 +124,9 @@ class GoalService:
         if err:
             return self._abort(err)
 
-        source = profiles.read_profile_source(profile, MODELS_DIR)
+        # engine 显式选边（review P-1）：同名 YAML 散落多个引擎子目录时 read_profile_source
+        # 一律拒发不猜（Task 3 条款②），调用方唯一出路就是这里透传的 engine=。
+        source = profiles.read_profile_source(profile, MODELS_DIR, engine)
         candidates = self._candidates(node_ids=node_ids, all_nodes=all_nodes)
         if not source.get("ok"):
             # 源不可用时仍逐候选出 verdict：CLI/REST 的报告形状在"全 error"与

@@ -56,6 +56,15 @@ def post_json(url: str, payload: dict, api_key: str = "", timeout: float = 5.0) 
     return _request("POST", url, payload, api_key, timeout)
 
 
+def put_json(url: str, payload: dict, api_key: str = "", timeout: float = 5.0) -> tuple[int, dict]:
+    return _request("PUT", url, payload, api_key, timeout)
+
+
+def delete_json(url: str, api_key: str = "", timeout: float = 5.0) -> tuple[int, dict]:
+    # payload=None → urllib 不带 body；method="DELETE" 必须显式（Request 默认 POST）
+    return _request("DELETE", url, None, api_key, timeout)
+
+
 def check_join(center_url: str, token: str, node_id: str, lan: str = "") -> tuple[bool, str, str]:
     """join 预检：(ok, node_token, message)。center_url 末尾斜杠容错。"""
     base = center_url.rstrip("/")

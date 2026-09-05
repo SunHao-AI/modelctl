@@ -173,6 +173,8 @@ class _GoalCreateBody(BaseModel):
     params: dict | None = None
     env_overlay: dict | None = None
     gpus: str = ""
+    #: 同名 YAML 散落多引擎时的选边出口（review P-1）：空串 = 不选边（多引擎同名即歧义拒发）
+    engine: str = ""
     lan_allow: list[str] | None = None
     runtime_ref: str | None = None
     target_role: str = "primary"
@@ -231,7 +233,8 @@ async def create_goals(body: _GoalCreateBody, _base: None = Depends(require_auth
                                 env_overlay=body.env_overlay, gpu_list=gpu_list,
                                 lan_allow=body.lan_allow, runtime_ref=body.runtime_ref,
                                 target_role=body.target_role, created_by="api",
-                                dry_run=body.dry_run, now=time.time())
+                                dry_run=body.dry_run, engine=body.engine or None,
+                                now=time.time())
     if result["reason"]:
         return _bad_request(result["reason"])
     now = time.time()

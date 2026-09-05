@@ -205,6 +205,53 @@ def build_parser() -> argparse.ArgumentParser:
     ct = csub.add_parser("join-token", help="查看/轮换 join token（仅中心本机，直读台账）")
     ct.add_argument("--rotate", action="store_true", help="生成新 join token（旧的立即失效）")
     ct.add_argument("--rotate-node", default=None, metavar="NODE_ID", help="轮换指定节点的 node_token")
+    # §7.5 M1：goal 声明式下发（launch/stop/sync 是同一台账的三个入口，不是三套机制）
+    from modelctl.core.cluster.goals import VALID_INTENTS, VALID_TARGET_ROLES
+
+    cg = csub.add_parser("goal", help="模型目标状态（goal）：声明式下发/查看/撤销/重试")
+    gsub = cg.add_subparsers(dest="goal_action", required=True)
+
+    def _goal_common(p, *, with_overlays: bool) -> None:
+        p.add_argument("profile", help="profile 名")
+        p.add_argument("--node", action="append", default=None, metavar="NODE_ID",
+                       help="目标节点（可重复传多个）")
+        p.add_argument("--all", action="store_true",
+                       help="set：全部在线候选节点；其余子命令：该 profile 已托管的全部节点")
+        if not with_overlays:
+            return
+        p.add_argument("--create", action="store_true",
+                       help="允许在无 goal 的节点上新建（缺省只更新已有 goal）")
+        p.add_argument("--engine", default="", metavar="ENGINE",
+                       help="同名 profile YAML 散落多个引擎子目录时显式选边（不猜）")
+        p.add_argument("--gpus", default="", metavar="0,1",
+                       help="绑定 GPU 序号列表（中心解析校验，CLI 不重复一套）")
+        p.add_argument("--env", action="append", default=None, metavar="K=V",
+                       help="env_overlay 覆盖（可重复；禁凭据类键，中心白名单裁决）")
+        p.add_argument("--lan-allow", action="append", default=None, metavar="LAN",
+                       help="placement 限定 LAN（可重复）")
+        p.add_argument("--target-role", choices=list(VALID_TARGET_ROLES), default="primary")
+        p.add_argument("--dry-run", action="store_true", help="只跑 gate 报告，不写台账")
+
+    gs = gsub.add_parser("set", help="下发/更新 goal（幂等：重复下发同参数无变更）")
+    _goal_common(gs, with_overlays=True)
+    gs.add_argument("--intent", choices=list(VALID_INTENTS), default="start",
+                    help="期望意图：start 拉起并保活 / stop 声明式停止（默认 start）")
+    gl = gsub.add_parser("list", help="列出 goal（读中心 REST，展示 stage/reason）")
+    gl.add_argument("--node", default="", help="按节点过滤")
+    gl.add_argument("--profile", default="", help="按 profile 过滤")
+    gl.add_argument("--json", action="store_true", help="原样输出中心 JSON")
+    gr = gsub.add_parser("remove", help="撤销托管（DELETE goal：撤文件 + 停模型 + 删台账）")
+    _goal_common(gr, with_overlays=False)
+    gt = gsub.add_parser("retry", help="人工重试 FAILED 的 goal（只推状态机，不改 intent）")
+    _goal_common(gt, with_overlays=False)
+
+    cl = csub.add_parser("launch", help="= goal set --intent start（spec §4.2 别名）")
+    _goal_common(cl, with_overlays=True)
+    cs = csub.add_parser("stop", help="声明式停止（PUT intent=stop；YAML 保留、不会自动复活）")
+    _goal_common(cs, with_overlays=False)
+    cy = csub.add_parser("sync", help="强制节点立即全量同步（不等 revision 变化）")
+    cy.add_argument("--node", action="append", default=None, metavar="NODE_ID")
+    cy.add_argument("--all", action="store_true", help="全部已注册节点")
     # §2.2 TensorRT-LLM 引擎编译
     tp = sub.add_parser("trtllm", help="TensorRT-LLM 编译/检查子命令")
     tp.add_argument("action", choices=["build", "status"])
@@ -1223,6 +1270,14 @@ def _cmd_cluster(args) -> int:
         return _cmd_cluster_nodes()
     if args.action == "status":
         return _cmd_cluster_status()
+    if args.action == "goal":
+        return _cmd_cluster_goal(args)
+    if args.action == "launch":
+        return _cmd_cluster_launch(args)
+    if args.action == "stop":
+        return _cmd_cluster_stop(args)
+    if args.action == "sync":
+        return _cmd_cluster_sync(args)
     if args.action == "join-token":
         return _cmd_cluster_join_token(args)
     return 2
@@ -1233,6 +1288,111 @@ def _cluster_center_base() -> str:
     from modelctl.core.webui.server import webui_port
 
     return cluster_config.center_url() or f"http://127.0.0.1:{webui_port()}"
+
+
+def _cluster_api_key() -> str:
+    import os as _os
+
+    return _os.environ.get("API_KEY", "")
+
+
+def _cluster_request(method: str, path: str, payload: dict | None = None,
+                     *, timeout: float = 10.0) -> tuple[int, dict]:
+    """中心 REST 统一出口：path 以 / 开头、不含 /admin/api 前缀。"""
+    from modelctl.core.cluster import center_probe
+
+    url = f"{_cluster_center_base()}/admin/api{path}"
+    key = _cluster_api_key()
+    if method == "GET":
+        return center_probe.get_json(url, api_key=key, timeout=timeout)
+    if method == "POST":
+        return center_probe.post_json(url, payload or {}, api_key=key, timeout=timeout)
+    if method == "PUT":
+        return center_probe.put_json(url, payload or {}, api_key=key, timeout=timeout)
+    return center_probe.delete_json(url, api_key=key, timeout=timeout)
+
+
+def _center_detail(status, body: dict) -> str:
+    """中心错误文案：detail（FastAPI）> error（urllib 折叠）> reason（gate 汇总）> 状态码。"""
+    for key in ("detail", "error", "reason"):
+        value = body.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return f"HTTP {status}"
+
+
+def _goal_node_targets(args) -> tuple[list[str] | None, bool, str]:
+    """(--node… | --all) 互斥校验；返回 (node_ids|None, all_nodes, 错误文案)。"""
+    node_ids = list(args.node or [])
+    if node_ids and args.all:
+        return None, False, "--node 与 --all 互斥，请二选一"
+    if not node_ids and not args.all:
+        return None, False, "必须指定 --node <NODE_ID> 或 --all"
+    return (node_ids or None), args.all, ""
+
+
+def _parse_env_pairs(pairs: list[str] | None) -> tuple[dict | None, str]:
+    overlay: dict[str, str] = {}
+    for item in pairs or []:
+        key, sep, value = item.partition("=")   # 只切第一个 =：值里允许出现 =
+        if not sep or not key.strip():
+            return None, f"--env 需为 K=V 形式，收到 {item!r}"
+        overlay[key.strip()] = value
+    return overlay, ""
+
+
+def _goal_path(profile: str, node_id: str) -> str:
+    """goal_id 一律经 goal_id_of 生成再 percent-encode（@@ 出现在 URL path 段）。"""
+    from urllib.parse import quote
+
+    from modelctl.core.cluster.goals import goal_id_of
+
+    return f"/cluster/goals/{quote(goal_id_of(profile, node_id), safe='')}"
+
+
+def _fmt_gpu(gpu) -> str:
+    return "-" if not gpu else "[" + ",".join(str(g) for g in gpu) + "]"
+
+
+def _goal_nodes_of_profile(profile: str) -> tuple[list[str], str]:
+    status, body = _cluster_request("GET", f"/cluster/goals?profile={profile}")
+    if status != 200:
+        return [], _center_detail(status, body)
+    return [g["node_id"] for g in body.get("goals", []) if g.get("node_id")], ""
+
+
+def _resolve_target_nodes(args) -> tuple[list[str], str]:
+    """remove/stop/retry 的目标解析：--all = 该 profile **已托管**的节点（不是全集群——
+    对未托管节点 stop/remove 毫无意义，还会打出一串 404）。"""
+    node_ids, _all, err = _goal_node_targets(args)
+    if err:
+        return [], err
+    if node_ids:
+        return node_ids, ""
+    nodes, err = _goal_nodes_of_profile(args.profile)
+    if err:
+        return [], err
+    if not nodes:
+        print(f"profile {args.profile} 当前没有托管中的节点：无需操作")
+    return nodes, ""
+
+
+def _sync_targets(args) -> tuple[list[str], str]:
+    """sync 的 --all = 全部已注册节点（sync 作用于节点而非 goal，没有 profile 可限定）。"""
+    node_ids = list(args.node or [])
+    if node_ids and args.all:
+        return [], "--node 与 --all 互斥，请二选一"
+    if not node_ids and not args.all:
+        return [], "必须指定 --node <NODE_ID> 或 --all"
+    if node_ids:
+        return node_ids, ""
+    status, body = _cluster_request("GET", "/cluster/nodes")
+    if status != 200:
+        return [], _center_detail(status, body)
+    nodes = [n["node_id"] for n in body.get("nodes", []) if n.get("node_id")]
+    if not nodes:
+        print("集群中没有任何已注册节点：无同步目标")
+    return nodes, ""
 
 
 def _cmd_cluster_init() -> int:
@@ -1344,6 +1504,171 @@ def _cmd_cluster_join_token(args) -> int:
     token = NodeRegistry(store).ensure_join_token()
     print(f"join token: {token}")
     return 0
+
+
+def _cmd_cluster_goal(args) -> int:
+    action = getattr(args, "goal_action", "")
+    if action == "set":
+        return _cmd_cluster_goal_set(args)
+    if action == "list":
+        return _cmd_cluster_goal_list(args)
+    if action == "remove":
+        return _cmd_cluster_goal_remove(args)
+    if action == "retry":
+        return _cmd_cluster_goal_retry(args)
+    return 2
+
+
+def _goal_set_impl(*, profile: str, node_ids: list[str] | None, all_nodes: bool,
+                   intent: str, create: bool, gpus: str, env_overlay: dict | None,
+                   lan_allow: list[str] | None, target_role: str, dry_run: bool,
+                   engine: str = "") -> int:
+    body = {"profile": profile, "node_ids": node_ids, "all_nodes": all_nodes,
+            "intent": intent, "create": bool(create), "gpus": gpus or "",
+            "engine": engine or "",
+            "target_role": target_role, "dry_run": bool(dry_run)}
+    if env_overlay:
+        body["env_overlay"] = env_overlay
+    if lan_allow:
+        body["lan_allow"] = lan_allow
+    status, resp = _cluster_request("POST", "/cluster/goals", body)
+    if status != 200:
+        logger.error(f"下发失败: {_center_detail(status, resp)}")
+        return 2
+    report = resp.get("report")
+    if report:
+        print(report)          # gate 报告已按 display_width 对齐，CLI 原样打印不重排
+    created, errors = int(resp.get("created", 0)), int(resp.get("errors", 0))
+    if created == 0 and errors:
+        logger.error(f"没有 goal 被下发（{errors} 个候选被 placement gate 拒绝；"
+                     f"用 --dry-run 看逐节点原因）")
+        return 2
+    if created == 0:
+        print("无变更：候选节点已被现有 goal 覆盖，或因 gate 条件不满足被跳过")
+    return 0
+
+
+def _cmd_cluster_goal_set(args) -> int:
+    node_ids, all_nodes, err = _goal_node_targets(args)
+    if err:
+        logger.error(err)
+        return 2
+    env_overlay, err = _parse_env_pairs(args.env)
+    if err:
+        logger.error(err)
+        return 2
+    return _goal_set_impl(profile=args.profile, node_ids=node_ids, all_nodes=all_nodes,
+                          intent=args.intent, create=args.create, gpus=args.gpus,
+                          env_overlay=env_overlay, lan_allow=args.lan_allow,
+                          target_role=args.target_role, dry_run=args.dry_run,
+                          engine=args.engine)
+
+
+def _cmd_cluster_launch(args) -> int:
+    node_ids, all_nodes, err = _goal_node_targets(args)
+    if err:
+        logger.error(err)
+        return 2
+    env_overlay, err = _parse_env_pairs(args.env)
+    if err:
+        logger.error(err)
+        return 2
+    return _goal_set_impl(profile=args.profile, node_ids=node_ids, all_nodes=all_nodes,
+                          intent="start", create=args.create, gpus=args.gpus,
+                          env_overlay=env_overlay, lan_allow=args.lan_allow,
+                          target_role=args.target_role, dry_run=args.dry_run,
+                          engine=args.engine)
+
+
+def _cmd_cluster_goal_list(args) -> int:
+    pairs = (("node_id", args.node), ("profile", args.profile))
+    query = "&".join(f"{k}={v}" for k, v in pairs if v)
+    status, body = _cluster_request("GET", "/cluster/goals" + (f"?{query}" if query else ""))
+    if status != 200:
+        logger.error(f"查询失败: {_center_detail(status, body)}")
+        return 2
+    if args.json:
+        print(json.dumps(body, ensure_ascii=False, indent=2))
+        return 0
+    goals = body.get("goals", [])
+    if not goals:
+        print("没有任何 goal：用 modelctl cluster goal set <profile> --node <id> --create 声明")
+        return 0
+    # updated_at / gpu / port 中心已定型或为次要列，CLI 不二次加工
+    _print_table(["节点", "Profile", "意图", "阶段", "原因", "GPU", "端口", "更新时间"],
+                 [[g.get("node_id", ""), g.get("profile", ""), g.get("intent", ""),
+                   g.get("stage", ""), g.get("reason") or "-", _fmt_gpu(g.get("gpu")),
+                   g.get("port") or "-", g.get("updated_at") or "-"] for g in goals],
+                 dim_indices=(2, 6, 7))
+    return 0
+
+
+def _cmd_cluster_goal_remove(args) -> int:
+    nodes, err = _resolve_target_nodes(args)
+    if err:
+        logger.error(err)
+        return 2
+    rc = 0
+    for node in nodes:
+        status, body = _cluster_request("DELETE", _goal_path(args.profile, node))
+        if status != 200:
+            logger.error(f"撤销失败 {args.profile}@{node}: {_center_detail(status, body)}")
+            rc = 2
+    if nodes and rc == 0:
+        print(f"已撤销 {len(nodes)} 个 goal：节点 reconciler 下一拍剪枝（模型将被停止）")
+    return rc
+
+
+def _cmd_cluster_goal_retry(args) -> int:
+    nodes, err = _resolve_target_nodes(args)
+    if err:
+        logger.error(err)
+        return 2
+    rc = 0
+    for node in nodes:
+        status, body = _cluster_request("POST", _goal_path(args.profile, node) + "/retry")
+        if status != 200:
+            logger.error(f"重试失败 {args.profile}@{node}: {_center_detail(status, body)}")
+            rc = 2
+    if nodes and rc == 0:
+        print(f"已为 {len(nodes)} 个 goal 排队重试（FAILED → 状态机重新推进；"
+              f"节点离线时仅入队）")
+    return rc
+
+
+def _cmd_cluster_stop(args) -> int:
+    """声明式停：PUT intent=stop。刻意不走 /model/{profile}/stop action 通道——
+    那条通道不动 goal，下一拍 reconciler 会照 start 意图把模型再拉起来（spec §8.2 双通道）。"""
+    nodes, err = _resolve_target_nodes(args)
+    if err:
+        logger.error(err)
+        return 2
+    rc = 0
+    for node in nodes:
+        status, body = _cluster_request("PUT", _goal_path(args.profile, node), {"intent": "stop"})
+        if status != 200:
+            logger.error(f"停止失败 {args.profile}@{node}: {_center_detail(status, body)}")
+            rc = 2
+    if nodes and rc == 0:
+        print(f"已声明 stop：{len(nodes)} 个 goal 下一拍由节点侧执行停止（YAML 保留，"
+              f"恢复用 goal set --intent start）")
+    return rc
+
+
+def _cmd_cluster_sync(args) -> int:
+    nodes, err = _sync_targets(args)
+    if err:
+        logger.error(err)
+        return 2
+    rc = 0
+    for node in nodes:
+        status, body = _cluster_request("POST", f"/cluster/nodes/{node}/sync")
+        if status != 200:
+            logger.error(f"强制同步失败 {node}: {_center_detail(status, body)}")
+            rc = 2
+    if nodes and rc == 0:
+        print(f"已排队强制同步 {len(nodes)} 个节点（下一枚心跳 ack 无条件带全量快照）")
+    return rc
 
 
 def main(argv: list[str] | None = None) -> int:

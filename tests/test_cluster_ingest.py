@@ -138,6 +138,25 @@ def test_drift_event_is_not_duplicated_every_beat(env):
     assert kinds.count("goal.drift") == 1
 
 
+def test_force_sync_survives_offline_until_next_online_heartbeat(env):
+    """mark_force_sync 后节点离线：标记必须在进程内存活到它下次上线的首枚心跳。
+
+    这是 REST 强制同步对离线节点仍有意义的全部依据——本地文件被改坏时，人最想立刻
+    修好的正是还没连回来的那台。变异：`mark_force_sync` 里加在线校验（或心跳前丢弃
+    标记）→ 本钉的 sync/force 断言即红；把 `_consume_force_sync` 改成不清标记 → 第三拍
+    （revision 已一致）仍带快照，即末条断言红。
+    """
+    _store, goals, reg = env
+    goals.set_goals(profile="qwen", node_ids=["w-1"], create=True)
+    rev = goals.snapshot_for("w-1")["revision"]
+    reg.mark_force_sync("w-1")
+    reg.store.set_node_status("w-1", "offline")            # 打标后掉线
+    ack = reg.handle_heartbeat("w-1", _hb(goal_sync={"revision": rev}), now=200.0)
+    assert ack["sync"]["force"] is True and ack["sync"]["revision"] == rev
+    assert "sync" not in reg.handle_heartbeat(            # 一次性：下一拍恢复不带
+        "w-1", _hb(goal_sync={"revision": rev}), now=210.0)
+
+
 def test_push_action_is_delivered_once(env):
     _store, _goals, reg = env
     assert reg.push_action("w-1", "start", goal_id="qwen@@w-1") is True

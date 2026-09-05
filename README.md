@@ -714,7 +714,7 @@ npm run dev
 
 适用场景：N 台服务器分布在 M 个局域网（N ≥ M），用**一个中心 webui** 统一查看/管理所有节点。取向与 torchrun 类似——每台机器照常跑自己的 `modelctl webui`，额外用一条 `cluster join` 命令注册到中心；但**没有 rank/rendezvous 概念**，中心故障不影响任何节点的本地推理与本地 webui。
 
-> **当前范围（M0）**：节点注册、心跳判活（lease 三态）、节点视图（Web UI「集群节点」页 + `modelctl cluster nodes`）、令牌准入与吊销。跨机模型下发（goal 声明式同步）、集群级起停属 M1+，见设计文档。
+> **当前范围（M1）**：节点注册、心跳判活（lease 三态）、节点视图（Web UI「集群节点」页 + `modelctl cluster nodes`）、令牌准入与吊销；M1 已可用：goal 声明式下发（`cluster goal/launch/stop/sync`）、stage 状态机与失败分类、强制同步修复漂移。dashboard 集群页的 goal 视图、日志/审计拉取、主动踢除旧连接属 M2，见设计文档。
 >
 > **数据面零改动**：推理流量仍按 nginx `/{node-id}/llm/*` 规则直连各节点端口，**不经过中心**。
 
@@ -791,6 +791,41 @@ modelctl cluster nodes                 # w-b1 状态 online，租约倒计时滚
 # kill 掉 B 机 webui 后：约 lease(90s) 后转 stale、3×lease 后转 offline；
 # 重启 B 机 webui（无需重新 join）→ 自动回到 online，node_token 不变
 ```
+
+#### 10.6 跨机模型下发（M1）
+
+前提：中心与目标节点均已 `cluster join` 且 `cluster nodes` 显示 online；profile YAML 在**中心**的 `models/<engine>/` 下。
+
+| 命令 | 效果 | YAML 文件 | 模型会自己复活吗 |
+|---|---|---|---|
+| `modelctl cluster stop <profile> --node w-210` | 声明式停：reconciler 下一拍停止 | 保留 | 不会（intent 已是 stop） |
+| `modelctl cluster goal remove <profile> --node w-210` | 撤销托管：撤文件 + 停模型 + 删台账 | **删除** | 之后本地 `modelctl start` 归本地管 |
+| `modelctl cluster goal retry <profile> --node w-210` | 只把 FAILED 的状态机推回一拍 | 不动 | 由 goal 的 intent 决定 |
+
+```bash
+# 下发（--create 允许在无该 goal 的节点新建；幂等，重复执行输出"无变更"）
+modelctl cluster goal set qwen --node w-210 --create --gpus 0,1 --env MODEL_ROOT=/mnt/nas
+modelctl cluster launch qwen --all --create          # = goal set --intent start --all
+modelctl cluster goal set qwen --node w-210 --dry-run  # 只跑 placement gate，不写台账
+
+# 查看（stage: PENDING_PROFILE_SYNC → PROFILE_SYNCED → STARTING → READY…）
+modelctl cluster goal list
+modelctl cluster goal list --node w-210 --json
+
+# 停止 / 撤销 / 重试
+modelctl cluster stop qwen --node w-210
+modelctl cluster goal remove qwen --all
+modelctl cluster goal retry qwen --node w-210
+
+# 修复漂移（worker 曾离线错过快照时，不等 revision 变化强制全量下发）
+modelctl cluster sync --node w-210
+```
+
+gate 报告解读：`[ok]`/`[skip]`/`[err]` 逐节点一行（runtimes/空闲显存/本地 profile 三道前置）；`--all` 时部分节点被 skip 属正常，全部被拒才非零退出。**失败不自动重试**：`FAILED` 的 goal 带 `error_class/reason`，人工修复后 `goal retry`——自动重试会在配置性错误上无限烧卡。
+
+同名 profile YAML 散落在多个引擎子目录（如 `models/vllm/qwen.yaml` 与 `models/sglang/qwen.yaml`）时中心**绝不猜**，直接报 `[err] 歧义`；用 `--engine vllm` 显式选边即可只下发该引擎那份。
+
+CLI 一律走中心 REST（需 `CLUSTER_CENTER_URL` + `API_KEY`），不直读中心台账；dashboard 集群页 M2 接入同一组端点。
 
 ## 文档
 

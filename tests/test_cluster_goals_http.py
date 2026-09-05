@@ -165,6 +165,31 @@ def test_create_goal_response_scoped_to_requested_nodes(center) -> None:
     assert {g["node_id"] for g in body["goals"]} <= {"w-1"}
 
 
+def test_create_goal_ambiguous_profile_refuses_then_engine_picks_side(center) -> None:
+    """同名 YAML 散落多个引擎子目录：**绝不猜**，但必须给出选边出口（review P-1）。
+
+    不带 engine → 歧义拒发（本仓 models/*/qwen3.8.yaml 有 8 份同名，是高频现实场景）；
+    带 engine → 命中该引擎那份并落库。旧代码 `_GoalCreateBody` 无 engine 字段，
+    Pydantic 静默忽略未知字段 → 恒歧义，用户遇 `[err] 歧义` 后无路可走。
+    """
+    import modelctl.core.cluster.goals as goals_mod
+    import modelctl.core.webui.admin_cluster as ac
+
+    for engine in ("vllm", "sglang"):
+        (goals_mod.MODELS_DIR / engine).mkdir(parents=True, exist_ok=True)
+        (goals_mod.MODELS_DIR / engine / "dup.yaml").write_text(YAML, encoding="utf-8")
+
+    r = _create(center, profile="dup", create=True)
+    assert r.status_code == 400 and "歧义" in r.json()["detail"]
+    assert ac.get_registry().store.list_goals(profile="dup") == []   # created 恒 0
+
+    r = _create(center, profile="dup", create=True, engine="vllm")
+    assert r.status_code == 200, r.text
+    assert r.json()["created"] == 1
+    assert [g["engine"] for g in r.json()["goals"]] == ["vllm"]
+    assert ac.get_registry().store.get_goal("dup@@w-1")["engine"] == "vllm"
+
+
 def test_list_goals_filters_by_node_and_profile(center) -> None:
     _create(center, node_ids=None, all_nodes=True)
     assert len(center.get(f"{GOALS}?node_id=w-1", headers=_h()).json()["goals"]) == 1
@@ -348,6 +373,27 @@ def test_model_verb_queues_action(center, verb) -> None:
     _create(center)
     r = center.post("/admin/api/cluster/nodes/w-1/model/qwen/stop", headers=_h())
     assert r.status_code == 200 and r.json()["queued"] is True
+
+
+def test_model_verb_reaches_ack_as_action_frame(center) -> None:
+    """verb 必须真投到 ack（P-2 承前）：`queued: true` 只证明入队，不证明投递。
+
+    retry 有同款钉，verb 没有 → push_action 的 `profile=` 参数丢失、或 ack 组装漏
+    drain_actions，都只剩 worker 侧"本机没有目标"的失败回执可观察。action 帧经
+    `deliver_ack` → `handle_actions` 的投递由 test_cluster_agent_v2 的替身钉覆盖。
+    """
+    _create(center)
+    rev = center_revision(center, "w-1")
+    assert center.post("/admin/api/cluster/nodes/w-1/model/qwen/stop", headers=_h()).status_code == 200
+    jt = _jt(center)
+    with center.websocket_connect("/admin/api/ws/cluster") as ws:
+        ws.send_json({"t": "hello", "v": 2, "node_id": "w-1", "lan": "", "key": jt,
+                      "meta": {}})
+        ws.receive_json()
+        ack = _heartbeat(ws, goal_sync={"revision": rev})
+    frame = ack["actions"][0]
+    assert frame["action"] == "stop" and frame["goal_id"] == "qwen@@w-1"
+    assert frame["profile"] == "qwen"                       # worker 侧按 profile 定位模型
 
 
 def test_model_verb_unknown_verb_400(center) -> None:
