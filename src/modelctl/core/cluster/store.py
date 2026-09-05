@@ -25,6 +25,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 _MASK_KEEP_TAIL = 4
 
 #: set_node_status 允许的状态白名单，防止调用方 typo 污染台账状态机
@@ -481,20 +483,35 @@ class ClusterStore:
     # ---- events ----
     def append_event(self, kind: str, *, node_id: str | None = None, goal_id: str | None = None,
                      payload: dict | None = None, now: float | None = None) -> None:
+        safe_kind = str(kind)[:64]
+        try:
+            from modelctl.core.cluster.events import is_known_kind
+            if not is_known_kind(safe_kind):
+                logger.warning(f"事件 kind 不在 EVENT_KINDS 词表: {safe_kind!r}（照常入库；"
+                               "worker 上报面 kind 为自由串，见计划裁决 1）")
+        except Exception:  # noqa: BLE001 — 守卫自身绝不阻断写入
+            pass
         with self._lock:
             self._db().execute(
                 "INSERT INTO events(ts,node_id,goal_id,kind,payload) VALUES(?,?,?,?,?)",
-                (now if now is not None else time.time(), node_id, goal_id, kind,
+                (now if now is not None else time.time(), node_id, goal_id, safe_kind,
                  json.dumps(payload, ensure_ascii=False) if payload else None),
             )
             self._db().commit()
 
-    def recent_events(self, limit: int = 100, node_id: str | None = None) -> list[dict]:
+    def recent_events(self, limit: int = 100, node_id: str | None = None, *,
+                      kind: str | None = None) -> list[dict]:
         sql = "SELECT ts,node_id,goal_id,kind,payload FROM events"
         params: list[Any] = []
+        conds = []
         if node_id:
-            sql += " WHERE node_id=?"
+            conds.append("node_id=?")
             params.append(node_id)
+        if kind:
+            conds.append("kind=?")
+            params.append(kind)
+        if conds:
+            sql += " WHERE " + " AND ".join(conds)
         sql += " ORDER BY ts DESC, id DESC LIMIT ?"
         params.append(limit)
         with self._lock:

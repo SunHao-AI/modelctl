@@ -141,6 +141,19 @@ class GoalService:
         if not candidates:
             return self._abort("无可下发节点（--node 指定的节点不存在或已 offline）")
 
+        # M2 治理（Task 3）：显式点名 `--node` 的 disabled 候选逐条出 **error** verdict。
+        # `_candidates` 只在 all_nodes 分支过滤 disabled，点名路径会把禁用节点直送
+        # gate——gate 的 disabled 分支是 skip（容量语义），而"往已禁用节点下发"是运维
+        # 意图错误，静默 skip 会被报告里一排 skip 淹没、看起来像"这次没抢到资源"。
+        # 全候选皆禁用时过滤后为空，evaluate_gate 空候选天然产 []，verdicts 只剩禁用行。
+        # gate 本体零 diff：容量/卡位职责不掺治理。
+        # 形状取 gate.NodeVerdict（brief 的 dict 形状与 format_gate_report 读 v.result
+        # 冲突，按 brief 条款"以 gate.py 实际形状为准"对齐）。
+        offlined = [gate.NodeVerdict(str(c["node_id"]), gate.RESULT_ERROR,
+                                     "节点已禁用，重新启用后才能下发")
+                    for c in candidates if c.get("disabled")]
+        candidates = [c for c in candidates if not c.get("disabled")]
+
         # 幂等集/落库/事件一律用 source["name"]（文件 stem），绝不用调用方原词：
         # 寻址名可能是展示名（Task 3 条款④），goal_id 与 worker 写盘文件名只认 stem。
         # 用原词查 existing 会让"展示名重跑"查不到已有 goal → gate 判 ok → upsert
@@ -183,6 +196,7 @@ class GoalService:
         verdicts = gate.evaluate_gate(candidates=candidates, source=enriched, in_use=in_use,
                                       existing_goal_ids=existing, lan_allow=lan_allow or [],
                                       create=create, profile_exists=has_profile)
+        verdicts = offlined + verdicts  # 禁用行置前：运维第一眼就看到"这台是手动禁的"
 
         created = 0
         for v in verdicts:

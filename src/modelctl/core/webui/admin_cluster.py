@@ -29,6 +29,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from modelctl.core.cluster import config, conns, tokens, wsproto
+from modelctl.core.cluster import events as events_mod
 from modelctl.core.cluster.goals import GoalService, goal_id_of
 from modelctl.core.cluster.nodes import AuthError, NodeRegistry
 from modelctl.core.cluster.store import ClusterStore
@@ -155,12 +156,19 @@ async def cluster_nodes(_base: None = Depends(require_auth)):
 
 
 @router.get("/cluster/events")
-async def cluster_events(node_id: str = Query(""), limit: int = Query(100, ge=1, le=1000),
+async def cluster_events(node_id: str = Query(""), kind: str = Query(""),
+                         limit: int = Query(100, ge=1, le=1000),
                          _base: None = Depends(require_auth)):
+    """事件流定版（spec §2.2）：{ts,node_id,goal_id,kind,text}，ts/text 后端单端格式化。"""
     if (off := _disabled()) is not None:
         return off
-    events = get_registry().store.recent_events(limit=limit, node_id=node_id or None)
-    return {"events": events}
+    if kind and not events_mod.is_known_kind(kind):
+        return _bad_request(f"未知事件类型 {kind!r}")
+    rows = get_registry().store.recent_events(limit=limit, node_id=node_id or None,
+                                              kind=kind or None)
+    return {"events": [{"ts": _fmt_ts(r["ts"]), "node_id": r["node_id"],
+                        "goal_id": r["goal_id"], "kind": r["kind"],
+                        "text": events_mod.event_text(r)} for r in rows]}
 
 
 # ================================ 目标状态（M1，spec §6.5）================================

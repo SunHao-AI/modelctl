@@ -125,3 +125,16 @@ def test_mask_tail() -> None:
     assert mask_tail("") == "***"
     assert mask_tail("abcdef") == "***cdef"
     assert mask_tail("ab") == "***"
+
+
+def test_recent_events_kind_filter(store: ClusterStore) -> None:
+    store.append_event("node.join", node_id="w-1", now=1.0)
+    store.append_event("node.heartbeat", node_id="w-1", now=2.0)
+    out = store.recent_events(kind="node.join")
+    assert [e["kind"] for e in out] == ["node.join"]
+
+
+def test_append_event_unknown_kind_still_stored(store: ClusterStore, caplog) -> None:
+    # 告警语义（全局裁决 1）：未知 kind 入库 + warning，绝不抛——worker 上报炸不得
+    store.append_event("vendor.custom", node_id="w-1", now=1.0)
+    assert [e["kind"] for e in store.recent_events()] == ["vendor.custom"]
