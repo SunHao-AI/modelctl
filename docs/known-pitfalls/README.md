@@ -61,6 +61,7 @@
 | 2026-09-05 | 后端 / 集群下发 | 中心"在用 GPU"白名单与 Task 9 实际写入值零交集，gate 卡位/占满检查生产静默空转 | 夹具与实现同用虚构值（READY/STARTING/UP）全绿，生产写入的 running/starting/degraded 恒不占卡；跨任务状态词表必须落成共享常量 `GPU_OCCUPYING_STATES` 并两侧钉用例。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-05 | 后端 / 集群下发 | 展示名归一漏掉 remove 侧；归一依赖的文件已删时撤不掉 goal | set 归一 remove 不归一 → 展示名撤除全进 missing；连带清 model_states 用原词删不掉（回流按 stem 建键）；`_resolve_names` 读失败必须回退 [原词]，撤除按被删行的 profile 字段。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-05 | 后端 / 演练一致性 | 上限检查排在 dry-run 计数后，演练报 created=1 实跑 skip；version 从原文 sha 而非最终落库 sha 派生 | dry-run = 实跑减写库副作用，一切"能不能创建"的校验必须在捷径前；`**source` 覆盖 sha 时必须重算其派生字段（version）。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-05 | 后端 / 集群下发 | 展示名归一的幻影 goal_id 进 missing，撤除成功却同时报"不存在"假警报 | 候选名 × 节点全组合的未命中项是算法内部噪声；missing 必须聚合回业务主键（节点）再对外报告，命中判定用被删行自带的 node_id。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 
 ## 目录约定
 

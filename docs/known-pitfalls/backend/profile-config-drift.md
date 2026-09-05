@@ -668,3 +668,43 @@
   - 自提缺陷的诚实申报换来了本轮收编：实现者报告里"version 与 profile_sha 非同一哈希链，
     故未动"的待确认点，被评审升格为裁决——**"当前无消费者"不是放任派生链断裂的理由**，
     M1 内无人读 ≠ Task 11+ 的 dashboard 不读。
+
+## 候选名归一的幻影组合进 missing：撤除成功却同时报"不存在"，假警报按 goal_id 而非节点计数
+
+- **日期**：2026-09-05（M1 Task 5 fix round 3）
+- **症状**：`remove_goals(profile=<展示名>, node_ids=["w-1"])` 撤除成功（`removed=
+  ["qwen-fast@@w-1"]`），返回里却同时 `missing=["qwen-display@@w-1"]`，report 输出
+  "已删除 1 个 goal；不存在 1 个"——removed 与 missing 自相矛盾，运维无法判断这次
+  `goal remove` 到底成没成。round 2 落地时该行为曾被注释钉住为"missing 语义本就属实"，
+  本轮评审推翻该裁决。
+- **根因**：round 2 的 `_targets_for_removal` 按"候选名 × 节点"**全组合**展开目标集
+  （stem 那份 + 展示名那份），而 set 侧只认 stem，展示名 goal_id 是**恒不落库的幻影
+  键**；`missing = targets - removed` 的集合差不区分"真实目标未命中"与"归一算法自身
+  产生的幻影"，幻影必然进 missing。计数维度也错了：goal 主键是 (profile,node)，一个
+  节点对一次撤除请求只有"撤到/没撤到"两种结局，运维感知的成败单位是**节点**，不是
+  候选名展开出的 goal_id 行数——按 goal_id 计数会让归一算法的内部实现细节泄漏进对外
+  契约（Task 11 REST 原样透传 missing、Task 12 CLI 据此给提示/退出码）。
+- **解决**：missing **按节点聚合**。删除循环记 `hit_nodes`（被删行的 node_id，来自
+  `delete_goal` 返回值，天然归一）；--node 路径 `missing = 未命中节点 × names[0]`
+  （stem 优先的规范键，每节点至多一条，重复 --node 经 `dict.fromkeys` 去重不重复计数）；
+  --all 路径 targets 来自 `list_goals` 查库、无幻影组合，维持集合差（仅防 list/delete
+  竞态）。`_targets_for_removal` 签名 `profile` → `names: list[str]`，候选名解析上移到
+  `remove_goals` 供两处共用。改写 round 2 钉住旧行为的断言为 `missing == []` +
+  report 不含"不存在"，新增 `test_remove_missing_aggregated_per_node` 钉"缺失节点按
+  stem 各报一条 + 去重"。变异验证：聚合改回集合差 → 恰红 2 条；missing 键改用调用方
+  原词（`goal_id_of(profile, n)`）→ 恰红 1 条。
+- **要点**：
+  - **归一/展开算法的副产物不能进对外契约**：为"扩大命中面"而做的候选展开（候选名 ×
+    节点、别名 × 资源），其未命中组合是算法内部噪声，聚合回业务主键（本例 (profile,
+    node)）再对外报告；否则每个归一优化都会自带一种新假警报。
+  - 上一轮"钉住而非回避"的注释不是终审：被钉住的行为若让对外输出自相矛盾
+    （removed 与 missing 同时非空且指向同一意图），下轮评审应重裁而非继承。判别标准：
+    **missing 的粒度必须与操作对象的唯一键一致**，"查无此目标"里的"目标"是节点级 goal，
+    不是候选名字符串拼出来的行。
+  - 聚合修复要交代清楚**两条目标来源路径**：--node（组合展开）与 --all（查库）的
+    missing 语义不同，前者必须聚合、后者本无幻影只需说明"保留集合差是为防 list/delete
+    竞态"——这个理由必须写进注释，防止后人"统一两处实现"时把幻影差集重新引回 --node
+    路径。
+  - 命中判定用**被删行自带的主键**（`gone["node_id"]`），不用从 goal_id 反解或拿调用方
+    node_ids 对照——反解要处理分隔符、对照要处理候选名错位，行内字段是零成本且必然
+    正确的口径（同 round 2"连带清理按被删行字段"要点，本例是 node 维复用同一原则）。

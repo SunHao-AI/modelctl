@@ -213,15 +213,24 @@ class GoalService:
                      now: float | None = None) -> dict[str, Any]:
         """删 goal。worker 侧的 YAML 剪枝无需中心额外传话：goal 消失后下一次快照
         就不含它，worker 的 managed 清单对照快照即知要删（Task 8 的 prune）。
+
+        fix round 3：**missing 按节点聚合**。候选名归一（round 2 裁决2）使 --node 路径
+        每节点可能展开出多个 goal_id，展示名那份恒不落库，旧的"targets 减 removed"
+        集合差会把它们全记成 missing → goal 明明撤成功却同时报"不存在"假警报。一节点
+        任一候选名命中即视为不缺失；确属缺失的节点按规范名（stem 优先）各报一条——
+        (profile,node) 唯一对应一个 goal，按节点计数才与运维感知的撤除数一致。
         """
         now = time.time() if now is None else now
-        targets = self._targets_for_removal(profile=profile, node_ids=node_ids, all_nodes=all_nodes)
+        names = self._resolve_names(profile)
+        targets = self._targets_for_removal(names=names, node_ids=node_ids, all_nodes=all_nodes)
         removed: list[str] = []
+        hit_nodes: set[str] = set()
         for goal_id in targets:
             gone = self.store.delete_goal(goal_id)
             if gone is None:
                 continue
             removed.append(goal_id)
+            hit_nodes.add(str(gone["node_id"]))
             # 连带清运行态：残留的占卡行会让 dashboard 在 worker 已剪枝后继续显示
             # "在跑"，且 _in_use_gpus 会把它当占卡而挡住后续下发。必须按**被删 goal 行
             # 的 profile 字段**（恒为 stem）删——调用方原词可能是展示名，model_states
@@ -229,7 +238,12 @@ class GoalService:
             self.store.delete_model_state(str(gone["node_id"]), str(gone["profile"]))
             self.store.append_event("goal.delete", node_id=str(gone["node_id"]), goal_id=goal_id,
                                     payload={"profile": profile, "operator": created_by}, now=now)
-        missing = [g for g in targets if g not in removed]
+        if all_nodes:
+            # --all 的 targets 来自查库（无幻影组合），仅在 list/delete 竞态下非空
+            missing = [g for g in targets if g not in removed]
+        else:
+            missing = [goal_id_of(names[0], n) for n in dict.fromkeys(node_ids or [])
+                       if n not in hit_nodes]
         # report 面向操作者并点名 profile：撤的是哪个模型是运维唯一能确认的线索。
         report = (f"profile {profile}：已删除 {len(removed)} 个 goal"
                   + (f"；不存在 {len(missing)} 个" if missing else "")
@@ -321,14 +335,13 @@ class GoalService:
                                 payload={"profile": profile, "intent": intent,
                                          "engine": source["engine"], "operator": created_by}, now=now)
 
-    def _targets_for_removal(self, *, profile: str, node_ids: list[str] | None,
+    def _targets_for_removal(self, *, names: list[str], node_ids: list[str] | None,
                              all_nodes: bool) -> list[str]:
         """remove/stop 侧的展示名归一（裁决2）：候选名 = stem 优先 + 原词兜底。
 
         set 侧已归一（source["name"]），remove 侧不归一会让展示名寻址全进 missing、
         --all 查库查不到——同一 CLI 参数在 set/remove 两种语义是体验分裂。
         """
-        names = self._resolve_names(profile)
         if all_nodes:
             seen: dict[str, None] = {}
             for name in names:

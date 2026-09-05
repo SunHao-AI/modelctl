@@ -400,10 +400,33 @@ def test_remove_goals_by_display_name_hits_stem_goal(store, svc, models):
     out = svc.remove_goals(profile="qwen-display", node_ids=["w-1"])
     assert out["removed"] == ["qwen-fast@@w-1"]
     assert store.list_goals() == []
-    # 裁决2 算法（候选名 × 节点全组合）的必然副产品：展示名拼出的 goal_id 恒不落库
-    # （set 侧只认 stem），故它进 missing。钉住而非回避——missing 语义是"查无此目标"，
-    # 本就属实；若改成"stem 命中即不再生成原词组合"，本断言转红、逼迫重裁决。
-    assert out["missing"] == ["qwen-display@@w-1"]
+    # fix round 3 裁决：missing 按节点聚合。展示名拼出的幻影 goal_id 恒不落库（set 侧
+    # 只认 stem），旧实现把它记进 missing → goal 明明撤成功却同时报"不存在 1 个"假警报。
+    # 节点已被任一候选名命中即不缺失；若聚合改回 per-goal_id，本断言转红。
+    assert out["missing"] == []
+    assert "不存在" not in out["report"]
+
+
+def test_remove_missing_aggregated_per_node(store, svc, models):
+    """fix round 3：missing 以**节点**为单位计数，且按规范名（stem）报规范 goal_id。
+
+    (profile,node) 唯一对应一个 goal，撤除成败的运维感知单位是节点，不是候选名展开出的
+    goal_id 组合。钉三件事：① 命中节点不产生 missing（哪怕展示名候选未落库）；
+    ② 确属缺失的每节点只报一条、用 stem 拼键（不是展示名幻影键）；③ 重复 --node
+    去重后不重复计数。"""
+    _add_display_profile(models)
+    _online(store, "w-1")
+    store.update_node_capacity("w-1", capacity={"gpu_count": 4, "vram_total_mb": 157280},
+                               runtimes={"vllm": {"ok": True}},
+                               local_profiles=["qwen-fast"], now=1.0)
+    assert svc.set_goals(profile="qwen-display", node_ids=["w-1"], create=True)["created"] == 1
+    out = svc.remove_goals(profile="qwen-display", node_ids=["w-1", "w-2"])
+    assert out["removed"] == ["qwen-fast@@w-1"]
+    assert out["missing"] == ["qwen-fast@@w-2"]          # stem 规范键，且仅一条
+    assert "已删除 1 个" in out["report"] and "不存在 1 个" in out["report"]
+    # 同一节点重复出现只计一次（候选名/节点展开均为 dict 保序去重）
+    again = svc.remove_goals(profile="qwen-display", node_ids=["w-2", "w-2"])
+    assert again["missing"] == ["qwen-fast@@w-2"]
 
 
 def test_remove_goals_works_after_profile_file_deleted(store, svc, models):

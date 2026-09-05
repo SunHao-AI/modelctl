@@ -1938,7 +1938,7 @@ goal 的唯一写入口。三类职责：① `set_goals` 组装 gate 输入、�
   - `class GoalService(store: ClusterStore)`：
     - `set_goals(*, profile: str, node_ids: list[str] | None, all_nodes: bool = False, intent: str = "start", create: bool = False, params: dict | None = None, env_overlay: dict | None = None, gpu_list: list[int] | None = None, lan_allow: list[str] | None = None, runtime_ref: str | None = None, target_role: str = "primary", created_by: str = "", dry_run: bool = False, now: float | None = None) -> dict`
       → `{"verdicts": list[NodeVerdict], "report": str, "created": int, "skipped": int, "errors": int, "reason": str}`（`reason` 仅在源不可用/参数非法时非空；`MAX_GOALS_PER_NODE` 检查先于 dry-run 计数，dry-run 与实跑对超限结论一致）
-    - `remove_goals(*, profile: str, node_ids: list[str] | None, all_nodes: bool = False, created_by: str = "", now: float | None = None) -> dict` → `{"removed": list[str], "missing": list[str], "report": str}`（remove 侧同样归一展示名 → stem，**profile 文件已删仍必须能撤**：归一失败回退调用方原词；连带清 model_states 按被删 goal 行的 profile 字段）
+    - `remove_goals(*, profile: str, node_ids: list[str] | None, all_nodes: bool = False, created_by: str = "", now: float | None = None) -> dict` → `{"removed": list[str], "missing": list[str], "report": str}`（remove 侧同样归一展示名 → stem，**profile 文件已删仍必须能撤**：归一失败回退调用方原词；连带清 model_states 按被删 goal 行的 profile 字段；**missing 按节点聚合**：一节点任一候选名命中即不缺失，确属缺失的节点按规范名（stem 优先）各报一条，fix round 3）
     - `snapshot_for(node_id: str) -> dict` → `{"revision": str, "goals": [{"goal_id","profile","engine","yaml","sha","version","intent","params","env_overlay"}]}`
     - `mark_stage(goal_id: str, stage: str, *, reason: str = "", error_class: str = "", now: float | None = None) -> None`
     - `record_model_states(node_id: str, profiles: dict, now: float) -> None`（心跳回流落库，见 Task 7）
@@ -2404,19 +2404,28 @@ class GoalService:
         就不含它，worker 的 managed 清单对照快照即知要删（Task 8 的 prune）。
         """
         now = time.time() if now is None else now
-        targets = self._targets_for_removal(profile=profile, node_ids=node_ids, all_nodes=all_nodes)
+        names = self._resolve_names(profile)
+        targets = self._targets_for_removal(names=names, node_ids=node_ids, all_nodes=all_nodes)
         removed: list[str] = []
+        hit_nodes: set[str] = set()
         for goal_id in targets:
             gone = self.store.delete_goal(goal_id)
             if gone is None:
                 continue
             removed.append(goal_id)
+            hit_nodes.add(str(gone["node_id"]))
             # fix round 2 裁决2：按被删 goal 行的 profile（恒为 stem）清运行态，
             # 不用调用方原词（可能是展示名，model_states 按 stem 建键，删不掉）。
             self.store.delete_model_state(str(gone["node_id"]), str(gone["profile"]))
             self.store.append_event("goal.delete", node_id=str(gone["node_id"]), goal_id=goal_id,
                                     payload={"profile": profile, "operator": created_by}, now=now)
-        missing = [g for g in targets if g not in removed]
+        # fix round 3：missing 按节点聚合——展示名候选拼出的幻影 goal_id 恒不落库，
+        # 旧的 targets-removed 集合差会把撤成功的节点也记进 missing（假警报）。
+        if all_nodes:
+            missing = [g for g in targets if g not in removed]
+        else:
+            missing = [goal_id_of(names[0], n) for n in dict.fromkeys(node_ids or [])
+                       if n not in hit_nodes]
         # report 面向操作者并点名 profile：撤的是哪个模型是运维唯一能确认的线索
         # （计划原稿的文案不含 profile 名，与 test_remove_goals_* 的 "qwen" in report 相左）。
         report = (f"profile {profile}：已删除 {len(removed)} 个 goal"
@@ -2508,10 +2517,10 @@ class GoalService:
                                 payload={"profile": profile, "intent": intent,
                                          "engine": source["engine"], "operator": created_by}, now=now)
 
-    def _targets_for_removal(self, *, profile: str, node_ids: list[str] | None,
+    def _targets_for_removal(self, *, names: list[str], node_ids: list[str] | None,
                              all_nodes: bool) -> list[str]:
-        """remove/stop 侧展示名归一（fix round 2 裁决2）：候选名 = stem 优先 + 原词兜底。"""
-        names = self._resolve_names(profile)
+        """remove/stop 侧展示名归一（fix round 2 裁决2）：候选名 = stem 优先 + 原词兜底。
+        fix round 3：候选名解析上移到 remove_goals（missing 聚合要用 names[0] 报规范键）。"""
         if all_nodes:
             seen: dict[str, None] = {}
             for name in names:
@@ -2551,7 +2560,7 @@ def _int_list(value: Any) -> list[int] | None:
 - [ ] **Step 4: 运行确认通过**
 
 Run: `uv run pytest tests/test_cluster_goals.py -q`
-Expected: PASS（42 条；初稿 23 + 实现期补入 8 + fix round 2 补入 11：unknown target_role、无可达节点、展示名寻址归一 stem（pitfall #38 端到端，真实 RED）、快照 goal 定序、快照键集合钉死、remove 连带剪枝 model_state、goal.delete 事件、回流路径不安全名拒绝；round 2：占卡词表常量钉死、`_in_use_gpus` 生产词表逐一占卡/终态不占卡、running 态端到端卡位冲突、展示名 remove 命中 stem、profile 已删仍可 remove、--all 展示名可撤、展示名 remove 连带清 model_state、version 与最终 sha 同哈希链、dry-run 与实跑对超限结论一致）
+Expected: PASS（43 条；初稿 23 + 实现期补入 8 + fix round 2 补入 11 + fix round 3 补入 1：unknown target_role、无可达节点、展示名寻址归一 stem（pitfall #38 端到端，真实 RED）、快照 goal 定序、快照键集合钉死、remove 连带剪枝 model_state、goal.delete 事件、回流路径不安全名拒绝；round 2：占卡词表常量钉死、`_in_use_gpus` 生产词表逐一占卡/终态不占卡、running 态端到端卡位冲突、展示名 remove 命中 stem、profile 已删仍可 remove、--all 展示名可撤、展示名 remove 连带清 model_state、version 与最终 sha 同哈希链、dry-run 与实跑对超限结论一致；round 3：missing 按节点聚合——展示名撤成功不再报假警报、缺失节点按 stem 各报一条）
 
 > **实现期对初稿代码的六处订正**（初稿自身矛盾，以测试/下游契约为裁决基准）：
 > 1. 夹具 `YAML` 引擎段键 `engine_config` → **`vllm`**（段键=引擎名，同 Task 4 订正口径；夹具抄错键属"夹具与实现同错 → 单测全绿生产恒错"陷阱）。
@@ -2567,6 +2576,9 @@ Expected: PASS（42 条；初稿 23 + 实现期补入 8 + fix round 2 补入 11�
 > 8. **remove/stop 侧展示名归一**：初稿 `_targets_for_removal` 直接用调用方原词 → 展示名 remove 全进 missing、--all 查库查不到，与 set 侧体验分裂。新增私有 `_resolve_names(profile)`：读到源 → `[stem, 原词]`；**读取失败（profile 文件已删）→ `[原词]`**（硬要求：文件删了仍必须能撤台账 goal）。`_targets_for_removal` 对候选名 × 节点 / 候选名 × list_goals 两路展开去重；`remove_goals` 连带清 model_states 按**被删 goal 行的 profile 字段**（`gone["profile"]`，恒为 stem），不用原词。
 > 9. **`profile_version` 派生自最终落库 sha**：初稿沿用 `source["version"]`（原文 sha 派生）；带 --gpus 时落库 sha 是合并后文本哈希，version 的 13 位哈希前缀必须与之同链（`profiles.default_profile_version(effective_sha)`），否则版本可追溯性指向一份不存在的内容。
 > 10. **`MAX_GOALS_PER_NODE` 检查移到 dry_run 计数之前**：初稿顺序下 dry-run 报"预计 created=1"而实跑 skip（created=0），Task 11/12 据 dry-run 结论给退出码/提示会误导"演练通过"。dry-run 下 `_count_for_node` 读当前台账（演练不写库），与紧随实跑起点一致，两侧结论必然相同。
+>
+> **fix round 3 订正（Task 5 评审裁决：missing 按节点聚合）**：
+> 11. **`remove_goals` 的 missing 以节点为单位**：round 2 的 `_targets_for_removal` 按"候选名 × 节点"全组合展开，展示名那份 goal_id 恒不落库（set 侧只认 stem），旧 `missing = targets - removed` 会把"展示名撤除成功"的节点同时记进 missing——removed=1 且 missing=1 的自相矛盾输出（round 2 曾以注释钉住该行为，本轮评审推翻：假警报不是"属实"，(profile,node) 唯一对应一个 goal，运维感知的撤除单位是节点）。改法：删除循环记 `hit_nodes`（被删行的 node_id），--node 路径 missing = 未命中节点按 `names[0]`（stem 优先）各拼一条规范 goal_id；--all 路径 targets 来自查库无幻影组合，维持集合差。`_targets_for_removal` 签名 `profile` → `names`（解析上移，两处共用）。变异验证：聚合改回集合差 → 恰红 2 条；missing 键改用调用方原词 → 恰红 1 条。
 
 - [ ] **Step 5: 提交**
 
