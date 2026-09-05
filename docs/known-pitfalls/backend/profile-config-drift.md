@@ -563,3 +563,108 @@
   - 测试互为镜像钉边界：带 --gpus 用例断言下发 yaml 引擎段 `gpu_list==传入值` + `sha==profile_sha(合并后)`
     + `!=原文哈希`；无 --gpus 用例断言 `profile_yaml==YAML`（逐字节）+ `sha==profile_sha(原文)` +
     引擎段不凭空多出 gpu_list。只测带 --gpus 会漏掉"不该改写时改写了"的回归。
+
+## 中心"在用 GPU"白名单与 Task 9 实际写入值零交集——"夹具与实现同错"家族二次引爆，gate 容量检查生产静默空转
+
+- **日期**：2026-09-05（M1 Task 5 fix round 2，评审裁决 1）
+- **症状**：无显式失败，单测全绿。`GoalService._in_use_gpus` 过滤
+  `row["state"] in ("READY","STARTING","UP")`，而 `model_states.state` 全仓唯一写入口是
+  `record_model_states`（透传 worker 心跳），Task 9 计划 `_STATE_OF_STAGE` 实际写入的是
+  **小写** `running/starting/degraded/...`。两套词表**零交集** → Task 7 接线后中心"在用
+  GPU"恒为空集，gate 的"卡位冲突求交"与"节点 GPU 已占满"两项检查在生产静默空转——
+  与在用模型抢同一张卡的 goal 被放行，冲突推迟到 worker `gpu_lock` 才爆。附带：
+  `_in_use_gpus` docstring 声称"回退 worker 侧 gpu_lock 上报"，代码根本没有该分支
+  （gpu_lock 真值在 worker 本地，中心拿不到），注释许诺了一条不存在的自愈路径。
+- **根因**：Task 5 与 Task 9 各写各的状态字面量，中间没有共享常量；测试夹具
+  `{"qwen": {"state": "READY"}}` 与实现**同用**这套生产从不产生的虚构值——与 Task 4
+  `engine_config` 假键同族："夹具与实现同错 → 单测体系对缺陷整体免疫"。词表这类
+  **跨任务枚举契约**没有任何单一权威定义点，两侧凭想象各抄一份，抄错也不报错，只
+  让下游判定恒空/恒真。
+- **解决**（裁决 1）：goals.py 定义模块级 `GPU_OCCUPYING_STATES: frozenset[str] =
+  frozenset({"running","starting","degraded","READY","STARTING","UP"})`（不带下划线，
+  供 Task 7/9 与计划文本引用同一来源；小写=Task 9 实际写入值为未来主词表，大写=M0
+  心跳透传/历史值过渡兼容），`_in_use_gpus` 判 `state in GPU_OCCUPYING_STATES`；删除
+  docstring 的 gpu_lock 虚假承诺。夹具与用例改用真实词表，running/starting/degraded
+  各钉一条占卡断言 + stopped/failed/未知态不占卡；端到端用例 `record_model_states
+  (state="running") → set_goals 同卡位 → skip "占用"` 复现最小失效路径。变异验证：
+  白名单退回大写三值 → 恰红 3 条。计划 Task 5 条款 + Task 9 `_STATE_OF_STAGE` 注释
+  同步注明"占卡词表以 goals.GPU_OCCUPYING_STATES 为唯一来源"。
+- **要点**：
+  - **跨任务共享的枚举值（状态词表、错误类、事件 kind）必须落成一个命名常量并被两侧
+    import**，禁止各处抄字面量；抄写的那一刻就注入了"零交集也不报错"的潜伏雷。没有
+    共享模块可 import 时（如 worker 侧刻意不 import 中心的 store 链），至少在计划与
+    双侧注释里互相点名唯一权威 + 用一条测试钉住全集。
+  - 判定"某集合为空是否正常"的测试要问：**夹具值的出处是生产写入口吗**？凡状态字段
+    参与业务判定（过滤/求交/计数），夹具值必须从写入口的映射表（这里是
+    `_STATE_OF_STAGE`）反查得到，不能凭 dashboard 观感或旧版记忆编造。
+  - docstring 里"回退 X 来源"的承诺必须能在代码里指出对应分支；写不出的承诺就是
+    给未来排障者画的饼，评审时按缺陷处理（本轮直接删除该句）。
+  - 白名单是**放行面**：少一项 = 静默漏判（本例：不占卡），多一项 = 静默误判（终态
+    被当占卡 → 节点被僵尸行占满永不放行）。两侧各钉用例：词表内每个值都占卡、
+    词表外每个终态/未知态都不占卡。
+
+## 标识归一漏掉删除侧；归一依赖可被删除的外部源时，失败必须显式降级为"原词单候选"
+
+- **日期**：2026-09-05（M1 Task 5 fix round 2，评审裁决 2）
+- **症状**：两个分裂。① `set_goals` 已把展示名归一成 stem 落库，`remove_goals`/
+  `_targets_for_removal` 却拿调用方原词拼 `goal_id_of(profile, node)`、按原词查
+  `list_goals(profile=)` → Task 12 CLI `goal remove --profile <展示名>` 全进 missing，
+  `--all` 查库查不到，"set 能用展示名、remove 报不存在"。② 连带清 model_states 用
+  原词：`delete_model_state(node_id, profile)`，而 model_states 是 worker 回流（stem
+  建键）→ 展示名撤 goal 成功、运行态却残留，dashboard 继续显示"在跑"且被当占卡。
+- **根因**：上一轮"归一是跨任务契约"只修了 set 路径，remove 路径是同一契约的第二个
+  消费点却漏改（查库键/写库键/清理键三处，修了两处）。且归一实现有个天然陷阱：
+  `read_profile_source` 是**唯一**的"寻址名→stem"映射源，而 profile 文件在 remove 时
+  **可能已被删除**（撤模型 = 删 YAML 与撤 goal 是两个可任意先后的操作）——归一失败若
+  报错或返回空候选，"文件已删"就连带"goal 撤不掉"，台账里留下永久撤除失败的僵尸。
+- **解决**（裁决 2）：`_resolve_names(profile)`：读到源 → `[stem, 原词]`（dict.fromkeys
+  去重，stem==原词时单元素）；**读取失败 → `[原词]`**（硬要求，绝不返回空表）。
+  `_targets_for_removal` 对候选名 × 节点（--node 路径）/ 候选名 × list_goals（--all
+  路径）两路展开去重。`remove_goals` 连带清运行态改用**被删 goal 行的 profile 字段**
+  （`gone["profile"]`，恒为 stem），不再用调用方原词。钉 4 条用例：展示名 remove 命中
+  stem goal、**profile 文件已删仍能 remove**、--all 展示名可撤、展示名 remove 连带清
+  model_state。变异验证：`names = [profile]`（归一退化）→ 恰红 3 条展示名用例。
+- **要点**：
+  - 归一裁决落地时把**同一实体的全部键位**列成清单逐个过：查库、写库、连带清理、
+    事件 payload、下游文件名——本轮 set 侧三处上轮已修，remove 侧三处原样漏网。
+  - 归一函数依赖外部源（文件/DB/RPC）时，必须显式设计**源不可用**分支：撤除类操作
+    的语义是"按台账现状删"，归一只是**扩大命中面的优化**，优化失败必须退化为最小
+    可用（原词单候选），绝不允许"归一失败 = 操作整体失败"。
+  - 候选名 × 目标展开用 dict 保序去重（`dict.fromkeys`），别用 set——missing/removed
+    清单的顺序会进 CLI 输出与测试断言，set 迭代序漂移是隐性 flaky 源。
+  - 连带清理永远按**被删行的字段**取键，不按调用方输入：行内字段是系统写入口径
+    （stem），调用方输入是用户口径（可能是展示名），两者等价的前提（归一）并不总成立。
+
+## 演练/派生量与实跑分叉：上限检查排在 dry-run 计数之后；version 从原文 sha 而非最终落库 sha 派生
+
+- **日期**：2026-09-05（M1 Task 5 fix round 2，实现者自提、控制器裁决 4 收编）
+- **症状**：两处"演练与实跑/哈希链不同源"。① `set_goals` 的写库循环里
+  `MAX_GOALS_PER_NODE` 检查在 `if dry_run: created += 1` **之后**——节点已达上限时
+  dry-run 报"预计 created=1"，实跑却 skip（created=0）。Task 11/12 按 dry-run 结论给
+  退出码/提示，运维看到"演练通过"，实跑 goal 却被静默跳过。② `--gpus` 合并改写
+  YAML 后 `effective_sha` 变了，但 `enriched = {**source, ...}` 未覆盖 `version`，
+  落库 `profile_version` 仍是**原文 sha** 派生的日期+13 位前缀——版本号的哈希段指向
+  一份不存在于任何台账行的内容，"version ↔ sha ↔ yaml"单一哈希链断裂，version 的
+  可追溯语义（Triton version policy）名存实亡。
+- **根因**：① dry-run 分支是"提前 return/continue 的捷径"，捷径之后的校验对演练不可见
+  ——凡影响"能不能创建"结论的检查（容量、上限、配额）都必须在捷径**之前**，捷径之后
+  只剩真正的写库动作。② 覆盖式补丁（`{**source, "yaml": ..., "sha": ...}`）新增字段时
+  漏了**由被覆盖字段派生的下游字段**：sha 换了，从 sha 派生的 version 不会自动跟着换。
+- **解决**：上限检查整体移到 dry_run 计数之前（dry-run 下 `_count_for_node` 读当前台账，
+  演练不写库，与紧随的实跑起点一致，结论必然相同）；`enriched` 显式
+  `"version": profiles.default_profile_version(effective_sha)`。各钉一条用例：dry-run 与
+  实跑对超限节点 created/skipped/reason 全同（monkeypatch 上限=1，避免插 512 行）；
+  带 --gpus 时 `profile_version == default_profile_version(profile_sha)` 且哈希后缀互钉。
+  变异验证：顺序换回 → 恰红 1 条（dry created=1≠0）；version 退回 source 值 → 恰红 1 条。
+- **要点**：
+  - dry-run 的实现纪律：**演练 = 实跑减去写库副作用**。所有改变"会不会创建"判定的
+    校验必须位于 dry-run 捷径之前；dry-run 期间不得推进任何循环内累加器/写任何状态，
+    使"演练 + 实跑"与"直接实跑"结论一致。CLI/REST 拿 dry-run 报告给退出码时，两侧
+    同值是靠这条纪律保证的，不是靠文案。
+  - 哈希链上任一环节被替换，其**全部派生环节**必须同步重算。写 `**source` 覆盖补丁时
+    grep 被覆盖字段名在整个函数里的派生用途（sha→version、yaml→sha、name→goal_id 同族）。
+  - 上限类常量进测试用 monkeypatch 压低（512→1），不要真造 512 行数据；被测的是
+    **分支顺序**而非阈值本身。
+  - 自提缺陷的诚实申报换来了本轮收编：实现者报告里"version 与 profile_sha 非同一哈希链，
+    故未动"的待确认点，被评审升格为裁决——**"当前无消费者"不是放任派生链断裂的理由**，
+    M1 内无人读 ≠ Task 11+ 的 dashboard 不读。

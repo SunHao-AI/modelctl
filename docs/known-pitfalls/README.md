@@ -58,6 +58,9 @@
 | 2026-09-05 | 计划 / 契约一致性 | 计划正文与自身测试、下游 Task 契约互斥（dry-run created、`sha in YAML`、报告文案） | 测试=契约、实现=建议；实现与下游对外契约冲突时以下游为准并回改上游；派生字段须断言非默认值否则退化成死字段。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-05 | 测试 / 覆盖 | 恒真断言新变体：键名出现在错误文案里、幂等重跑让"隔离性"断言失去判别力 | 拒绝类断言锁分支专属措辞（"凭据"）而非键名；"A 变更不影响 B"须真的改动 B 侧并自证前提；首轮变异全绿先怀疑断言恒真。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-05 | 后端 / 集群下发 | `--gpus` 只进 params/placement 不落地进下发 YAML，中心按 requested 判、worker 按 declared 锁卡 | worker `selected_gpus()` 读下发 YAML 引擎段（profile.gpu_list 优先），中心只记 params 不写回 = 双源不一致毒 goal；裁决 A：仅 gpu_list 非空时合并进引擎段 + sha 对合并后文本重算，无 --gpus 保持逐字节原文。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-05 | 后端 / 集群下发 | 中心"在用 GPU"白名单与 Task 9 实际写入值零交集，gate 卡位/占满检查生产静默空转 | 夹具与实现同用虚构值（READY/STARTING/UP）全绿，生产写入的 running/starting/degraded 恒不占卡；跨任务状态词表必须落成共享常量 `GPU_OCCUPYING_STATES` 并两侧钉用例。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-05 | 后端 / 集群下发 | 展示名归一漏掉 remove 侧；归一依赖的文件已删时撤不掉 goal | set 归一 remove 不归一 → 展示名撤除全进 missing；连带清 model_states 用原词删不掉（回流按 stem 建键）；`_resolve_names` 读失败必须回退 [原词]，撤除按被删行的 profile 字段。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-05 | 后端 / 演练一致性 | 上限检查排在 dry-run 计数后，演练报 created=1 实跑 skip；version 从原文 sha 而非最终落库 sha 派生 | dry-run = 实跑减写库副作用，一切"能不能创建"的校验必须在捷径前；`**source` 覆盖 sha 时必须重算其派生字段（version）。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 
 ## 目录约定
 
