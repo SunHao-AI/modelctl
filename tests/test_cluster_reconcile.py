@@ -10,6 +10,7 @@
 # ===============================================================================
 
 import os
+import time
 
 import pytest
 
@@ -522,3 +523,70 @@ def test_local_only_profiles_are_reported_unmanaged(dirs):
     got = rt.snapshot()["profiles"]["local"]
     assert got["managed"] is False and got["stage"] == READY
     assert rec.starts == []                              # 未托管的绝不代客起停
+
+
+# --------------------------------------------------------------------------- 心跳读路径（评审 M-1）
+
+def _hold_lock_from_other_thread(rt):
+    """另起线程占住 `rt._lock` 直到返回的 Event 被 set。
+
+    必须在**别的线程**持有：`_lock` 是 RLock，同线程重入会让非阻塞 acquire 恒成功，
+    测试将失去判别力（模拟不出"循环线程起进程 300s 持锁"）。
+    """
+    import threading
+
+    held, release = threading.Event(), threading.Event()
+    t = threading.Thread(target=lambda: (rt._lock.acquire(), held.set(),
+                                         release.wait(5), rt._lock.release()))
+    t.daemon = True
+    t.start()
+    assert held.wait(5)
+    return t, release
+
+
+def test_heartbeat_payload_never_blocks_on_reconcile_lock(dirs):
+    """起进程持锁期间心跳必须照跳：阻塞等锁 = 健康节点被中心 lease(90s) 误标 stale。
+
+    `reconcile_once` 全程持 `_lock`（起进程最长 start_timeout_s=300s），心跳每拍经
+    `heartbeat_payload()→snapshot()` 读快照。锁被占时须**非阻塞降级**返回上一份缓存
+    （stale 视图 << 被误标 stale）；冷启动无缓存则抛 TimeoutError，由 Task 10 的
+    collect_heartbeat 整段省略扩展段（None=未知，不会误覆盖中心台账）。
+    """
+    rt, _rec = _rt(dirs)
+    rt.apply_snapshot(_snap(_goal()), now=1.0)
+    rt.reconcile_once(now=2.0)
+    cached = rt.snapshot()                               # 正常一拍，制造缓存
+
+    t, release = _hold_lock_from_other_thread(rt)
+    try:
+        started_at = time.perf_counter()
+        got = rt.heartbeat_payload()
+        spent = time.perf_counter() - started_at
+    finally:
+        release.set()
+        t.join(5)
+    assert spent < 1.0                                   # 未等锁：立即降级返回
+    assert got["goal_sync"]["revision"] == cached["revision"]
+    assert got["profiles"]["qwen"]["stage"] == READY     # 内容即上一拍缓存
+
+    fresh, _rec2 = _rt(dirs)                             # 冷启动：还没跑过任何一拍
+    t2, release2 = _hold_lock_from_other_thread(fresh)
+    try:
+        started_at = time.perf_counter()
+        with pytest.raises(TimeoutError):
+            fresh.heartbeat_payload()
+        assert time.perf_counter() - started_at < 1.0    # 抛错同样不阻塞
+    finally:
+        release2.set()
+        t2.join(5)
+
+
+def test_state_vocabulary_guard_fires_on_mismatch(dirs, monkeypatch):
+    """评审盲区 a：同源守卫自身必须有回归。注入 READY→"bogus"（占卡态脱离词表），
+    构造 Reconciler 必须立刻炸——否则中心 gate 的卡位冲突/占满检查静默空转，
+    在用的卡会被当空闲二次下发（双模型撞卡）。"""
+    monkeypatch.setitem(reconcile._STATE_OF_STAGE, READY, "bogus")
+    monkeypatch.setattr(reconcile, "_vocabulary_checked", False)   # 绕过进程级一次性缓存
+    models, cache = dirs
+    with pytest.raises(RuntimeError, match="GPU_OCCUPYING_STATES"):
+        Reconciler(models_dir=models, cache_dir=cache, caps=_CAPS)

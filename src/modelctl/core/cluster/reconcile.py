@@ -403,6 +403,10 @@ class Reconciler:
         self._caps_cache: tuple[float, Capabilities] | None = None
         #: models/ 里"没有对应 goal"的本地 profile 观测结果（本地手起的模型也要上报）
         self._local: dict[str, dict[str, Any]] = {}
+        #: 最近一次成功构建的快照（评审 M-1）：仅作 `snapshot()` 在 reconcile 循环
+        #: 持锁（起进程最长 start_timeout_s）期间的非阻塞降级兜底；正常路径每拍仍
+        #: 由 `_collect` 全量重建，缓存从不被复用为"新鲜视图"
+        self._last_snapshot: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------ 状态持久化
 
@@ -821,13 +825,31 @@ class Reconciler:
             profiles.setdefault(name, entry)
         for name, entry in self._local.items():
             profiles.setdefault(name, dict(entry))
-        return {"revision": state["revision"], "profiles": profiles, "drift": drift,
+        snap = {"revision": state["revision"], "profiles": profiles, "drift": drift,
                 "local_profiles": sorted(set(stems)), "capacity": self._capacity(caps),
                 "runtimes": self._runtimes(caps)}
+        # 留一份给 snapshot() 的降级兜底（评审 M-1）；本拍照常返回新构造的 dict
+        self._last_snapshot = snap
+        return snap
 
     def snapshot(self) -> dict[str, Any]:
-        with self._lock:
-            return self._collect()
+        """锁可得 → 每拍全量重建；锁被循环线程占住（起进程最长 start_timeout_s）→
+        **非阻塞降级**返回上一份缓存：心跳继续跳（stale 视图 << 被误标 stale）。
+
+        评审 M-1：`reconcile_once` 全程持 `_lock`，而心跳每拍经
+        `heartbeat_payload()→snapshot()` 读快照。若此处阻塞等锁，正在拉 70B 模型的
+        健康节点会因心跳断跳被中心 lease（90s）误标 stale——心跳的可用性优先级高于
+        快照的实时性。缓存冷启动为 None → 抛 TimeoutError，Task 10 collect_heartbeat
+        的既有 try/except 会"整段省略"扩展段（None=未知，不会误覆盖中心台账）。
+        """
+        if self._lock.acquire(blocking=False):
+            try:
+                return self._collect()
+            finally:
+                self._lock.release()
+        if self._last_snapshot is not None:
+            return self._last_snapshot
+        raise TimeoutError("reconcile 循环持锁中且无缓存快照，心跳扩展段本轮省略")
 
     def heartbeat_payload(self) -> dict[str, Any]:
         """心跳扩展段（Task 2 的六个键）。缺失段由 Agent 侧决定"整段省略"。"""
