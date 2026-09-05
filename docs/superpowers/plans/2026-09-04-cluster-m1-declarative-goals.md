@@ -3557,6 +3557,11 @@ def apply_snapshot(snapshot: dict[str, Any], *, models_dir: Path, cache_dir: Pat
         result.drift = scan_drift(cache_dir, models_dir)
         return result
 
+    # 漂移必须在落盘**前**扫描（判据是上一轮登记的 sha）：本轮写盘会把本地改动
+    # 改回中心版本，落盘后再扫永远为空——"drift=本轮覆盖掉了哪些本地手改"
+    # （test_drift_reported_inside_apply 钉死，实现者 round0 实测首红后裁决前置）。
+    result.drift = scan_drift(cache_dir, models_dir)
+
     previous = {str(g["goal_id"]): g for g in state["goals"]}
     entries: dict[str, dict[str, Any]] = {}
     for goal in goals:
@@ -3589,8 +3594,7 @@ def apply_snapshot(snapshot: dict[str, Any], *, models_dir: Path, cache_dir: Pat
                                          "goals": list(entries.values())})
     _write_json(cache_dir / MARKER_FILE, {"revision": revision, "applied_at": now,
                                           "goal_count": len(entries)})
-    result.drift = scan_drift(cache_dir, models_dir)
-    return result
+    return result          # drift 已在落盘前扫描（见上），末尾不重复扫
 
 
 def _atomic_write(path: Path, text: str, *, backup: str | None) -> None:
@@ -5102,7 +5106,10 @@ def test_force_breaks_revision_short_circuit(dirs):
     assert same.written == [] and same.drift == [g["goal_id"]]      # 默认：只报不修
     forced = apply_snapshot({"revision": "r1", "goals": [g]}, models_dir=models,
                             cache_dir=cache, now=3.0, force=True)
-    assert forced.written == [g["goal_id"]] and forced.drift == []  # 强制：重写并修好
+    # drift 语义（Task 8 裁决）= "本轮覆盖掉了哪些本地手改"（落盘**前**扫描）：
+    # 强制修好 = written 与 drift 同时点名；修复后实时 scan_drift 才为空
+    # （rt.snapshot()["drift"] 走 _collect 的实时扫描，与本返回值是两条路径）。
+    assert forced.written == [g["goal_id"]] and forced.drift == [g["goal_id"]]
 
 
 def test_reconcile_forwards_force_flag_from_snapshot(dirs):
