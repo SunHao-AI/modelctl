@@ -158,6 +158,13 @@ def test_create_goal_offline_node_is_skipped_not_created(center) -> None:
     assert body["created"] == 0 and body["skipped"] == 1
 
 
+def test_create_goal_response_scoped_to_requested_nodes(center) -> None:
+    """响应只回本次请求命中的节点：按 profile 全量列会混入未请求节点（fix round 1 Minor-1）。"""
+    _create(center, node_ids=None, all_nodes=True, create=True)      # w-1 / w-2 各一条 goal
+    body = _create(center, node_ids=["w-1"]).json()
+    assert {g["node_id"] for g in body["goals"]} <= {"w-1"}
+
+
 def test_list_goals_filters_by_node_and_profile(center) -> None:
     _create(center, node_ids=None, all_nodes=True)
     assert len(center.get(f"{GOALS}?node_id=w-1", headers=_h()).json()["goals"]) == 1
@@ -219,6 +226,46 @@ def test_update_goal_bad_env_overlay_400(center) -> None:
 def test_update_goal_missing_404(center) -> None:
     r = center.put(f"{GOALS}/ghost@@w-1", json={"intent": "stop"}, headers=_h())
     assert r.status_code == 404
+
+
+def test_update_goal_target_role_persists(center) -> None:
+    """PUT 声明可改的键必须真落库：service 白名单与 store 白名单不一致会假报 200（Major-1）。"""
+    import modelctl.core.webui.admin_cluster as ac
+
+    _create(center)
+    store = ac.get_registry().store
+    before = store.get_goal("qwen@@w-1")["updated_at"]
+    r = center.put(f"{GOALS}/qwen@@w-1", json={"target_role": "replica"}, headers=_h())
+    assert r.status_code == 200
+    goal = store.get_goal("qwen@@w-1")
+    assert goal["target_role"] == "replica"
+    assert goal["updated_at"] > before
+    events = store.recent_events(limit=10, node_id="w-1")
+    update = [e for e in events if e["kind"] == "goal.update"][0]
+    assert update["payload"]["fields"] == ["target_role"]
+
+
+def test_update_goal_runtime_ref_persists(center) -> None:
+    import modelctl.core.webui.admin_cluster as ac
+
+    _create(center)
+    store = ac.get_registry().store
+    r = center.put(f"{GOALS}/qwen@@w-1", json={"runtime_ref": "rt-1"}, headers=_h())
+    assert r.status_code == 200
+    assert store.get_goal("qwen@@w-1")["runtime_ref"] == "rt-1"
+    events = store.recent_events(limit=10, node_id="w-1")
+    update = [e for e in events if e["kind"] == "goal.update"][0]
+    assert update["payload"]["fields"] == ["runtime_ref"]
+
+
+def test_update_goal_profile_version_null_becomes_empty(center) -> None:
+    """显式 null 归一为空串：str(None) 会把字符串 "None" 写进台账当版本号（Major-2）。"""
+    import modelctl.core.webui.admin_cluster as ac
+
+    _create(center)
+    r = center.put(f"{GOALS}/qwen@@w-1", json={"profile_version": None}, headers=_h())
+    assert r.status_code == 200
+    assert ac.get_registry().store.get_goal("qwen@@w-1")["profile_version"] == ""
 
 
 # ---------------- 删除 ----------------

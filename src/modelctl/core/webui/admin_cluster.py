@@ -235,7 +235,18 @@ async def create_goals(body: _GoalCreateBody, _base: None = Depends(require_auth
     if result["reason"]:
         return _bad_request(result["reason"])
     now = time.time()
-    rows = [] if body.dry_run else get_registry().store.list_goals(profile=body.profile)
+    if body.dry_run:
+        rows: list[dict[str, Any]] = []
+    elif body.all_nodes or not body.node_ids:
+        # 响应只回本次请求范围（fix round 1 Minor-1）：all_nodes/未点名 node_ids 时
+        # 本次范围就是该 profile 的全量。
+        rows = get_registry().store.list_goals(profile=body.profile)
+    else:
+        # 点名 node_ids：只回命中的行，否则未请求节点的历史 goal 会混进响应，
+        # 看起来像"这次也下发了它们"。
+        wanted = set(body.node_ids)
+        rows = [r for r in get_registry().store.list_goals(profile=body.profile)
+                if str(r["node_id"]) in wanted]
     # reason 恒为空串才走到这行（非空已在上面转 400）；仍显式回带：Interfaces 契约
     # 把它列为成功响应体键，CLI（Task 12）据此区分"受理成功"与"整体失败"两套渲染。
     return {"created": result["created"], "skipped": result["skipped"],

@@ -286,8 +286,12 @@ class GoalService:
         for key in ("params", "placement"):
             if key in clean and not isinstance(clean[key], dict):
                 return None, f"{key} 必须是映射"
-        if "profile_version" in fields:
-            clean["profile_version"] = str(fields["profile_version"])
+        # 判据用 clean 而非 fields（fix round 1 Major-2）：fields 里的 None 会被
+        # str() 变成字符串 "None" 写进台账，成为跨层可见的毒版本号。显式 null 的
+        # 语义是"清空版本号"，归一为空串（snapshot 侧 `or ""` 口径一致）。
+        if "profile_version" in clean:
+            value = clean["profile_version"]
+            clean["profile_version"] = "" if value is None else str(value)
         updated = self.store.update_goal(goal_id, now=now, **clean)
         if updated is None:
             return None, ""

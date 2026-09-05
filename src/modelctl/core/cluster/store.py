@@ -348,8 +348,12 @@ class ClusterStore:
         with self._lock:
             return [self._row_to_goal(r) for r in self._db().execute(sql, params).fetchall()]
 
+    # 必须与 GoalService._UPDATABLE 声明的可变字段保持一致（fix round 1 Major-1）：
+    # 缺 runtime_ref/target_role 会让 PUT 走 service 校验、记 goal.update 事件却
+    # 在 update 这里被 continue 丢弃——200 + 审计假报，台账纹丝不动。
     _GOAL_MUTABLE = ("intent", "stage", "stage_reason", "error_class", "params",
-                     "env_overlay", "placement", "profile_yaml", "profile_sha", "profile_version")
+                     "env_overlay", "placement", "profile_yaml", "profile_sha",
+                     "profile_version", "runtime_ref", "target_role")
 
     def update_goal(self, goal_id: str, *, now: float, **fields: Any) -> dict | None:
         sets, params = [], []
