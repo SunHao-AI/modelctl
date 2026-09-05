@@ -57,6 +57,7 @@
 | 2026-09-05 | 后端 / 集群下发 | 展示名归一只做在读侧，GoalService 用原词查幂等集 → 重跑把 worker 状态机清零 | 归一是跨任务契约：查库/写库/local_profiles/事件/写盘文件名必须全用规范名；幂等测试要跑两次并断言第二次的计数**与 stage**。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-05 | 计划 / 契约一致性 | 计划正文与自身测试、下游 Task 契约互斥（dry-run created、`sha in YAML`、报告文案） | 测试=契约、实现=建议；实现与下游对外契约冲突时以下游为准并回改上游；派生字段须断言非默认值否则退化成死字段。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-05 | 测试 / 覆盖 | 恒真断言新变体：键名出现在错误文案里、幂等重跑让"隔离性"断言失去判别力 | 拒绝类断言锁分支专属措辞（"凭据"）而非键名；"A 变更不影响 B"须真的改动 B 侧并自证前提；首轮变异全绿先怀疑断言恒真。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-05 | 后端 / 集群下发 | `--gpus` 只进 params/placement 不落地进下发 YAML，中心按 requested 判、worker 按 declared 锁卡 | worker `selected_gpus()` 读下发 YAML 引擎段（profile.gpu_list 优先），中心只记 params 不写回 = 双源不一致毒 goal；裁决 A：仅 gpu_list 非空时合并进引擎段 + sha 对合并后文本重算，无 --gpus 保持逐字节原文。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 
 ## 目录约定
 

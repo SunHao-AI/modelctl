@@ -249,14 +249,14 @@ def evaluate_gate(
         nid = str(node.get("node_id", ""))
         verdicts.append(_verdict_one(
             node_id=nid, node=node, name=name, engine=engine, need_gpus=need_gpus,
-            min_vram=min_vram, requested=effective, in_use=in_use.get(nid) or [],
+            min_vram=min_vram, effective=effective, in_use=in_use.get(nid) or [],
             exists=f"{name}@@{nid}" in existing_goal_ids, lan_allow=lan_allow,
             create=create, has_profile=bool(profile_exists.get(nid, False)),
             tp_conflict=tp_conflict))
     return verdicts
 
 
-def _tp_conflict(engine: str, raw: Any, requested: list[int]) -> str:
+def _tp_conflict(engine: str, raw: Any, effective: list[int]) -> str:
     """生效卡位数与 profile 的 tensor_parallel_size 矛盾 → 冲突文案，否则 ""。
 
     六个 tp 系适配器在 worker 侧对 `len(gpu_list) != tensor_parallel_size` 同文案
@@ -264,7 +264,7 @@ def _tp_conflict(engine: str, raw: Any, requested: list[int]) -> str:
     天然一致。中心放行 = 下发一条 worker 必拒、永不收敛的 goal（与"stem 未过写盘
     白名单"同族：中心多放行一步 = 下游必拒内容进入期望状态）。
     """
-    if not requested or engine not in _TP_ENGINES:
+    if not effective or engine not in _TP_ENGINES:
         return ""
     ec = _engine_section(raw, engine)
     if ec.get("tensor_parallel_size") in (None, ""):
@@ -273,14 +273,14 @@ def _tp_conflict(engine: str, raw: Any, requested: list[int]) -> str:
         tp = int(ec["tensor_parallel_size"])
     except Exception:  # noqa: BLE001 — .inf 的 OverflowError 等，见 _safe_int 同款理由
         return ""   # 坏值由 worker check_requirements 报错，这里不作为拒判依据
-    if tp == len(requested):
+    if tp == len(effective):
         return ""
-    return (f"gpu_list 指定了 {len(requested)} 块 GPU，但 profile 的 "
+    return (f"gpu_list 指定了 {len(effective)} 块 GPU，但 profile 的 "
             f"tensor_parallel_size={tp}，二者必须一致（worker 侧必拒）")
 
 
 def _verdict_one(*, node_id: str, node: dict[str, Any], name: str, engine: str, need_gpus: int,
-                 min_vram: int, requested: list[int], in_use: list[int], exists: bool,
+                 min_vram: int, effective: list[int], in_use: list[int], exists: bool,
                  lan_allow: list[str], create: bool, has_profile: bool,
                  tp_conflict: str = "") -> NodeVerdict:
     if node.get("disabled"):
@@ -317,7 +317,7 @@ def _verdict_one(*, node_id: str, node: dict[str, Any], name: str, engine: str, 
                                f"vram 不足：估算需 ≥{min_vram}MB，节点共 {total_vram}MB")
 
     busy = {g for g in in_use if isinstance(g, int)}
-    clash = sorted(set(requested) & busy)
+    clash = sorted(set(effective) & busy)
     if clash:
         return NodeVerdict(node_id, RESULT_SKIP,
                            f"GPU {clash} 已被在用模型占用（gpu_list 冲突，请改用空闲卡位）")

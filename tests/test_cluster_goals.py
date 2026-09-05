@@ -12,7 +12,9 @@
 import hashlib
 
 import pytest
+import yaml
 
+from modelctl.core.cluster import profiles
 from modelctl.core.cluster.goals import ENV_OVERLAY_ALLOWLIST, GoalService, goal_id_of, validate_env_overlay
 from modelctl.core.cluster.store import ClusterStore
 
@@ -208,7 +210,9 @@ def test_set_goals_addressed_by_display_name_normalizes_to_stem(store, svc, mode
 # ---------------- snapshot ----------------
 def test_snapshot_shape_and_raw_passthrough(store, svc):
     _online(store, "w-1")
-    svc.set_goals(profile="qwen", node_ids=["w-1"], create=True, gpu_list=[0, 1])
+    # 无 --gpus：必须逐字节原文透传（裁决A 只在显式点卡时改写引擎段）。带 --gpus 的
+    # 落地路径由 test_set_goals_lands_gpu_list_into_dispatched_yaml 单独钉住。
+    svc.set_goals(profile="qwen", node_ids=["w-1"], create=True)
     snap = svc.snapshot_for("w-1")
     assert len(snap["goals"]) == 1
     g = snap["goals"][0]
@@ -220,13 +224,50 @@ def test_snapshot_shape_and_raw_passthrough(store, svc):
     # 快照里必须带 sha256:<hex>（worker 侧漂移检测的判据）。sha 是对原文的哈希，
     # 不是原文的子串——计划此处写作 `g["sha"] in YAML`，按定义永假。
     assert g["sha"] == "sha256:" + hashlib.sha256(YAML.encode("utf-8")).hexdigest()
-    assert g["params"]["gpu_list"] == [0, 1]
+    assert g["params"] is None                          # 无 --gpus 不进 params
     assert g["version"] and g["intent"] == "start"
     assert g["env_overlay"] is None
     # 快照是"下发协议载荷"的形状，绝不能夹带台账内部列（stage/placement 等）：
     # 它们随 ack 进网络帧、进 worker 落盘清单，多一个键就多一处 worker 侧误读面。
     assert set(g) == {"goal_id", "profile", "engine", "yaml", "sha",
                       "version", "intent", "params", "env_overlay"}
+
+
+def test_set_goals_lands_gpu_list_into_dispatched_yaml(store, svc):
+    """裁决A：显式 --gpus 必须"落地"进下发 YAML 引擎段，而不只是留在 params/placement。
+
+    worker 的 selected_gpus() 读的是下发 YAML 引擎段 gpu_list（不是 params），中心只记
+    requested 不写回 = 中心按 requested 判、worker 按 profile 声明锁卡的双源不一致毒 goal。
+    故落库/下发的 profile_yaml 必须含 gpu_list，且 sha 对**合并后文本**重算（worker 拿
+    它做漂移检测，若仍对原文取哈希，worker 一写盘就误判"本地被篡改"）。
+    """
+    _online(store, "w-1")
+    svc.set_goals(profile="qwen", node_ids=["w-1"], create=True, gpu_list=[0, 1])
+    g = store.get_goal("qwen@@w-1")
+    # 引擎段真的带上了卡位，且原 tp 段其他键不丢（safe_load/dump 往返）
+    section = yaml.safe_load(g["profile_yaml"])["vllm"]
+    assert section["gpu_list"] == [0, 1]
+    assert section["tensor_parallel_size"] == 2
+    # 占位符永不插值（密钥不出中心），合并只动 gpu_list 一个键
+    assert "${API_KEY}" in g["profile_yaml"]
+    # sha 对合并后文本重算，且 != 原文哈希（证明落地真的改变了下发内容）
+    assert g["profile_sha"] == profiles.profile_sha(g["profile_yaml"])
+    assert g["profile_sha"] != "sha256:" + hashlib.sha256(YAML.encode("utf-8")).hexdigest()
+    # 快照与台账同源：下发出去的 yaml/sha 就是落库值
+    snap = svc.snapshot_for("w-1")["goals"][0]
+    assert snap["yaml"] == g["profile_yaml"] and snap["sha"] == g["profile_sha"]
+
+
+def test_set_goals_without_gpus_keeps_yaml_byte_identical(store, svc):
+    """无 --gpus 绝不改写 YAML（原文逐字节铁律）：这条与上一条互为镜像，共同钉住
+    裁决A 的"仅 gpu_list 非空才合并"边界——只测带 --gpus 会漏掉"改写不该改写时"的回归。"""
+    _online(store, "w-1")
+    svc.set_goals(profile="qwen", node_ids=["w-1"], create=True)
+    g = store.get_goal("qwen@@w-1")
+    assert g["profile_yaml"] == YAML
+    assert g["profile_sha"] == profiles.profile_sha(YAML)
+    # 原文里本来没写 gpu_list，改写后也不该凭空多出该键
+    assert "gpu_list" not in yaml.safe_load(g["profile_yaml"])["vllm"]
 
 
 def test_snapshot_revision_is_stable_and_content_sensitive(store, svc):

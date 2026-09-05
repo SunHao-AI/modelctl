@@ -525,3 +525,41 @@
   - 拒绝/校验类断言必须锁**该分支专属词汇**，绝不锁键名/ID/通用前缀——这些在多条失败路径里都出现，等于没断言。挑词标准：把这条检查整段删掉，错误文案里还剩不剩这个词？
   - "A 的变更不影响 B"类断言，写完要自问"B 侧数据真的变了吗"。幂等 API 的重跑天然是 no-op，不能用来制造变更；直接写库或调用能真正改状态的接口，并显式断言前提（`intent == "stop"`）。
   - 变异验证的价值恰在首轮有存活项：全绿的变异报告要先怀疑"断言恒真"，再怀疑"实现有别处兜底"。
+
+## --gpus 只进 params/placement 不落地进下发 YAML，中心按 requested 判、worker 按 declared 锁卡
+
+- **日期**：2026-09-05（M1 Task 5 fix round 1，用户裁决 A）
+- **症状**：无显式失败。`goal set --gpus 0,1` 下发 profile 内 `tensor_parallel_size: 4`（或未写
+  gpu_list）的 vllm 模型：中心 gate 用 `effective = requested or declared` 按 `[0,1]`（2 卡）判
+  容量与 tp 一致性并放行落库，但**下发/写盘的 YAML 保持 profile 原文逐字节透传**（`sha` 是原文
+  哈希），`params["gpu_list"]` 与 `placement.gpu_count` 只是台账侧记账，worker 侧 `apply_snapshot`
+  原样落 YAML、Task 9 reconciler 均不消费 params。worker `selected_gpus()`
+  （`engines/base.py:68-71` = `resolve_gpu_list(engine_config.gpu_list, None, MODELCTL_GPUS)`，
+  优先级 **profile.gpu_list > CLI > env**）读的是**下发 YAML 引擎段的 gpu_list**，于是 worker 按
+  profile 声明的卡位锁卡、中心按 requested 判定 → 中心与 worker 对"这个 goal 用哪几张卡"给出两个
+  答案，双源不一致的毒 goal。`--gpus` 在 M1 里实际"无落地路径"，是个只写不读的字段。
+- **根因**：`resolve_gpu_list` 的优先级是 **profile 声明 > 中心显式点卡**，与直觉相反——中心以为
+  "我显式传了 --gpus 就覆盖 profile"，但 worker 读的是下发内容里的 `engine_config.gpu_list`，中心
+  从没把 requested 写回下发内容。这是"中心/worker 同口径"族（坏 port、不安全 stem、大小写、
+  gpu_list 生效卡位）的又一变体：**中心掌握并据以判定的事实，没有随下发传递到执行侧**，两侧各自
+  按不同来源解析同一份 profile，`requested or declared` 的语义在中心兑现、在 worker 落空。
+- **解决**（裁决 A）：`GoalService.set_goals` 生成 goal 时，**仅当 `gpu_list` 非空**，把生效卡位
+  合并进下发 YAML 引擎段——新增 `_merge_gpu_list_into_yaml()`：`safe_load` →
+  `data[engine]["gpu_list"] = list(gpu_list)` → `safe_dump(allow_unicode, sort_keys=False,
+  width=4096)`，`sha` 对**合并后文本**用 `profiles.profile_sha()` 重算，经 `enriched` 覆盖
+  `yaml`/`sha` 传给 `_write_goal` 落库。合并后 worker `declared == requested`，双源不一致从源头
+  消除，**gate 零逻辑改动**。无 `--gpus` 时保持 `source["yaml"]`/`source["sha"]` 纯原文透传——
+  "原文逐字节"铁律不破（避免键序/引号往返差异被 worker 漂移检测误判成篡改）。合并**绝不插值**
+  （`${VAR}` 原样保留），"密钥不出中心"不破。
+- **要点**：
+  - 中心据以判定的每个事实，若 worker 执行时也要用，**必须随下发内容传递**，不能只在台账侧记账。
+    "记进 params/placement" ≠ "落地到生效路径"——params 是审计/回显通道，worker 消费的是下发 YAML。
+  - 改写下发 YAML 要守两条铁律的边界：**只在必要时改写**（有 --gpus 才动，否则纯原文），**只动必要
+    的键**（safe_load/dump 仅改一个数字字段，绝不触碰占位符/其他键），且 sha 必须跟着改成合并后文本
+    的哈希（否则 worker 拿原文哈希比对合并后落盘内容，一写盘就误判"本地被篡改"）。
+  - "放行下游必拒内容"族的镜像：这次不是中心放行坏值，而是**中心与 worker 各按不同来源解析导致
+    期望状态不收敛**——双侧纵深防御不仅要求"同口径校验"，还要求"同口径的生效输入"，即中心算 effective
+    卡位、worker 也必须拿到同一个 effective 卡位。
+  - 测试互为镜像钉边界：带 --gpus 用例断言下发 yaml 引擎段 `gpu_list==传入值` + `sha==profile_sha(合并后)`
+    + `!=原文哈希`；无 --gpus 用例断言 `profile_yaml==YAML`（逐字节）+ `sha==profile_sha(原文)` +
+    引擎段不凭空多出 gpu_list。只测带 --gpus 会漏掉"不该改写时改写了"的回归。

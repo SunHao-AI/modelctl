@@ -18,7 +18,10 @@
    自己的 revision，中心只在两者不同时带回全量快照，于是"重连/中心重启/丢帧"
    三种情况共用一条自愈路径。
 3) **env_overlay 白名单**：只允许路径/卡位类键，任何名字含 API_KEY/TOKEN/... 的
-   键直接拒绝。profile YAML 走原文下发（占位符不插值），密钥因此永不出中心。
+   键直接拒绝。profile YAML 默认原文逐字节下发、永不插值（占位符原样保留），密钥
+   因此永不出中心；仅显式 --gpus 时把生效卡位合并进引擎段 `gpu_list`（同样不插值，
+   裁决A：让 worker 的 declared==requested，消除中心/worker 双源锁卡不一致），无
+   --gpus 时保持纯原文透传不破"原文"铁律。
 """
 
 from __future__ import annotations
@@ -27,6 +30,9 @@ import hashlib
 import json
 import time
 from typing import Any
+
+import yaml
+from loguru import logger
 
 from modelctl.core.cluster import gate, profiles
 from modelctl.core.cluster.store import ClusterStore
@@ -128,13 +134,30 @@ class GoalService:
         # 用原词查 existing 会让"展示名重跑"查不到已有 goal → gate 判 ok → upsert
         # 把 stage 重置回 PENDING_PROFILE_SYNC，等于把 worker 状态机清零。
         name = str(source["name"])
-        # gpu_list 同时进 params（worker 写盘时并入 YAML）与 placement（gate 冲突判定用）
+        # gpu_list 同时进 params（审计/回显）与 placement（gate 冲突判定用）。
         merged_params = dict(params or {})
         if gpu_list:
             merged_params["gpu_list"] = list(gpu_list)
         need_gpus = len(gpu_list) if gpu_list else gate.declared_gpu_count(source.get("raw"), source["engine"])
         est = gate.estimate_vram_mb(source.get("raw"), source["engine"], name) or 0
-        enriched = {**source, "gpu_count": need_gpus, "min_vram_mb": est,
+        # 裁决A（Task 4 终审）：显式 --gpus 必须"落地"进下发 YAML 引擎段 gpu_list。
+        # worker selected_gpus() 读的是下发 YAML（非 params.gpu_list），中心只记 requested
+        # 不写回 = profile 声明与中心点卡双源不一致 → 中心按 requested 判、worker 按
+        # declared 锁卡的毒 goal。合并后 worker declared==requested，双源不一致从源头消除，
+        # gate 零改动。仅 --gpus 时改写：无 gpu_list 保持原文逐字节透传（原文铁律不破）。
+        effective_yaml = str(source["yaml"])
+        effective_sha = str(source["sha"])
+        if gpu_list:
+            merged = _merge_gpu_list_into_yaml(effective_yaml, str(source["engine"]), list(gpu_list))
+            if merged is not None:
+                effective_yaml = merged
+                effective_sha = profiles.profile_sha(effective_yaml)
+            else:
+                # 原文已能 safe_load（read_profile_source 校验过），dump 失败属极端畸形；
+                # 保守回退原文下发（等价无 --gpus），绝不冒异常炸破 set_goals"永不抛"契约。
+                logger.warning(f"profile {name} 的 gpu_list 合并进引擎段失败，按原文下发（worker 按 profile 声明锁卡）")
+        enriched = {**source, "yaml": effective_yaml, "sha": effective_sha,
+                    "gpu_count": need_gpus, "min_vram_mb": est,
                     "requested_gpus": list(gpu_list or [])}
 
         in_use = self._in_use_gpus([str(c["node_id"]) for c in candidates])
@@ -295,3 +318,23 @@ def _int_list(value: Any) -> list[int] | None:
     if not isinstance(value, list):
         return None
     return [v for v in value if isinstance(v, int) and not isinstance(v, bool)][:64]
+
+
+def _merge_gpu_list_into_yaml(text: str, engine: str, gpu_list: list[int]) -> str | None:
+    """把生效卡位合并进 YAML 引擎段 `gpu_list`（裁决A）；无法安全合并返回 None。
+
+    只做一处最小改动：safe_load → `data[engine]["gpu_list"] = gpu_list` → safe_dump。
+    绝不插值（`${VAR}` 原样保留），"密钥不出中心"铁律不破；sort_keys=False 保键序、
+    allow_unicode 保中文、width 拉大避免长卡位列表折行影响 sha 观感。段缺失/顶层或段
+    非映射/dump 抛错一律返回 None——调用方据此回退原文下发，宁可退回"等价无 --gpus"，
+    也不产出畸形 YAML，更不抛异常炸破 set_goals 的"永不抛业务异常"契约（REST 层不转 500）。
+    """
+    try:
+        data = yaml.safe_load(text)
+        if not isinstance(data, dict) or not isinstance(data.get(engine), dict):
+            return None
+        data[engine]["gpu_list"] = list(gpu_list)
+        return yaml.safe_dump(data, allow_unicode=True, sort_keys=False,
+                              default_flow_style=False, width=4096)
+    except Exception:  # noqa: BLE001 — RecursionError/yaml 等绝不冒泡（契约同 profiles._scan）
+        return None

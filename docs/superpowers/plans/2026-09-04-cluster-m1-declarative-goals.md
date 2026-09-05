@@ -2123,15 +2123,16 @@ def test_snapshot_shape_and_raw_passthrough(store, svc):
     # gpu_list 必须给满 tp=2 张卡：gate 对 tp 系引擎要求"生效卡位数 == tp"，
     # 只给 [0] 会被 skip → get_goal 为 None，本用例根本走不到快照断言。
     _online(store, "w-1")
-    svc.set_goals(profile="qwen", node_ids=["w-1"], create=True, gpu_list=[0, 1])
+    svc.set_goals(profile="qwen", node_ids=["w-1"], create=True)   # 无 --gpus：走原文透传
     snap = svc.snapshot_for("w-1")
     assert len(snap["goals"]) == 1
     g = snap["goals"][0]
     assert g["goal_id"] == "qwen@@w-1" and g["engine"] == "vllm"
     assert "${API_KEY}" in g["yaml"]                    # 原文下发，未插值
-    # yaml 逐字节等于源文件原文（worker 侧漂移检测的基准），故比对整串而非片段。
-    assert g["yaml"] == YAML and g["params"]["gpu_list"] == [0, 1]
-    # sha 是"对原文的哈希"，按定义**不是**原文的子串——计划原稿写作
+    # 无 --gpus：yaml 逐字节等于源文件原文（worker 侧漂移检测的基准），比对整串而非片段。
+    # 带 --gpus 时引擎段并入 gpu_list、sha 对合并后文本重算（裁决A），由独立落地用例钉。
+    assert g["yaml"] == YAML and g["params"] is None
+    # sha 是"对下发文本的哈希"，按定义**不是**原文的子串——计划原稿写作
     # `g["sha"] in YAML`，该断言恒假；正确钉法是重算哈希比对。
     assert g["sha"] == "sha256:" + hashlib.sha256(YAML.encode("utf-8")).hexdigest()
     # 快照是下发协议载荷的形状，绝不夹带台账内部列（stage/placement 等）。
