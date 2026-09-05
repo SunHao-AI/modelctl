@@ -35,7 +35,7 @@ def env(tmp_path, monkeypatch):
     # （"未上报≠可用"是 Task 4 钉死的保守口径）。set_goals 类用例必须先有
     # runtimes/容量，与 Task 11 计划夹具同口径。
     store.update_node_capacity("w-1", capacity={"gpu_count": 4, "vram_total_mb": 157280},
-                               runtimes={"vllm": {"ok": True}}, local_profiles=["qwen"], now=1.0)
+                               runtimes={"vllm": {"ok": True}}, local_profiles=["qwen"])
     return store, goals, reg
 
 

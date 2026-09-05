@@ -62,6 +62,9 @@
 | 2026-09-05 | 后端 / 集群下发 | 展示名归一漏掉 remove 侧；归一依赖的文件已删时撤不掉 goal | set 归一 remove 不归一 → 展示名撤除全进 missing；连带清 model_states 用原词删不掉（回流按 stem 建键）；`_resolve_names` 读失败必须回退 [原词]，撤除按被删行的 profile 字段。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-05 | 后端 / 演练一致性 | 上限检查排在 dry-run 计数后，演练报 created=1 实跑 skip；version 从原文 sha 而非最终落库 sha 派生 | dry-run = 实跑减写库副作用，一切"能不能创建"的校验必须在捷径前；`**source` 覆盖 sha 时必须重算其派生字段（version）。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-05 | 后端 / 集群下发 | 展示名归一的幻影 goal_id 进 missing，撤除成功却同时报"不存在"假警报 | 候选名 × 节点全组合的未命中项是算法内部噪声；missing 必须聚合回业务主键（节点）再对外报告，命中判定用被删行自带的 node_id。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-05 | 后端 / 集群下发 | agent 心跳 rt=None 按 M0 形状带 `profiles:{}`，中心按"显式空集"覆盖 model_states 抹台账 | M0 逐键兼容刻意取舍（{} 已被"没有模型"占用，"未知"只能用 None/缺键）；缓解=server 先 reconciler 后 Agent 的启动顺序消常态窗，跨组件启动顺序是数据正确性约束。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-05 | 测试 / 覆盖 | 隐式下界类测试常量（rounds=3）无注释，为提速缩减会静默失去判别力 | "最小可判别规模"是隐式契约：注释须交代低于该值为何测不出、判据哪轮显形、常量与断言联动改写；单元素/单轮证明不了关系类不变量。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-05 | 测试 / 隔离 | conftest 的 CLUSTER_* 清理用白名单枚举，新增配置键必然漏进清单 | 枚举与生产配置键集合赛跑且漏键是软污染（结论随机器漂移）；改为 `k.startswith("CLUSTER_")` 前缀扫描，清理范围随配置自动扩张。 | [backend/test-isolation.md](backend/test-isolation.md) |
 
 ## 目录约定
 

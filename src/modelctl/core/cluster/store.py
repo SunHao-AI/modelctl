@@ -265,9 +265,11 @@ class ClusterStore:
         return transitions
 
     # ---- nodes 容量/运行时/本机 profile 清单（改进 B；None 不覆盖既有值，与 engines 同语义）----
+    # 无 now 形参：本方法不写任何时间列（capacity_updated_at 属 DDL 演进，M1 未加列），
+    # 心跳时间归 touch_heartbeat 单责——保留死参会诱导调用方以为它影响时间语义。
     def update_node_capacity(self, node_id: str, *, capacity: dict | None,
-                             runtimes: dict | None, local_profiles: list[str] | None = None,
-                             now: float) -> None:
+                             runtimes: dict | None,
+                             local_profiles: list[str] | None = None) -> None:
         with self._lock:
             row = self._db().execute(
                 "SELECT capacity_json, runtime_json, local_profiles_json FROM nodes WHERE node_id=?",

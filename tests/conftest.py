@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import subprocess
 import sys
 import time
@@ -52,15 +53,11 @@ def isolated_runtime_dirs(tmp_path, monkeypatch):
     # CLUSTER_* delenv：同 GATEWAY_* 口径——开发者 .env 里的 CLUSTER_ROLE 等经 load_env()
     # 注入后，solo 用例的 404 断言会被"意外启用"的集群角色破坏。cluster 用例在自己的
     # fixture/用例内 setenv，晚于本 autouse fixture 执行，不受影响。
-    monkeypatch.delenv("CLUSTER_ROLE", raising=False)
-    monkeypatch.delenv("CLUSTER_CENTER_URL", raising=False)
-    monkeypatch.delenv("CLUSTER_NODE_ID", raising=False)
-    monkeypatch.delenv("CLUSTER_LAN", raising=False)
-    monkeypatch.delenv("CLUSTER_JOIN_TOKEN", raising=False)
-    monkeypatch.delenv("CLUSTER_NODE_TOKEN", raising=False)
-    monkeypatch.delenv("CLUSTER_LEASE_S", raising=False)
-    monkeypatch.delenv("CLUSTER_HEARTBEAT_INTERVAL_S", raising=False)
-    monkeypatch.delenv("CLUSTER_WS_INSECURE", raising=False)
+    # 前缀式扫描而非白名单枚举：新增 CLUSTER_* 配置键必然漏进枚举清单（M1 就加了
+    # CLUSTER_START_TIMEOUT_S 等），漏一个键=该键的 .env 泄漏静默改变控制流。
+    for key in list(os.environ):
+        if key.startswith("CLUSTER_"):
+            monkeypatch.delenv(key, raising=False)
 
 
 @pytest.fixture()

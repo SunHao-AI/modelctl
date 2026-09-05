@@ -364,6 +364,11 @@ GET    /admin/cluster/export                   # 全量 goal + 节点状态 JSON
 
 所有 `/admin/cluster/*` 过现有 Bearer（API_KEY）鉴权。
 
+> **§6.5 豁免说明（2026-09-05 M1 终审，T11-② 关闭）**：goals 刻意**不提供** `GET /goals/{id}`
+> 单条端点——本清单本就未定义它，单条读取由 `GET /goals?node_id=` 过滤与
+> `GET /nodes/{id}`（响应内嵌本节点 goals 列表）完整覆盖；PUT/DELETE 的存在性校验
+> 已各自带 404，无"读后写"依赖。M1 不补建。
+
 ### 6.6 下发校验门禁（placement gate，Ray autoscaler / Placement Group 借鉴）
 
 **所有 `goal set` / `launch` 在正式下发前先过中心侧校验门禁**；`--dry-run` 时只跑校验不写 DB：

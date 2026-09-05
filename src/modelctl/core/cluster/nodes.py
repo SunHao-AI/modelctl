@@ -105,7 +105,7 @@ class NodeRegistry:
         self.store.touch_heartbeat(node_id, now=now, lease_s=config.lease_s())
         self.store.update_node_capacity(
             node_id, capacity=hb.get("capacity"), runtimes=hb.get("runtimes"),
-            local_profiles=hb.get("local_profiles"), now=now)
+            local_profiles=hb.get("local_profiles"))
 
         profiles = hb.get("profiles")
         if self.goals is not None and isinstance(profiles, dict):

@@ -184,6 +184,30 @@ def test_goal_list_filters_in_query(probe) -> None:
     assert "node_id=w-1" in url and "profile=qwen" in url
 
 
+def test_goal_list_query_values_percent_encoded(probe) -> None:
+    """query 值含 #/空格必须 percent-encode（终审 C2）。
+
+    `#` 不编码时 urllib 会把 `#` 之后当 fragment 整段丢掉——中心收到的 profile
+    被静默截断，list 会"成功"返回另一个 profile 的 goal（假过滤）；空格更直接
+    是非法 URL。钉 URL 尾部保留完整编码值而非截断原值。
+    """
+    _main(["cluster", "goal", "list", "--node", "w 1", "--profile", "qwen#v2"])
+    url = probe.calls[0][1]
+    assert "node_id=w%201" in url and "profile=qwen%23v2" in url
+    assert "qwen#v2" not in url and "w 1" not in url      # 绝不允许裸值泄漏进 URL
+
+
+def test_remove_all_profile_with_hash_encodes_list_query(probe) -> None:
+    """remove/stop --all 的 --all 展开走 `_goal_nodes_of_profile` 的 profile 查询，
+    同一编码义务：含 # 时查询段必须完整，否则列到的是别的 profile 的节点集。"""
+    probe.reply("GET", "/admin/api/cluster/goals?profile=qwen%23v2", 200,
+                {"goals": [{"node_id": "w-1"}]})
+    assert _main(["cluster", "goal", "remove", "qwen#v2", "--all"]) == 0
+    get_url = probe.one("GET")[0][1]
+    assert get_url == BASE + GOALS + "?profile=qwen%23v2"
+    assert len(probe.one("DELETE")) == 1                  # 展开成功而非截断后空转
+
+
 def test_goal_list_json_raw(probe, capsys) -> None:
     probe.reply("GET", GOALS, 200, {"goals": [{"goal_id": "qwen@@w-1"}]})
     _main(["cluster", "goal", "list", "--json"])
@@ -312,6 +336,21 @@ def test_delete_json_network_error_folded(monkeypatch) -> None:
     monkeypatch.setattr(cp.urllib.request, "urlopen", boom)
     status, body = cp.delete_json("http://c/x")
     assert status == -1 and "connection refused" in body["error"]
+
+
+# ---------------- _cluster_request 方法兜底（终审 C3）----------------
+def test_cluster_request_unknown_method_raises_without_sending(probe) -> None:
+    """未知方法必须 ValueError 且**一个请求都不发**。
+
+    旧实现把兜底写成 DELETE：拼错的方法名（PATCH/HEAD/POSTT）静默变成一次删除
+    ——控制面 CLI 的最坏失效模式。钉raises 之外必须钉 probe.calls == []，
+    否则"先删再抛"也能全绿。
+    """
+    from modelctl.cli import _cluster_request
+
+    with pytest.raises(ValueError, match="不支持的方法 PATCH"):
+        _cluster_request("PATCH", "/cluster/goals")
+    assert probe.calls == []
 
 
 # ---------------- P-1（Task 12 review）：--engine 全链路透传 ----------------

@@ -58,7 +58,7 @@ def _online(store, nid, *, lan="", with_runtime=True):
                       host_ip="", hostname="", engines=None, now=1.0)
     store.update_node_capacity(nid, capacity={"gpu_count": 4, "vram_total_mb": 157280},
                                runtimes=({"vllm": {"ok": True}} if with_runtime else {}),
-                               local_profiles=["qwen"], now=1.0)
+                               local_profiles=["qwen"])
 
 
 def _add_display_profile(models):
@@ -210,7 +210,7 @@ def test_set_goals_addressed_by_display_name_normalizes_to_stem(store, svc, mode
     _online(store, "w-1")
     store.update_node_capacity("w-1", capacity={"gpu_count": 4, "vram_total_mb": 157280},
                                runtimes={"vllm": {"ok": True}},
-                               local_profiles=["qwen-fast"], now=1.0)
+                               local_profiles=["qwen-fast"])
     out = svc.set_goals(profile="qwen-display", node_ids=["w-1"], create=True)
     assert out["created"] == 1
     goal = store.get_goal("qwen-fast@@w-1")
@@ -395,7 +395,7 @@ def test_remove_goals_by_display_name_hits_stem_goal(store, svc, models):
     _online(store, "w-1")
     store.update_node_capacity("w-1", capacity={"gpu_count": 4, "vram_total_mb": 157280},
                                runtimes={"vllm": {"ok": True}},
-                               local_profiles=["qwen-fast"], now=1.0)
+                               local_profiles=["qwen-fast"])
     assert svc.set_goals(profile="qwen-display", node_ids=["w-1"], create=True)["created"] == 1
     out = svc.remove_goals(profile="qwen-display", node_ids=["w-1"])
     assert out["removed"] == ["qwen-fast@@w-1"]
@@ -418,7 +418,7 @@ def test_remove_missing_aggregated_per_node(store, svc, models):
     _online(store, "w-1")
     store.update_node_capacity("w-1", capacity={"gpu_count": 4, "vram_total_mb": 157280},
                                runtimes={"vllm": {"ok": True}},
-                               local_profiles=["qwen-fast"], now=1.0)
+                               local_profiles=["qwen-fast"])
     assert svc.set_goals(profile="qwen-display", node_ids=["w-1"], create=True)["created"] == 1
     out = svc.remove_goals(profile="qwen-display", node_ids=["w-1", "w-2"])
     assert out["removed"] == ["qwen-fast@@w-1"]
@@ -451,7 +451,7 @@ def test_remove_all_nodes_by_display_name(store, svc, models):
     for nid in ("w-1", "w-2"):
         store.update_node_capacity(nid, capacity={"gpu_count": 4, "vram_total_mb": 157280},
                                    runtimes={"vllm": {"ok": True}},
-                                   local_profiles=["qwen-fast"], now=1.0)
+                                   local_profiles=["qwen-fast"])
     assert svc.set_goals(profile="qwen-display", node_ids=None,
                          all_nodes=True, create=True)["created"] == 2
     out = svc.remove_goals(profile="qwen-display", node_ids=None, all_nodes=True)
@@ -467,7 +467,7 @@ def test_remove_by_display_name_prunes_model_state(store, svc, models):
     _online(store, "w-1")
     store.update_node_capacity("w-1", capacity={"gpu_count": 4, "vram_total_mb": 157280},
                                runtimes={"vllm": {"ok": True}},
-                               local_profiles=["qwen-fast"], now=1.0)
+                               local_profiles=["qwen-fast"])
     svc.set_goals(profile="qwen-display", node_ids=["w-1"], create=True)
     svc.record_model_states("w-1", {"qwen-fast": {"state": "running", "gpu": [0, 1]}}, now=2.0)
     out = svc.remove_goals(profile="qwen-display", node_ids=["w-1"])
@@ -561,3 +561,18 @@ def test_record_model_states_ignores_unsafe_names(store, svc):
     svc.record_model_states("w-1", {"../escape": {"state": "READY"},
                                     "good": {"state": "READY"}}, now=1.0)
     assert [r["profile"] for r in store.list_model_states(node_id="w-1")] == ["good"]
+
+
+# ---------------- 跨层常量：PUT 白名单 ⊆ 台账可写集（终审 C1）----------------
+def test_service_updatable_subset_of_store_mutable():
+    """`GoalService._UPDATABLE`（PUT 允许改的字段）必须是
+    `ClusterStore._GOAL_MUTABLE`（update_goal 真正落库的字段）的子集。
+
+    两层各自维护白名单，交集之外的键会在 service 侧通过校验、记 `goal.update`
+    事件，却在 store 的 `if k not in self._GOAL_MUTABLE: continue` 处被丢弃——
+    对外是 200 + 审计假报，台账纹丝不动（fix round 1 Major-1 的跨层契约）。
+    集合关系而非逐键比对：任一侧新增键时，只有 service 侧单方面扩张才转红。
+    """
+    assert set(GoalService._UPDATABLE) <= set(ClusterStore._GOAL_MUTABLE), (
+        f"PUT 可改但落不了库的字段："
+        f"{sorted(set(GoalService._UPDATABLE) - set(ClusterStore._GOAL_MUTABLE))}")

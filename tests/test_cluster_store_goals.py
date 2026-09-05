@@ -52,12 +52,12 @@ def test_update_node_capacity_none_keeps_existing(store):
                       host_ip="", hostname="", engines=None, now=1.0)
     store.update_node_capacity("w-1", capacity={"gpu_count": 4, "vram_total_mb": 157280},
                                runtimes={"vllm": {"ok": True, "version": "0.9.1"}},
-                               local_profiles=["qwen-vllm"], now=2.0)
+                               local_profiles=["qwen-vllm"])
     node = store.get_node("w-1")
     assert node["capacity"]["gpu_count"] == 4
     assert node["runtimes"]["vllm"]["ok"] is True
     assert node["local_profiles"] == ["qwen-vllm"]
-    store.update_node_capacity("w-1", capacity=None, runtimes=None, now=3.0)
+    store.update_node_capacity("w-1", capacity=None, runtimes=None)
     assert store.get_node("w-1")["capacity"]["gpu_count"] == 4  # None 不覆盖（同 engines 语义）
     assert store.get_node("w-1")["local_profiles"] == ["qwen-vllm"]
 

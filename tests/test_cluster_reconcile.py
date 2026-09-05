@@ -135,6 +135,21 @@ def test_profile_sha_safe_missing_file_returns_empty(tmp_path):
     assert profile_sha_safe(p) == P.profile_sha(YAML_A)
 
 
+def test_raw_of_swallows_non_yaml_errors(monkeypatch):
+    """`_raw_of` 必须泛兜**一切**异常（终审 C4），不只 YAMLError。
+
+    `safe_load` 对深嵌套输入抛 RecursionError、对 `port: .inf` 抛 OverflowError——
+    两者都不是 YAMLError（known-pitfalls profile-config-drift 已沉淀同族教训：
+    profiles/sync 侧因此改为泛兜）。reconciler 的宽容契约是"坏文件绝不打断整轮
+    调度"，异常穿透会让 worker 停摆。monkeypatch 直接抛，比构造深嵌套输入稳定。
+    """
+    def boom(_text):
+        raise RecursionError("depth limit")
+
+    monkeypatch.setattr(reconcile.yaml, "safe_load", boom)
+    assert reconcile._raw_of("port: 8001\n") == {}   # 旧代码（只 catch YAMLError）此处穿透
+
+
 # --------------------------------------------------------------------------- 替身与夹具
 
 class Recorder:

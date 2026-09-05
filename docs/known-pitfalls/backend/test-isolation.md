@@ -81,3 +81,36 @@ def admin_client(monkeypatch, tmp_path):
 - 顺带发现：**该 FastAPI 版本 `app.routes` 平铺不到 `include_router` 的子路由**
   （懒展开的 `_IncludedRouter` 内部结构），遍历会得到空集合而误判「路由没挂」。
   枚举路由改用稳定公开口径 `app.openapi()["paths"]`。
+
+## conftest 的 env 清理必须按前缀扫描，白名单枚举必然漏新增键
+
+**日期**：2026-09-05
+**症状**：`tests/conftest.py` 的 autouse fixture 用 9 行
+`monkeypatch.delenv("CLUSTER_ROLE", ...)` 逐键枚举清理 CLUSTER_* 泄漏。M1 新增
+`CLUSTER_START_TIMEOUT_S`、`CLUSTER_RECONCILE_INTERVAL_S` 等配置键后，枚举清单没有
+同步——开发者 .env 里只要有这些键，就会经 `load_env()` 泄漏进测试进程，静默改变
+reconciler/agent 的节拍与超时行为，而 conftest 看起来"已经清理过 CLUSTER_*"，
+排查时最先被排除。
+
+**根因**：白名单枚举是**与生产配置键集合赛跑**的防御——每新增一个可被 .env 注入的
+键就多一处必漏点，且泄漏是"测试变慢/变快"级别的软污染，不像 404 变 200 那样立刻
+炸红，往往要等跨机器结论漂移才被发现。枚举清单的"看起来完整"是最危险的假象。
+
+**解决方案**：按**前缀**扫描删除，让"新增键"落入清理范围成为默认行为：
+
+```python
+for key in list(os.environ):
+    if key.startswith("CLUSTER_"):
+        monkeypatch.delenv(key, raising=False)
+```
+
+（`list(os.environ)` 先取快照，避免迭代中改字典；`GATEWAY_*` 仅 2 键且语义独立，
+保留显式枚举反而更点名——前缀式适用于"同族键会持续新增"的场景。）
+
+**教训**：
+
+- env 隔离清单的粒度应与**配置的演化粒度**一致：一族会持续新增键的配置（CLUSTER_*）
+  用前缀；少量彼此独立的开关（GATEWAY_*）可枚举，但要在注释里写明"本族不再扩键"
+  的前提，前提失效即改前缀式。
+- 判据："这个前缀下未来会不会加新键？"会 ⇒ 枚举必然漏 ⇒ 用前缀扫描。漏一个键的
+  代价不是失败而是**软污染**（结论随机器/时序漂移），比硬失败更难归因。

@@ -170,7 +170,7 @@ def _raw_of(text: str) -> dict[str, Any]:
     """
     try:
         raw = yaml.safe_load(text)
-    except yaml.YAMLError:
+    except Exception:  # noqa: BLE001 — 泛兜口径与 profiles/sync 同族：RecursionError/OverflowError 非 YAMLError（known-pitfalls profile-config-drift）
         return {}
     return raw if isinstance(raw, dict) else {}
 

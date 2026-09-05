@@ -1309,7 +1309,11 @@ def _cluster_request(method: str, path: str, payload: dict | None = None,
         return center_probe.post_json(url, payload or {}, api_key=key, timeout=timeout)
     if method == "PUT":
         return center_probe.put_json(url, payload or {}, api_key=key, timeout=timeout)
-    return center_probe.delete_json(url, api_key=key, timeout=timeout)
+    if method == "DELETE":
+        return center_probe.delete_json(url, api_key=key, timeout=timeout)
+    # 兜底不能落 DELETE：拼错的方法名（PATCH/HEAD…）静默变成一次删除请求，
+    # 对控制面 CLI 是最坏失效模式——显式拒绝且不发任何请求。
+    raise ValueError(f"不支持的方法 {method}")
 
 
 def _center_detail(status, body: dict) -> str:
@@ -1355,7 +1359,11 @@ def _fmt_gpu(gpu) -> str:
 
 
 def _goal_nodes_of_profile(profile: str) -> tuple[list[str], str]:
-    status, body = _cluster_request("GET", f"/cluster/goals?profile={profile}")
+    from urllib.parse import quote
+
+    # query 值必须 percent-encode：展示名可含 #/空格（# 会把后半 URL 变成 fragment，
+    # 服务端收到的 profile 被静默截断，--all 于是对错误目标空转）
+    status, body = _cluster_request("GET", f"/cluster/goals?profile={quote(profile, safe='')}")
     if status != 200:
         return [], _center_detail(status, body)
     return [g["node_id"] for g in body.get("goals", []) if g.get("node_id")], ""
@@ -1581,8 +1589,11 @@ def _cmd_cluster_launch(args) -> int:
 
 
 def _cmd_cluster_goal_list(args) -> int:
+    from urllib.parse import quote
+
+    # 与 _goal_nodes_of_profile 同口径：query 值 percent-encode，含 #/空格不截断
     pairs = (("node_id", args.node), ("profile", args.profile))
-    query = "&".join(f"{k}={v}" for k, v in pairs if v)
+    query = "&".join(f"{k}={quote(v, safe='')}" for k, v in pairs if v)
     status, body = _cluster_request("GET", "/cluster/goals" + (f"?{query}" if query else ""))
     if status != 200:
         logger.error(f"查询失败: {_center_detail(status, body)}")

@@ -77,7 +77,7 @@ M0 已按 spec §11.1 建齐全部表，但 `nodes` 缺 M1 需要的 4 列（改
 **Interfaces:**
 - Consumes: `ClusterStore._db()`（autocommit + WAL + busy_timeout）、`init_db()`
 - Produces:
-  - `ClusterStore.update_node_capacity(node_id: str, *, capacity: dict | None, runtimes: dict | None, local_profiles: list[str] | None = None, now: float) -> None`
+  - `ClusterStore.update_node_capacity(node_id: str, *, capacity: dict | None, runtimes: dict | None, local_profiles: list[str] | None = None) -> None`（终审 C5：删除死参 `now`——本方法不写任何时间列，心跳时间归 touch_heartbeat 单责）
   - `ClusterStore.set_node_last_goal_sync_sha(node_id: str, sha: str) -> None`
   - `ClusterStore.upsert_goal(*, goal_id: str, node_id: str, profile: str, engine: str, profile_yaml: str, profile_sha: str, profile_version: str | None, intent: str, params: dict | None, env_overlay: dict | None, placement: dict | None, runtime_ref: str | None, target_role: str, stage: str, created_by: str, now: float) -> None`
   - `ClusterStore.get_goal(goal_id: str) -> dict | None`
@@ -148,12 +148,12 @@ def test_update_node_capacity_none_keeps_existing(store):
                       host_ip="", hostname="", engines=None, now=1.0)
     store.update_node_capacity("w-1", capacity={"gpu_count": 4, "vram_total_mb": 157280},
                                runtimes={"vllm": {"ok": True, "version": "0.9.1"}},
-                               local_profiles=["qwen-vllm"], now=2.0)
+                               local_profiles=["qwen-vllm"])
     node = store.get_node("w-1")
     assert node["capacity"]["gpu_count"] == 4
     assert node["runtimes"]["vllm"]["ok"] is True
     assert node["local_profiles"] == ["qwen-vllm"]
-    store.update_node_capacity("w-1", capacity=None, runtimes=None, now=3.0)
+    store.update_node_capacity("w-1", capacity=None, runtimes=None)
     assert store.get_node("w-1")["capacity"]["gpu_count"] == 4  # None 不覆盖（同 engines 语义）
     assert store.get_node("w-1")["local_profiles"] == ["qwen-vllm"]
 
@@ -304,9 +304,11 @@ _NODE_M1_COLUMNS: tuple[tuple[str, str], ...] = (
 
 ```python
     # ---- nodes 容量/运行时/本机 profile 清单（改进 B；None 不覆盖既有值，与 engines 同语义）----
+    # 无 now 形参：本方法不写任何时间列（capacity_updated_at 属 DDL 演进，M1 未加列），
+    # 心跳时间归 touch_heartbeat 单责——保留死参会诱导调用方以为它影响时间语义。
     def update_node_capacity(self, node_id: str, *, capacity: dict | None,
-                             runtimes: dict | None, local_profiles: list[str] | None = None,
-                             now: float) -> None:
+                             runtimes: dict | None,
+                             local_profiles: list[str] | None = None) -> None:
         with self._lock:
             row = self._db().execute(
                 "SELECT capacity_json, runtime_json, local_profiles_json FROM nodes WHERE node_id=?",
@@ -1999,7 +2001,7 @@ def _online(store, nid, *, lan="", with_runtime=True):
                       host_ip="", hostname="", engines=None, now=1.0)
     store.update_node_capacity(nid, capacity={"gpu_count": 4, "vram_total_mb": 157280},
                                runtimes=({"vllm": {"ok": True}} if with_runtime else {}),
-                               local_profiles=["qwen"], now=1.0)
+                               local_profiles=["qwen"])
 
 
 # ---------------- env_overlay 白名单 ----------------
@@ -2844,7 +2846,7 @@ def env(tmp_path, monkeypatch):
     # （"未上报≠可用"是 Task 4 钉死的保守口径）。set_goals 类用例必须先有
     # runtimes/容量，与 Task 11 计划夹具同口径。
     store.update_node_capacity("w-1", capacity={"gpu_count": 4, "vram_total_mb": 157280},
-                               runtimes={"vllm": {"ok": True}}, local_profiles=["qwen"], now=1.0)
+                               runtimes={"vllm": {"ok": True}}, local_profiles=["qwen"])
     return store, goals, reg
 
 
@@ -3051,7 +3053,7 @@ class NodeRegistry:
         self.store.touch_heartbeat(node_id, now=now, lease_s=config.lease_s())
         self.store.update_node_capacity(
             node_id, capacity=hb.get("capacity"), runtimes=hb.get("runtimes"),
-            local_profiles=hb.get("local_profiles"), now=now)
+            local_profiles=hb.get("local_profiles"))
 
         profiles = hb.get("profiles")
         if self.goals is not None and isinstance(profiles, dict):
@@ -5690,10 +5692,10 @@ def center(monkeypatch, tmp_path):
                               host_ip="", hostname="", engines=None, now=time.time())
         reg.store.update_node_capacity(
             "w-1", capacity={"gpu_count": 4, "vram_total_mb": 157280},
-            runtimes={"vllm": {"ok": True}}, local_profiles=["qwen"], now=time.time())
+            runtimes={"vllm": {"ok": True}}, local_profiles=["qwen"])
         reg.store.update_node_capacity(
             "w-2", capacity={"gpu_count": 4, "vram_total_mb": 157280},
-            runtimes={"vllm": {"ok": True}}, local_profiles=[], now=time.time())
+            runtimes={"vllm": {"ok": True}}, local_profiles=[])
         yield c
     ac._REGISTRY = None
     ac._CONNS = conns.ConnectionRegistry()
@@ -5958,7 +5960,7 @@ def test_capacity_text_dash_when_missing(center) -> None:
     reg = ac.get_registry()
     # 传 {} 才是"清空"——capacity=None 是"不覆盖"（Task 1 的合并语义），w-2 夹具已带容量
     reg.store.update_node_capacity("w-2", capacity={}, runtimes=None,
-                                   local_profiles=None, now=time.time())
+                                   local_profiles=None)
     body = center.get("/admin/api/cluster/nodes", headers=_h()).json()
     w2 = [n for n in body["nodes"] if n["node_id"] == "w-2"][0]
     assert w2["capacity_text"] == "-"

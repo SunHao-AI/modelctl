@@ -59,10 +59,10 @@ def center(monkeypatch, tmp_path):
                               host_ip="", hostname="", engines=None, now=time.time())
         reg.store.update_node_capacity(
             "w-1", capacity={"gpu_count": 4, "vram_total_mb": 157280},
-            runtimes={"vllm": {"ok": True}}, local_profiles=["qwen"], now=time.time())
+            runtimes={"vllm": {"ok": True}}, local_profiles=["qwen"])
         reg.store.update_node_capacity(
             "w-2", capacity={"gpu_count": 4, "vram_total_mb": 157280},
-            runtimes={"vllm": {"ok": True}}, local_profiles=[], now=time.time())
+            runtimes={"vllm": {"ok": True}}, local_profiles=[])
         yield c
     ac._REGISTRY = None
     ac._CONNS = conns.ConnectionRegistry()
@@ -421,7 +421,7 @@ def test_capacity_text_dash_when_missing(center) -> None:
     reg = ac.get_registry()
     # 传 {} 才是"清空"——capacity=None 是"不覆盖"（Task 1 的合并语义），w-2 夹具已带容量
     reg.store.update_node_capacity("w-2", capacity={}, runtimes=None,
-                                   local_profiles=None, now=time.time())
+                                   local_profiles=None)
     body = center.get("/admin/api/cluster/nodes", headers=_h()).json()
     w2 = [n for n in body["nodes"] if n["node_id"] == "w-2"][0]
     assert w2["capacity_text"] == "-"
