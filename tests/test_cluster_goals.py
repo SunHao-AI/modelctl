@@ -15,7 +15,13 @@ import pytest
 import yaml
 
 from modelctl.core.cluster import profiles
-from modelctl.core.cluster.goals import ENV_OVERLAY_ALLOWLIST, GoalService, goal_id_of, validate_env_overlay
+from modelctl.core.cluster.goals import (
+    ENV_OVERLAY_ALLOWLIST,
+    GPU_OCCUPYING_STATES,
+    GoalService,
+    goal_id_of,
+    validate_env_overlay,
+)
 from modelctl.core.cluster.store import ClusterStore
 
 #: 引擎段必须挂在**引擎名**键下（gate._engine_section / core.profile._to_profile 同
@@ -53,6 +59,12 @@ def _online(store, nid, *, lan="", with_runtime=True):
     store.update_node_capacity(nid, capacity={"gpu_count": 4, "vram_total_mb": 157280},
                                runtimes=({"vllm": {"ok": True}} if with_runtime else {}),
                                local_profiles=["qwen"], now=1.0)
+
+
+def _add_display_profile(models):
+    """stem=qwen-fast、展示名=qwen-display 的 profile（remove 侧归一用例共用）。"""
+    (models / "vllm" / "qwen-fast.yaml").write_text(
+        "port: 8001\nname: qwen-display\nvllm:\n  tensor_parallel_size: 2\n", encoding="utf-8")
 
 
 # ---------------- env_overlay 白名单 ----------------
@@ -270,6 +282,42 @@ def test_set_goals_without_gpus_keeps_yaml_byte_identical(store, svc):
     assert "gpu_list" not in yaml.safe_load(g["profile_yaml"])["vllm"]
 
 
+def test_set_goals_version_derived_from_final_sha(store, svc):
+    """裁决4：带 --gpus 时 profile_version 必须对**最终落库 sha**（合并后文本）派生。
+
+    单一哈希链：yaml ↔ sha ↔ version 三者同源。version 若仍从原文 sha 派生，worker
+    与 dashboard 会看到"版本号对应内容哈希"的指针悬空——version 的可追溯性
+    （default_profile_version 的 Triton version policy 语义）正是那 13 位 sha 前缀。
+    """
+    _online(store, "w-1")
+    svc.set_goals(profile="qwen", node_ids=["w-1"], create=True, gpu_list=[0, 1])
+    g = store.get_goal("qwen@@w-1")
+    assert g["profile_version"] == profiles.default_profile_version(g["profile_sha"])
+    # version 的哈希段就是 profile_sha 的 sha256 前缀（与 default_profile_version 同口径）
+    assert g["profile_version"].endswith(g["profile_sha"][len("sha256:"):13])
+
+
+def test_dry_run_and_real_run_agree_on_goal_limit(store, svc, monkeypatch):
+    """裁决4：MAX_GOALS_PER_NODE 检查必须在 dry_run 计数**之前**。
+
+    顺序颠倒时 dry-run 报告"预计 created=1"而实跑 skip（created=0）——Task 12 CLI 以
+    dry-run 结论决定退出码/提示，会误导运维"演练通过"却在实跑被静默跳过。
+    把上限压到 1 避免为测试插 512 行。"""
+    monkeypatch.setattr("modelctl.core.cluster.goals.MAX_GOALS_PER_NODE", 1)
+    _online(store, "w-1")
+    store.upsert_goal(goal_id="filler@@w-1", node_id="w-1", profile="filler", engine="vllm",
+                      profile_yaml="port: 9401\n", profile_sha="sha256:filler",
+                      profile_version=None, intent="start", params=None, env_overlay=None,
+                      placement=None, runtime_ref=None, target_role="primary",
+                      stage="READY", created_by="op", now=1.0)
+    dry = svc.set_goals(profile="qwen", node_ids=["w-1"], create=True, dry_run=True)
+    real = svc.set_goals(profile="qwen", node_ids=["w-1"], create=True)
+    assert dry["created"] == 0 == real["created"]
+    assert dry["skipped"] == 1 == real["skipped"]
+    assert "上限" in dry["verdicts"][0].reason and "上限" in real["verdicts"][0].reason
+    assert store.list_goals(profile="qwen") == []        # dry-run 依旧分毫不动
+
+
 def test_snapshot_revision_is_stable_and_content_sensitive(store, svc):
     _online(store, "w-1")
     _online(store, "w-2")
@@ -328,12 +376,79 @@ def test_remove_all_nodes(store, svc):
 
 
 def test_remove_goals_prunes_model_state(store, svc):
-    """撤托管必须连带删掉该 profile 的运行态：残留的 READY 会让 dashboard 在
+    """撤托管必须连带删掉该 profile 的运行态：残留的 running 会让 dashboard 在
     worker 已剪枝之后继续显示"在跑"，也会被 _in_use_gpus 当成占卡而挡住新下发。"""
     _online(store, "w-1")
     svc.set_goals(profile="qwen", node_ids=["w-1"], create=True)
-    svc.record_model_states("w-1", {"qwen": {"state": "READY", "gpu": [0, 1]}}, now=2.0)
+    svc.record_model_states("w-1", {"qwen": {"state": "running", "gpu": [0, 1]}}, now=2.0)
     svc.remove_goals(profile="qwen", node_ids=["w-1"])
+    assert store.list_model_states(node_id="w-1") == []
+
+
+# ---------------- remove 侧展示名归一（裁决2）----------------
+def test_remove_goals_by_display_name_hits_stem_goal(store, svc, models):
+    """set 能用展示名，remove/stop 也必须能用（Task 12 CLI `goal remove --profile 展示名`）。
+
+    remove 侧不归一时，调用方原词（展示名）拼出的 goal_id 查无此行 → 全进 missing，
+    与 set 的体验分裂；台账里 stem goal 永远撤不掉，直到运维发现文件名才知情。"""
+    _add_display_profile(models)
+    _online(store, "w-1")
+    store.update_node_capacity("w-1", capacity={"gpu_count": 4, "vram_total_mb": 157280},
+                               runtimes={"vllm": {"ok": True}},
+                               local_profiles=["qwen-fast"], now=1.0)
+    assert svc.set_goals(profile="qwen-display", node_ids=["w-1"], create=True)["created"] == 1
+    out = svc.remove_goals(profile="qwen-display", node_ids=["w-1"])
+    assert out["removed"] == ["qwen-fast@@w-1"]
+    assert store.list_goals() == []
+    # 裁决2 算法（候选名 × 节点全组合）的必然副产品：展示名拼出的 goal_id 恒不落库
+    # （set 侧只认 stem），故它进 missing。钉住而非回避——missing 语义是"查无此目标"，
+    # 本就属实；若改成"stem 命中即不再生成原词组合"，本断言转红、逼迫重裁决。
+    assert out["missing"] == ["qwen-display@@w-1"]
+
+
+def test_remove_goals_works_after_profile_file_deleted(store, svc, models):
+    """profile 文件已删仍必须能撤掉台账 goal（裁决2 硬要求）。
+
+    归一失败不得连带撤不掉：set 之后 YAML 被删是正常运维序列（撤模型 = 先删源再撤
+    托管，或反过来），_resolve_names 读取失败必须退化为 [原词] 单候选。若归一实现
+    在读取失败时返回空候选，remove 会查无目标 → goal 永远撤不掉、worker 永久托管。"""
+    _online(store, "w-1")
+    assert svc.set_goals(profile="qwen", node_ids=["w-1"], create=True)["created"] == 1
+    (models / "vllm" / "qwen.yaml").unlink()
+    out = svc.remove_goals(profile="qwen", node_ids=["w-1"])
+    assert out["removed"] == ["qwen@@w-1"]
+    assert store.list_goals() == []
+
+
+def test_remove_all_nodes_by_display_name(store, svc, models):
+    """--all 路径按展示名查库（list_goals(profile=展示名)）恒空 → 必须归一为 stem 再查。"""
+    _add_display_profile(models)
+    _online(store, "w-1")
+    _online(store, "w-2")
+    for nid in ("w-1", "w-2"):
+        store.update_node_capacity(nid, capacity={"gpu_count": 4, "vram_total_mb": 157280},
+                                   runtimes={"vllm": {"ok": True}},
+                                   local_profiles=["qwen-fast"], now=1.0)
+    assert svc.set_goals(profile="qwen-display", node_ids=None,
+                         all_nodes=True, create=True)["created"] == 2
+    out = svc.remove_goals(profile="qwen-display", node_ids=None, all_nodes=True)
+    assert sorted(out["removed"]) == ["qwen-fast@@w-1", "qwen-fast@@w-2"]
+    assert store.list_goals() == []
+
+
+def test_remove_by_display_name_prunes_model_state(store, svc, models):
+    """连带清 model_states 必须按**被删 goal 行的 profile 字段**（stem），不能用调用方
+    原词：model_states.profile 来自 worker 回流 = stem，拿展示名去删恒不命中 →
+    goal 已撤而运行态残留，dashboard 继续显示"在跑"且 _in_use_gpus 继续把它当占卡。"""
+    _add_display_profile(models)
+    _online(store, "w-1")
+    store.update_node_capacity("w-1", capacity={"gpu_count": 4, "vram_total_mb": 157280},
+                               runtimes={"vllm": {"ok": True}},
+                               local_profiles=["qwen-fast"], now=1.0)
+    svc.set_goals(profile="qwen-display", node_ids=["w-1"], create=True)
+    svc.record_model_states("w-1", {"qwen-fast": {"state": "running", "gpu": [0, 1]}}, now=2.0)
+    out = svc.remove_goals(profile="qwen-display", node_ids=["w-1"])
+    assert out["removed"] == ["qwen-fast@@w-1"]
     assert store.list_model_states(node_id="w-1") == []
 
 
@@ -352,12 +467,63 @@ def test_mark_stage_on_absent_goal_is_silent(store, svc):
 
 def test_record_model_states_overwrites_and_prunes(store, svc):
     _online(store, "w-1")
-    svc.record_model_states("w-1", {"qwen": {"state": "READY", "port": 8101,
+    svc.record_model_states("w-1", {"qwen": {"state": "running", "port": 8101,
                                              "gpu": [0, 1], "pid": 7}}, now=1.0)
     row = store.list_model_states(node_id="w-1")[0]
-    assert row["state"] == "READY" and row["port"] == 8101 and row["gpu"] == [0, 1]
+    assert row["state"] == "running" and row["port"] == 8101 and row["gpu"] == [0, 1]
     svc.record_model_states("w-1", {}, now=2.0)          # 空集 = 该节点当前无在跑模型
     assert store.list_model_states(node_id="w-1") == []
+
+
+# ---------------- 占卡词表（裁决1）----------------
+#: 与 Task 9 reconcile._STATE_OF_STAGE 的写入值逐一对应（全仓唯一写入口是
+#: record_model_states）。夹具若用生产从不产生的虚构值（如大写 READY），实现与
+#: 夹具同错 → 单测全绿而生产"在用 GPU"恒为空集，gate 两项卡位检查静默失效。
+OCCUPYING = [("running", [0, 1]), ("starting", [1, 2]), ("degraded", [3])]
+#: stopped/failed 是终态（worker 已释放卡位）；pending 是 goal 侧 stage 回流、从未占卡。
+#: 词表内任何一个值的增减都可能静默改变放行面，四态 + 未知态必须钉死。
+FREE = [("stopped", [0, 1]), ("failed", [0, 1]), ("pending", [0, 1]), ("weird-state", [0, 1])]
+
+
+def test_occupying_states_constant_matches_task9_vocabulary():
+    """占卡词表是跨任务共享常量（Task 9 写入 / gate 消费 / 计划文本引用的唯一来源）。
+
+    小写六值 = Task 9 _STATE_OF_STAGE 实际写入值 + M0 心跳透传的过渡期兼容值；
+    任何一侧改词表必须同步改这条断言，防止"中心白名单与生产写入值零交集"复发。"""
+    assert {"running", "starting", "degraded", "READY", "STARTING", "UP"} == GPU_OCCUPYING_STATES
+
+
+def test_in_use_gpus_counts_production_states(store, svc):
+    """running/starting/degraded 逐一占卡；stopped/failed/未知态不占卡。
+
+    白名单少一个小写值 → 对应生产态不占卡 → 卡位冲突/节点占满检查静默失效；
+    白名单多一个终态 → 已停模型永久占卡，节点被越积越多的僵尸行填满、再不可下发。
+    record_model_states 全量覆盖同节点，故每个状态单独一拍写入后立即断言。"""
+    _online(store, "w-1")
+    _online(store, "w-2")
+    for state, gpus in OCCUPYING:
+        svc.record_model_states("w-1", {"qwen": {"state": state, "gpu": gpus}}, now=1.0)
+        assert svc._in_use_gpus(["w-1"]).get("w-1") == gpus, f"{state} 必须占卡"
+    for state, _ in FREE:
+        svc.record_model_states("w-1", {"qwen": {"state": state, "gpu": [0, 1]}}, now=2.0)
+        assert "w-1" not in svc._in_use_gpus(["w-1"]), f"{state} 不得占卡"
+    # 按节点过滤：他节点的占卡不得混入本节点（gate 的冲突判定以 node 为键）
+    svc.record_model_states("w-2", {"qwen": {"state": "running", "gpu": [3]}}, now=3.0)
+    assert svc._in_use_gpus(["w-2"]) == {"w-2": [3]}
+    assert svc._in_use_gpus(["w-1"]) == {}
+
+
+def test_set_goals_skips_when_production_state_occupies_gpus(store, svc):
+    """端到端：Task 9 写入的真实 state（running）必须让 gate 判卡位冲突。
+
+    白名单与写入值零交集时本用例转红——这是"gate 卡位冲突/节点占满检查生产静默
+    失效"的最小复现：夹具改用 running 后，旧实现的 `in ("READY","STARTING","UP")`
+    过滤把在用集滤成空，冲突下发被放行成 worker 侧 gpu_lock 冲突的毒 goal。"""
+    _online(store, "w-1")
+    svc.record_model_states("w-1", {"other": {"state": "running", "gpu": [0, 1]}}, now=2.0)
+    out = svc.set_goals(profile="qwen", node_ids=["w-1"], create=True, gpu_list=[0, 1])
+    assert out["created"] == 0 and out["skipped"] == 1
+    assert "占用" in out["verdicts"][0].reason
 
 
 def test_record_model_states_ignores_non_dict_entries(store, svc):

@@ -50,6 +50,16 @@ ENV_OVERLAY_ALLOWLIST: frozenset[str] = frozenset({
 #: 键名命中任一子串即拒绝（纵深防御：防止有人把密钥塞进白名单形状的键里）
 SECRET_KEY_HINTS: tuple[str, ...] = ("API_KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "KEY")
 
+#: 占卡状态词表（裁决1）：**model_states.state 判"GPU 在用"的唯一来源**，Task 7/9
+#: 与计划文本都引用本常量，禁止各处再抄一份字面量。两套词表并收：
+#: - 小写 = Task 9 `reconcile._STATE_OF_STAGE` 的实际写入值（running/starting/
+#:   degraded 为"卡还握着"的三态；stopped/failed/pending 等终态或未起动态**不占卡**），
+#:   M1 起的主词表——中心唯一写入口 `record_model_states` 透传 worker 上报，此前
+#:   白名单只有大写值与生产写入值零交集，gate 的卡位冲突/占满两项检查恒空转；
+#: - 大写 = M0 心跳透传与历史数据可能携带的旧值，过渡期兼容，worker 全量升级后可删。
+GPU_OCCUPYING_STATES: frozenset[str] = frozenset(
+    {"running", "starting", "degraded", "READY", "STARTING", "UP"})
+
 VALID_INTENTS: tuple[str, ...] = ("start", "stop")
 VALID_TARGET_ROLES: tuple[str, ...] = ("primary", "replica", "benchmark")
 
@@ -157,6 +167,10 @@ class GoalService:
                 # 保守回退原文下发（等价无 --gpus），绝不冒异常炸破 set_goals"永不抛"契约。
                 logger.warning(f"profile {name} 的 gpu_list 合并进引擎段失败，按原文下发（worker 按 profile 声明锁卡）")
         enriched = {**source, "yaml": effective_yaml, "sha": effective_sha,
+                    # 裁决4：version 对**最终落库 sha** 派生（单一哈希链）。带 --gpus 时
+                    # sha 是合并后文本的哈希，version 若仍从原文 sha 派生，版本号的
+                    # 13 位哈希前缀指向一份不存在于任何台账行的内容，可追溯性悬空。
+                    "version": profiles.default_profile_version(effective_sha),
                     "gpu_count": need_gpus, "min_vram_mb": est,
                     "requested_gpus": list(gpu_list or [])}
 
@@ -172,11 +186,15 @@ class GoalService:
         for v in verdicts:
             if v.result != gate.RESULT_OK:
                 continue
-            if dry_run:
-                created += 1
-                continue
+            # 裁决4：上限检查必须在 dry_run 计数之前——否则 dry-run 报"预计 created=1"
+            # 而实跑 skip，Task 11/12 据 dry-run 结论给退出码/提示，演练通过实跑却被
+            # 静默跳过。dry-run 下 _count_for_node 读的是当前台账（演练不写库），
+            # 与紧随其后的实跑起点一致，两侧结论必然相同。
             if self._count_for_node(v.node_id) >= MAX_GOALS_PER_NODE:
                 v.result, v.reason = gate.RESULT_SKIP, f"节点 goal 数已达上限 {MAX_GOALS_PER_NODE}"
+                continue
+            if dry_run:
+                created += 1
                 continue
             # enriched 而非 source：_write_goal 读 min_vram_mb 进 placement，
             # 估算值只挂在 enriched 上——传 source 会让该列恒 0（死字段）。
@@ -204,9 +222,11 @@ class GoalService:
             if gone is None:
                 continue
             removed.append(goal_id)
-            # 连带清运行态：残留的 READY 会让 dashboard 在 worker 已剪枝后继续显示
-            # "在跑"，且 _in_use_gpus 会把它当占卡而挡住后续下发。
-            self.store.delete_model_state(str(gone["node_id"]), profile)
+            # 连带清运行态：残留的占卡行会让 dashboard 在 worker 已剪枝后继续显示
+            # "在跑"，且 _in_use_gpus 会把它当占卡而挡住后续下发。必须按**被删 goal 行
+            # 的 profile 字段**（恒为 stem）删——调用方原词可能是展示名，model_states
+            # 是 worker 回流（stem 建键），拿展示名去删恒不命中。
+            self.store.delete_model_state(str(gone["node_id"]), str(gone["profile"]))
             self.store.append_event("goal.delete", node_id=str(gone["node_id"]), goal_id=goal_id,
                                     payload={"profile": profile, "operator": created_by}, now=now)
         missing = [g for g in targets if g not in removed]
@@ -269,10 +289,12 @@ class GoalService:
         return [rows[n] for n in (node_ids or []) if n in rows]
 
     def _in_use_gpus(self, node_ids: list[str]) -> dict[str, list[int]]:
-        """在用 GPU：优先 model_states（更精确），回退 worker 侧 gpu_lock 上报。"""
+        """在用 GPU：来自 model_states 心跳回流中处于占卡状态（GPU_OCCUPYING_STATES）
+        的行。worker 侧 gpu_lock 真值只在本地，中心 M1 拿不到，不做回退上报路径。
+        """
         out: dict[str, list[int]] = {}
         for row in self.store.list_model_states():
-            if row["node_id"] not in node_ids or row["state"] not in ("READY", "STARTING", "UP"):
+            if row["node_id"] not in node_ids or row["state"] not in GPU_OCCUPYING_STATES:
                 continue
             for g in (row.get("gpu") or []):
                 out.setdefault(row["node_id"], []).append(int(g))
@@ -301,9 +323,36 @@ class GoalService:
 
     def _targets_for_removal(self, *, profile: str, node_ids: list[str] | None,
                              all_nodes: bool) -> list[str]:
+        """remove/stop 侧的展示名归一（裁决2）：候选名 = stem 优先 + 原词兜底。
+
+        set 侧已归一（source["name"]），remove 侧不归一会让展示名寻址全进 missing、
+        --all 查库查不到——同一 CLI 参数在 set/remove 两种语义是体验分裂。
+        """
+        names = self._resolve_names(profile)
         if all_nodes:
-            return [g["goal_id"] for g in self.store.list_goals(profile=profile)]
-        return [goal_id_of(profile, n) for n in (node_ids or [])]
+            seen: dict[str, None] = {}
+            for name in names:
+                for g in self.store.list_goals(profile=name):
+                    seen.setdefault(str(g["goal_id"]), None)
+            return list(seen)
+        out: dict[str, None] = {}
+        for name in names:
+            for n in (node_ids or []):
+                out.setdefault(goal_id_of(name, n), None)
+        return list(out)
+
+    def _resolve_names(self, profile: str) -> list[str]:
+        """寻址名 → 候选规范名列表：读得到源 → [stem, 原词]；读不到 → [原词]。
+
+        读取失败**必须**回退单元素原词而非报错/空表——profile 文件被删后仍要能撤掉
+        台账 goal（撤模型 = 删 YAML 与撤 goal 是两个可任意先后的操作，归一失败不得
+        连带撤不掉）。stem==原词时天然去重为单元素。read_profile_source 契约是
+        "绝不抛异常"，故只看 ok 位。
+        """
+        source = profiles.read_profile_source(profile, MODELS_DIR)
+        if source.get("ok"):
+            return list(dict.fromkeys([str(source["name"]), profile]))
+        return [profile]
 
 
 def _safe_int(value: Any) -> int | None:
