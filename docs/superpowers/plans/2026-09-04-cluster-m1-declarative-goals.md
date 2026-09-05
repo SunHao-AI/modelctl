@@ -3551,7 +3551,9 @@ def apply_snapshot(snapshot: dict[str, Any], *, models_dir: Path, cache_dir: Pat
     result = SyncResult(revision=revision)
 
     if revision and state["revision"] == revision:
-        result.skipped = [str(g["goal_id"]) for g in goals]
+        # 短路路径只产 revision + drift 两字段：skipped 全下游无消费者（reconcile/CLI
+        # 都不读），且 `test_second_apply_with_same_revision_is_noop` 钉死 skipped==[]。
+        # drift 必须扫：force=False 时"只报不修"全靠这里。
         result.drift = scan_drift(cache_dir, models_dir)
         return result
 
@@ -3592,7 +3594,12 @@ def apply_snapshot(snapshot: dict[str, Any], *, models_dir: Path, cache_dir: Pat
 
 
 def _atomic_write(path: Path, text: str, *, backup: str | None) -> None:
-    """同目录临时文件 + os.replace。任一步失败必须清掉 .tmp（不留半成品）。"""
+    """同目录临时文件 + os.replace。任一步失败必须清掉 .tmp（不留半成品）。
+
+    清理路径按继承树泛兜（BaseException）：磁盘满之外的编码/权限/未知异常同样
+    不得固化半成品——.tmp 残留 + 下一轮同 revision 短路 = 半途状态永久固化。
+    unlink 自身失败绝不允许吞掉原异常（嵌套 try）。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     try:
@@ -3600,8 +3607,11 @@ def _atomic_write(path: Path, text: str, *, backup: str | None) -> None:
             _write_text_quiet(path.with_name(path.name + ".master"), backup)
         tmp.write_text(text, encoding="utf-8")
         os.replace(tmp, path)
-    except OSError:
-        tmp.unlink(missing_ok=True)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError as clean_exc:  # noqa: BLE001 — 清理失败只留痕，原异常照常上抛
+            logger.warning(f"集群 sync 清理 {tmp.name} 失败: {clean_exc}")
         raise
 
 
@@ -3646,7 +3656,7 @@ def scan_drift(cache_dir: Path, models_dir: Path) -> list[str]:
 - [ ] **Step 4: 运行确认通过**
 
 Run: `uv run pytest tests/test_cluster_sync_writer.py -q`
-Expected: PASS（22 条）
+Expected: PASS（21 条）
 
 - [ ] **Step 5: 提交**
 
@@ -5074,8 +5084,7 @@ def apply_snapshot(snapshot: dict[str, Any], *, models_dir: Path, cache_dir: Pat
     """
     ...
     if revision and not force and state["revision"] == revision:
-        result.skipped = [str(g["goal_id"]) for g in goals]
-        result.drift = scan_drift(cache_dir, models_dir)
+        result.drift = scan_drift(cache_dir, models_dir)   # 只报不修；skipped 死字段不赋值
         return result
 ```
 
