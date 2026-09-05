@@ -252,6 +252,21 @@ def build_parser() -> argparse.ArgumentParser:
     cy = csub.add_parser("sync", help="强制节点立即全量同步（不等 revision 变化）")
     cy.add_argument("--node", action="append", default=None, metavar="NODE_ID")
     cy.add_argument("--all", action="store_true", help="全部已注册节点")
+    cn = csub.add_parser("node", help="节点治理：禁用/启用/轮换 token/踢除/退役（spec §2.1）")
+    nsub = cn.add_subparsers(dest="node_action", required=True)
+    for act, hlp in (("disable", "禁用：hello/join 拒；goal 台账不动"),
+                     ("enable", "解除禁用：状态由下次 hello/心跳自然决定"),
+                     ("rotate-token", "轮换节点 token：响应一次性给新值，须人工写该节点 .env 后重启"),
+                     ("kick", "主动断连：worker 指数退避后自动重连"),
+                     ("retire", "退役：级联撤销该节点全部 goal（二次确认）")):
+        np = nsub.add_parser(act, help=hlp)
+        np.add_argument("--node", required=True, metavar="NODE_ID")
+        if act == "retire":
+            np.add_argument("--yes", action="store_true", help="跳过二次确认（脚本/cron 用）")
+    ce = csub.add_parser("events", help="集群事件流（读中心 events 台账，中心已格式化）")
+    ce.add_argument("--node", default="", metavar="NODE_ID", help="按节点过滤")
+    ce.add_argument("--kind", default="", metavar="KIND", help="事件类型过滤（非法值中心 400）")
+    ce.add_argument("--limit", type=int, default=50, help="条数上限 1..1000（默认 50）")
     # §2.2 TensorRT-LLM 引擎编译
     tp = sub.add_parser("trtllm", help="TensorRT-LLM 编译/检查子命令")
     tp.add_argument("action", choices=["build", "status"])
@@ -1278,6 +1293,10 @@ def _cmd_cluster(args) -> int:
         return _cmd_cluster_stop(args)
     if args.action == "sync":
         return _cmd_cluster_sync(args)
+    if args.action == "node":
+        return _cmd_cluster_node(args)
+    if args.action == "events":
+        return _cmd_cluster_events(args)
     if args.action == "join-token":
         return _cmd_cluster_join_token(args)
     return 2
@@ -1680,6 +1699,66 @@ def _cmd_cluster_sync(args) -> int:
     if nodes and rc == 0:
         print(f"已排队强制同步 {len(nodes)} 个节点（下一枚心跳 ack 无条件带全量快照）")
     return rc
+
+
+def _confirm_or_yes(args, question: str) -> bool:
+    """破坏性操作闸门：--yes 直通；交互 y/Y 确认；EOF（非交互终端）拒绝。"""
+    if getattr(args, "yes", False):
+        return True
+    try:
+        return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+
+
+def _cmd_cluster_node(args) -> int:
+    from urllib.parse import quote
+
+    node = quote(args.node, safe="")
+    act = args.node_action
+    if act == "retire":
+        # 确认文案必须带真实连带数：先查该节点 goals（查不到按 0 并报提示，不阻断退役）
+        gs, gb = _cluster_request("GET", f"/cluster/goals?node_id={quote(args.node, safe='')}")
+        n_goals = len(gb.get("goals", [])) if gs == 200 else 0
+        if not _confirm_or_yes(args, f"退役节点 {args.node}：将连带撤销 {n_goals} 个托管目标"
+                                     f"（不可恢复，events 审计保留），确认？"):
+            print("已取消")
+            return 2
+        status, body = _cluster_request("DELETE", f"/cluster/nodes/{node}")
+        if status != 200:
+            logger.error(f"退役失败 {args.node}: {_center_detail(status, body)}")
+            return 2
+        print(f"节点 {args.node} 已退役（连带撤销 {body.get('removed_goals', 0)} 个目标）")
+        return 0
+    status, body = _cluster_request("POST", f"/cluster/nodes/{node}/{act}")
+    if status != 200:
+        logger.error(f"操作失败 {act} {args.node}: {_center_detail(status, body)}")
+        return 2
+    if act == "rotate-token":
+        print(f"新 node_token: {body.get('node_token', '')}")
+        print(f"注意: {body.get('hint', '')}")
+        print("旧 token 立即失效" + ("（已顺带断开当前连接）" if body.get("kicked") else ""))
+    elif act in ("disable", "kick"):
+        verb = "禁用" if act == "disable" else "踢除"
+        print(f"已{verb} {args.node}" + ("（顺带断开当前连接）" if body.get("kicked") else "（当时无连接）"))
+    else:
+        print(f"已解除禁用 {args.node}（状态将由其下次 hello/心跳决定）")
+    return 0
+
+
+def _cmd_cluster_events(args) -> int:
+    from urllib.parse import quote
+
+    pairs = (("node_id", args.node), ("kind", args.kind), ("limit", str(args.limit)))
+    query = "&".join(f"{k}={quote(v, safe='')}" for k, v in pairs if v)
+    status, body = _cluster_request("GET", "/cluster/events" + (f"?{query}" if query else ""))
+    if status != 200:
+        logger.error(f"事件查询失败: {_center_detail(status, body)}")
+        return 2
+    rows = [[e.get("ts", ""), e.get("node_id") or "-", e.get("kind", ""), e.get("text", "")]
+            for e in body.get("events", [])]
+    _print_table(["时间", "节点", "类型", "描述"], rows, dim_indices=(2,))
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
