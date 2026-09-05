@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from modelctl.core.cluster import wsproto
 from modelctl.core.cluster.nodes import AuthError, NodeRegistry
 from modelctl.core.cluster.store import ClusterStore
 from modelctl.core.cluster.wsproto import HelloMsg
@@ -69,7 +70,7 @@ def test_bad_token_rejected(reg: NodeRegistry) -> None:
 def test_heartbeat_then_sweep(reg: NodeRegistry) -> None:
     jt = reg.ensure_join_token()
     reg.handle_hello(HelloMsg(node_id="w-1", lan="", key=jt, meta={}))
-    reg.handle_heartbeat("w-1", {"profiles": {}}, now=0.0)
+    reg.handle_heartbeat("w-1", wsproto.parse_heartbeat_v2({"profiles": {}}), now=0.0)
     assert reg.store.get_node("w-1")["status"] == "online"
     assert ("w-1", "stale") in reg.sweep(now=95.0)
 
@@ -78,7 +79,7 @@ def test_node_view_masks_token(reg: NodeRegistry) -> None:
     jt = reg.ensure_join_token()
     nt = reg.handle_hello(HelloMsg(node_id="w-1", lan="lan-9", key=jt,
                                    meta={"hostname": "w1"}))[0]["node_token"]
-    reg.handle_heartbeat("w-1", {}, now=100.0)
+    reg.handle_heartbeat("w-1", wsproto.parse_heartbeat_v2({}), now=100.0)
     view = reg.list_node_views(now=105.0)[0]
     assert "node_token" not in view
     assert view["token_mask"] == "***" + nt[-4:]

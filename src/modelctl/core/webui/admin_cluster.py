@@ -28,6 +28,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from modelctl.core.cluster import config, tokens, wsproto
+from modelctl.core.cluster.goals import GoalService
 from modelctl.core.cluster.nodes import AuthError, NodeRegistry
 from modelctl.core.cluster.store import ClusterStore
 from modelctl.core.webui.admin_auth import require_auth
@@ -46,7 +47,7 @@ def get_registry() -> NodeRegistry:
     if _REGISTRY is None:
         store = ClusterStore()
         store.init_db()
-        _REGISTRY = NodeRegistry(store)
+        _REGISTRY = NodeRegistry(store, goals=GoalService(store))
     return _REGISTRY
 
 
@@ -185,9 +186,9 @@ async def ws_cluster(ws: WebSocket):
                 await ws.send_text(wsproto.dumps(wsproto.make_error("消息解析失败")))
                 continue
             if mtype == "heartbeat":
-                reg.handle_heartbeat(node_id, wsproto.parse_heartbeat(data), now=time.time())
+                ack = reg.handle_heartbeat(node_id, wsproto.parse_heartbeat_v2(data), now=time.time())
                 _sweep_if_due()
-                await ws.send_text(wsproto.dumps({"t": "ack"}))
+                await ws.send_text(wsproto.dumps(ack))
             elif mtype == "event":
                 payload = data.get("payload")
                 reg.store.append_event(str(data.get("kind", "")), node_id=node_id,

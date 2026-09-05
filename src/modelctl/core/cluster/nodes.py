@@ -19,9 +19,12 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from modelctl.core.cluster import config, tokens
+from modelctl.core.cluster import config, tokens, wsproto
+from modelctl.core.cluster.goals import GoalService
 from modelctl.core.cluster.store import ClusterStore, mask_tail
 from modelctl.core.cluster.wsproto import HelloMsg, make_welcome
+
+MAX_QUEUED_ACTIONS = 16
 
 _JOIN_TOKEN_META_KEY = "join_token"
 
@@ -31,8 +34,15 @@ class AuthError(Exception):
 
 
 class NodeRegistry:
-    def __init__(self, store: ClusterStore) -> None:
+    def __init__(self, store: ClusterStore, goals: GoalService | None = None) -> None:
         self.store = store
+        self.goals = goals
+        # node_id → 待下发 action 帧队列（心跳 ack 取空）。进程内即可：中心重启后
+        # 队列清空是可接受的——worker 侧 reconciler 会自行把实际状态逼向本地 goal。
+        self._actions: dict[str, list[dict[str, Any]]] = {}
+        self._seq_base: dict[str, int] = {}
+        # node_id → 上次已上报的漂移集合，用于"只在变化时记事件"
+        self._drift_seen: dict[str, set[str]] = {}
 
     def ensure_join_token(self) -> str:
         existing = self.store.get_meta(_JOIN_TOKEN_META_KEY)
@@ -69,8 +79,92 @@ class NodeRegistry:
         welcome = make_welcome(node_token, config.heartbeat_interval_s(), config.lease_s())
         return welcome, hello.node_id
 
-    def handle_heartbeat(self, node_id: str, payload: dict[str, Any], now: float) -> None:
+    # ---- 心跳回流 + ack 组装（M1）----
+    def handle_heartbeat(self, node_id: str, hb: dict[str, Any], now: float) -> dict[str, Any]:
+        """落库 worker 事实，并组装 ack（sync 捎带 + action 投递）。
+
+        `hb` 必须是 wsproto.parse_heartbeat_v2 的输出。三段落库遵循同一原则：
+        **None 表示 worker 未上报（保留既有事实），[]/{} 表示明确为空（照实覆盖）**
+        ——混用会让旧版 worker 每 10s 把新版写入的容量/模型状态抹成空。
+        """
         self.store.touch_heartbeat(node_id, now=now, lease_s=config.lease_s())
+        self.store.update_node_capacity(
+            node_id, capacity=hb.get("capacity"), runtimes=hb.get("runtimes"),
+            local_profiles=hb.get("local_profiles"), now=now)
+
+        profiles = hb.get("profiles")
+        if self.goals is not None and isinstance(profiles, dict):
+            self.goals.record_model_states(node_id, profiles, now)
+            self._sync_stages(node_id, profiles, now)
+
+        ack: dict[str, Any] = {"t": "ack"}
+        if self.goals is not None:
+            snapshot = self.goals.snapshot_for(node_id)
+            reported = ""
+            goal_sync = hb.get("goal_sync")
+            if isinstance(goal_sync, dict):
+                reported = str(goal_sync.get("revision", ""))
+            if snapshot["revision"] != reported:
+                ack["sync"] = snapshot
+                self.store.set_node_last_goal_sync_sha(node_id, snapshot["revision"])
+        self._record_drift(node_id, hb.get("drift"), now=now)
+        actions = self.drain_actions(node_id)
+        if actions:
+            ack["actions"] = actions
+        return ack
+
+    def _sync_stages(self, node_id: str, profiles: dict[str, Any], now: float) -> None:
+        """把 worker 上报的 goal 阶段回写 goals 表（只认本节点声明过的 profile）。"""
+        goals = self.goals
+        if goals is None:  # 调用点已保证非 None，此守卫仅为类型窄化（mypy）
+            return
+        for goal in self.store.list_goals(node_id=node_id):
+            info = profiles.get(str(goal["profile"]))
+            if not isinstance(info, dict):
+                continue
+            stage = str(info.get("stage", ""))
+            if not stage:
+                continue
+            goals.mark_stage(str(goal["goal_id"]), stage,
+                             reason=str(info.get("reason", "")),
+                             error_class=str(info.get("error_class", "")), now=now)
+
+    def _record_drift(self, node_id: str, drift: Any, *, now: float) -> None:
+        """漂移是持续状态：只在集合发生新增时记事件，避免每心跳刷一条。"""
+        if not isinstance(drift, list):
+            return
+        current = {str(d) for d in drift}
+        previous = self._drift_seen.get(node_id, set())
+        for goal_id in sorted(current - previous):
+            self.store.append_event("goal.drift", node_id=node_id, goal_id=goal_id,
+                                    payload={"message": "worker 本地 profile 与中心声明不一致"},
+                                    now=now)
+        if current:
+            self._drift_seen[node_id] = current
+        else:
+            self._drift_seen.pop(node_id, None)
+
+    # ---- 指令队列（REST/WS 写入，心跳 ack 取走）----
+    def push_action(self, node_id: str, action: str, *, goal_id: str = "",
+                    profile: str = "") -> bool:
+        """排队一条指令。节点离线也保留（等其回连）；超出上限拒绝而非静默丢弃。"""
+        queue = self._actions.setdefault(node_id, [])
+        if len(queue) >= MAX_QUEUED_ACTIONS:
+            return False
+        queue.append(wsproto.make_action(len(queue) + 1, action,
+                                         goal_id=goal_id, profile=profile))
+        return True
+
+    def drain_actions(self, node_id: str) -> list[dict[str, Any]]:
+        """取空队列并统一编号（seq 用全局递增的进程内计数，保证同连接内不重复）。
+
+        入队时的 seq 只用于人读；真正给 worker 的 seq 在此重排，避免"队列被取空
+        后再次入队"产生与历史 seq 撞号，导致 worker 把新指令当旧回执。
+        """
+        queue = self._actions.pop(node_id, [])
+        base = int(self._seq_base.get(node_id, 0))
+        self._seq_base[node_id] = base + len(queue)
+        return [dict(f, seq=base + i + 1) for i, f in enumerate(queue)]
 
     def sweep(self, now: float) -> list[tuple[str, str]]:
         return self.store.sweep_expired(now=now, lease_s=config.lease_s())
