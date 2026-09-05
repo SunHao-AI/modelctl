@@ -3606,7 +3606,9 @@ def _atomic_write(path: Path, text: str, *, backup: str | None) -> None:
         if backup is not None and backup != text:      # 内容真的变了才留 .master 回退
             _write_text_quiet(path.with_name(path.name + ".master"), backup)
         tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
+        # 走 Path.replace 而非 os.replace：语义相同（pathlib 内部即 os.replace），
+        # 但保留 monkeypatch Path.replace 的注入缝——原子性测试靠它模拟 rename 失败。
+        tmp.replace(path)
     except BaseException:
         try:
             tmp.unlink(missing_ok=True)
