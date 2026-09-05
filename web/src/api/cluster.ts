@@ -12,6 +12,8 @@ export interface NodeView {
   token_mask: string;
   since_seen_s: number | null;
   lease_left_s: number | null;
+  capacity: Record<string, number> | null;
+  capacity_text: string;
 }
 
 export interface ClusterStatus {

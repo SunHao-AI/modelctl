@@ -142,6 +142,21 @@ def parse_ack(data: Any) -> dict[str, Any]:
     return out
 
 
+def parse_result(data: Any) -> dict[str, Any]:
+    """result 帧消毒（中心侧使用；`ok` 三态：True/False/None=未知）。
+
+    `ok` 与 seq/action 不同：**不能**把"字段缺失/类型不对"折叠成 False。中心拿它
+    落 `action.result` 事件供排障，假报一次"指令失败"足以让运维对着一台好机器
+    查半天；None 才诚实地表达"worker 回了但没告诉我们结果"。
+    """
+    if not isinstance(data, dict):
+        return {"seq": 0, "ok": None, "detail": ""}
+    ok = data.get("ok")
+    detail = data.get("detail")
+    return {"seq": _safe_seq(data), "ok": ok if isinstance(ok, bool) else None,
+            "detail": str(detail)[:500] if isinstance(detail, str) else ""}
+
+
 def _opt_dict(value: Any) -> dict | None:
     return value if isinstance(value, dict) else None
 

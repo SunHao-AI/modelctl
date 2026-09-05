@@ -29,6 +29,19 @@ MAX_QUEUED_ACTIONS = 16
 _JOIN_TOKEN_META_KEY = "join_token"
 
 
+def capacity_text(capacity: dict | None) -> str:
+    """把心跳上报的容量映射格式化为"4 卡 / 154 GiB"。缺任一字段一律 "-"。
+
+    vram_total_mb → GiB 四舍五入取整（展示用，精确值仍在 capacity 原始字段里）。
+    """
+    if not isinstance(capacity, dict):
+        return "-"
+    gpus, vram = capacity.get("gpu_count"), capacity.get("vram_total_mb")
+    if not isinstance(gpus, int) or not isinstance(vram, int) or gpus <= 0 or vram <= 0:
+        return "-"
+    return f"{gpus} 卡 / {round(vram / 1024)} GiB"
+
+
 class AuthError(Exception):
     """hello 鉴权失败：key 既不是 join_token 也不匹配任何 node_token。"""
 
@@ -41,6 +54,8 @@ class NodeRegistry:
         # 队列清空是可接受的——worker 侧 reconciler 会自行把实际状态逼向本地 goal。
         self._actions: dict[str, list[dict[str, Any]]] = {}
         self._seq_base: dict[str, int] = {}
+        # 待处理的"强制全量 sync"标记（REST 打标 → 下一枚 ack 消费掉）
+        self._force_sync: set[str] = set()
         # node_id → 上次已上报的漂移集合，用于"只在变化时记事件"
         self._drift_seen: dict[str, set[str]] = {}
 
@@ -104,8 +119,12 @@ class NodeRegistry:
             goal_sync = hb.get("goal_sync")
             if isinstance(goal_sync, dict):
                 reported = str(goal_sync.get("revision", ""))
-            if snapshot["revision"] != reported:
-                ack["sync"] = snapshot
+            # forced：REST 打标的"强制全量 sync"。即便 revision 与 worker 上报值一致
+            # 也必须带快照——这正是"强制"的全部含义：worker 本地文件被改坏而 revision
+            # 未变，短路会让漂移永不自愈。标记一次性（消费即清），不会每拍白传全量。
+            forced = self._consume_force_sync(node_id)
+            if snapshot["revision"] != reported or forced:
+                ack["sync"] = dict(snapshot, force=True) if forced else snapshot
                 self.store.set_node_last_goal_sync_sha(node_id, snapshot["revision"])
         self._record_drift(node_id, hb.get("drift"), now=now)
         actions = self.drain_actions(node_id)
@@ -176,7 +195,25 @@ class NodeRegistry:
         lease_expiry = node.get("lease_expiry")
         view["since_seen_s"] = round(now - last_seen, 1) if last_seen is not None else None
         view["lease_left_s"] = round(lease_expiry - now, 1) if lease_expiry is not None else None
+        view["capacity_text"] = capacity_text(node.get("capacity"))
         return view
 
     def list_node_views(self, now: float) -> list[dict[str, Any]]:
         return [self.node_view(n, now) for n in self.store.list_nodes()]
+
+    # ---- 强制全量 sync（REST 打标，心跳消费）----
+    def mark_force_sync(self, node_id: str) -> None:
+        """打标"下次心跳无条件带全量快照"。set 而非 dict[bool]：幂等天然成立。
+
+        刻意不落 SQLite：强制 sync 是"此刻这次运维动作"，中心重启即作废是可接受的
+        ——重启后 worker 重连时 revision 若已一致，说明确实没有内容要补发。
+        节点若一直离线，标记会留存到它下次上线，属期望行为（那正是最想修盘的时刻）。
+        """
+        self._force_sync.add(node_id)
+
+    def _consume_force_sync(self, node_id: str) -> bool:
+        """取走并清除标记：**一次性**。否则该节点每 10s 收一份全量 YAML 直到永远。"""
+        if node_id not in self._force_sync:
+            return False
+        self._force_sync.discard(node_id)
+        return True

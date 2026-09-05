@@ -98,3 +98,20 @@ def test_parse_heartbeat_v2_accepts_top_level_for_rolling_upgrade():
     """M0 心跳把字段放 payload；对混版本对端，顶层位置也须能解。"""
     got = wsproto.parse_heartbeat_v2({"profiles": {"a": {"state": "READY"}}})
     assert got["profiles"] == {"a": {"state": "READY"}}
+
+
+def test_parse_result_sanitizes_shape():
+    assert wsproto.parse_result({"t": "result", "seq": 4, "ok": True, "detail": "已受理"}) == {
+        "seq": 4, "ok": True, "detail": "已受理"}
+
+
+def test_parse_result_ok_missing_is_unknown_not_false():
+    """缺 ok 字段 → None（未知），不得折叠成 False：台账假报"指令失败"会误导排障。"""
+    assert wsproto.parse_result({"t": "result", "seq": 1})["ok"] is None
+    assert wsproto.parse_result({"t": "result", "seq": 1, "ok": "yes"})["ok"] is None
+
+
+def test_parse_result_rejects_non_dict_and_bool_seq():
+    assert wsproto.parse_result(None) == {"seq": 0, "ok": None, "detail": ""}
+    assert wsproto.parse_result({"seq": True, "ok": True, "detail": 5}) == {
+        "seq": 0, "ok": True, "detail": ""}

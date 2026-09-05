@@ -66,6 +66,7 @@ onBeforeUnmount(() => window.clearInterval(timer));
           <th class="py-2 pr-4">节点</th>
           <th class="py-2 pr-4">LAN</th>
           <th class="py-2 pr-4">角色</th>
+          <th class="py-2 pr-4">容量</th>
           <th class="py-2 pr-4">状态</th>
           <th class="py-2 pr-4">最后心跳</th>
           <th class="py-2 pr-4">租约剩余</th>
@@ -77,6 +78,7 @@ onBeforeUnmount(() => window.clearInterval(timer));
           <td class="py-2 pr-4 font-mono">{{ n.node_id }}</td>
           <td class="py-2 pr-4 text-slate-400">{{ n.lan_id || '-' }}</td>
           <td class="py-2 pr-4">{{ n.role }}</td>
+          <td class="py-2 pr-4 text-slate-400">{{ n.capacity_text }}</td>
           <td class="py-2 pr-4">
             <span class="rounded border px-2 py-0.5 text-xs" :class="STATUS_STYLE[n.status] || STATUS_STYLE.offline">
               {{ n.status }}
@@ -87,7 +89,7 @@ onBeforeUnmount(() => window.clearInterval(timer));
           <td class="py-2 text-slate-400">{{ n.hostname || n.host_ip || '-' }}</td>
         </tr>
         <tr v-if="!nodes.length">
-          <td colspan="7" class="py-6 text-center text-slate-500">暂无节点，等待 worker join…</td>
+          <td colspan="8" class="py-6 text-center text-slate-500">暂无节点，等待 worker join…</td>
         </tr>
       </tbody>
     </table>

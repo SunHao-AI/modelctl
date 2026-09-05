@@ -250,6 +250,52 @@ class GoalService:
                   if targets else f"profile {profile} 无任何 goal")
         return {"removed": removed, "missing": missing, "report": report}
 
+    _UPDATABLE: tuple[str, ...] = ("intent", "params", "env_overlay", "placement",
+                                   "runtime_ref", "target_role", "profile_version")
+
+    def update_goal(self, goal_id: str, *, fields: dict[str, Any],
+                    created_by: str = "", now: float | None = None) -> tuple[dict | None, str]:
+        """按需更新单个 goal 的可变字段。返回 (最新 goal 行或 None, 错误文案)。
+
+        `fields` 由调用方以 `model_dump(exclude_unset=True)` 产出——**未提供的键不
+        动**（Pydantic 默认值不是用户意图，混进来会把未填字段刷成默认值）。空 fields
+        视为调用方错误：没有任何字段要改却刷新 updated_at，会让"最后修改时间"说谎。
+        目标不存在 → (None, "")，由调用方转 404。
+
+        校验与 `set_goals` 同源（intent/target_role 枚举、env_overlay 白名单）：PUT 是
+        已存在 goal 的唯一改参通道，此处放松等于"下发时拦住、改参时放行"。
+        """
+        now = time.time() if now is None else now
+        goal = self.store.get_goal(goal_id)
+        if goal is None:
+            return None, ""
+        clean = {k: v for k, v in fields.items() if k in self._UPDATABLE}
+        if not clean:
+            return None, f"没有可更新字段（可更新：{list(self._UPDATABLE)}）"
+        if "intent" in clean:
+            if clean["intent"] not in VALID_INTENTS:
+                return None, f"非法 intent {clean['intent']!r}（仅 {VALID_INTENTS}）"
+            clean["intent"] = str(clean["intent"])
+        if "target_role" in clean and clean["target_role"] not in VALID_TARGET_ROLES:
+            return None, f"非法 target_role {clean['target_role']!r}（仅 {VALID_TARGET_ROLES}）"
+        if "env_overlay" in clean:
+            overlay, err = validate_env_overlay(clean["env_overlay"])
+            if err:
+                return None, err
+            clean["env_overlay"] = overlay          # None = 明确清空覆盖项
+        for key in ("params", "placement"):
+            if key in clean and not isinstance(clean[key], dict):
+                return None, f"{key} 必须是映射"
+        if "profile_version" in fields:
+            clean["profile_version"] = str(fields["profile_version"])
+        updated = self.store.update_goal(goal_id, now=now, **clean)
+        if updated is None:
+            return None, ""
+        self.store.append_event("goal.update", node_id=str(goal["node_id"]), goal_id=goal_id,
+                                payload={"profile": str(goal["profile"]),
+                                         "fields": sorted(clean), "operator": created_by}, now=now)
+        return updated, ""
+
     # ---------------- 下发快照（心跳 ack 捎带）----------------
     def snapshot_for(self, node_id: str) -> dict[str, Any]:
         """该节点的全量期望状态。revision 是内容哈希：同一 goal 集在中心重启后同值，
