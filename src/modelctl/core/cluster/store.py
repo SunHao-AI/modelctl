@@ -224,6 +224,62 @@ class ClusterStore:
             self._db().execute("UPDATE nodes SET status=? WHERE node_id=?", (status, node_id))
             self._db().commit()
 
+    def set_node_disabled(self, node_id: str, disabled: bool, *, status: str = "") -> bool:
+        """置/清 disabled；status 非空时同语句连带改写（禁用传 "disabled"）。
+
+        两条 UPDATE 分支而非一条拼串：status 可选出现在 f-string 里会把"传了非法
+        status"这类调用方错误伪装成 SQL 注入面，显式分支让 SQL 文本恒封闭。
+        """
+        if status and status not in NODE_STATUSES:
+            raise ValueError(f"非法节点状态: {status!r}，允许值 {NODE_STATUSES}")
+        with self._lock:
+            if status:
+                cur = self._db().execute(
+                    "UPDATE nodes SET disabled=?, status=? WHERE node_id=?",
+                    (1 if disabled else 0, status, node_id))
+            else:
+                cur = self._db().execute("UPDATE nodes SET disabled=? WHERE node_id=?",
+                                         (1 if disabled else 0, node_id))
+            self._db().commit()
+        return cur.rowcount > 0
+
+    def delete_node_cascade(self, node_id: str) -> int:
+        """退役级联：nodes + goals + model_states 三表**单事务**删除，返回连带 goals 数。
+
+        events 刻意不删（审计留痕）。原子性是本方法契约——"节点删了但它的 goal 还
+        在快照里"是毒台账：心跳风暴、gate 幽灵候选、前端死链三连。
+        """
+        with self._lock:
+            conn = self._db()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                n = conn.execute("SELECT COUNT(*) AS c FROM goals WHERE node_id=?",
+                                 (node_id,)).fetchone()["c"]
+                cur = conn.execute("DELETE FROM nodes WHERE node_id=?", (node_id,))
+                conn.execute("DELETE FROM goals WHERE node_id=?", (node_id,))
+                conn.execute("DELETE FROM model_states WHERE node_id=?", (node_id,))
+                conn.execute("COMMIT")
+            except Exception:
+                conn.rollback()
+                raise
+        return n if cur.rowcount else 0
+
+    def retire_node(self, node_id: str, *, append_event_fn=None) -> dict | None:
+        """退役节点：级联删除 + `node.retire` 事件；节点不存在返回 None 且不记事件。
+
+        事件经 `append_event_fn` 回调注入（而非内部硬调 self.append_event）：
+        restore 场景需要决定事件落"恢复后的新库"，接口缝在此留好（Task 5 消费）。
+        存在性必须在级联删除**前**判定——delete_node_cascade 对不存在节点同样返回 0，
+        删后再查无法区分"退役了个空节点"与"节点本就不存在"。
+        """
+        if self.get_node(node_id) is None:
+            return None
+        removed = self.delete_node_cascade(node_id)
+        if append_event_fn is not None:
+            append_event_fn("node.retire", node_id=node_id,
+                            payload={"removed_goals": removed, "operator": "api"})
+        return {"removed_goals": removed}
+
     def rotate_node_token(self, node_id: str) -> str | None:
         from modelctl.core.cluster.tokens import new_node_token
 

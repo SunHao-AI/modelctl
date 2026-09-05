@@ -47,6 +47,15 @@ class AuthError(Exception):
 
 
 class NodeRegistry:
+    """中心侧节点编排。
+
+    并发契约（终审 A-1 显式化）：`_actions/_seq_base/_force_sync/_drift_seen` 四个
+    进程内状态**只在单事件循环内**被安全访问——REST handler 与 WS 循环都跑在同一
+    uvicorn event loop 的协程里，方法体内无 await 即无切换点，天然互斥。违例场景：
+    把 `drain_actions`/`push_action` 挪到线程池（`run_in_executor`）或多 worker
+    部署（uvicorn --workers>1）都会破坏该前提——届时须加锁或外置状态。
+    """
+
     def __init__(self, store: ClusterStore, goals: GoalService | None = None) -> None:
         self.store = store
         self.goals = goals
@@ -82,6 +91,12 @@ class NodeRegistry:
             if str(known["node_id"]) != hello.node_id:
                 raise AuthError("node_id 与节点令牌不匹配")
             node_token = str(known["node_token"])  # 重连：沿用既有 token
+        # 禁用闸门（M2）：置于 token 校验之后、upsert 之前——先认身份再谈解禁，
+        # 未授权请求得到与"节点不存在"完全相同的文案，探测不出禁用态。join token
+        # 首次准入同样受闸：禁用是节点级意志，换准入令牌绕开不成。
+        existing = self.store.get_node(hello.node_id)
+        if existing is not None and existing.get("disabled"):
+            raise AuthError("节点已禁用")
         engines = hello.meta.get("engines")
         self.store.upsert_node(
             node_id=hello.node_id, node_token=node_token, lan_id=hello.lan,
@@ -217,3 +232,32 @@ class NodeRegistry:
             return False
         self._force_sync.discard(node_id)
         return True
+
+    # ---- 治理复合动作（M2：REST 只做参数消毒，复合写在此）----
+    def disable_node(self, node_id: str, *, conns_registry=None) -> dict | None:
+        """禁用：置位 + 事件；`conns_registry` 非空且该节点在线时顺带 revoke（等同一次 kick）。
+
+        goal 台账**不动**：禁用 ≠ 撤销声明，重新启用后 reconciler 按既有 revision 收敛。
+        """
+        if not self.store.set_node_disabled(node_id, True, status="disabled"):
+            return None
+        kicked = False
+        if conns_registry is not None:
+            kicked = conns_registry.revoke(node_id) is not None
+        self.store.append_event("node.disable", node_id=node_id,
+                                payload={"kicked": kicked, "operator": "api"})
+        return {"kicked": kicked}
+
+    def enable_node(self, node_id: str) -> dict | None:
+        if not self.store.set_node_disabled(node_id, False):
+            return None
+        self.store.append_event("node.enable", node_id=node_id, payload={"operator": "api"})
+        return {"ok": True}
+
+    def kick_node(self, node_id: str, conns_registry) -> dict | None:
+        if self.store.get_node(node_id) is None:
+            return None
+        kicked = conns_registry.revoke(node_id) is not None
+        self.store.append_event("node.kick", node_id=node_id,
+                                payload={"kicked": kicked, "operator": "api"})
+        return {"kicked": kicked}

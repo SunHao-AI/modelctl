@@ -58,6 +58,17 @@ class ConnectionRegistry:
             if self._current.get(node_id) == epoch:
                 self._current.pop(node_id, None)
 
+    def revoke(self, node_id: str) -> int | None:
+        """主动摘除该节点当前登记的 epoch 并返回它；无连接返回 None。
+
+        kick 的世代表入口：摘除后旧连接下一帧 `is_current` 必失败，WS 循环自行
+        发 error 帧 + close(4409)。被动感知是刻意取舍（与"旧连接后来者胜"同构）：
+        中心不持有连接对象，也就无需跨任务 send——代价是断连时延 ≤ 对端下一次
+        发帧（正常 ≤ 心跳周期）。
+        """
+        with self._mu:
+            return self._current.pop(node_id, None)
+
     def count(self) -> int:
         with self._mu:
             return len(self._current)
