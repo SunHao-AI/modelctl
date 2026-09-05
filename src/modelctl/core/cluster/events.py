@@ -50,7 +50,11 @@ def event_text(row: dict[str, Any]) -> str:
     if kind == "goal.create":
         return f"创建目标（{p.get('profile', '?')} intent→{p.get('intent', '?')}；操作者 {p.get('operator', '-')}）"
     if kind == "goal.update":
-        fields = ",".join(p.get("fields") or [])
+        # payload 经 WS event 帧原样入库（值任意）：fields 可能是非序列/含非字符串
+        # 元素，逐项类型过滤保证"永不抛"，否则 poison 行会让读端点持久 500。
+        raw = p.get("fields") or []
+        items = list(raw) if isinstance(raw, (list, tuple)) else [raw]
+        fields = ",".join(str(x) for x in items if isinstance(x, (str, int)))
         return f"更新目标（{p.get('profile', '?')} 字段 {fields or '-'}；操作者 {p.get('operator', '-')}）"
     if kind == "goal.delete":
         return f"撤销目标（{p.get('profile', '?')}；操作者 {p.get('operator', '-')}）"

@@ -107,6 +107,25 @@ def test_event_text_never_raises_on_garbage():
         assert isinstance(events.event_text(row), str)
 
 
+def test_event_text_goal_update_poison_fields_never_raises():
+    # payload 经 WS event 帧原样入库（值任意）：goal.update 的 fields 可能是
+    # 非列表 / 非字符串元素，拼装必须永不抛（否则读端点被 poison 行持久 500）
+    for payload in ({"fields": 123}, {"fields": ["intent", {"k": 1}]},
+                    {"fields": "intent"}, {"fields": {"a": 1}}, {"fields": [None, True]}):
+        assert isinstance(events.event_text({"kind": "goal.update", "payload": payload}), str)
+
+
+def test_events_poison_payload_endpoint_still_200(center):
+    import modelctl.core.webui.admin_cluster as ac
+    st = ac.get_registry().store
+    st.append_event("goal.update", node_id="w-1", payload={"fields": 123})
+    st.append_event("goal.update", node_id="w-1", payload={"fields": ["intent", {"k": 1}]})
+    r = center.get(EV, headers=_h())
+    assert r.status_code == 200
+    rows = [e for e in r.json()["events"] if e["kind"] == "goal.update"]
+    assert len(rows) == 2 and all(isinstance(e["text"], str) for e in rows)
+
+
 def test_create_goal_rejects_disabled_node(center):
     import modelctl.core.webui.admin_cluster as ac
     ac.get_registry().store.set_node_disabled("w-1", True, status="disabled")
@@ -115,3 +134,6 @@ def test_create_goal_rejects_disabled_node(center):
     assert r.status_code == 200
     rep = r.json()["report"]
     assert "禁用" in rep and r.json()["created"] == 0
+    # 判别性断言：旧 SKIP 行为同样含"禁用"且 created=0，唯 error verdict 才 errors=1
+    assert r.json()["errors"] == 1
+    assert "重新启用" in rep
