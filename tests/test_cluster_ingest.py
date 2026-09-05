@@ -31,6 +31,11 @@ def env(tmp_path, monkeypatch):
     reg = NodeRegistry(store, goals=goals)
     store.upsert_node(node_id="w-1", node_token="NT-1", lan_id="lan-1", role="worker",
                       host_ip="", hostname="", engines=None, now=1.0)
+    # gate._verdict_one 的 runtimes 检查排在容量之前：runtimes=None 直接 SKIP
+    # （"未上报≠可用"是 Task 4 钉死的保守口径）。set_goals 类用例必须先有
+    # runtimes/容量，与 Task 11 计划夹具同口径。
+    store.update_node_capacity("w-1", capacity={"gpu_count": 4, "vram_total_mb": 157280},
+                               runtimes={"vllm": {"ok": True}}, local_profiles=["qwen"], now=1.0)
     return store, goals, reg
 
 
