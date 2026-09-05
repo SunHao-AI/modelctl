@@ -93,22 +93,21 @@ def _engine_section(raw: Any, engine: str) -> dict[str, Any]:
     return section if isinstance(section, dict) else {}
 
 
-def _gpu_list_len(value: Any) -> int | None:
-    """profile 内 `gpu_list` 选中的卡数；未配置/解析失败返回 None。
+def _gpu_list_ids(value: Any) -> list[int]:
+    """profile 内 `gpu_list` 解析出的卡位列表；未配置/解析失败返回 []（视作未选卡）。
 
     各引擎适配器都以 `selected_gpus()`（base.py，读 engine_config.gpu_list）为实际
-    卡数：llamacpp 注释明写"与 gpu_count 二选一，配置后覆盖"，tp 系则要求与
-    tensor_parallel_size 一致。中心漏读它会拿字段值误判（如 gpu_list: "0,1" 的
-    llamacpp 被按缺省 8 卡拒发，或反之）。坏值（非整数/重复）交给 worker 的
-    check_requirements 报错，这里按未配置处理。
+    卡位：llamacpp 注释明写"与 gpu_count 二选一，配置后覆盖"，tp 系则要求与
+    tensor_parallel_size 一致。中心漏读它就拿字段值误判容量、放行 worker 必拒的
+    卡位冲突。坏值（非整数/重复）交给 worker 的 check_requirements 报错，这里按
+    未配置处理，绝不因坏值抛异常（与 _safe_int 同策略）。
     """
-    if value in (None, ""):
-        return None
+    if value is None or value == "":
+        return []
     try:
-        gpus = parse_gpu_list(value)
-    except Exception:  # noqa: BLE001 — GPUValidationError 等，坏值不作为容量依据
-        return None
-    return len(gpus) if gpus else None
+        return list(parse_gpu_list(value) or [])
+    except Exception:  # noqa: BLE001 — GPUValidationError 等，坏值不作为判定依据
+        return []
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -127,12 +126,16 @@ def _safe_int(value: Any, default: int = 0) -> int:
 
 
 def declared_gpu_count(raw: Any, engine: str) -> int:
-    """从 profile 原文推断所需 GPU 数；任何异常/缺字段一律保守取 1。
+    """从 profile 原文推断所需 GPU 数；任何异常一律保守取 1。
 
     与 worker 侧适配器同口径：引擎段 = `raw[engine]`（见 _engine_section）；
     `gpu_list`（实际选卡，覆盖计数字段）> 引擎计数字段；unsloth 的
     `tensor_parallel` 是布尔开关（开 → 至少 2 卡，取与 gpu_list 的下界 max）；
     llamacpp 未配置时跟随适配器的 8 卡缺省。
+
+    缺省回落**显式判 None/""**，不走 `or` 短路：0 是显式值（worker 按 0 校验），
+    `0 or 8` 会把它猜成 8 卡误拦健康节点；只有"字段缺失/显式空值"才允许落缺省。
+    显式 0 与非有限值同样收拢到契约下限 1。
     """
     ec = _engine_section(raw, engine)
     flag = _GPU_FLAG_KEYS.get(engine)
@@ -141,10 +144,14 @@ def declared_gpu_count(raw: Any, engine: str) -> int:
         n = floor if ec.get(key) else 1
     else:
         key = _GPU_COUNT_KEYS.get(engine, "gpu_count")
-        n = _safe_int(ec.get(key) or _GPU_COUNT_DEFAULT.get(engine, 1), 1)
-    listed = _gpu_list_len(ec.get("gpu_list"))
-    if listed is not None:
-        n = max(n, listed) if flag else listed
+        value = ec.get(key)
+        if value is None or value == "":
+            n = _GPU_COUNT_DEFAULT.get(engine, 1)
+        else:
+            n = _safe_int(value, 1)
+    listed = _gpu_list_ids(ec.get("gpu_list"))
+    if listed:
+        n = max(n, len(listed)) if flag else len(listed)
     return max(1, n)
 
 
@@ -211,20 +218,38 @@ def evaluate_gate(
     # source 的数值字段同样可能来自 profile 原文（Task 5 会按 profile 事实填充），
     # 裸 int() 只列 TypeError/ValueError 时 `.inf` 的 OverflowError 会炸穿 500。
     min_vram = _safe_int(source.get("min_vram_mb") or 0, 0)
+    # 生效卡位 = 显式 --gpus，否则 profile 内 gpu_list（worker 的 selected_gpus()
+    # 读的就是后者）。只认 requested 会漏掉一半裁决：tp 一致性、在用卡位求交都
+    # 只对 requested 做，profile 自带 gpu_list 的"worker 必拒"组合被放行成毒 goal。
     requested = [g for g in (source.get("requested_gpus") or []) if isinstance(g, int)]
-    # 显式指定卡位时以卡位数为准：worker 侧 selected_gpus() 就是实际用卡数，
+    declared = _gpu_list_ids(_engine_section(source.get("raw"), engine).get("gpu_list"))
+    effective = requested or declared
+    # 显式点卡时以卡位数为准：worker 侧 selected_gpus() 就是实际用卡数，
     # gpu_list 覆盖计数字段（llamacpp/unsloth）或与 tp 必须一致（tp 系）。
     # 用 profile 声明值判容量会自相矛盾：requested=[0,1] 却按 tp=8 拒掉 4 卡节点。
-    need_gpus = len(requested) if requested else _safe_int(
-        source.get("gpu_count") or declared_gpu_count(source.get("raw"), engine), 1)
-    tp_conflict = _tp_conflict(engine, source.get("raw"), requested)
+    # gpu_count 显式判缺失（同 declared_gpu_count）：0 是显式值，不得被 profile 事实推翻。
+    declared_count = source.get("gpu_count")
+    if declared_count is None or declared_count == "":
+        declared_count = declared_gpu_count(source.get("raw"), engine)
+    need_gpus = len(effective) if effective else max(1, _safe_int(declared_count, 1))
+    # unsloth 布尔开关下界对生效卡位同样生效：tensor_parallel:true 却只点 1 张卡
+    # （--gpus 0 或 profile gpu_list 单卡）时，worker（engines/unsloth.py:82-83）对
+    # 生效 gpu_list <2 硬失败。必须按**冲突拦截**而非抬高 need_gpus——抬高只会拦小
+    # 节点，4 卡节点照样放行，而 worker 拒的是"选中的卡位数"，与节点大小无关。
+    flag_conflict = ""
+    flag = _GPU_FLAG_KEYS.get(engine)
+    ec = _engine_section(source.get("raw"), engine)
+    if flag and effective and ec.get(flag[0]) and len(effective) < flag[1]:
+        flag_conflict = (f"tensor_parallel 需要至少 {flag[1]} 块 GPU，但 gpu_list 仅指定 "
+                         f"{len(effective)} 块（worker 侧必拒）")
+    tp_conflict = _tp_conflict(engine, source.get("raw"), effective) or flag_conflict
 
     verdicts: list[NodeVerdict] = []
     for node in candidates:
         nid = str(node.get("node_id", ""))
         verdicts.append(_verdict_one(
             node_id=nid, node=node, name=name, engine=engine, need_gpus=need_gpus,
-            min_vram=min_vram, requested=requested, in_use=in_use.get(nid) or [],
+            min_vram=min_vram, requested=effective, in_use=in_use.get(nid) or [],
             exists=f"{name}@@{nid}" in existing_goal_ids, lan_allow=lan_allow,
             create=create, has_profile=bool(profile_exists.get(nid, False)),
             tp_conflict=tp_conflict))
@@ -232,7 +257,7 @@ def evaluate_gate(
 
 
 def _tp_conflict(engine: str, raw: Any, requested: list[int]) -> str:
-    """gpu_list 卡位数与 profile 的 tensor_parallel_size 矛盾 → 冲突文案，否则 ""。
+    """生效卡位数与 profile 的 tensor_parallel_size 矛盾 → 冲突文案，否则 ""。
 
     六个 tp 系适配器在 worker 侧对 `len(gpu_list) != tensor_parallel_size` 同文案
     硬失败（engines/vllm.py:81-83 等），profile 未写该键时适配器按 len(gpus) 兜底、

@@ -468,3 +468,26 @@
   - 逐行/逐列对齐的**报告/表格函数，对任何外部来源字段都要先归一化换行**（`\r\n`/`\n`/`\t` 折成空格），不能假设上游只给单行；本模块自产的短文案单行 ≠ 所有 reason 单行。
   - 折叠空白用 `" ".join(s.split())` 一行搞定，比 `s.replace("\n", " ")` 稳（顺带压掉连续空白/制表/`\r`）；这是"把不可控的多行输入塞进单行槽位"的通用收口。
   - 与"列宽按 `len()` 算"同族：对齐类函数要同时对**宽度**（CJK 双宽）和**行数**（换行）两个维度免疫，缺一个都会错位。
+
+## gate 只把显式 --gpus 当生效卡位，profile 内 gpu_list 绕过 tp 一致性与在用卡位求交
+
+- **日期**：2026-09-05（M1 Task 4 fix round 3）
+- **症状**：两个独立漏拦。① tp=4 的 vllm profile 在 YAML 里写 `gpu_list: "0,1"`、下发时不传 `--gpus`：中心 gate 判 ok，worker `check_requirements`（engines/vllm.py:81-83）对 `len(gpu_list)=2 ≠ tensor_parallel_size=4` 硬失败，goal 永不收敛；`gpu_list: "2,3"` 撞上在用 GPU `[2,3]` 同样判 ok（clash 求交只对 requested 做，requested 为空 = 空集求交恒空）。② unsloth `tensor_parallel: true` 配 `--gpus 0`：need 取 `len(requested)=1`，中心判 ok，而 worker（engines/unsloth.py:82-83）对生效 gpu_list <2 硬失败。
+- **根因**：round 1 修"requested 优先容量"时，把 `_tp_conflict` 与 clash 求交的输入也一并绑死在 `requested` 上——而 worker 侧 `selected_gpus()` 读的是 **gpu_list 优先、CLI 其次**，"生效卡位"在中心被窄化成了 `--gpus` 一个来源。计划裁决④"profile 声明的 gpu_list 与在用 GPU 求交"只做了一半（`declared_gpu_count` 里读了 gpu_list 的**卡数**，卡位**序号**却没喂给冲突判定）。unsloth 下界同理：round 1 只在 `declared_gpu_count`（无 requested 路径）实现布尔下界，requested 路径的 `len(requested)` 直接覆盖，下界对生效卡位失明。
+- **解决**：`evaluate_gate` 归一 `effective = requested or _gpu_list_ids(profile 内 gpu_list)`，同喂 `_tp_conflict`、clash 求交与 need_gpus；unsloth 下界改成**冲突拦截**（`flag_conflict`，effective < floor 即 skip）而非抬高 need_gpus——抬高只会拦小节点，4 卡节点带 1 卡 gpu_list 照样放行，而 worker 拒的是"选中的卡位数"，与节点大小无关。`_gpu_list_len` 改 `_gpu_list_ids` 返回卡位列表（卡数 = len）。变异验证：`effective = requested` → 恰红 2 条（tp/clash）；下界分支禁用 → 恰红 1 条。
+- **要点**：
+  - "A 覆盖 B"类裁决必须核对**下游权威实现里覆盖的完整语义**：worker 的生效卡位 = gpu_list or CLI，中心只认其中一个来源 = 同一事实在两侧口径分裂，"放行 worker 必拒内容"族再次显形。
+  - 卡位冲突求交的输入集合必须与 worker 实际锁卡的集合同源；空集合参与求交恒为空，"没传参数"不等于"没有生效卡位"。
+  - **下界校验放错了机制就是没放**：容量不足（need > 节点卡数）与卡位组合非法（选中的卡数 < 开关要求）是两种判定——前者随节点大小变化、后者与节点大小无关，用抬高 need 实现下界只对部分节点生效。
+  - 单测全绿的又一变体：夹具里 requested 与 profile gpu_list **从不同时出现**，两侧各测各的都能绿；跨来源归一类逻辑必须显式构造"另一来源非空"的组合数据。
+
+## gate 缺省回落用 `or` 短路：显式 0 被当缺失，同值三果（0→8、"0"→1、""→8）
+
+- **日期**：2026-09-05（M1 Task 4 fix round 3）
+- **症状**：`declared_gpu_count({"llamacpp": {"gpu_count": 0}}, "llamacpp")` 返回 **8**（`0 or 8` 短路），而 worker `engines/llamacpp.py:239` 对显式 0 按 0 校验；字符串 `"0"` 却返回 1（`"0" or 8` → `"0"` → int 成功）。同一个语义值在中心有三种结果。`evaluate_gate` 的 `source.get("gpu_count") or declared_gpu_count(...)` 同型：显式 0 被 profile 事实（如 tp=2）推翻。round 2 刚裁决"缺省只用于缺失"，同一段代码里 `or` 短路就是违例。
+- **根因**：Python 的 `or` 按**真值**回落而非**存在性**，0/""/False 都是 falsy——"缺省回落"与"零值/falsy 值"是两回事。round 2 修的是 `int()` 抛异常的泛兜面，没扫 `or` 短路这条"不抛异常但语义错"的姊妹路径；两处 `or`（declared 路径 + evaluate_gate 的 source 路径）互相背对，改一处漏一处。
+- **解决**：两处都改显式判 `value is None or value == ""` 才落引擎缺省；存在但非法（非整数/inf）与显式 0 统一收拢契约下限 1（`max(1,·)`），与 round 2"坏值回落 1 而非引擎缺省"的既有裁决同向。用例钉住四象限：0→1、"0"→1、""→8、None→8。变异验证：改回 `or` → 恰红对应 2 条。
+- **要点**：
+  - 缺省回落的判据是**存在性**（`is None` / 显式空值），永远不是真值（`or` / `if x:`）——falsy 但合法的值（0、False、空列表）是这类缺陷的固定受害者，与"工厂默认值不能占用业务值"（`_UNSET` 哨兵）是同一课的两个方向。
+  - 三态设计要显式写进契约：**缺失**（引擎缺省）/ **存在但非法**（保守下限）/ **显式值**（按值判），每个态各钉一条用例，否则任何一次 `or → if-else` 重构都可能悄悄合并其中两态。
+  - YAML 语境下 `key:`（隐式 null）与 `key: ""` 都是"写了但等于没写"，归入缺失态与键不存在同路径，避免第四种结果。

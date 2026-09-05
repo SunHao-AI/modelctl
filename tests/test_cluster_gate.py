@@ -95,6 +95,60 @@ def test_requested_gpu_count_must_match_tensor_parallel_size():
     assert _one(source=src).result == "ok"
 
 
+def test_profile_gpu_list_joins_tp_consistency_check_without_requested_gpus():
+    """不传 --gpus 时，profile 内 gpu_list 同样参与 tp 一致性（fix round 3 ①）。
+
+    生效卡位 = requested or profile 内 gpu_list：worker 的 selected_gpus() 读的正是
+    gpu_list，中心只看 requested 会放行 tp=4 + gpu_list:"0,1" 这种 worker 必拒
+    （engines/vllm.py:81-83）、永不收敛的组合。一致时仍须放行（泛拦即误杀）。
+    """
+    src = {**SRC, "requested_gpus": [],
+           "raw": {"port": 8101, "vllm": {"tensor_parallel_size": 4, "gpu_list": "0,1"}}}
+    v = _one(source=src)
+    assert v.result == "skip" and "tensor_parallel_size=4" in v.reason
+    # tp 与 profile gpu_list 一致 → 不拦
+    src = {**SRC, "requested_gpus": [],
+           "raw": {"port": 8101, "vllm": {"tensor_parallel_size": 2, "gpu_list": "0,1"}}}
+    assert _one(source=src).result == "ok"
+
+
+def test_profile_gpu_list_checked_against_in_use_gpus():
+    """profile 内 gpu_list 撞上在用卡位也要拦（fix round 3 ① 的 clash 半边）。
+
+    requested 为空时旧实现拿空集求交 → gpu_list:"2,3" vs 在用 [2,3] 漏检；卡位分配
+    的真正裁决者是 worker 侧 gpu_lock，中心放行 = 冲突要到 worker 启动才暴露。
+    """
+    src = {**SRC, "requested_gpus": [],
+           "raw": {"port": 8101, "vllm": {"gpu_list": "2,3"}}}
+    v = _one(source=src, in_use={"w-1": [2, 3]})
+    assert v.result == "skip" and "GPU" in v.reason and "2" in v.reason
+    # 不冲突的卡位仍放行
+    assert _one(source=src, in_use={"w-1": [0, 1]}).result == "ok"
+
+
+def test_unsloth_tensor_parallel_floor_applies_to_effective_cards():
+    """unsloth 布尔下界对**生效卡位**同样生效（fix round 3 ②）。
+
+    `tensor_parallel: true` + `--gpus 0`：need 取 len(requested)=1 会把 worker 必拒
+    （engines/unsloth.py:82-83 对生效 gpu_list <2 硬失败）的组合按 1 卡放行；开关关
+    时单卡合法（下界不得反向误拦）。
+    """
+    src = {"name": "u", "ok": True, "engine": "unsloth", "requested_gpus": [0],
+           "raw": {"port": 8102, "unsloth": {"tensor_parallel": True}}}
+    node = _node("w-1", gpu_count=4, runtimes={"unsloth": {"ok": True}})
+    v = _one(candidates=[node], source=src)
+    assert v.result == "skip" and "2" in v.reason
+    # 生效卡位达到下界 → 放行
+    assert _one(candidates=[node], source={**src, "requested_gpus": [0, 1]}).result == "ok"
+    # 开关关闭 → 1 卡合法
+    off = {**src, "raw": {"port": 8102, "unsloth": {"tensor_parallel": False}}}
+    assert _one(candidates=[node], source=off).result == "ok"
+    # 生效卡位来自 profile 内 gpu_list 时同样受下界约束（不传 --gpus）
+    listed = {"name": "u", "ok": True, "engine": "unsloth", "requested_gpus": [],
+              "raw": {"port": 8102, "unsloth": {"tensor_parallel": True, "gpu_list": "0"}}}
+    assert _one(candidates=[node], source=listed).result == "skip"
+
+
 def test_disabled_node_skipped_even_when_status_online():
     """disabled 位与 status 独立：rejoin 会把 status 刷回 online，只查 status 漏拦。"""
     v = _one(candidates=[_node("w-1", disabled=1)])
@@ -203,6 +257,33 @@ def test_declared_gpu_count_per_engine():
     assert G.declared_gpu_count({"vllm": {"tensor_parallel_size": "bad"}}, "vllm") == 1
     assert G.declared_gpu_count(None, "vllm") == 1
     assert G.declared_gpu_count({"vllm": {"tensor_parallel_size": 0}}, "vllm") == 1
+
+
+def test_declared_gpu_count_zero_is_explicit_never_falls_back_to_default():
+    """`or` 短路把显式 0 当缺失：0 → 引擎缺省 8，同值三果（0→8、"0"→1、""→8）。
+
+    round 2 已裁决"缺省只用于字段缺失"——0 是**显式值**，必须显式判 None/"" 才回落
+    缺省（engines/llamacpp.py:239 对 0 按 0 校验，中心猜大一位会误拦健康节点）；
+    显式 0 走契约下限 1，与坏值、"0"（字符串零）统一口径。空串/None 是 YAML 显式
+    空值（等于没写），与缺失同路径走缺省 8。
+    """
+    assert G.declared_gpu_count({"llamacpp": {"gpu_count": 0}}, "llamacpp") == 1
+    assert G.declared_gpu_count({"llamacpp": {"gpu_count": "0"}}, "llamacpp") == 1
+    assert G.declared_gpu_count({"llamacpp": {"gpu_count": ""}}, "llamacpp") == 8
+    assert G.declared_gpu_count({"llamacpp": {"gpu_count": None}}, "llamacpp") == 8
+    # tp 系同型：显式 0 落契约下限 1（而非缺省），坏值回落 1 的口径不变
+    assert G.declared_gpu_count({"vllm": {"tensor_parallel_size": 0}}, "vllm") == 1
+
+
+def test_evaluate_gate_treats_zero_gpu_count_as_explicit():
+    """evaluate_gate 的 `source.gpu_count or ...` 同型短路：显式 0 不得回落 profile/缺省。
+
+    Task 5 按 profile 事实算出 gpu_count=0 时，profile 里 tp=2 会把它推翻成 2 卡，
+    与 round 3 ③"缺省/回落只用于缺失"的裁决相悖；0 按契约下限 1 判。
+    """
+    src = {**SRC, "gpu_count": 0, "requested_gpus": []}
+    v = _one(candidates=[_node("w-1", gpu_count=1)], source=src)
+    assert v.result == "ok" and "gpu_count=1" in v.reason
 
 
 @pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])

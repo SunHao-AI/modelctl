@@ -52,6 +52,8 @@
 | 2026-09-05 | 测试 / 覆盖 | 显存估算 int() 向下截断违背下界语义，整除夹具让变异验证假阴性 | 下界须 ceil 上界须 floor，`int()` 两个方向都错；取整类用例数据必须带小数（monkeypatch 喂分数值），否则变异不转红。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-05 | 后端 / 集群下发 | gate 三处裸 `int()` 重犯 `.inf` 的 OverflowError，只修被点名那处 = 另外两处继续炸 | 修 int() 漏点须 grep 同模块同类裸转换一次泛兜；契约写"任何异常"就不能按类型列举；抽 `_safe_int` 单点封装，坏值回落契约最小值 1 而非引擎缺省。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-05 | 后端 / 终端对齐 | 多行 `source.reason` 原样拼进报告，破坏"逐节点一行"不变量 | 短路 reason 来自外部（YAMLError str 实测 4 行），拼行前 `" ".join(reason.split())` 折叠；对齐类函数要同时对宽度（CJK）和行数（换行）免疫。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-05 | 后端 / 集群下发 | gate 只把显式 --gpus 当生效卡位，profile 内 gpu_list 绕过 tp 一致性与在用卡位求交 | 生效卡位 = requested or profile gpu_list（worker selected_gpus() 同源），同喂 tp 一致性与 clash 求交；unsloth 布尔下界须按冲突拦截而非抬高 need。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-05 | 后端 / 集群下发 | gate 缺省回落用 `or` 短路：显式 0 被当缺失，同值三果（0→8、"0"→1、""→8） | 缺省回落判据是存在性（is None/显式空值）不是真值；缺失/存在但非法/显式值三态各钉用例，显式 0 收拢契约下限 1。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 
 ## 目录约定
 
