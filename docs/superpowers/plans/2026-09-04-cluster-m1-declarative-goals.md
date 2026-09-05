@@ -2980,6 +2980,34 @@ def test_heartbeat_for_unknown_node_returns_ack_without_crash(env):
     reg = env[2]
     ack = reg.handle_heartbeat("ghost", _hb(), now=1.0)
     assert ack["t"] == "ack"
+
+
+def test_profiles_none_keeps_model_states(env):
+    """profiles=None（旧版 worker 未上报）绝不抹 model_states：这是三态落库的
+    核心不变量，M0 worker 每 10s 心跳一次，写空 = dashboard 集体假 down。"""
+    store, _goals, reg = env
+    reg.handle_heartbeat("w-1", _hb(profiles={"qwen": {"stage": "READY"}}), now=100.0)
+    assert store.list_model_states(node_id="w-1")
+    reg.handle_heartbeat("w-1", wsproto.parse_heartbeat_v2({}), now=110.0)
+    assert [r["profile"] for r in store.list_model_states(node_id="w-1")] == ["qwen"]
+
+
+def test_drain_seq_never_reuses_numbers(env):
+    """跨 drain 的 seq 必须递增：撞号会让 worker 把新指令当旧回执直接丢弃。"""
+    _store, _goals, reg = env
+    reg.push_action("w-1", "start", goal_id="g1")
+    assert reg.drain_actions("w-1")[0]["seq"] == 1
+    reg.push_action("w-1", "stop", goal_id="g2")
+    assert reg.drain_actions("w-1")[0]["seq"] == 2
+
+
+def test_push_action_rejects_when_queue_full(env):
+    """超限必须显式返回 False：静默 True 会让调用方以为指令已排队。"""
+    _store, _goals, reg = env
+    for i in range(16):
+        assert reg.push_action("w-1", "retry", goal_id=f"g{i}") is True
+    assert reg.push_action("w-1", "retry", goal_id="overflow") is False
+    assert len(reg.drain_actions("w-1")) == 16
 ```
 
 - [ ] **Step 2: 运行确认失败**
@@ -3137,7 +3165,7 @@ def get_registry() -> NodeRegistry:
 - [ ] **Step 5: 运行确认通过**
 
 Run: `uv run pytest tests/test_cluster_ingest.py tests/test_cluster_nodes.py tests/test_cluster_agent.py -q`
-Expected: PASS（新 15 条 + M0 相关测试；若 M0 测试直接调过 `handle_heartbeat(node, payload, now)` 并断言返回 None，按新签名改为传 `parse_heartbeat_v2({...})` 并断言 `ack["t"] == "ack"`——这是**有意的签名变更**，不要为兼容旧测试保留双签名）
+Expected: PASS（新 18 条 + M0 相关测试；若 M0 测试直接调过 `handle_heartbeat(node, payload, now)` 并断言返回 None，按新签名改为传 `parse_heartbeat_v2({...})` 并断言 `ack["t"] == "ack"`——这是**有意的签名变更**，不要为兼容旧测试保留双签名）
 
 - [ ] **Step 6: 提交**
 
