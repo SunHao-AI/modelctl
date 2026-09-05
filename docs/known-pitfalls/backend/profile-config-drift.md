@@ -443,3 +443,28 @@
     假阴性——变异没转红不一定是代码有别处兜底，先怀疑数据不敏感。
   - 直接构造能让被测值非整数的输入最稳的途径是 monkeypatch 估算器，不必为凑小数
     去反推模型架构参数。
+
+## gate 三处裸 `int()` 重犯 `.inf` 的 OverflowError：只修被点名的那处 = 另外两处继续炸
+
+- **日期**：2026-09-05（M1 Task 4 fix round 2）
+- **症状**：round 1 声称已修 P1，但 `declared_gpu_count({'vllm': {'tensor_parallel_size': float('inf')}}, 'vllm')` 实测仍抛 `OverflowError`。控制器复核又发现同模块两处同型裸路径：`_tp_conflict` 的 `int(ec["tensor_parallel_size"])`、`evaluate_gate` 的 `int(source["gpu_count"])` / `int(source["min_vram_mb"])`——全部只 `except (TypeError, ValueError)`。端到端：profile YAML 写 `tensor_parallel_size: .inf` → `read_profile_source` 返回 ok=True（只校验 port）→ `evaluate_gate` 抛 `OverflowError`，冒到 Task 5 `set_goals`（契约"永不抛业务异常"）即 REST 500。
+- **根因**：修"某个 `int()` 漏 OverflowError"时只改**评审点名的那一行**，没在同一模块内横向扫其余裸 `int()`。`int(float('inf'))` 抛 `OverflowError`（`float('nan')` 抛 ValueError）是 `int()` 的固定失败面，任何 `int(用户可控值)` 都会中招。`profiles._port_reason` 在 round 5 已因**完全相同**的 `.inf`→OverflowError 泛兜 `Exception` 并沉淀，但那条"按继承树之上兜"从未作为**模块级策略**推广到 gate——`declared_gpu_count` 的 docstring 白纸黑字写"任何异常一律取 1"，实现却按类型列举，契约与实现自相矛盾。
+- **解决**：抽 `_safe_int(value, default)` 单点封装（内部 `except Exception`），`declared_gpu_count`、`_safe_port`、`evaluate_gate` 的 need_gpus/min_vram 三处改走它；`_tp_conflict` 坏值要返回 `""` 而非 int，用本地 `try/except Exception`（语义相同、出口不同）。用例参数化 `inf/-inf/nan` 覆盖 `declared_gpu_count` 与 `evaluate_gate` 两条端到端路径，`_tp_conflict`/`_safe_port` 各单独钉；变异验证 `except Exception`→`except (TypeError, ValueError)` 分两处做：`_safe_int` 变红 6 条、`_tp_conflict` 变红 3 条。
+- **要点**：
+  - 修一个 `int()`/`float()`/解析类漏点，必须 grep **同模块 + 同调用链**的所有同类裸转换一次性泛兜；评审只点名一处 ≠ 只有一处（gate 这次三处，profiles round 5 已是前车）。**契约写"任何异常"，实现就不能按类型列举**——docstring 的"任何"是硬承诺。
+  - 泛兜逻辑出现第 2 次就抽封装（`_safe_int`/`_safe_port`），把"按继承树兜 + 永不冒泡"固化到一处；散落的 `try/except (TypeError, ValueError)` 是"下次新增又漏兜"的温床，单点封装让新增消费点自动继承正确兜底。
+  - 坏值回落的 `default` 有业务语义：坏卡数回落**契约最小值 1**，而非引擎缺省（llamacpp=8）——坏配置无法推断意图，猜大数字会误拦健康节点并把 reason 写成误导性的"gpu_count 不足：需 8 卡"。缺省值只用于"字段缺失"（合法未配置），"存在但非法"走更保守的 1；且坏计数值不得连带吞掉同段内独立有效的 `gpu_list` 选卡数。
+  - `_tp_conflict` 泛兜后仍须保持"坏值不作为拒判依据"的既有语义（转不出整数就返回 ""，由 worker check_requirements 报错），不能因为兜了异常就编一条 `tensor_parallel_size=inf 与卡位数不一致` 的误导性 reason——泛兜 ≠ 改变判定方向。
+  - **同型漏点还包括 try 块之后的转换**：`estimate_vram_mb` 的 try 只包估算器调用，try 之后的 `math.ceil(float(est["kv_total_mb"]))` 在估算值本身为 inf（如 `max_model_len: .inf` 参与乘积）时同样抛 OverflowError——"泛兜一条链路"必须逐行核对到函数的**出口**，不止 try 覆盖的那段。非有限估算值按"不可估算"返回 None（无法参与容量比较）。
+  - **端到端复现脚本**（`read_profile_source` 读带 `.inf` 的真 YAML → `evaluate_gate`）比纯单测更能证明"Task 5 永不抛 → 不会 500"这条跨任务契约真的成立；验证后删除，结论写入 review。
+
+## 多行 `source.reason` 原样拼进报告，破坏"逐节点一行"不变量
+
+- **日期**：2026-09-05（M1 Task 4 fix round 2）
+- **症状**：`source.ok=False` 短路时 reason 直接取 `read_profile_source` 的失败原因，而它可能是整段 `yaml.YAMLError` 的 str（实测 4 行，含换行）。`format_gate_report` 原样 `f"...{v.reason}"` 拼接后，一个节点被输出成 4 行，`len(lines) == 节点数 + 1` 的行数不变量破裂，按行消费的 CLI/测试全部错位。
+- **根因**：报告函数假设 reason 是单行短语（各分支自产的 skip/error 文案确实单行），但**短路分支的 reason 来自外部**（YAML 解析器、IO 异常的 str），这些字符串天然可能多行。列对齐用 `pad_width` 处理了 CJK 宽度，却没处理换行——两者都是"字段内容形态不受本报告函数控制"的表现。
+- **解决**：拼行前 `reason = " ".join(v.reason.split())` 折叠所有空白（含换行→空格）。用例喂一段多行 YAML 错误串，断言"报告行数 == 节点数 + 1"（钉不变量而非具体文案）。变异验证去掉折叠 → 该条转红（实测 7 行 ≠ 3 行）。
+- **要点**：
+  - 逐行/逐列对齐的**报告/表格函数，对任何外部来源字段都要先归一化换行**（`\r\n`/`\n`/`\t` 折成空格），不能假设上游只给单行；本模块自产的短文案单行 ≠ 所有 reason 单行。
+  - 折叠空白用 `" ".join(s.split())` 一行搞定，比 `s.replace("\n", " ")` 稳（顺带压掉连续空白/制表/`\r`）；这是"把不可控的多行输入塞进单行槽位"的通用收口。
+  - 与"列宽按 `len()` 算"同族：对齐类函数要同时对**宽度**（CJK 双宽）和**行数**（换行）两个维度免疫，缺一个都会错位。

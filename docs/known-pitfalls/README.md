@@ -50,6 +50,8 @@
 | 2026-09-05 | 后端 / 集群下发 | unsloth `tensor_parallel` 是布尔开关却按卡数 int()；llamacpp 卡数缺省与适配器的 8 脱节 | `int(True)=1` 静默放行 worker 必拒下发；字段表要钉到"键名+值语义+缺省值"三件套，权威口径逐个看 engines/*.py。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-05 | 后端 / 集群下发 | gate 放行 worker 必拒组合：tp 系 gpu_list 卡数≠tensor_parallel_size；disabled 位漏查 | 改写卡数一侧必须校验组合一致性；status/disabled 是独立列且 rejoin 刷 status，闸门要核对全部分量；注释承诺与用例一一对应。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-05 | 测试 / 覆盖 | 显存估算 int() 向下截断违背下界语义，整除夹具让变异验证假阴性 | 下界须 ceil 上界须 floor，`int()` 两个方向都错；取整类用例数据必须带小数（monkeypatch 喂分数值），否则变异不转红。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-05 | 后端 / 集群下发 | gate 三处裸 `int()` 重犯 `.inf` 的 OverflowError，只修被点名那处 = 另外两处继续炸 | 修 int() 漏点须 grep 同模块同类裸转换一次泛兜；契约写"任何异常"就不能按类型列举；抽 `_safe_int` 单点封装，坏值回落契约最小值 1 而非引擎缺省。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-05 | 后端 / 终端对齐 | 多行 `source.reason` 原样拼进报告，破坏"逐节点一行"不变量 | 短路 reason 来自外部（YAMLError str 实测 4 行），拼行前 `" ".join(reason.split())` 折叠；对齐类函数要同时对宽度（CJK）和行数（换行）免疫。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 
 ## 目录约定
 

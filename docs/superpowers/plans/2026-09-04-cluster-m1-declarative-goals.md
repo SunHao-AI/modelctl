@@ -1063,6 +1063,8 @@ goal 下发前的中心侧校验门禁（spec §6.6，Ray Placement Group / auto
 # @Desc   : placement gate 全分支测试（运行时/容量/冲突/LAN/幂等/创建/源失败/报告）
 # ===============================================================================
 
+import pytest
+
 from modelctl.core.cluster import gate as G
 from modelctl.core.colors import display_width
 from modelctl.core.profile import KNOWN_ENGINES
@@ -1257,6 +1259,80 @@ def test_declared_gpu_count_per_engine():
     assert G.declared_gpu_count({"vllm": {"tensor_parallel_size": 0}}, "vllm") == 1
 
 
+@pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
+def test_declared_gpu_count_nonfinite_values_never_raise(bad):
+    """`tensor_parallel_size: .inf` 是合法 YAML，`int()` 抛 OverflowError。
+
+    declared_gpu_count 的契约是"任何异常一律取 1"，原实现只列
+    TypeError/ValueError，`.inf` 直接炸穿（与 profiles._port_reason round 5
+    同族）；兜底必须按异常继承树之上兜 Exception。
+    """
+    assert G.declared_gpu_count({"vllm": {"tensor_parallel_size": bad}}, "vllm") == 1
+    # 坏值回落契约声明的 1，而非引擎缺省（llamacpp=8）：坏配置无法推断意图，
+    # 猜大数字会误拦健康节点并把 reason 写成误导性的"gpu_count 不足"。
+    assert G.declared_gpu_count({"llamacpp": {"gpu_count": bad}}, "llamacpp") == 1
+    # 但 gpu_list 是独立事实，坏卡数值不得连带吞掉有效的 gpu_list 选卡数
+    assert G.declared_gpu_count({"vllm": {"tensor_parallel_size": bad,
+                                          "gpu_list": [0, 1]}}, "vllm") == 2
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
+def test_evaluate_gate_never_raises_on_nonfinite_source_fields(bad):
+    """Task 5 `set_goals` 契约"永不抛业务异常"，一抛即 REST 500。
+
+    source.gpu_count / min_vram_mb 与 raw 里的 tp 都可能带非有限 float，
+    evaluate_gate 的三条数值路径（need_gpus、min_vram、_tp_conflict）都要兜住；
+    坏值不作为拒判依据的既有语义保持（tp 坏值 → 不拦，由 worker 报错）。
+    """
+    src = {**SRC, "gpu_count": bad, "min_vram_mb": bad,
+           "raw": {"port": 8101, "vllm": {"tensor_parallel_size": bad}},
+           "requested_gpus": [0, 1]}
+    assert _one(source=src).result == "ok"   # requested=2 优先，坏 gpu_count 不参与
+    # 无 requested 时坏 gpu_count 回落 profile 事实（raw 里 tp 也坏 → declared 1）
+    src = {k: val for k, val in SRC.items() if k != "gpu_count"}
+    src.update({"min_vram_mb": bad, "raw": {"port": 8101, "vllm": {"tensor_parallel_size": bad}}})
+    assert _one(candidates=[_node("w-1", gpu_count=1)], source=src).result == "ok"
+
+
+def test_tp_conflict_ignores_nonfinite_tensor_parallel_size():
+    """`_tp_conflict` 的 int() 与 declared_gpu_count 同型漏点：`.inf` 曾同样炸。
+
+    坏值必须**不作为拒判依据**（由 worker check_requirements 报错）：不能因为
+    转不出整数就编出一条"tensor_parallel_size=inf 与卡位数不一致"的误导性 reason。
+    """
+    assert G._tp_conflict("vllm", {"vllm": {"tensor_parallel_size": float("inf")}}, [0, 1]) == ""
+    assert G._tp_conflict("vllm", {"vllm": {"tensor_parallel_size": "bad"}}, [0, 1]) == ""
+    # 正常值仍要拦（泛兜不得把有效校验一起吞掉）
+    assert "tensor_parallel_size=4" in G._tp_conflict("vllm", {"vllm": {"tensor_parallel_size": 4}}, [0, 1])
+
+
+def test_ollama_declared_gpu_count_is_always_one():
+    """ollama 全局 serve、无卡数字段，靠 gpu_list 隔离；表内条目即"恒 1 卡"声明。"""
+    assert G.declared_gpu_count({}, "ollama") == 1
+    assert G.declared_gpu_count({"ollama": {"model": "qwen2.5"}}, "ollama") == 1
+    assert G.declared_gpu_count({"ollama": {"gpu_list": "0,1,2"}}, "ollama") == 3
+
+
+def test_safe_port_non_integer_is_zero():
+    """估算路径的 port 容错：坏值 → 0（不参与实际启动，只喂 Profile 构造）。"""
+    assert G._safe_port("not-a-port") == 0
+    assert G._safe_port(float("inf")) == 0      # OverflowError 路径，同 declared_gpu_count 族
+    assert G._safe_port(None) == 0
+    assert G._safe_port("8101") == 8101
+
+
+def test_estimate_vram_none_for_non_dict_raw():
+    """raw 为 None（读源失败/非映射）必须在调用估算器前就返回 None，不抛。"""
+    assert G.estimate_vram_mb(None, "vllm", "qwen") is None
+    assert G.estimate_vram_mb("- just a string", "vllm", "qwen") is None
+
+
+def test_report_empty_verdicts_is_summary_only():
+    """无候选（如 --node 未命中任何节点）时只输出 summary，不得因 max() 空序列抛。"""
+    assert G.format_gate_report([], created=0, dry_run=True).strip().endswith("created=0）")
+    assert len(G.format_gate_report([], created=0, dry_run=False).split("\n")) == 1
+
+
 def test_declared_gpu_count_ignores_literal_engine_config_key():
     """`engine_config` 是 Profile 字段名，真实 YAML 原文里没有这个键。
 
@@ -1319,6 +1395,19 @@ def test_estimate_vram_rounds_up_fractional_estimate(monkeypatch):
     assert G.estimate_vram_mb({"port": 8101, "vllm": {}}, "vllm", "qwen") == 256
 
 
+def test_estimate_vram_none_for_nonfinite_estimate(monkeypatch):
+    """`max_model_len: .inf` 之类让估算乘积溢出成 inf，`ceil(float(inf))` 抛 OverflowError。
+
+    该抛点在 estimate_vram_mb 的 try 之外（同函数每条分支都要补齐泛兜，round 5
+    教训）；非有限值无法参与容量比较，契约上按"不可估算"返回 None 跳过该维度。
+    """
+    import modelctl.core.vram_estimator as ve
+
+    for bad in (float("inf"), float("-inf"), float("nan")):
+        monkeypatch.setattr(ve, "kv_estimate_for_profile", lambda p, b=bad: {"kv_total_mb": b})
+        assert G.estimate_vram_mb({"port": 8101, "vllm": {}}, "vllm", "qwen") is None
+
+
 def test_report_lists_every_node_with_result_and_counts():
     got = _ev(candidates=[_node("w-1", vram=1024), _node("w-2")], source={**SRC, "min_vram_mb": 40960})
     text = G.format_gate_report(got, created=1, dry_run=True)
@@ -1347,6 +1436,22 @@ def test_report_pads_cjk_node_id_by_display_width():
     starts = {display_width(line[:line.index(v.reason)])
               for line, v in zip(lines[: len(got)], got, strict=True)}
     assert len(starts) == 1, lines
+
+
+def test_report_collapses_multiline_reason_to_single_line():
+    """source.reason 可能整段是 yaml.YAMLError 的 str（实测 4 行），必须折叠空白。
+
+    原样拼接会把一个节点输出成 4 行，破坏"逐节点一行"不变量——报告按行消费的
+    CLI/测试全部错位。钉的不变量：报告行数 == 节点数 + 1（summary）。
+    """
+    multiline = ("while parsing a block mapping\n"
+                 '  in "<unicode string>", line 3, column 1:\n'
+                 "    vllm:\n    ^\nexpected <block end>")
+    got = [G.NodeVerdict("w-1", "error", multiline), G.NodeVerdict("w-2", "ok", "正常")]
+    lines = G.format_gate_report(got, created=0, dry_run=False).split("\n")
+    assert len(lines) == 3, lines                       # 两节点 + summary，多行 reason 不增行
+    assert "while parsing a block mapping" in lines[0] and "expected <block end>" in lines[0]
+    assert "\n" not in lines[0]
 ```
 
 - [ ] **Step 2: 运行确认失败**
@@ -1470,6 +1575,21 @@ def _gpu_list_len(value: Any) -> int | None:
     return len(gpus) if gpus else None
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    """整数容错解析：任何失败都返回 default，绝不冒泡。
+
+    失败面按异常**继承树之上**兜，不列 TypeError/ValueError：`tensor_parallel_size: .inf`
+    经 yaml 解析成 float('inf')，`int()` 抛的是 `OverflowError`（实测），nan 同抛
+    ValueError 但结果不可比较。本模块所有数值字段都来自中心不可控的 profile 原文，
+    而调用方（Task 5 `set_goals`）的契约是"永不抛业务异常"——一抛即 REST 500。
+    与 profiles._port_reason（fix round 5 同型修复）同策略，避免第三次漏同族。
+    """
+    try:
+        return int(value)
+    except Exception:  # noqa: BLE001 — OverflowError/RecursionError 等一概不冒泡
+        return default
+
+
 def declared_gpu_count(raw: Any, engine: str) -> int:
     """从 profile 原文推断所需 GPU 数；任何异常/缺字段一律保守取 1。
 
@@ -1485,11 +1605,7 @@ def declared_gpu_count(raw: Any, engine: str) -> int:
         n = floor if ec.get(key) else 1
     else:
         key = _GPU_COUNT_KEYS.get(engine, "gpu_count")
-        default = _GPU_COUNT_DEFAULT.get(engine, 1)
-        try:
-            n = int(ec.get(key, default) or default)
-        except (TypeError, ValueError):
-            n = 1
+        n = _safe_int(ec.get(key) or _GPU_COUNT_DEFAULT.get(engine, 1), 1)
     listed = _gpu_list_len(ec.get("gpu_list"))
     if listed is not None:
         n = max(n, listed) if flag else listed
@@ -1498,10 +1614,7 @@ def declared_gpu_count(raw: Any, engine: str) -> int:
 
 def _safe_port(value: Any) -> int:
     """port 容错解析（profile 原文里可能是 str/int/None；估算路径不参与实际启动）。"""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
+    return _safe_int(value, 0)
 
 
 def estimate_vram_mb(raw: Any, engine: str, name: str) -> int | None:
@@ -1523,9 +1636,15 @@ def estimate_vram_mb(raw: Any, engine: str, name: str) -> int | None:
         return None
     if not isinstance(est, dict) or est.get("kv_total_mb") is None:
         return None
+    total = est["kv_total_mb"]
+    # 估算值非有限（如 `max_model_len: .inf` 让乘积溢出成 inf）时 `math.ceil(float(...))`
+    # 抛 OverflowError——它在本函数的 try 之外，同样会炸穿调用方。非有限值无法参与
+    # 容量比较，按"不可估算"返回 None（契约：估算不可得一律跳过该维度）。
+    if not isinstance(total, (int, float)) or not math.isfinite(total):
+        return None
     # 向上取整：这是"节点至少要有这么多显存"的下界口径，int() 向下截断会把
     # 255.4 判成 255，让 255MB 的节点通过它实际放不下的下发。
-    return math.ceil(float(est["kv_total_mb"]))
+    return math.ceil(float(total))
 
 
 def evaluate_gate(
@@ -1553,13 +1672,15 @@ def evaluate_gate(
 
     name = str(source.get("name", ""))
     engine = str(source.get("engine", ""))
-    min_vram = int(source.get("min_vram_mb") or 0)
+    # source 的数值字段同样可能来自 profile 原文（Task 5 会按 profile 事实填充），
+    # 裸 int() 只列 TypeError/ValueError 时 `.inf` 的 OverflowError 会炸穿 500。
+    min_vram = _safe_int(source.get("min_vram_mb") or 0, 0)
     requested = [g for g in (source.get("requested_gpus") or []) if isinstance(g, int)]
     # 显式指定卡位时以卡位数为准：worker 侧 selected_gpus() 就是实际用卡数，
     # gpu_list 覆盖计数字段（llamacpp/unsloth）或与 tp 必须一致（tp 系）。
     # 用 profile 声明值判容量会自相矛盾：requested=[0,1] 却按 tp=8 拒掉 4 卡节点。
-    need_gpus = len(requested) if requested else int(
-        source.get("gpu_count") or declared_gpu_count(source.get("raw"), engine))
+    need_gpus = len(requested) if requested else _safe_int(
+        source.get("gpu_count") or declared_gpu_count(source.get("raw"), engine), 1)
     tp_conflict = _tp_conflict(engine, source.get("raw"), requested)
 
     verdicts: list[NodeVerdict] = []
@@ -1589,7 +1710,7 @@ def _tp_conflict(engine: str, raw: Any, requested: list[int]) -> str:
         return ""
     try:
         tp = int(ec["tensor_parallel_size"])
-    except (TypeError, ValueError):
+    except Exception:  # noqa: BLE001 — .inf 的 OverflowError 等，见 _safe_int 同款理由
         return ""   # 坏值由 worker check_requirements 报错，这里不作为拒判依据
     if tp == len(requested):
         return ""
@@ -1660,6 +1781,10 @@ def format_gate_report(verdicts: list[NodeVerdict], *, created: int, dry_run: bo
     宽度必须按 `display_width` 取：node_id 由运维在 `cluster join --node-id` 时自
     定义（CLAUDE.md 例外条款：集群视图直接显示它），含 CJK 时 `len()` 会算窄列位，
     pad_width 补齐后整表右移错位。
+
+    reason 先折叠空白再拼行：source.reason 可能整段是 yaml.YAMLError 的 str
+    （实测 4 行），原样拼接会破坏"逐节点一行"不变量——报告按行解析/逐行对齐的
+    消费方（CLI、测试）都会错位。折叠只动空白，不改写文案语义。
     """
     width = max((display_width(_MARKS.get(v.result, v.result)) for v in verdicts), default=4)
     nid_width = max((display_width(v.node_id) for v in verdicts), default=5)
@@ -1667,7 +1792,8 @@ def format_gate_report(verdicts: list[NodeVerdict], *, created: int, dry_run: bo
     lines = []
     for v in verdicts:
         mark = head + _MARKS.get(v.result, v.result)
-        lines.append(f"{pad_width(mark, len(head) + width)}  {pad_width(v.node_id, nid_width)}  {v.reason}")
+        reason = " ".join(v.reason.split())
+        lines.append(f"{pad_width(mark, len(head) + width)}  {pad_width(v.node_id, nid_width)}  {reason}")
     tail = f"（dry-run：预计 created={created}）" if dry_run else f"（created: {created}）"
     lines.append(f"{head}summary: {tail}")
     return "\n".join(lines)

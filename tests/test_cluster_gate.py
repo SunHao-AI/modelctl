@@ -9,6 +9,8 @@
 # @Desc   : placement gate 全分支测试（运行时/容量/冲突/LAN/幂等/创建/源失败/报告）
 # ===============================================================================
 
+import pytest
+
 from modelctl.core.cluster import gate as G
 from modelctl.core.colors import display_width
 from modelctl.core.profile import KNOWN_ENGINES
@@ -203,6 +205,80 @@ def test_declared_gpu_count_per_engine():
     assert G.declared_gpu_count({"vllm": {"tensor_parallel_size": 0}}, "vllm") == 1
 
 
+@pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
+def test_declared_gpu_count_nonfinite_values_never_raise(bad):
+    """`tensor_parallel_size: .inf` 是合法 YAML，`int()` 抛 OverflowError。
+
+    declared_gpu_count 的契约是"任何异常一律取 1"，原实现只列
+    TypeError/ValueError，`.inf` 直接炸穿（与 profiles._port_reason round 5
+    同族）；兜底必须按异常继承树之上兜 Exception。
+    """
+    assert G.declared_gpu_count({"vllm": {"tensor_parallel_size": bad}}, "vllm") == 1
+    # 坏值回落契约声明的 1，而非引擎缺省（llamacpp=8）：坏配置无法推断意图，
+    # 猜大数字会误拦健康节点并把 reason 写成误导性的"gpu_count 不足"。
+    assert G.declared_gpu_count({"llamacpp": {"gpu_count": bad}}, "llamacpp") == 1
+    # 但 gpu_list 是独立事实，坏卡数值不得连带吞掉有效的 gpu_list 选卡数
+    assert G.declared_gpu_count({"vllm": {"tensor_parallel_size": bad,
+                                          "gpu_list": [0, 1]}}, "vllm") == 2
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
+def test_evaluate_gate_never_raises_on_nonfinite_source_fields(bad):
+    """Task 5 `set_goals` 契约"永不抛业务异常"，一抛即 REST 500。
+
+    source.gpu_count / min_vram_mb 与 raw 里的 tp 都可能带非有限 float，
+    evaluate_gate 的三条数值路径（need_gpus、min_vram、_tp_conflict）都要兜住；
+    坏值不作为拒判依据的既有语义保持（tp 坏值 → 不拦，由 worker 报错）。
+    """
+    src = {**SRC, "gpu_count": bad, "min_vram_mb": bad,
+           "raw": {"port": 8101, "vllm": {"tensor_parallel_size": bad}},
+           "requested_gpus": [0, 1]}
+    assert _one(source=src).result == "ok"   # requested=2 优先，坏 gpu_count 不参与
+    # 无 requested 时坏 gpu_count 回落 profile 事实（raw 里 tp 也坏 → declared 1）
+    src = {k: val for k, val in SRC.items() if k != "gpu_count"}
+    src.update({"min_vram_mb": bad, "raw": {"port": 8101, "vllm": {"tensor_parallel_size": bad}}})
+    assert _one(candidates=[_node("w-1", gpu_count=1)], source=src).result == "ok"
+
+
+def test_tp_conflict_ignores_nonfinite_tensor_parallel_size():
+    """`_tp_conflict` 的 int() 与 declared_gpu_count 同型漏点：`.inf` 曾同样炸。
+
+    坏值必须**不作为拒判依据**（由 worker check_requirements 报错）：不能因为
+    转不出整数就编出一条"tensor_parallel_size=inf 与卡位数不一致"的误导性 reason。
+    """
+    assert G._tp_conflict("vllm", {"vllm": {"tensor_parallel_size": float("inf")}}, [0, 1]) == ""
+    assert G._tp_conflict("vllm", {"vllm": {"tensor_parallel_size": "bad"}}, [0, 1]) == ""
+    # 正常值仍要拦（泛兜不得把有效校验一起吞掉）
+    assert "tensor_parallel_size=4" in G._tp_conflict("vllm", {"vllm": {"tensor_parallel_size": 4}}, [0, 1])
+
+
+def test_ollama_declared_gpu_count_is_always_one():
+    """ollama 全局 serve、无卡数字段，靠 gpu_list 隔离；表内条目即"恒 1 卡"声明。"""
+    assert G.declared_gpu_count({}, "ollama") == 1
+    assert G.declared_gpu_count({"ollama": {"model": "qwen2.5"}}, "ollama") == 1
+    assert G.declared_gpu_count({"ollama": {"gpu_list": "0,1,2"}}, "ollama") == 3
+
+
+def test_safe_port_non_integer_is_zero():
+    """估算路径的 port 容错：坏值 → 0（不参与实际启动，只喂 Profile 构造）。"""
+    assert G._safe_port("not-a-port") == 0
+    assert G._safe_port(float("inf")) == 0      # OverflowError 路径，同 declared_gpu_count 族
+    assert G._safe_port(None) == 0
+    assert G._safe_port("8101") == 8101
+
+
+def test_estimate_vram_none_for_non_dict_raw():
+    """raw 为 None（读源失败/非映射）必须在调用估算器前就返回 None，不抛。"""
+    assert G.estimate_vram_mb(None, "vllm", "qwen") is None
+    assert G.estimate_vram_mb("- just a string", "vllm", "qwen") is None
+
+
+def test_report_empty_verdicts_is_summary_only():
+    """无候选（如 --node 未命中任何节点）时只输出 summary，不得因 max() 空序列抛。"""
+    assert G.format_gate_report([], created=0, dry_run=True).strip().endswith("created=0）")
+    assert len(G.format_gate_report([], created=0, dry_run=False).split("\n")) == 1
+
+
 def test_declared_gpu_count_ignores_literal_engine_config_key():
     """`engine_config` 是 Profile 字段名，真实 YAML 原文里没有这个键。
 
@@ -265,6 +341,19 @@ def test_estimate_vram_rounds_up_fractional_estimate(monkeypatch):
     assert G.estimate_vram_mb({"port": 8101, "vllm": {}}, "vllm", "qwen") == 256
 
 
+def test_estimate_vram_none_for_nonfinite_estimate(monkeypatch):
+    """`max_model_len: .inf` 之类让估算乘积溢出成 inf，`ceil(float(inf))` 抛 OverflowError。
+
+    该抛点在 estimate_vram_mb 的 try 之外（同函数每条分支都要补齐泛兜，round 5
+    教训）；非有限值无法参与容量比较，契约上按"不可估算"返回 None 跳过该维度。
+    """
+    import modelctl.core.vram_estimator as ve
+
+    for bad in (float("inf"), float("-inf"), float("nan")):
+        monkeypatch.setattr(ve, "kv_estimate_for_profile", lambda p, b=bad: {"kv_total_mb": b})
+        assert G.estimate_vram_mb({"port": 8101, "vllm": {}}, "vllm", "qwen") is None
+
+
 def test_report_lists_every_node_with_result_and_counts():
     got = _ev(candidates=[_node("w-1", vram=1024), _node("w-2")], source={**SRC, "min_vram_mb": 40960})
     text = G.format_gate_report(got, created=1, dry_run=True)
@@ -293,3 +382,19 @@ def test_report_pads_cjk_node_id_by_display_width():
     starts = {display_width(line[:line.index(v.reason)])
               for line, v in zip(lines[: len(got)], got, strict=True)}
     assert len(starts) == 1, lines
+
+
+def test_report_collapses_multiline_reason_to_single_line():
+    """source.reason 可能整段是 yaml.YAMLError 的 str（实测 4 行），必须折叠空白。
+
+    原样拼接会把一个节点输出成 4 行，破坏"逐节点一行"不变量——报告按行消费的
+    CLI/测试全部错位。钉的不变量：报告行数 == 节点数 + 1（summary）。
+    """
+    multiline = ("while parsing a block mapping\n"
+                 '  in "<unicode string>", line 3, column 1:\n'
+                 "    vllm:\n    ^\nexpected <block end>")
+    got = [G.NodeVerdict("w-1", "error", multiline), G.NodeVerdict("w-2", "ok", "正常")]
+    lines = G.format_gate_report(got, created=0, dry_run=False).split("\n")
+    assert len(lines) == 3, lines                       # 两节点 + summary，多行 reason 不增行
+    assert "while parsing a block mapping" in lines[0] and "expected <block end>" in lines[0]
+    assert "\n" not in lines[0]
