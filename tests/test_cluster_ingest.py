@@ -171,3 +171,31 @@ def test_heartbeat_for_unknown_node_returns_ack_without_crash(env):
     reg = env[2]
     ack = reg.handle_heartbeat("ghost", _hb(), now=1.0)
     assert ack["t"] == "ack"
+
+
+def test_profiles_none_keeps_model_states(env):
+    """profiles=None（旧版 worker 未上报）绝不抹 model_states：这是三态落库的
+    核心不变量，M0 worker 每 10s 心跳一次，写空 = dashboard 集体假 down。"""
+    store, _goals, reg = env
+    reg.handle_heartbeat("w-1", _hb(profiles={"qwen": {"stage": "READY"}}), now=100.0)
+    assert store.list_model_states(node_id="w-1")
+    reg.handle_heartbeat("w-1", wsproto.parse_heartbeat_v2({}), now=110.0)
+    assert [r["profile"] for r in store.list_model_states(node_id="w-1")] == ["qwen"]
+
+
+def test_drain_seq_never_reuses_numbers(env):
+    """跨 drain 的 seq 必须递增：撞号会让 worker 把新指令当旧回执直接丢弃。"""
+    _store, _goals, reg = env
+    reg.push_action("w-1", "start", goal_id="g1")
+    assert reg.drain_actions("w-1")[0]["seq"] == 1
+    reg.push_action("w-1", "stop", goal_id="g2")
+    assert reg.drain_actions("w-1")[0]["seq"] == 2
+
+
+def test_push_action_rejects_when_queue_full(env):
+    """超限必须显式返回 False：静默 True 会让调用方以为指令已排队。"""
+    _store, _goals, reg = env
+    for i in range(16):
+        assert reg.push_action("w-1", "retry", goal_id=f"g{i}") is True
+    assert reg.push_action("w-1", "retry", goal_id="overflow") is False
+    assert len(reg.drain_actions("w-1")) == 16
