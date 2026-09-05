@@ -319,6 +319,82 @@ async def cluster_node_detail(node_id: str, _base: None = Depends(require_auth))
             "model_states": reg.store.list_model_states(node_id=node_id)}
 
 
+# ================================ 节点治理（M2，spec §2.1）================================
+@router.post("/cluster/nodes/{node_id}/disable")
+async def disable_node(node_id: str, _base: None = Depends(require_auth)):
+    """禁用节点：hello/join-check 此后拒绝；goal 台账不动（禁用≠撤销声明）。"""
+    if (off := _disabled()) is not None:
+        return off
+    out = get_registry().disable_node(node_id, conns_registry=_CONNS)
+    if out is None:
+        return JSONResponse(status_code=404, content={"detail": f"节点 {node_id} 不存在"})
+    return out
+
+
+@router.post("/cluster/nodes/{node_id}/enable")
+async def enable_node(node_id: str, _base: None = Depends(require_auth)):
+    """解除禁用：只清 disabled 位，状态由其下次 hello/心跳自行恢复。"""
+    if (off := _disabled()) is not None:
+        return off
+    out = get_registry().enable_node(node_id)
+    if out is None:
+        return JSONResponse(status_code=404, content={"detail": f"节点 {node_id} 不存在"})
+    return out
+
+
+@router.post("/cluster/nodes/{node_id}/rotate-token")
+async def rotate_node_token(node_id: str, _base: None = Depends(require_auth)):
+    """轮换节点 token：**响应一次性返回明文**（同 join-check 先例），连带 kick。
+
+    旧 token 即刻失效（rotate 后 find_node_by_token 不再命中旧值）+ revoke 断连，
+    worker 用 .env 里的旧 token 重连会被拒——必须人工把新 token 写进该节点 .env。
+    """
+    if (off := _disabled()) is not None:
+        return off
+    reg = get_registry()
+    if reg.store.get_node(node_id) is None:
+        return JSONResponse(status_code=404, content={"detail": f"节点 {node_id} 不存在"})
+    fresh = reg.store.rotate_node_token(node_id)
+    if fresh is None:
+        return JSONResponse(status_code=404, content={"detail": f"节点 {node_id} 不存在"})
+    kicked = _CONNS.revoke(node_id) is not None
+    reg.store.append_event("token.rotate", node_id=node_id,
+                           payload={"scope": "node", "kicked": kicked, "operator": "api"},
+                           now=time.time())
+    return {"node_token": fresh, "kicked": kicked,
+            "hint": "请在该节点 .env 更新 CLUSTER_NODE_TOKEN 后重启 webui"}
+
+
+@router.post("/cluster/nodes/{node_id}/kick")
+async def kick_node(node_id: str, _base: None = Depends(require_auth)):
+    """主动断连（世代表摘除 → 下一帧自退）。一次性动作：worker 退避重连后即恢复。"""
+    if (off := _disabled()) is not None:
+        return off
+    out = get_registry().kick_node(node_id, _CONNS)
+    if out is None:
+        return JSONResponse(status_code=404, content={"detail": f"节点 {node_id} 不存在"})
+    return out
+
+
+@router.delete("/cluster/nodes/{node_id}")
+async def retire_node(node_id: str, _base: None = Depends(require_auth)):
+    """节点退役：先 kick，再级联删 goals/model_states（连带撤销声明，防幽灵 goal）。
+
+    有 goals 被连带删除时响应带 removed_goals 计数（CLI 二次确认文案消费）；
+    events 不删——审计留痕。
+    """
+    if (off := _disabled()) is not None:
+        return off
+    reg = get_registry()
+    if reg.store.get_node(node_id) is None:
+        return JSONResponse(status_code=404, content={"detail": f"节点 {node_id} 不存在"})
+    _CONNS.revoke(node_id)
+    out = reg.store.retire_node(node_id, append_event_fn=reg.store.append_event)
+    if out is None:
+        return JSONResponse(status_code=404, content={"detail": f"节点 {node_id} 不存在"})
+    return {"removed": True, **out}
+
+
 @router.post("/cluster/nodes/{node_id}/sync")
 async def force_node_sync(node_id: str, _base: None = Depends(require_auth)):
     """强制全量 sync：下一枚 ack 无条件带 `sync.force=true`，worker 跳过 revision 短路重写盘。
@@ -406,6 +482,11 @@ async def join_check(body: _JoinCheckBody):
         return off
     reg = get_registry()
     if tokens.token_matches(body.key, reg.ensure_join_token()):
+        # 禁用闸门（M2）：与 WS hello 同构——先认身份再谈解禁，判据取被 join 的
+        # node_id 行（换 join token 绕不开节点级意志）。
+        existing = reg.store.get_node(body.node_id)
+        if existing is not None and existing.get("disabled"):
+            return JSONResponse(status_code=401, content={"detail": "节点已禁用"})
         node_token = tokens.new_node_token()
         result = reg.store.upsert_node(node_id=body.node_id, node_token=node_token, lan_id=body.lan,
                                        role="worker", host_ip=body.host_ip, hostname=body.hostname,
@@ -420,6 +501,10 @@ async def join_check(body: _JoinCheckBody):
         return JSONResponse(status_code=401, content={"detail": "无效的 join/node token"})
     if str(known["node_id"]) != body.node_id:
         return JSONResponse(status_code=401, content={"detail": "node_id 与节点令牌不匹配"})
+    # 第二处闸门：校验链已过 node_id 比对，known 即被 join 的 node_id 行；同文案
+    # 不泄露"token 有效但节点被禁"与"其他 401"的差异。
+    if known.get("disabled"):
+        return JSONResponse(status_code=401, content={"detail": "节点已禁用"})
     return {"ok": True, "node_token": str(known["node_token"])}
 
 
