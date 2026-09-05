@@ -5121,7 +5121,9 @@ def test_reconcile_forwards_force_flag_from_snapshot(dirs):
 - [ ] **Step 5: 运行确认通过**
 
 Run: `uv run pytest tests/test_cluster_reconcile.py -q`
-Expected: PASS（31 条）
+Expected: PASS（brief 名义 31 条，parametrize 展开实为 47；fix round 1 追加 2 条 force 透传、
+fix round 2 追加 2 条（心跳非阻塞降级 + 词表守卫回归）后共 **49 条**。回归基线：Task 8 落地后
+十文件实测 **219**（此前派发词写 222 系笔误），Task 9 后为 219+2+47=268，fix round 2 后 270）
 
 Run: `uv run pytest tests/ -q -k "cluster"`
 Expected: PASS（Task 1–9 全部 cluster 用例；`runtimes` 键变更不影响 Task 4/7 已有断言，若失败先检查 `_runtimes` 是否遍历了全量 `KNOWN_ENGINES`）
