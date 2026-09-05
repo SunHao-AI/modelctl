@@ -32,7 +32,11 @@ class ConnectionRegistry:
         self._current: dict[str, int] = {}
 
     def join(self, node_id: str) -> int:
-        """登记一条新连接并返回其 epoch；同 node_id 的旧 epoch 即刻失效。"""
+        """登记一条新连接并返回其 epoch；同 node_id 的旧 epoch 即刻失效。
+
+        取号必须与写表同处临界区：若先取号后入锁，先取小 epoch 的线程可能后写表，
+        覆盖更大 epoch 的新连接——恰好破坏本机制要保的"后来者胜"语义。
+        """
         with self._mu:
             epoch = next(self._counter)
             self._current[node_id] = epoch
