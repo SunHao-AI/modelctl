@@ -25,7 +25,7 @@ from typing import Any
 
 from loguru import logger
 
-from modelctl.core.cluster import config, wsproto
+from modelctl.core.cluster import config, reconcile, wsproto
 from modelctl.core.envfile import PROJECT_ROOT, set_env_values
 
 ENV_PATH = PROJECT_ROOT / ".env"
@@ -52,8 +52,13 @@ def ws_url(center_url: str, insecure: bool) -> str:
     return base + "/admin/api/ws/cluster"
 
 
-def collect_heartbeat() -> dict[str, Any]:
-    """M0 心跳 payload：GPU 概要 + 空 profiles/主机段（模型级采集属 M1 reconciler）。"""
+def collect_heartbeat(rt: Any = None) -> dict[str, Any]:
+    """心跳 payload：M0 基础段 + （可选）reconciler 扩展段。
+
+    `rt` 为 None（solo 误启、reconciler 尚未创建）时返回与 M0 **逐键一致**的形状。
+    `rt` 存在但取数抛错时**整段省略扩展段并删掉 profiles 键**：profiles={} 在中心侧
+    读作"本机确实没有模型"，会覆盖台账；省略才读作"未知"，中心据此保留上一次的事实。
+    """
     gpu: dict[str, Any] = {}
     try:
         from modelctl.core.capabilities import probe
@@ -62,15 +67,48 @@ def collect_heartbeat() -> dict[str, Any]:
         gpu = {"count": caps.gpu_count, "vram_total_mb_per_gpu": caps.vram_total_mb_per_gpu}
     except Exception as exc:  # noqa: BLE001 — 探测失败不阻断心跳
         logger.debug(f"心跳 GPU 探测失败（忽略）: {exc}")
-    return {"profiles": {}, "gpu": gpu, "host": {}}
+    payload: dict[str, Any] = {"profiles": {}, "gpu": gpu, "host": {}}
+    if rt is None:
+        return payload
+    try:
+        payload.update(rt.heartbeat_payload())
+    except Exception as exc:  # noqa: BLE001 — 扩展段缺失只是本轮少报，不影响注册/租约
+        logger.debug(f"心跳扩展段采集失败（本轮省略）: {exc}")
+        payload.pop("profiles", None)
+    return payload
+
+
+def deliver_ack(ack: Any, rt: Any) -> list[dict[str, Any]]:
+    """把中心 ack 的内容投递给 reconciler，返回需要立刻回传的 result 帧。
+
+    只做投递与读缓存（Task 9 的单写者约定）：这里任何"顺手做点事"都会把
+    300s 量级的起停阻塞引进心跳线程，进而让中心把健康节点判成 stale。
+    """
+    if rt is None:
+        return []
+    parsed = wsproto.parse_ack(ack)
+    if parsed["sync"] is not None:
+        rt.offer_snapshot(parsed["sync"])
+    if parsed["actions"]:
+        rt.handle_actions(parsed["actions"])
+    return list(rt.flush_results())
 
 
 class WorkerAgent:
     """worker→中心长连接维护者。异常一律吞掉进退避重连，绝不让线程带崩宿主 webui。"""
 
-    def __init__(self, stop_event: threading.Event) -> None:
+    def __init__(self, stop_event: threading.Event, reconciler: Any = None) -> None:
         self._stop = stop_event
+        self._reconciler = reconciler
         self._node_token = config.node_token()
+
+    def _reconciler_now(self) -> Any:
+        """每拍取一次 reconciler。
+
+        注入优先（测试）；否则读全局单例——webui 里 reconciler 与 Agent 的启动顺序
+        不构成正确性前提：单例尚未就绪时本轮按"无扩展段"上报，下一拍自动接上。
+        """
+        return self._reconciler if self._reconciler is not None else reconcile.current()
 
     def _current_key(self) -> str:
         return self._node_token or config.join_token()
@@ -100,8 +138,11 @@ class WorkerAgent:
             while not self._stop.is_set():
                 if self._stop.wait(interval):
                     break
-                ws.send(wsproto.dumps(wsproto.make_heartbeat(collect_heartbeat())))
-                ws.recv()  # 等 ack，保持请求-应答有序
+                rt = self._reconciler_now()
+                ws.send(wsproto.dumps(wsproto.make_heartbeat(collect_heartbeat(rt))))
+                ack = json.loads(ws.recv())          # 等 ack，保持请求-应答有序
+                for frame in deliver_ack(ack, rt):   # 受理回执随同一次往返送出
+                    ws.send(wsproto.dumps(frame))
 
     def run(self) -> None:
         backoff = 1

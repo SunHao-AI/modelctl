@@ -89,6 +89,36 @@ def mount_static(app) -> bool:
     return True
 
 
+def start_cluster_background() -> bool:
+    """按角色启动集群后台线程（worker/both：reconciler + 中心 Agent）。
+
+    任何导入/启动异常都不得阻断 webui，故整块 try/except 兜底；solo 与纯中心角色
+    在一行 `if` 处即返回 False，零副作用。返回是否启动了后台线程（便于测试与自检）。
+
+    启动顺序刻意定为**先 reconciler 后 Agent**：reconciler 是"有状态可独立运行"的一方
+    （中心宕机也要按最后已知 goal 维持推理），Agent 是"尽力上报"的一方；顺序反了会出现
+    "Agent 已连上中心但本机还没有 reconciler 实例"的空窗——那一拍心跳会缺 `goal_sync`，
+    中心于是白搭一次全量 sync。
+    """
+    try:
+        from modelctl.core.cluster import config as cluster_config
+
+        if not cluster_config.is_worker():
+            return False
+        from modelctl.core.cluster import reconcile as cluster_reconcile
+
+        cluster_reconcile.start_reconciler_in_background()
+        from modelctl.core.cluster import agent as cluster_agent
+
+        cluster_agent.start_agent_in_background()
+        return True
+    except Exception as exc:  # noqa: BLE001 — 集群能力缺失/异常只降级，不影响管理面
+        from loguru import logger
+
+        logger.warning(f"cluster 后台线程启动失败（Web UI 照常运行）: {exc}")
+        return False
+
+
 def main() -> None:
     """独立运行入口：python -m modelctl.core.webui.server。
 
@@ -107,19 +137,7 @@ def main() -> None:
     host, port = webui_host(), webui_port()
     app = create_app(admin=True)
 
-    # cluster worker Agent：任何导入/启动异常都不得阻断 webui，故整块 try/except 兜底
-    # （solo/纯中心：is_worker() False，一行 if 即过，零副作用）。
-    try:
-        from modelctl.core.cluster import config as cluster_config
-
-        if cluster_config.is_worker():
-            from modelctl.core.cluster import agent as cluster_agent
-
-            cluster_agent.start_agent_in_background()
-    except Exception as exc:  # noqa: BLE001 — 集群能力缺失/异常只降级，不影响管理面
-        from loguru import logger
-
-        logger.warning(f"cluster worker Agent 启动失败（Web UI 照常运行）: {exc}")
+    start_cluster_background()
 
     hint = "（未找到 dist/，仅暴露 /admin/api；先执行 npm run build）" if not dist_ready() else ""
     print(f"modelctl Web UI 运行于 http://{host}:{port}/ {hint}", flush=True)
