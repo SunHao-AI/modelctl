@@ -110,6 +110,8 @@ def _validate(goal: dict[str, Any]) -> str:
         raw = yaml.safe_load(text)
     except yaml.YAMLError as exc:
         return f"yaml 语法错误: {exc}"
+    except Exception as exc:  # noqa: BLE001 — 深嵌套 RecursionError 等按继承树收口（同 profiles.py 口径）
+        return f"yaml 解析失败: {type(exc).__name__}"
     if not isinstance(raw, dict):
         return "yaml 顶层必须是映射"
     if raw.get("port") in (None, ""):
@@ -155,7 +157,12 @@ def apply_snapshot(snapshot: dict[str, Any], *, models_dir: Path, cache_dir: Pat
             continue
         path = models_dir / str(goal["engine"]) / f"{goal['profile']}.yaml"
         text = str(goal["yaml"])
-        before = path.read_text(encoding="utf-8") if path.is_file() else None
+        before = None
+        if path.is_file():
+            try:
+                before = path.read_text(encoding="utf-8")
+            except Exception as exc:  # noqa: BLE001 — 非 UTF-8 等读不动按"无备份"覆盖：中心版本恢复权威即自愈
+                logger.warning(f"集群 sync 读取 {path.name} 失败（按无备份覆盖）: {exc}")
         if before != text:
             _atomic_write(path, text, backup=before)
         entries[goal_id] = {"goal_id": goal_id, "profile": str(goal["profile"]),
@@ -164,8 +171,13 @@ def apply_snapshot(snapshot: dict[str, Any], *, models_dir: Path, cache_dir: Pat
                             "params": goal.get("params"), "env_overlay": goal.get("env_overlay")}
         result.written.append(goal_id)
 
+    # 被拒 ≠ 撤销：同 goal 的坏更新（sha 截断等）被拒时必须**维持上轮版本**——文件
+    # 不剪枝、state 保留上轮 entry（否则下轮它变"未登记"，剪枝/漂移都失去保护对象）。
+    # 删除语义只属于"goal 从快照消失"。否则一次传输截断就把服役中的模型文件毁掉。
+    rejected_ids = set(result.rejected)
     for goal_id, old in previous.items():
-        if goal_id in entries:
+        if goal_id in entries or goal_id in rejected_ids:
+            entries.setdefault(goal_id, old)
             continue
         _prune(Path(str(old.get("path", ""))))
         result.pruned.append(goal_id)
@@ -231,7 +243,7 @@ def scan_drift(cache_dir: Path, models_dir: Path) -> list[str]:
         want = str(g.get("sha", ""))
         try:
             got = profile_sha(path.read_text(encoding="utf-8"))
-        except OSError:
+        except Exception:  # noqa: BLE001 — 文件不可读/非 UTF-8 一律计 drift（不匹配），绝不崩心跳
             out.append(str(g.get("goal_id", "")))
             continue
         if got != want:

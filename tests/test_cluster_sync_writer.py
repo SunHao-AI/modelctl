@@ -207,3 +207,44 @@ def test_written_file_is_loadable_by_repo_profile_loader(dirs, monkeypatch, tmp_
     prof = load_profile("qwen", dirs[0])
     assert prof.port == 8101 and prof.api_key == "sk-local"
     assert yaml.safe_load((dirs[0] / "vllm" / "qwen.yaml").read_text(encoding="utf-8"))["port"] == 8101
+
+
+# ---------------- fix round 1（task-8-review M-1/M-2/M-3 + 字节口径盲区）----------------
+def test_rejected_update_keeps_previous_file(dirs):
+    """被拒 ≠ 撤销：同 goal 的坏更新（sha 截断）被拒时必须维持上轮文件与 state 登记。"""
+    models, cache = dirs
+    _apply(dirs, [_goal()], revision="r1")
+    bad = _goal()
+    bad["sha"] = "0" * 64                                   # 模拟传输截断：sha 与 yaml 不符
+    out = _apply(dirs, [bad], revision="r2")
+    assert out.rejected == ["qwen@@w-1"]
+    assert (models / "vllm" / "qwen.yaml").read_text(encoding="utf-8") == YAML_A
+    entries = {g["goal_id"]: g for g in read_state(cache)["goals"]}
+    assert entries["qwen@@w-1"]["sha"] == P.profile_sha(YAML_A)  # state 保留上轮正确 sha
+    assert scan_drift(cache, models) == []                        # 不误报漂移
+
+
+def test_non_utf8_existing_file_rewritten_and_drift_survives(dirs):
+    """既有文件被外部编辑器改成非 UTF-8：apply 不崩并覆盖回中心版本；scan_drift 计漂移。"""
+    models, cache = dirs
+    _apply(dirs, [_goal()], revision="r1")
+    target = models / "vllm" / "qwen.yaml"
+    target.write_bytes("端口：8101\n".encode("gbk"))
+    out = _apply(dirs, [_goal()], revision="r2")            # 读不动按"无备份"覆盖 → 自愈
+    assert out.written == ["qwen@@w-1"]
+    assert target.read_text(encoding="utf-8") == YAML_A
+    target.write_bytes("端口：8101\n".encode("gbk"))        # 再改坏：scan_drift 别崩心跳
+    assert scan_drift(cache, models) == ["qwen@@w-1"]
+
+
+def test_rejects_deeply_nested_yaml(dirs):
+    """深嵌套 flow 结构击穿递归上限抛 RecursionError（非 YAMLError）→ 拒该条不炸 apply。"""
+    out = _apply(dirs, [_goal(text="a: " + "[" * 4000)])
+    assert out.rejected == ["qwen@@w-1"]
+
+
+def test_oversize_yaml_measured_in_utf8_bytes(dirs):
+    """尺寸按 UTF-8 字节口径：中文字符数 < 上限但字节数 > 上限，同样必须拒。"""
+    text = "port: 1\npad: " + "汉" * (P.MAX_YAML_BYTES // 3 + 10)
+    assert len(text) < P.MAX_YAML_BYTES                     # 按 len() 算"没超限"的口径漏洞
+    assert _apply(dirs, [_goal(text=text)]).rejected == ["qwen@@w-1"]
