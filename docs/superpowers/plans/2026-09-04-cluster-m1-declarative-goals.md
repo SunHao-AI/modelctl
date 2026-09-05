@@ -1956,6 +1956,8 @@ goal 的唯一写入口。三类职责：① `set_goals` 组装 gate 输入、�
 # @Desc   : GoalService（env 白名单 / gate 串联 / 快照 revision / stage 回写）
 # ===============================================================================
 
+import hashlib
+
 import pytest
 
 from modelctl.core.cluster.goals import (
@@ -1963,7 +1965,10 @@ from modelctl.core.cluster.goals import (
 )
 from modelctl.core.cluster.store import ClusterStore
 
-YAML = "port: 8101\napi_key: ${API_KEY}\nengine_config:\n  tensor_parallel_size: 2\n"
+# 引擎段键 = 引擎名（core/profile.py _to_profile: raw.get(engine)），**不是**字面
+# `engine_config` 键。写成 engine_config 时 gate/估算器读不到 tp，夹具与实现同错 →
+# 单测全绿而生产恒判 1 卡（同 Task 4 pitfall：test_declared_gpu_count_ignores_literal_*）
+YAML = "port: 8001\napi_key: ${API_KEY}\nvllm:\n  tensor_parallel_size: 2\n"
 
 
 @pytest.fixture()
@@ -2003,10 +2008,14 @@ def test_env_overlay_allowlist_covers_paths_only():
 
 
 def test_env_overlay_rejects_secret_keys_even_inside_allowlist_shape():
+    """凭据类键必须命中"凭据"专用文案，不能只断言键名出现在错误里：键名本身会被
+    "不在白名单"的通用文案原样带出（`MODELSCOPE_API_KEY` 含 API_KEY），只断言
+    `"API_KEY" in err` 的话删掉整条 SECRET 前置检查也照样全绿——两条分支防护强度
+    完全不同（白名单=没列出就拒；凭据检查=将来误加进白名单也拒）。Task 11 同口径。"""
     got, err = validate_env_overlay({"MODEL_ROOT": "/m", "MODELSCOPE_API_KEY": "sk-1"})
-    assert got is None and "API_KEY" in err
+    assert got is None and "凭据" in err and "API_KEY" in err
     got, err = validate_env_overlay({"MY_TOKEN": "x"})
-    assert got is None and "TOKEN" in err
+    assert got is None and "凭据" in err and "TOKEN" in err
 
 
 def test_env_overlay_rejects_unknown_key():
@@ -2058,9 +2067,16 @@ def test_set_goals_is_idempotent_second_call_creates_zero(store, svc):
 
 
 def test_set_goals_dry_run_writes_nothing(store, svc):
+    """dry-run 的 created 是**预计数**（1），台账分毫不动。
+
+    计划原稿此处写作 `created == 0`，与本计划下游 Task 11 的 REST 契约
+    （`assert body["created"] == 0` 只用于"全 skip"用例，dry-run 用例断言 1）以及
+    Task 12 的退出码判定（`created == 0 且 errors > 0` → 2）互斥。
+    `format_gate_report` 本就把 created 读作"将创建/已创建"，故以实现语义为准。
+    """
     _online(store, "w-1")
     out = svc.set_goals(profile="qwen", node_ids=["w-1"], create=True, dry_run=True)
-    assert out["created"] == 0 and out["report"].startswith("[dry-run]")
+    assert out["created"] == 1 and out["report"].startswith("[dry-run]")
     assert store.list_goals() == []
     assert store.get_goal("qwen@@w-1") is None
 
@@ -2077,7 +2093,8 @@ def test_set_goals_bad_env_overlay_is_rejected_before_write(store, svc):
     _online(store, "w-1")
     out = svc.set_goals(profile="qwen", node_ids=["w-1"], create=True,
                         env_overlay={"API_KEY": "sk"})
-    assert out["created"] == 0 and "API_KEY" in out["reason"]
+    # 断"凭据"专用措辞而非键名：键名会被通用白名单文案带出，属恒真断言
+    assert out["created"] == 0 and "凭据" in out["reason"]
     assert store.list_goals() == []
 
 
@@ -2103,14 +2120,23 @@ def test_set_goals_rejects_unknown_intent(store, svc):
 
 # ---------------- snapshot ----------------
 def test_snapshot_shape_and_raw_passthrough(store, svc):
+    # gpu_list 必须给满 tp=2 张卡：gate 对 tp 系引擎要求"生效卡位数 == tp"，
+    # 只给 [0] 会被 skip → get_goal 为 None，本用例根本走不到快照断言。
     _online(store, "w-1")
-    svc.set_goals(profile="qwen", node_ids=["w-1"], create=True, gpu_list=[0])
+    svc.set_goals(profile="qwen", node_ids=["w-1"], create=True, gpu_list=[0, 1])
     snap = svc.snapshot_for("w-1")
     assert len(snap["goals"]) == 1
     g = snap["goals"][0]
     assert g["goal_id"] == "qwen@@w-1" and g["engine"] == "vllm"
     assert "${API_KEY}" in g["yaml"]                    # 原文下发，未插值
-    assert g["sha"] in YAML and g["params"]["gpu_list"] == [0]
+    # yaml 逐字节等于源文件原文（worker 侧漂移检测的基准），故比对整串而非片段。
+    assert g["yaml"] == YAML and g["params"]["gpu_list"] == [0, 1]
+    # sha 是"对原文的哈希"，按定义**不是**原文的子串——计划原稿写作
+    # `g["sha"] in YAML`，该断言恒假；正确钉法是重算哈希比对。
+    assert g["sha"] == "sha256:" + hashlib.sha256(YAML.encode("utf-8")).hexdigest()
+    # 快照是下发协议载荷的形状，绝不夹带台账内部列（stage/placement 等）。
+    assert set(g) == {"goal_id", "profile", "engine", "yaml", "sha",
+                      "version", "intent", "params", "env_overlay"}
 
 
 def test_snapshot_revision_is_stable_and_content_sensitive(store, svc):
@@ -2119,8 +2145,12 @@ def test_snapshot_revision_is_stable_and_content_sensitive(store, svc):
     svc.set_goals(profile="qwen", node_ids=["w-1", "w-2"], create=True)
     a = svc.snapshot_for("w-1")["revision"]
     assert svc.snapshot_for("w-1")["revision"] == a          # 稳定（中心重启后同值）
-    svc.set_goals(profile="qwen", node_ids=["w-2"], create=True, intent="stop")
-    assert svc.snapshot_for("w-1")["revision"] == a          # 他节点变更不影响本节点
+    # 他节点变更不影响本节点：必须**真的**改掉 w-2 的 goal 才算钉住"按 node_id 过滤"。
+    # 计划原稿用 set_goals(create=True) 重跑——goal 已存在 → gate 幂等 skip →
+    # 什么都没变，断言恒真，snapshot_for 忘了 node_id 过滤也能全绿。
+    svc.store.update_goal("qwen@@w-2", now=8.0, intent="stop")
+    assert store.get_goal("qwen@@w-2")["intent"] == "stop"
+    assert svc.snapshot_for("w-1")["revision"] == a
     svc.store.update_goal("qwen@@w-1", now=9.0, intent="stop")
     assert svc.snapshot_for("w-1")["revision"] != a          # 本节点变更 → revision 变
 
@@ -2298,27 +2328,36 @@ class GoalService:
         source = profiles.read_profile_source(profile, MODELS_DIR)
         candidates = self._candidates(node_ids=node_ids, all_nodes=all_nodes)
         if not source.get("ok"):
-            verdicts = gate.evaluate_gate(candidates=candidates or [{"node_id": n} for n in (node_ids or [])],
-                                          source=source, in_use={}, existing_goal_ids=set(),
-                                          lan_allow=lan_allow or [], create=create, profile_exists={})
+            # 源不可用时仍逐候选出 verdict：CLI/REST 的报告形状在"全 error"与
+            # "部分 skip"下必须一致，否则调用方要为失败单独写一套渲染分支。
+            verdicts = gate.evaluate_gate(
+                candidates=candidates or [{"node_id": n} for n in (node_ids or [])],
+                source=source, in_use={}, existing_goal_ids=set(),
+                lan_allow=lan_allow or [], create=create, profile_exists={})
             report = gate.format_gate_report(verdicts, created=0, dry_run=dry_run)
             return {"verdicts": verdicts, "report": report, "created": 0, "skipped": 0,
                     "errors": len(verdicts), "reason": str(source.get("reason", ""))}
         if not candidates:
             return self._abort("无可下发节点（--node 指定的节点不存在或已 offline）")
 
+        # 幂等集/落库/事件一律用 source["name"]（文件 stem），绝不用调用方原词：
+        # 寻址名可能是展示名（Task 3 条款④），goal_id 与 worker 写盘文件名只认 stem。
+        # 用原词查 existing 会让"展示名重跑"查不到已有 goal → gate 判 ok → upsert
+        # 把 stage 重置回 PENDING_PROFILE_SYNC，等于把 worker 状态机清零。
+        name = str(source["name"])
         # gpu_list 同时进 params（worker 写盘时并入 YAML）与 placement（gate 冲突判定用）
         merged_params = dict(params or {})
         if gpu_list:
             merged_params["gpu_list"] = list(gpu_list)
         need_gpus = len(gpu_list) if gpu_list else gate.declared_gpu_count(source.get("raw"), source["engine"])
-        est = gate.estimate_vram_mb(source.get("raw"), source["engine"], profile) or 0
+        est = gate.estimate_vram_mb(source.get("raw"), source["engine"], name) or 0
         enriched = {**source, "gpu_count": need_gpus, "min_vram_mb": est,
                     "requested_gpus": list(gpu_list or [])}
 
         in_use = self._in_use_gpus([str(c["node_id"]) for c in candidates])
-        existing = {g["goal_id"] for g in self.store.list_goals(profile=profile)}
-        has_profile = {str(c["node_id"]): profile in (c.get("local_profiles") or []) for c in candidates}
+        existing = {g["goal_id"] for g in self.store.list_goals(profile=name)}
+        has_profile = {str(c["node_id"]): name in (c.get("local_profiles") or [])
+                       for c in candidates}
         verdicts = gate.evaluate_gate(candidates=candidates, source=enriched, in_use=in_use,
                                       existing_goal_ids=existing, lan_allow=lan_allow or [],
                                       create=create, profile_exists=has_profile)
@@ -2327,16 +2366,18 @@ class GoalService:
         for v in verdicts:
             if v.result != gate.RESULT_OK:
                 continue
-            if dry_run:
+            if dry_run:                       # created 是"预计数"，台账分毫不动
                 created += 1
                 continue
             if self._count_for_node(v.node_id) >= MAX_GOALS_PER_NODE:
                 v.result, v.reason = gate.RESULT_SKIP, f"节点 goal 数已达上限 {MAX_GOALS_PER_NODE}"
                 continue
-            self._write_goal(profile=profile, source=source, node_id=v.node_id, intent=intent,
-                             params=merged_params, env_overlay=overlay, gpu_count=need_gpus,
-                             runtime_ref=runtime_ref, target_role=target_role,
-                             created_by=created_by, now=now)
+            # enriched 而非 source：_write_goal 读 min_vram_mb 进 placement，
+            # 估算值只挂在 enriched 上——传 source 会让该列恒 0（死字段）。
+            self._write_goal(profile=name, source=enriched, node_id=v.node_id,
+                             intent=intent, params=merged_params, env_overlay=overlay,
+                             gpu_count=need_gpus, runtime_ref=runtime_ref,
+                             target_role=target_role, created_by=created_by, now=now)
             created += 1
         report = gate.format_gate_report(verdicts, created=created, dry_run=dry_run)
         return {"verdicts": verdicts, "report": report, "created": created,
@@ -2361,7 +2402,10 @@ class GoalService:
             self.store.append_event("goal.delete", node_id=str(gone["node_id"]), goal_id=goal_id,
                                     payload={"profile": profile, "operator": created_by}, now=now)
         missing = [g for g in targets if g not in removed]
-        report = (f"已删除 {len(removed)} 个 goal" + (f"；不存在 {len(missing)} 个" if missing else "")
+        # report 面向操作者并点名 profile：撤的是哪个模型是运维唯一能确认的线索
+        # （计划原稿的文案不含 profile 名，与 test_remove_goals_* 的 "qwen" in report 相左）。
+        report = (f"profile {profile}：已删除 {len(removed)} 个 goal"
+                  + (f"；不存在 {len(missing)} 个" if missing else "")
                   if targets else f"profile {profile} 无任何 goal")
         return {"removed": removed, "missing": missing, "report": report}
 
@@ -2470,7 +2514,16 @@ def _int_list(value: Any) -> list[int] | None:
 - [ ] **Step 4: 运行确认通过**
 
 Run: `uv run pytest tests/test_cluster_goals.py -q`
-Expected: PASS（23 条）
+Expected: PASS（31 条；初稿 23 + 实现期补入 8：unknown target_role、无可达节点、展示名寻址归一 stem（pitfall #38 端到端，真实 RED）、快照 goal 定序、快照键集合钉死、remove 连带剪枝 model_state、goal.delete 事件、回流路径不安全名拒绝）
+
+> **实现期对初稿代码的六处订正**（初稿自身矛盾，以测试/下游契约为裁决基准）：
+> 1. 夹具 `YAML` 引擎段键 `engine_config` → **`vllm`**（段键=引擎名，同 Task 4 订正口径；夹具抄错键属"夹具与实现同错 → 单测全绿生产恒错"陷阱）。
+> 2. `g["sha"] in YAML` → 重算 `sha256:`+hex 比对：sha 是对原文的哈希，按定义**不是**原文子串，原断言恒假。
+> 3. dry-run 的 `created`：**1（预计数）**而非 0——初稿与 Task 11 `body["created"] == 1`、Task 12 退出码判定互斥；`format_gate_report` 本就把 created 读作"将创建/已创建"。
+> 4. `_write_goal(source=enriched)`：`min_vram_mb` 只挂在 enriched 上，初稿传 source 会让 placement 该列恒 0（死字段）。
+> 5. 幂等集 `existing` / `has_profile` / 落库 profile 一律用 `source["name"]`（stem）：初稿用调用方原词，展示名寻址重跑会查不到已有 goal → upsert 把 stage 重置回 PENDING_PROFILE_SYNC（真实 RED：第二次 `created == 1`）。
+> 6. `remove_goals` 报告文案加 profile 名（初稿文案与自身测试 `"qwen" in report` 相左）。
+> 另：env 凭据拒绝断言必须锁"凭据"专用措辞——键名会被通用白名单文案带出（恒真断言，变异验证首轮存活的正是这条）。
 
 - [ ] **Step 5: 提交**
 

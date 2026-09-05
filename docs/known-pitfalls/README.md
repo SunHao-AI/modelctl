@@ -54,6 +54,9 @@
 | 2026-09-05 | 后端 / 终端对齐 | 多行 `source.reason` 原样拼进报告，破坏"逐节点一行"不变量 | 短路 reason 来自外部（YAMLError str 实测 4 行），拼行前 `" ".join(reason.split())` 折叠；对齐类函数要同时对宽度（CJK）和行数（换行）免疫。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-05 | 后端 / 集群下发 | gate 只把显式 --gpus 当生效卡位，profile 内 gpu_list 绕过 tp 一致性与在用卡位求交 | 生效卡位 = requested or profile gpu_list（worker selected_gpus() 同源），同喂 tp 一致性与 clash 求交；unsloth 布尔下界须按冲突拦截而非抬高 need。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-05 | 后端 / 集群下发 | gate 缺省回落用 `or` 短路：显式 0 被当缺失，同值三果（0→8、"0"→1、""→8） | 缺省回落判据是存在性（is None/显式空值）不是真值；缺失/存在但非法/显式值三态各钉用例，显式 0 收拢契约下限 1。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-05 | 后端 / 集群下发 | 展示名归一只做在读侧，GoalService 用原词查幂等集 → 重跑把 worker 状态机清零 | 归一是跨任务契约：查库/写库/local_profiles/事件/写盘文件名必须全用规范名；幂等测试要跑两次并断言第二次的计数**与 stage**。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-05 | 计划 / 契约一致性 | 计划正文与自身测试、下游 Task 契约互斥（dry-run created、`sha in YAML`、报告文案） | 测试=契约、实现=建议；实现与下游对外契约冲突时以下游为准并回改上游；派生字段须断言非默认值否则退化成死字段。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-05 | 测试 / 覆盖 | 恒真断言新变体：键名出现在错误文案里、幂等重跑让"隔离性"断言失去判别力 | 拒绝类断言锁分支专属措辞（"凭据"）而非键名；"A 变更不影响 B"须真的改动 B 侧并自证前提；首轮变异全绿先怀疑断言恒真。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 
 ## 目录约定
 

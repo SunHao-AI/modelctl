@@ -491,3 +491,37 @@
   - 缺省回落的判据是**存在性**（`is None` / 显式空值），永远不是真值（`or` / `if x:`）——falsy 但合法的值（0、False、空列表）是这类缺陷的固定受害者，与"工厂默认值不能占用业务值"（`_UNSET` 哨兵）是同一课的两个方向。
   - 三态设计要显式写进契约：**缺失**（引擎缺省）/ **存在但非法**（保守下限）/ **显式值**（按值判），每个态各钉一条用例，否则任何一次 `or → if-else` 重构都可能悄悄合并其中两态。
   - YAML 语境下 `key:`（隐式 null）与 `key: ""` 都是"写了但等于没写"，归入缺失态与键不存在同路径，避免第四种结果。
+
+## 展示名归一只做在读侧：GoalService 用调用方原词查幂等集，重跑把 worker 状态机清零
+
+- **日期**：2026-09-05（M1 Task 5）
+- **症状**：profile 文件 `models/vllm/qwen-fast.yaml` 内写 `name: qwen-display`，用户按 UI 展示名下发的第一次成功（`read_profile_source` 条款④已把归一后的 stem 放进 `source["name"]`，落库是 `qwen-fast@@w-1`）。第二次同样的展示名重跑，本应 gate 幂等 skip，实际 `created == 1` → `upsert_goal` 把 `stage` 从 READY 重置回 `PENDING_PROFILE_SYNC`，等于"幂等重跑把 worker 状态机清零"。
+- **根因**：Task 3 的归一裁决只覆盖**读取侧的返回值**，Task 5 的 `set_goals` 却拿**调用方原词**（展示名）去查 `list_goals(profile=profile)` 组装 `existing_goal_ids`、并比对 `local_profiles`——goal_id/落库/worker 写盘文件名三处只认 stem，于是"查库键"与"写库键"用了两套标识，第二次必然查不到已有 goal。计划正文的参考实现正是这么写的（`existing = {… list_goals(profile=profile)}`、`has_profile = {…: profile in …}`、`_write_goal(profile=profile)`）。
+- **解决**：`source["name"]` 取一次 `name`，`existing` / `has_profile` / `_write_goal(profile=name)` / 事件 payload 全部改用 stem；新增端到端用例 `test_set_goals_addressed_by_display_name_normalizes_to_stem`（真写一个带 `name:` 的文件，断言落库 profile 是 stem + 第二次 `created == 0`）。该用例在改实现前是**真实 RED**（`1 == 0`）。
+- **要点**：
+  - "标识归一"是**跨任务契约**：上游归一出的规范名，下游每个消费点（查库、写库、比对节点上报清单、事件 payload、写盘文件名）都必须换成它。只在读侧归一 = 写侧用原词 = 同一个实体在系统里有两个主键。
+  - 自检口诀：一个函数里凡出现"调用方传入的字符串"直接参与 `where`/`get`/`key in list`，先问一句"它归一了吗"。参数名同名（`profile`）掩盖了两种语义（寻址名 vs 规范名），必要时像本次一样立刻落到局部变量 `name` 上，让原词不再出现在后续逻辑里。
+  - 幂等类缺陷的测试必须**跑两次**并断言第二次的计数与状态（不只是"库里只有一条"）——只断言条数的话，upsert 覆盖 stage 这类破坏完全隐形。
+
+## 计划正文与自身测试/下游契约互斥：dry-run created、sha in YAML、撤除报告文案
+
+- **日期**：2026-09-05（M1 Task 5）
+- **症状**：实现期发现计划 Task 5 内部/跨任务三处互斥。① 测试断言 `g["sha"] in YAML`——`sha` 是 `sha256:`+十六进制摘要，按定义**不是**原文子串，该断言恒假。② `test_set_goals_dry_run_writes_nothing` 断言 `created == 0`，而 Task 11 的 REST 用例断言 `body["created"] == 1`、Task 12 的退出码判定依赖 `created == 0 且 errors > 0 → 2`（把 dry-run 的"将创建 1 个"报成 0，CLI 会输出"无变更"并退 0，用户以为没生效）。③ `remove_goals` 参考实现文案 `f"已删除 {n} 个 goal"` 不含 profile 名，同任务测试却断言 `"qwen" in out["report"]`。另有 ④ `_write_goal(source=source)` 让 `placement.min_vram_mb` 恒 0（估算值只挂在 `enriched` 上，写的是没合并过的 `source`）——死字段，无断言即无人发现。
+- **根因**：计划的参考实现与参考测试由不同轮次写出，缺少"实现/测试/下游消费者"三方交叉核对；`sha`、`created` 这类**语义被别处定义**的量，在计划里按直觉写。dry-run 的 `created` 更是"预计数 vs 实际数"的经典歧义，`format_gate_report` 早已按"将创建/已创建"消费它。
+- **解决**：以测试/下游契约为裁决基准（Task 11/12 是要编译进 CLI 与 REST 的对外契约）——dry-run `created=1` 且台账不写、report 前缀 `[dry-run]` 显式标注；sha 改为重算 `hashlib.sha256(YAML).hexdigest()` 比对；report 改 `f"profile {profile}：已删除 N 个 goal"`；`_write_goal` 传 `enriched`。六处订正连同裁决理由写回计划 Step 4，避免后续 Task 抄回旧稿。
+- **要点**：
+  - 计划的**测试代码 = 契约**、**实现代码 = 建议**。二者冲突时改实现；实现与**下游任务**的断言冲突时，以下游对外契约为准并回改上游测试——写代码前先把该字段在整个计划里的所有出现点 grep 一遍。
+  - 哈希/摘要字段不能与原文互相断言包含关系。钉"原文逐字节下发"用 `g["yaml"] == YAML` 整串比对（`"${API_KEY}" in yaml` 只能证明没插值，证明不了没丢段/没改写），钉 sha 用**重算比对**。
+  - 落库的派生字段（placement/估算值/统计列）必须有至少一条断言其**非默认值**的用例，否则"取错来源对象"会静默退化成死字段。
+  - 计数语义有歧义（dry-run/部分成功/幂等重跑）时，把"预计数/实际写入数/受影响数"写进 docstring 并各配一条用例——这三个数在 CLI 退出码、REST body、报告文案三处必须同值。
+
+## 恒真断言新变体：键名出现在错误文案里、幂等重跑让"隔离性"断言失去判别力
+
+- **日期**：2026-09-05（M1 Task 5 变异验证）
+- **症状**：7 项变异验证首轮 1 项存活——把 `validate_env_overlay` 的凭据前置检查整段删掉，`test_env_overlay_rejects_secret_keys_even_inside_allowlist_shape`（原稿断言 `"API_KEY" in err`）仍绿：`MODELSCOPE_API_KEY` 不在白名单，走的是通用文案 `f"env_overlay 键 {key!r} 不在白名单 …"`，**键名被原样带出**。同类问题在同文件的 revision 用例：原稿用 `set_goals(w-2, create=True)` 制造"他节点变更"，而 goal 已存在 → gate 幂等 skip → 什么都没变，"w-1 的 revision 不变"即使 `snapshot_for` 忘了按 node_id 过滤也照样绿。
+- **根因**：断言选的是"必然随错误一起出现的字符"（键名、节点 id、通用前缀），而不是**该分支独有的措辞**；隔离性断言的"变更"没有真正改变被隔离侧的数据（幂等设计使重复下发是 no-op）。两者都属"实现删掉一半也全绿"的假绿。
+- **解决**：凭据类拒绝统一断言专用措辞 `"凭据" in err`（Task 11 REST 层同口径，形成两侧共用的措辞契约）；隔离性用例改用 `store.update_goal("qwen@@w-2", intent="stop")` 真改数据，并加 `assert store.get_goal("qwen@@w-2")["intent"] == "stop"` 自证前提成立。复跑变异 7/7 KILLED。
+- **要点**：
+  - 拒绝/校验类断言必须锁**该分支专属词汇**，绝不锁键名/ID/通用前缀——这些在多条失败路径里都出现，等于没断言。挑词标准：把这条检查整段删掉，错误文案里还剩不剩这个词？
+  - "A 的变更不影响 B"类断言，写完要自问"B 侧数据真的变了吗"。幂等 API 的重跑天然是 no-op，不能用来制造变更；直接写库或调用能真正改状态的接口，并显式断言前提（`intent == "stop"`）。
+  - 变异验证的价值恰在首轮有存活项：全绿的变异报告要先怀疑"断言恒真"，再怀疑"实现有别处兜底"。
