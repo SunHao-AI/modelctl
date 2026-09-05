@@ -1042,7 +1042,7 @@ goal 下发前的中心侧校验门禁（spec §6.6，Ray Placement Group / auto
 - Produces:
   - `RESULT_OK / RESULT_SKIP / RESULT_ERROR = "ok" / "skip" / "error"`
   - `@dataclass NodeVerdict: node_id: str; result: str; reason: str = ""`
-  - `declared_gpu_count(raw: dict, engine: str) -> int`（vllm/sglang/aphrodite/tensorrt_llm/lmdeploy/tokenspeed 读 `tensor_parallel_size`，unsloth 读 `tensor_parallel`，llamacpp/ollama 等其余读 `gpu_count`；字段缺失/异常一律 1）
+  - `declared_gpu_count(raw: dict, engine: str) -> int`（引擎段 = `raw[engine]`，与 `core.profile._to_profile` 同口径；vllm/sglang/aphrodite/tensorrt_llm/lmdeploy/tokenspeed 读 `tensor_parallel_size`，unsloth 的 `tensor_parallel` 是**布尔开关**（开 → ≥2 卡），llamacpp 读 `gpu_count` 且**缺省 8**（跟随 engines/llamacpp.py 适配器），ollama 恒 1；`gpu_list` 若配置则覆盖计数字段（tp 系不一致时另有 `_tp_conflict` 拦截）；字段缺失/异常一律 1）
   - `estimate_vram_mb(raw: dict, engine: str, name: str) -> int | None`（构造未插值 `Profile` → `kv_estimate_for_profile`，任何异常/None → None）
   - `evaluate_gate(*, candidates, source, in_use, existing_goal_ids, lan_allow, create, profile_exists) -> list[NodeVerdict]`
   - `format_gate_report(verdicts: list[NodeVerdict], *, created: int, dry_run: bool) -> str`
@@ -1059,24 +1059,28 @@ goal 下发前的中心侧校验门禁（spec §6.6，Ray Placement Group / auto
 # @IDE    : VSCode
 # @Author : SunHao
 # @Email  : 2865467769@qq.com
-# @Date   : 2026/9/4 10:00
+# @Date   : 2026/9/5 01:25
 # @Desc   : placement gate 全分支测试（运行时/容量/冲突/LAN/幂等/创建/源失败/报告）
 # ===============================================================================
 
 from modelctl.core.cluster import gate as G
 from modelctl.core.colors import display_width
+from modelctl.core.profile import KNOWN_ENGINES
 
+# raw 必须是**真实 YAML 形状**：引擎配置段挂在引擎名键下（core/profile.py
+# _to_profile: raw.get(engine)），不是字面 `engine_config` 键——夹具若用后者，
+# gate 读错键也能全绿，真实 profile 却在生产恒判 1 卡（见 test_declared_gpu_count_*）
 SRC = {"name": "qwen", "ok": True, "engine": "vllm", "yaml": "port: 8101\n",
        "sha": "sha256:" + "a" * 64, "version": "2026-09-04-aaaaaa",
-       "raw": {"port": 8101, "engine_config": {"tensor_parallel_size": 2}},
+       "raw": {"port": 8101, "vllm": {"tensor_parallel_size": 2}},
        "gpu_count": 2, "min_vram_mb": 0, "requested_gpus": []}
 
 
 _UNSET = object()   # 哨兵：区分"省略该参数"与"显式传 None（节点从未上报运行时）"
 
 
-def _node(nid, *, status="online", gpu_count=4, vram=40960, runtimes=_UNSET, lan=""):
-    return {"node_id": nid, "status": status, "lan_id": lan,
+def _node(nid, *, status="online", gpu_count=4, vram=40960, runtimes=_UNSET, lan="", disabled=0):
+    return {"node_id": nid, "status": status, "lan_id": lan, "disabled": disabled,
             "capacity": {"gpu_count": gpu_count, "vram_total_mb": vram},
             "runtimes": {"vllm": {"ok": True}} if runtimes is _UNSET else runtimes}
 
@@ -1117,6 +1121,36 @@ def test_vram_capacity_shortage():
 def test_gpu_conflict_with_in_use_sets():
     v = _one(source={**SRC, "requested_gpus": [1, 2]}, in_use={"w-1": [2, 3]})
     assert v.result == "skip" and "2" in v.reason and "GPU" in v.reason
+
+
+def test_requested_gpus_override_profile_gpu_count_for_capacity():
+    """显式 2 卡卡位时，容量按**实际请求的 2 卡**判（4 卡节点该放行）。
+
+    `gpu_count=8` 模拟 Task 5 按 profile 声明算出的需要量；它不得压过用户显式点名的
+    2 张卡——worker 侧 selected_gpus() 就是实际用卡数，按 8 卡判会误拦健康节点。
+    （tp 与 gpu_list 的**一致性**由 _tp_conflict 单独把关，见下条。）
+    """
+    src = {**SRC, "gpu_count": 8, "requested_gpus": [0, 1],
+           "raw": {"port": 8101, "vllm": {"tensor_parallel_size": 2}}}
+    assert _one(candidates=[_node("w-1", gpu_count=4)], source=src).result == "ok"
+
+
+def test_requested_gpu_count_must_match_tensor_parallel_size():
+    """worker 侧 `len(gpu_list) != tensor_parallel_size` 同文案硬失败（engines/vllm.py:83）：
+    中心放行 = 下发一条 worker 必拒、永不收敛的 goal。"""
+    v = _one(source={**SRC, "requested_gpus": [0, 1, 2]})   # SRC raw 里 tp=2
+    assert v.result == "skip" and "tensor_parallel_size=2" in v.reason
+    # 一致 → 不拦
+    assert _one(source={**SRC, "requested_gpus": [0, 1]}).result == "ok"
+    # profile 未写 tp 键 → 适配器按 len(gpus) 兜底，天然一致，不该拦
+    src = {**SRC, "requested_gpus": [0, 1], "raw": {"port": 8101, "vllm": {}}}
+    assert _one(source=src).result == "ok"
+
+
+def test_disabled_node_skipped_even_when_status_online():
+    """disabled 位与 status 独立：rejoin 会把 status 刷回 online，只查 status 漏拦。"""
+    v = _one(candidates=[_node("w-1", disabled=1)])
+    assert v.result == "skip" and "停用" in v.reason
 
 
 def test_all_gpus_busy_blocks_even_without_request():
@@ -1183,24 +1217,77 @@ def test_need_gpus_falls_back_to_profile_when_source_omits_gpu_count():
     assert v.result == "skip" and "需 2 卡" in v.reason
 
 
+def test_gpu_count_table_covers_known_engines():
+    """KNOWN_ENGINES 全集必须逐一落表（_GPU_COUNT_KEYS 或 _GPU_FLAG_KEYS）。
+
+    漏表回落 gpu_count → tp 系 profile 恒判 1 卡（known-pitfalls 已沉淀过一次），
+    靠人肉记忆补表必然复发，这里用集合等式把"增引擎必须补表"变成硬约束。
+    """
+    assert set(KNOWN_ENGINES) <= set(G._GPU_COUNT_KEYS) | set(G._GPU_FLAG_KEYS)
+
+
 def test_declared_gpu_count_per_engine():
-    assert G.declared_gpu_count({"engine_config": {"tensor_parallel_size": 4}}, "vllm") == 4
-    assert G.declared_gpu_count({"engine_config": {"gpu_count": 2}}, "llamacpp") == 2
-    # unsloth 的字段名是 tensor_parallel（与 vram_estimator._ctx_tokens_and_gpus 同源，非 _size）
-    assert G.declared_gpu_count({"engine_config": {"tensor_parallel": 3}}, "unsloth") == 3
+    # 段键 = 引擎名（真实 YAML 形状，见 SRC 注释）；写成 engine_config 会恒空段
+    assert G.declared_gpu_count({"vllm": {"tensor_parallel_size": 4}}, "vllm") == 4
+    assert G.declared_gpu_count({"llamacpp": {"gpu_count": 2}}, "llamacpp") == 2
+    # 引擎段键必须与 engine 参数一致：tokenspeed 段配给 vllm 判定 = 空段 → 1
+    assert G.declared_gpu_count({"tokenspeed": {"tensor_parallel_size": 8}}, "vllm") == 1
+    # unsloth 的 tensor_parallel 是布尔开关不是卡数（models/unsloth/*.yaml 现实值
+    # 只有 true/false；worker 要求 ≥2 卡，engines/unsloth.py:74）。按卡数 int(True)=1
+    # 会把多卡 profile 判成 1 卡放行。
+    assert G.declared_gpu_count({"unsloth": {"tensor_parallel": True}}, "unsloth") == 2
+    assert G.declared_gpu_count({"unsloth": {"tensor_parallel": False}}, "unsloth") == 1
     # lmdeploy/tokenspeed 同样读 tensor_parallel_size（engines/lmdeploy.py、engines/tokenspeed.py
     # 实际取值口径；models/tokenspeed/qwen3.5-397b.yaml 就是 tp=8）；漏补表则回落 gpu_count → 误判 1 卡
-    assert G.declared_gpu_count({"engine_config": {"tensor_parallel_size": 8}}, "tokenspeed") == 8
-    assert G.declared_gpu_count({"engine_config": {"tensor_parallel_size": 1}}, "lmdeploy") == 1
+    assert G.declared_gpu_count({"tokenspeed": {"tensor_parallel_size": 8}}, "tokenspeed") == 8
+    assert G.declared_gpu_count({"lmdeploy": {"tensor_parallel_size": 1}}, "lmdeploy") == 1
+    # llamacpp 缺省跟随适配器：engines/llamacpp.py:239 是 cfg.get("gpu_count", 8)，
+    # 中心按 1 判会放行 worker 必拒（"gpu_count=8 超过实际 GPU 数"）的下发
+    assert G.declared_gpu_count({"llamacpp": {}}, "llamacpp") == 8
+    assert G.declared_gpu_count({}, "llamacpp") == 8
+    # gpu_list 覆盖计数字段（适配器口径：selected_gpus() 就是实际用卡数）
+    assert G.declared_gpu_count({"llamacpp": {"gpu_list": "0,1"}}, "llamacpp") == 2
+    assert G.declared_gpu_count({"vllm": {"gpu_list": [0, 1]}}, "vllm") == 2
+    # gpu_list 坏值（重复/非整数）不作为容量依据，回落计数字段口径
+    assert G.declared_gpu_count({"llamacpp": {"gpu_list": "0,0", "gpu_count": 2}}, "llamacpp") == 2
+    assert G.declared_gpu_count({"llamacpp": {"gpu_list": "x", "gpu_count": 2}}, "llamacpp") == 2
     assert G.declared_gpu_count({}, "vllm") == 1
-    assert G.declared_gpu_count({"engine_config": {"tensor_parallel_size": "bad"}}, "vllm") == 1
+    assert G.declared_gpu_count({"vllm": {"tensor_parallel_size": "bad"}}, "vllm") == 1
     assert G.declared_gpu_count(None, "vllm") == 1
-    assert G.declared_gpu_count({"engine_config": {"tensor_parallel_size": 0}}, "vllm") == 1
+    assert G.declared_gpu_count({"vllm": {"tensor_parallel_size": 0}}, "vllm") == 1
+
+
+def test_declared_gpu_count_ignores_literal_engine_config_key():
+    """`engine_config` 是 Profile 字段名，真实 YAML 原文里没有这个键。
+
+    把它当段键读 = 恒空段（8 卡 tp profile 判 1 卡放行）。钉死"只认引擎名段键"，
+    防止实现/夹具再次同步漂移回 engine_config 形状。
+    """
+    assert G.declared_gpu_count(
+        {"engine_config": {"tensor_parallel_size": 8}}, "tokenspeed") == 1
+
+
+def test_declared_gpu_count_reads_real_multicard_profiles():
+    """真 profile 回归：models/ 里的多卡声明必须原样判对，不许悄悄漂成别的值。
+
+    用 read_profile_source 读**仓库真实 YAML**（而非合成夹具）才能钉住"段键 =
+    引擎名"这条口径：夹具与实现若同用 engine_config 假形状，单测全绿而生产恒 1 卡。
+    """
+    from modelctl.core.cluster.profiles import read_profile_source
+    from modelctl.core.envfile import PROJECT_ROOT
+
+    root = PROJECT_ROOT / "models"
+    for name, engine, want in [("qwen3.5-397b", "tokenspeed", 8),    # tensor_parallel_size: 8
+                               ("qwen3.8-flash-next", "unsloth", 2),  # tensor_parallel: true
+                               ("qwen2.5-1.5b", "llamacpp", 1)]:      # gpu_count: 1
+        src = read_profile_source(name, root, engine)
+        assert src.get("ok"), src.get("reason")
+        assert G.declared_gpu_count(src["raw"], engine) == want, name
 
 
 def test_estimate_vram_returns_none_on_unparseable_or_missing_model():
     assert G.estimate_vram_mb({"port": 1}, "vllm", "x") is None
-    assert G.estimate_vram_mb({"port": 1, "engine_config": {"tensor_parallel_size": 1}},
+    assert G.estimate_vram_mb({"port": 1, "totally-unknown-engine": {"tensor_parallel_size": 1}},
                               "totally-unknown-engine", "x") is None
 
 
@@ -1209,15 +1296,27 @@ def test_estimate_vram_returns_int_for_known_model():
     int 路径零验证——round(kv,1) 忘了转 int 也照样绿）。qwen3.8-27b 架构表 + 1024 token
     × fp16 → 64×4×256×2×2×1024 B = 恰好 256MB。"""
     got = G.estimate_vram_mb(
-        {"port": 8101, "engine_config": {"model": "/models/qwen3.8-27b", "max_model_len": 1024,
-                                         "tensor_parallel_size": 2}}, "vllm", "qwen")
+        {"port": 8101, "vllm": {"model": "/models/qwen3.8-27b", "max_model_len": 1024,
+                                "tensor_parallel_size": 2}}, "vllm", "qwen")
     # 契约声明是 int：vram_estimator 返回 round(kv,1) 的 float，256.0 == 256 为真，
     # 故必须显式钉类型，否则"忘了 int() 转换"这类缺陷测不出来。
     assert got == 256 and isinstance(got, int)
     # HF 仓库名不在架构表、本地也无 config.json → None（不抛）
     assert G.estimate_vram_mb(
-        {"port": 8101, "engine_config": {"model": "Qwen/Qwen3-8B", "max_model_len": 32768,
-                                         "tensor_parallel_size": 2}}, "vllm", "qwen") is None
+        {"port": 8101, "vllm": {"model": "Qwen/Qwen3-8B", "max_model_len": 32768,
+                                "tensor_parallel_size": 2}}, "vllm", "qwen") is None
+
+
+def test_estimate_vram_rounds_up_fractional_estimate(monkeypatch):
+    """估算值是"节点至少要有这么多显存"的下界：255.4MB 必须判 256，不许 int() 截断。
+
+    255MB 的节点会放过实际放不下的下发。整数夹具（256）对截断不敏感，故这里
+    monkeypatch 估算器喂分数值——上面那条整除用例钉不住这条不变量。
+    """
+    import modelctl.core.vram_estimator as ve
+
+    monkeypatch.setattr(ve, "kv_estimate_for_profile", lambda p: {"kv_total_mb": 255.4})
+    assert G.estimate_vram_mb({"port": 8101, "vllm": {}}, "vllm", "qwen") == 256
 
 
 def test_report_lists_every_node_with_result_and_counts():
@@ -1265,7 +1364,7 @@ Expected: FAIL —`ImportError: cannot import name 'gate' from 'modelctl.core.cl
 # @IDE    : VSCode
 # @Author : SunHao
 # @Email  : 2865467769@qq.com
-# @Date   : 2026/9/4 10:00
+# @Date   : 2026/9/5 01:25
 # @Desc   : placement gate：goal 下发前的中心侧容量/运行时/冲突校验（§6.6）
 # ===============================================================================
 
@@ -1283,10 +1382,12 @@ Expected: FAIL —`ImportError: cannot import name 'gate' from 'modelctl.core.cl
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
 from modelctl.core.colors import display_width, pad_width
+from modelctl.core.gpu_utils import parse_gpu_list
 
 RESULT_OK, RESULT_SKIP, RESULT_ERROR = "ok", "skip", "error"
 
@@ -1294,10 +1395,12 @@ RESULT_OK, RESULT_SKIP, RESULT_ERROR = "ok", "skip", "error"
 #: 中心拒发只会让 goal 永远不落，不如放行由 worker 侧兜底，Task 5 的 --all 同样收 stale）
 _GATEABLE = ("online", "stale")
 
-#: 各引擎"用几张卡"的字段名（与 core.vram_estimator._ctx_tokens_and_gpus 及
-#: engines/*.py 实际读取的字段同源）。**KNOWN_ENGINES 增删引擎必须同步补表**：
-#: 漏项回落到 `gpu_count`，而 tp 系 profile 根本没这个键——tokenspeed 8 卡 profile
-#: 会被当 1 卡放行，容量维度形同虚设（错误要到 worker 启动才暴露）。
+#: 各引擎"用几张卡"的字段名（权威口径 = engines/*.py 的 check_requirements/
+#: build_command 实际取值，不是文档也不是 vram_estimator）。**KNOWN_ENGINES 增删
+#: 引擎必须同步补表**（test_gpu_count_table_covers_known_engines 钉死）：漏项回落
+#: `gpu_count`，而 tp 系 profile 根本没这个键——tokenspeed 8 卡 profile 会被当
+#: 1 卡放行，容量维度形同虚设（错误要到 worker 启动才暴露）。
+#: ollama 无卡数字段（全局 serve，靠 gpu_list 隔离），条目即"恒 1 卡"的显式声明。
 _GPU_COUNT_KEYS = {
     "vllm": "tensor_parallel_size",
     "sglang": "tensor_parallel_size",
@@ -1306,8 +1409,23 @@ _GPU_COUNT_KEYS = {
     "lmdeploy": "tensor_parallel_size",
     "tokenspeed": "tensor_parallel_size",
     "llamacpp": "gpu_count",
-    "unsloth": "tensor_parallel",
+    "ollama": "gpu_count",
 }
+
+#: 卡数字段是**布尔开关**而非卡数的引擎：开 → 最小卡数下界（unsloth 的
+#: `tensor_parallel: true` 是 `--tensor-parallel` 开关，worker 硬要求 ≥2 卡，
+#: engines/unsloth.py:74；models/unsloth/*.yaml 现实值只有 true/false。按卡数
+#: int(True)=1 会把它判成 1 卡，与漏表同族——字段语义猜错比漏字段更隐蔽）。
+_GPU_FLAG_KEYS: dict[str, tuple[str, int]] = {"unsloth": ("tensor_parallel", 2)}
+
+#: worker 要求 `len(gpu_list) == tensor_parallel_size` 的引擎（六个适配器
+#: check_requirements 同文案硬失败，如 engines/vllm.py:83）。llamacpp/ollama 不在此列：
+#: 它们的 gpu_list 是"覆盖计数字段"，不一致是合法配置（models/llamacpp/*.yaml 注释）。
+_TP_ENGINES = ("vllm", "sglang", "aphrodite", "tensorrt_llm", "lmdeploy", "tokenspeed")
+
+#: 卡数字段缺省时各引擎适配器的真实默认（engines/llamacpp.py:239 缺省 **8 卡**，
+#: 中心按 1 判会放行"gpu_count=8 超过实际 GPU 数"的必拒下发；其余引擎缺省 1）。
+_GPU_COUNT_DEFAULT: dict[str, int] = {"llamacpp": 8}
 
 _MARKS = {"ok": "OK  ", "skip": "SKIP", "error": "ERR "}
 
@@ -1319,18 +1437,63 @@ class NodeVerdict:
     reason: str = ""
 
 
-def declared_gpu_count(raw: Any, engine: str) -> int:
-    """从 profile 原文推断所需 GPU 数；任何异常/缺字段一律保守取 1。"""
+def _engine_section(raw: Any, engine: str) -> dict[str, Any]:
+    """profile 原文中的引擎配置段；与 core.profile._to_profile 同口径 = `raw[engine]`。
+
+    真实 YAML 的段键就是引擎名（models/tokenspeed/qwen3.5-397b.yaml 的
+    `tokenspeed: tensor_parallel_size: 8`），`engine_config` 只是 Profile dataclass
+    的字段名，真实原文里没有该键。读错键 = 恒空段：8 卡 tp profile 被当 1 卡放行、
+    显存估算永远取不到 model 返回 None——而测试夹具若同样写成 `engine_config` 键，
+    实现与测试会同步漂移、全绿但生产全错（本函数即该缺陷的修复点）。
+    """
     if not isinstance(raw, dict):
-        return 1
-    ec = raw.get("engine_config")
-    if not isinstance(ec, dict):
-        return 1
-    key = _GPU_COUNT_KEYS.get(engine, "gpu_count")
+        return {}
+    section = raw.get(engine)
+    return section if isinstance(section, dict) else {}
+
+
+def _gpu_list_len(value: Any) -> int | None:
+    """profile 内 `gpu_list` 选中的卡数；未配置/解析失败返回 None。
+
+    各引擎适配器都以 `selected_gpus()`（base.py，读 engine_config.gpu_list）为实际
+    卡数：llamacpp 注释明写"与 gpu_count 二选一，配置后覆盖"，tp 系则要求与
+    tensor_parallel_size 一致。中心漏读它会拿字段值误判（如 gpu_list: "0,1" 的
+    llamacpp 被按缺省 8 卡拒发，或反之）。坏值（非整数/重复）交给 worker 的
+    check_requirements 报错，这里按未配置处理。
+    """
+    if value in (None, ""):
+        return None
     try:
-        return max(1, int(ec.get(key, 1) or 1))
-    except (TypeError, ValueError):
-        return 1
+        gpus = parse_gpu_list(value)
+    except Exception:  # noqa: BLE001 — GPUValidationError 等，坏值不作为容量依据
+        return None
+    return len(gpus) if gpus else None
+
+
+def declared_gpu_count(raw: Any, engine: str) -> int:
+    """从 profile 原文推断所需 GPU 数；任何异常/缺字段一律保守取 1。
+
+    与 worker 侧适配器同口径：引擎段 = `raw[engine]`（见 _engine_section）；
+    `gpu_list`（实际选卡，覆盖计数字段）> 引擎计数字段；unsloth 的
+    `tensor_parallel` 是布尔开关（开 → 至少 2 卡，取与 gpu_list 的下界 max）；
+    llamacpp 未配置时跟随适配器的 8 卡缺省。
+    """
+    ec = _engine_section(raw, engine)
+    flag = _GPU_FLAG_KEYS.get(engine)
+    if flag is not None:
+        key, floor = flag
+        n = floor if ec.get(key) else 1
+    else:
+        key = _GPU_COUNT_KEYS.get(engine, "gpu_count")
+        default = _GPU_COUNT_DEFAULT.get(engine, 1)
+        try:
+            n = int(ec.get(key, default) or default)
+        except (TypeError, ValueError):
+            n = 1
+    listed = _gpu_list_len(ec.get("gpu_list"))
+    if listed is not None:
+        n = max(n, listed) if flag else listed
+    return max(1, n)
 
 
 def _safe_port(value: Any) -> int:
@@ -1353,15 +1516,16 @@ def estimate_vram_mb(raw: Any, engine: str, name: str) -> int | None:
         from modelctl.core.profile import Profile
         from modelctl.core.vram_estimator import kv_estimate_for_profile
 
-        ec = raw.get("engine_config")
         profile = Profile(name=name, engine=engine, port=_safe_port(raw.get("port")),
-                          engine_config=ec if isinstance(ec, dict) else {})
+                          engine_config=_engine_section(raw, engine))
         est = kv_estimate_for_profile(profile)
     except Exception:  # noqa: BLE001 — 估算在任何异常下都不得影响下发决策
         return None
     if not isinstance(est, dict) or est.get("kv_total_mb") is None:
         return None
-    return int(est["kv_total_mb"])
+    # 向上取整：这是"节点至少要有这么多显存"的下界口径，int() 向下截断会把
+    # 255.4 判成 255，让 255MB 的节点通过它实际放不下的下发。
+    return math.ceil(float(est["kv_total_mb"]))
 
 
 def evaluate_gate(
@@ -1389,9 +1553,14 @@ def evaluate_gate(
 
     name = str(source.get("name", ""))
     engine = str(source.get("engine", ""))
-    need_gpus = int(source.get("gpu_count") or declared_gpu_count(source.get("raw"), engine))
     min_vram = int(source.get("min_vram_mb") or 0)
     requested = [g for g in (source.get("requested_gpus") or []) if isinstance(g, int)]
+    # 显式指定卡位时以卡位数为准：worker 侧 selected_gpus() 就是实际用卡数，
+    # gpu_list 覆盖计数字段（llamacpp/unsloth）或与 tp 必须一致（tp 系）。
+    # 用 profile 声明值判容量会自相矛盾：requested=[0,1] 却按 tp=8 拒掉 4 卡节点。
+    need_gpus = len(requested) if requested else int(
+        source.get("gpu_count") or declared_gpu_count(source.get("raw"), engine))
+    tp_conflict = _tp_conflict(engine, source.get("raw"), requested)
 
     verdicts: list[NodeVerdict] = []
     for node in candidates:
@@ -1400,13 +1569,42 @@ def evaluate_gate(
             node_id=nid, node=node, name=name, engine=engine, need_gpus=need_gpus,
             min_vram=min_vram, requested=requested, in_use=in_use.get(nid) or [],
             exists=f"{name}@@{nid}" in existing_goal_ids, lan_allow=lan_allow,
-            create=create, has_profile=bool(profile_exists.get(nid, False))))
+            create=create, has_profile=bool(profile_exists.get(nid, False)),
+            tp_conflict=tp_conflict))
     return verdicts
+
+
+def _tp_conflict(engine: str, raw: Any, requested: list[int]) -> str:
+    """gpu_list 卡位数与 profile 的 tensor_parallel_size 矛盾 → 冲突文案，否则 ""。
+
+    六个 tp 系适配器在 worker 侧对 `len(gpu_list) != tensor_parallel_size` 同文案
+    硬失败（engines/vllm.py:81-83 等），profile 未写该键时适配器按 len(gpus) 兜底、
+    天然一致。中心放行 = 下发一条 worker 必拒、永不收敛的 goal（与"stem 未过写盘
+    白名单"同族：中心多放行一步 = 下游必拒内容进入期望状态）。
+    """
+    if not requested or engine not in _TP_ENGINES:
+        return ""
+    ec = _engine_section(raw, engine)
+    if ec.get("tensor_parallel_size") in (None, ""):
+        return ""
+    try:
+        tp = int(ec["tensor_parallel_size"])
+    except (TypeError, ValueError):
+        return ""   # 坏值由 worker check_requirements 报错，这里不作为拒判依据
+    if tp == len(requested):
+        return ""
+    return (f"gpu_list 指定了 {len(requested)} 块 GPU，但 profile 的 "
+            f"tensor_parallel_size={tp}，二者必须一致（worker 侧必拒）")
 
 
 def _verdict_one(*, node_id: str, node: dict[str, Any], name: str, engine: str, need_gpus: int,
                  min_vram: int, requested: list[int], in_use: list[int], exists: bool,
-                 lan_allow: list[str], create: bool, has_profile: bool) -> NodeVerdict:
+                 lan_allow: list[str], create: bool, has_profile: bool,
+                 tp_conflict: str = "") -> NodeVerdict:
+    if node.get("disabled"):
+        # store 行的 disabled 位（运维 cluster disable）与 status 独立存在：rejoin 会把
+        # status 刷回 online，只查 status 会让"已停用"节点被 --node 显式指定时重新下发。
+        return NodeVerdict(node_id, RESULT_SKIP, "节点已停用（disabled），不可下发")
     status = str(node.get("status", ""))
     if status not in _GATEABLE:
         return NodeVerdict(node_id, RESULT_SKIP, f"节点状态 {status or '未知'} 不可下发（需 online/stale）")
@@ -1422,6 +1620,8 @@ def _verdict_one(*, node_id: str, node: dict[str, Any], name: str, engine: str, 
         detail = "（节点未上报运行时信息）" if not runtimes else ""
         return NodeVerdict(node_id, RESULT_SKIP,
                            f"engine {engine} 在 {node_id} 上不可用{detail}，需先 modelctl env setup {engine}")
+    if tp_conflict:
+        return NodeVerdict(node_id, RESULT_SKIP, tp_conflict)
 
     capacity = node.get("capacity")
     if isinstance(capacity, dict):
@@ -1476,7 +1676,7 @@ def format_gate_report(verdicts: list[NodeVerdict], *, created: int, dry_run: bo
 - [ ] **Step 4: 运行确认通过**
 
 Run: `uv run pytest tests/test_cluster_gate.py -q`
-Expected: PASS（22 条；初稿 19 + 修订补入 stale 用例、gpu_count 回落用例、CJK 报告对齐用例）
+Expected: PASS（29 条；初稿 19 + 修订补入 stale/gpu_count 回落/CJK 报告对齐用例 + fix round 1 补入 KNOWN_ENGINES 全集守卫、真 profile 回归（段键=引擎名）、requested 优先容量、tp 一致性拦截、disabled 拦截、向上取整用例）
 
 - [ ] **Step 5: 提交**
 

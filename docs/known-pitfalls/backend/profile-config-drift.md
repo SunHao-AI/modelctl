@@ -341,3 +341,105 @@
     报告/表格函数**；`pad_width` 补、`len()` 算 = 只修了一半，看起来还在用封装但依旧错位。
   - 对齐类断言别数空格（改文案/改列宽就得改用例），钉"各列起始位置一致"这个不变量，
     且数据里必须真的含双宽字符，纯 ASCII 数据会假绿。
+
+## gate 按字面键 `engine_config` 读引擎配置段，真实 YAML 的段键是引擎名——夹具与实现同形状导致全绿生产全错
+
+- **日期**：2026-09-05（M1 Task 4 fix round 1）
+- **症状**：无显式失败。`cluster/gate.py` 的 `declared_gpu_count`/`estimate_vram_mb`/
+  `_tp_conflict` 都用 `raw.get("engine_config")` 取引擎配置段，而 `read_profile_source`
+  返回的 `raw` 是 YAML safe_load **原文**——引擎段挂在**引擎名键**下
+  （`models/tokenspeed/qwen3.5-397b.yaml` 是 `tokenspeed: tensor_parallel_size: 8`，
+  权威口径 = `core/profile.py::_to_profile` 的 `engine_config = raw.get(engine) or {}`）。
+  对一切真实 profile：`raw.get("engine_config")` 恒 None → 卡数恒判 1、显存估算恒
+  None、tp 一致性恒不触发。上一轮补的"引擎→卡数字段表"在真实数据上整体空转。
+- **根因**：`engine_config` 是 **Profile dataclass 的字段名**，不是 YAML 里的键；
+  计划 Task 4 的合成夹具 `SRC["raw"] = {"port": ..., "engine_config": {...}}` 恰好
+  也用了这个假键，实现照抄夹具形状 → 22 条测试全绿，而夹具形状与 `read_profile_source`
+  的真实返回不符。这是"中心/worker 同口径"族的**最恶性变体**：不是实现偏离权威口径，
+  而是**实现与测试夹具一起偏离**，单测体系对该缺陷整体免疫。
+- **解决**：新增 `_engine_section(raw, engine)` 单点封装（镜像 `_to_profile` 的
+  `raw.get(engine)`），三处消费点统一改走它；测试夹具 SRC 及全部 raw 断言改成真实
+  形状 `{"port": 8101, "vllm": {"tensor_parallel_size": 2}}`；另加两条钉：
+  `test_declared_gpu_count_ignores_literal_engine_config_key`（字面 engine_config 键
+  必须视同空段）与 `test_declared_gpu_count_reads_real_multicard_profiles`
+  （用 `read_profile_source` 读**仓库真 profile** 钉 tokenspeed=8/unsloth=2/llamacpp=1）。
+- **要点**：
+  - 消费上游解析结果的模块，**夹具必须复刻上游的真实形状**，或干脆用
+    `read_profile_source` 真读一份仓库 profile 做回归；合成夹具的每个键都该能
+    在上游真实返回值里找到出处。
+  - 变异验证夹具形状是否"活"：把实现改回 `raw.get("engine_config")`，真 profile
+    回归用例应转红（实测 6 条红，含 8 卡→1 卡、显存估算→None）。
+  - dataclass 字段名 ≠ 序列化文档的键名；跨模块传 dict 时，键的权威定义在**产出方**
+    （这里是 `read_profile_source`/`_to_profile`），消费方凭印象造键名必错。
+
+## unsloth 的 `tensor_parallel` 是布尔开关却按卡数 int()，llamacpp 卡数缺省与适配器的 8 脱节
+
+- **日期**：2026-09-05（M1 Task 4 fix round 1）
+- **症状**：补全引擎表后仍判错。`{"unsloth": {"tensor_parallel": true}}` 被判 **1 卡**
+  放行（`int(True)==1`），而 worker 侧 `engines/unsloth.py:74` 对 `tensor_parallel`
+  硬要求 ≥2 卡；`{"llamacpp": {}}`（未写 `gpu_count`）被判 1 卡，而
+  `engines/llamacpp.py:239` 是 `cfg.get("gpu_count", 8)`——真实启动按 8 卡要资源，
+  单卡节点上 worker 报 "gpu_count=8 超过实际 GPU 数 1" 拒启。中心放行 = 一条永不
+  收敛的 goal。
+- **根因**：上一轮沉淀的"漏表"教训只覆盖了**键名**维度，没覆盖**同一键名下的字段
+  语义与缺省值**维度：`tensor_parallel`（unsloth，bool）与 `tensor_parallel_size`
+  （tp 系，int）名字只差后缀、语义完全不同；models/unsloth/*.yaml 现实值只有
+  true/false，`int(True)=1` 静默通过。缺省值同理——字段缺失时各引擎适配器的真实
+  默认不同（llamacpp=8，其余=1），中心统一回落 1 与适配器缺省脱节。
+- **解决**：gate 拆出 `_GPU_FLAG_KEYS = {"unsloth": ("tensor_parallel", 2)}`（布尔开关
+  → 最小卡数下界）与 `_GPU_COUNT_DEFAULT = {"llamacpp": 8}`（缺省跟随适配器）；
+  集合守卫用例 `set(KNOWN_ENGINES) <= set(_GPU_COUNT_KEYS) | set(_GPU_FLAG_KEYS)`
+  把"增引擎必须落表"变成硬约束；真 profile 回归钉 unsloth=true → 2。
+- **要点**：
+  - 字段名映射表要钉到**语义三件套**：键名、值类型/语义（bool/int/list）、缺失时的
+    真实缺省值——三者都要以 `engines/*.py` 实际取值为准，逐个打开适配器看。
+  - `int(value)` 对 bool 静默成功（True→1）是最危险的类型错配：不抛异常、结果还
+    "看着合理"。凡字段可能是布尔，先查适配器怎么用它，再决定解析方式。
+  - "放行下游必拒内容"族的又一变体：这次不是校验缺失，而是**容量维度算小了**——
+    粗筛表的每个数字都必须与执行侧同口径，包括缺省值。
+
+## gate 放行 worker 必拒的组合：tp 系 gpu_list 卡数 ≠ tensor_parallel_size；节点 disabled 位漏查
+
+- **日期**：2026-09-05（M1 Task 4 fix round 1）
+- **症状**：两个独立漏拦。① `goal set --gpus 0,1,2` 下发 tp=2 的 vllm profile：
+  中心 gate 判 ok 落库，worker `check_requirements` 六个 tp 系适配器同文案硬失败
+  （`engines/vllm.py:83`：`len(gpu_list)` 必须 == `tensor_parallel_size`），goal
+  永不收敛。② 运维 `cluster disable` 停用的节点被 `--node` 显式指定时照常下发——
+  `_verdict_one` 上方注释承诺"offline/disabled 不发"，代码却只查了 `status`；
+  store 的 `disabled` 是独立位（`_NODE_COLS` 含它），rejoin 会把 status 刷回
+  online，只查 status 形同虚设。
+- **根因**：① `need_gpus = len(requested)` 让显式卡位**覆盖**了 profile 声明，容量
+  判定自洽了，但"覆盖后与 profile 内部字段矛盾"没人管——中心把"以谁为准"的选择
+  做了一半。② 注释里的承诺清单没有对应的用例逐条钉，兑现情况无人核对。
+- **解决**：新增 `_tp_conflict()`——requested 非空、引擎 ∈ 六个 tp 系、profile 写了
+  tp 且 `tp != len(requested)` 时 skip 并给出与 worker 同文案的冲突提示（tp 键缺失
+  时适配器按 `len(gpus)` 兜底、天然一致，不拦）；`_verdict_one` 顶部补
+  `if node.get("disabled")` 拦截。各配一条用例（矛盾→skip、一致→ok、无 tp 键→ok；
+  disabled=1 且 status=online → skip）。
+- **要点**：
+  - worker 侧存在"参数组合必拒"硬校验时，中心凡是**改写其中一侧**的逻辑（如
+    gpu_list 覆盖卡数）必须同时校验组合一致性，否则放行即毒 goal——与"stem 未过
+    写盘白名单""坏 port"同族。
+  - 状态位是**多个独立列**（status/disabled）时，每个消费点都要核对全部分量：
+    `disabled` 不改变 `status`，而 rejoin 又会把 `status` 刷回 online——只看
+    `status` 的闸门对"人为停用"永远失明。
+  - 注释承诺的拦截清单（"offline/disabled 不发"）应与用例一一对应；本次就是
+    注释兑现检查顺带揪出的漏拦。
+
+## 显存估算 int() 向下截断违背"下界"语义；整数夹具对截断缺陷不敏感
+
+- **日期**：2026-09-05（M1 Task 4 fix round 1）
+- **症状**：`estimate_vram_mb` 返回 `int(est["kv_total_mb"])`，255.4 → 255。该值是
+  "节点至少要有这么多显存"的**下界**口径，截断让 255MB 的节点通过实际放不下的下发。
+- **根因**：既有 int 用例的夹具恰好整除（估算恰好 256.0），`int(256.0) == ceil(256.0)`
+  ——数据对截断不敏感，变异 `ceil→int` 时 29 条**全绿**，属实现缺陷与测试盲区同存。
+- **解决**：改 `math.ceil(float(...))`；新增 `test_estimate_vram_rounds_up_fractional_estimate`
+  ——monkeypatch `kv_estimate_for_profile` 喂 `{"kv_total_mb": 255.4}` 断言返回 256。
+  变异验证：`ceil→int` 后该条精确转红（255 ≠ 256）。
+- **要点**：
+  - "下界/上界"型数值在边界处的取整方向就是语义本身：下界向上取整、上界向下取整，
+    `int()` 恒向零截断，两个方向都错。
+  - 取整类逻辑的用例数据必须**带小数**（或落在边界 ±1），整除夹具会让变异验证
+    假阴性——变异没转红不一定是代码有别处兜底，先怀疑数据不敏感。
+  - 直接构造能让被测值非整数的输入最稳的途径是 monkeypatch 估算器，不必为凑小数
+    去反推模型架构参数。

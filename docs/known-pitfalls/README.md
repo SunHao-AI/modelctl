@@ -46,6 +46,10 @@
 | 2026-09-05 | 后端 / 集群下发 | 中心 gate 的"引擎→GPU 数字段名"表漏引擎，8 卡 profile 被当 1 卡放行 | 漏项回落 `gpu_count` 而 tp 系 profile 无此键 → 恒判 1 卡；表须按 KNOWN_ENGINES 全集补，逐引擎钉用例，权威口径是 `engines/*.py` 实际取值。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-05 | 测试 / 覆盖 | 测试工厂用 `None` 当哨兵，与"显式传 None"的用例互斥到计划的 PASS 达不到 | `None` 既当缺省又当业务值（`runtimes=None` 未上报是有语义输入）→ 实现正确也必红；用 `object()` 哨兵分离，另记"恒真或断言/浮点 `==` 整数"两类假绿防护与变异验证。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-05 | 后端 / 终端对齐 | gate 报告按 `len()` 取列宽，中文 node_id 让整表右移错位 | `pad_width` 按显示宽度补、`len()` 按字符算 = 只修一半；宽度改 `display_width`，用例钉"各列起始位置一致"不变量且数据须含双宽字符。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-05 | 后端 / 集群下发 | gate 按字面键 `engine_config` 读引擎段，真实 YAML 段键是引擎名，夹具同形状导致全绿生产全错 | `engine_config` 是 Profile 字段名非 YAML 键；真实段挂 `raw[engine]`（_to_profile 口径），恒空段 = 卡数恒 1、估算恒 None；夹具须复刻上游真实返回或真读仓库 profile 回归。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-05 | 后端 / 集群下发 | unsloth `tensor_parallel` 是布尔开关却按卡数 int()；llamacpp 卡数缺省与适配器的 8 脱节 | `int(True)=1` 静默放行 worker 必拒下发；字段表要钉到"键名+值语义+缺省值"三件套，权威口径逐个看 engines/*.py。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-05 | 后端 / 集群下发 | gate 放行 worker 必拒组合：tp 系 gpu_list 卡数≠tensor_parallel_size；disabled 位漏查 | 改写卡数一侧必须校验组合一致性；status/disabled 是独立列且 rejoin 刷 status，闸门要核对全部分量；注释承诺与用例一一对应。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-05 | 测试 / 覆盖 | 显存估算 int() 向下截断违背下界语义，整除夹具让变异验证假阴性 | 下界须 ceil 上界须 floor，`int()` 两个方向都错；取整类用例数据必须带小数（monkeypatch 喂分数值），否则变异不转红。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 
 ## 目录约定
 

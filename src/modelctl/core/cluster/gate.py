@@ -23,10 +23,12 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
 from modelctl.core.colors import display_width, pad_width
+from modelctl.core.gpu_utils import parse_gpu_list
 
 RESULT_OK, RESULT_SKIP, RESULT_ERROR = "ok", "skip", "error"
 
@@ -34,10 +36,12 @@ RESULT_OK, RESULT_SKIP, RESULT_ERROR = "ok", "skip", "error"
 #: 中心拒发只会让 goal 永远不落，不如放行由 worker 侧兜底，Task 5 的 --all 同样收 stale）
 _GATEABLE = ("online", "stale")
 
-#: 各引擎"用几张卡"的字段名（与 core.vram_estimator._ctx_tokens_and_gpus 及
-#: engines/*.py 实际读取的字段同源）。**KNOWN_ENGINES 增删引擎必须同步补表**：
-#: 漏项回落到 `gpu_count`，而 tp 系 profile 根本没这个键——tokenspeed 8 卡 profile
-#: 会被当 1 卡放行，容量维度形同虚设（错误要到 worker 启动才暴露）。
+#: 各引擎"用几张卡"的字段名（权威口径 = engines/*.py 的 check_requirements/
+#: build_command 实际取值，不是文档也不是 vram_estimator）。**KNOWN_ENGINES 增删
+#: 引擎必须同步补表**（test_gpu_count_table_covers_known_engines 钉死）：漏项回落
+#: `gpu_count`，而 tp 系 profile 根本没这个键——tokenspeed 8 卡 profile 会被当
+#: 1 卡放行，容量维度形同虚设（错误要到 worker 启动才暴露）。
+#: ollama 无卡数字段（全局 serve，靠 gpu_list 隔离），条目即"恒 1 卡"的显式声明。
 _GPU_COUNT_KEYS = {
     "vllm": "tensor_parallel_size",
     "sglang": "tensor_parallel_size",
@@ -46,8 +50,23 @@ _GPU_COUNT_KEYS = {
     "lmdeploy": "tensor_parallel_size",
     "tokenspeed": "tensor_parallel_size",
     "llamacpp": "gpu_count",
-    "unsloth": "tensor_parallel",
+    "ollama": "gpu_count",
 }
+
+#: 卡数字段是**布尔开关**而非卡数的引擎：开 → 最小卡数下界（unsloth 的
+#: `tensor_parallel: true` 是 `--tensor-parallel` 开关，worker 硬要求 ≥2 卡，
+#: engines/unsloth.py:74；models/unsloth/*.yaml 现实值只有 true/false。按卡数
+#: int(True)=1 会把它判成 1 卡，与漏表同族——字段语义猜错比漏字段更隐蔽）。
+_GPU_FLAG_KEYS: dict[str, tuple[str, int]] = {"unsloth": ("tensor_parallel", 2)}
+
+#: worker 要求 `len(gpu_list) == tensor_parallel_size` 的引擎（六个适配器
+#: check_requirements 同文案硬失败，如 engines/vllm.py:83）。llamacpp/ollama 不在此列：
+#: 它们的 gpu_list 是"覆盖计数字段"，不一致是合法配置（models/llamacpp/*.yaml 注释）。
+_TP_ENGINES = ("vllm", "sglang", "aphrodite", "tensorrt_llm", "lmdeploy", "tokenspeed")
+
+#: 卡数字段缺省时各引擎适配器的真实默认（engines/llamacpp.py:239 缺省 **8 卡**，
+#: 中心按 1 判会放行"gpu_count=8 超过实际 GPU 数"的必拒下发；其余引擎缺省 1）。
+_GPU_COUNT_DEFAULT: dict[str, int] = {"llamacpp": 8}
 
 _MARKS = {"ok": "OK  ", "skip": "SKIP", "error": "ERR "}
 
@@ -59,18 +78,63 @@ class NodeVerdict:
     reason: str = ""
 
 
-def declared_gpu_count(raw: Any, engine: str) -> int:
-    """从 profile 原文推断所需 GPU 数；任何异常/缺字段一律保守取 1。"""
+def _engine_section(raw: Any, engine: str) -> dict[str, Any]:
+    """profile 原文中的引擎配置段；与 core.profile._to_profile 同口径 = `raw[engine]`。
+
+    真实 YAML 的段键就是引擎名（models/tokenspeed/qwen3.5-397b.yaml 的
+    `tokenspeed: tensor_parallel_size: 8`），`engine_config` 只是 Profile dataclass
+    的字段名，真实原文里没有该键。读错键 = 恒空段：8 卡 tp profile 被当 1 卡放行、
+    显存估算永远取不到 model 返回 None——而测试夹具若同样写成 `engine_config` 键，
+    实现与测试会同步漂移、全绿但生产全错（本函数即该缺陷的修复点）。
+    """
     if not isinstance(raw, dict):
-        return 1
-    ec = raw.get("engine_config")
-    if not isinstance(ec, dict):
-        return 1
-    key = _GPU_COUNT_KEYS.get(engine, "gpu_count")
+        return {}
+    section = raw.get(engine)
+    return section if isinstance(section, dict) else {}
+
+
+def _gpu_list_len(value: Any) -> int | None:
+    """profile 内 `gpu_list` 选中的卡数；未配置/解析失败返回 None。
+
+    各引擎适配器都以 `selected_gpus()`（base.py，读 engine_config.gpu_list）为实际
+    卡数：llamacpp 注释明写"与 gpu_count 二选一，配置后覆盖"，tp 系则要求与
+    tensor_parallel_size 一致。中心漏读它会拿字段值误判（如 gpu_list: "0,1" 的
+    llamacpp 被按缺省 8 卡拒发，或反之）。坏值（非整数/重复）交给 worker 的
+    check_requirements 报错，这里按未配置处理。
+    """
+    if value in (None, ""):
+        return None
     try:
-        return max(1, int(ec.get(key, 1) or 1))
-    except (TypeError, ValueError):
-        return 1
+        gpus = parse_gpu_list(value)
+    except Exception:  # noqa: BLE001 — GPUValidationError 等，坏值不作为容量依据
+        return None
+    return len(gpus) if gpus else None
+
+
+def declared_gpu_count(raw: Any, engine: str) -> int:
+    """从 profile 原文推断所需 GPU 数；任何异常/缺字段一律保守取 1。
+
+    与 worker 侧适配器同口径：引擎段 = `raw[engine]`（见 _engine_section）；
+    `gpu_list`（实际选卡，覆盖计数字段）> 引擎计数字段；unsloth 的
+    `tensor_parallel` 是布尔开关（开 → 至少 2 卡，取与 gpu_list 的下界 max）；
+    llamacpp 未配置时跟随适配器的 8 卡缺省。
+    """
+    ec = _engine_section(raw, engine)
+    flag = _GPU_FLAG_KEYS.get(engine)
+    if flag is not None:
+        key, floor = flag
+        n = floor if ec.get(key) else 1
+    else:
+        key = _GPU_COUNT_KEYS.get(engine, "gpu_count")
+        default = _GPU_COUNT_DEFAULT.get(engine, 1)
+        try:
+            n = int(ec.get(key, default) or default)
+        except (TypeError, ValueError):
+            n = 1
+    listed = _gpu_list_len(ec.get("gpu_list"))
+    if listed is not None:
+        n = max(n, listed) if flag else listed
+    return max(1, n)
 
 
 def _safe_port(value: Any) -> int:
@@ -93,15 +157,16 @@ def estimate_vram_mb(raw: Any, engine: str, name: str) -> int | None:
         from modelctl.core.profile import Profile
         from modelctl.core.vram_estimator import kv_estimate_for_profile
 
-        ec = raw.get("engine_config")
         profile = Profile(name=name, engine=engine, port=_safe_port(raw.get("port")),
-                          engine_config=ec if isinstance(ec, dict) else {})
+                          engine_config=_engine_section(raw, engine))
         est = kv_estimate_for_profile(profile)
     except Exception:  # noqa: BLE001 — 估算在任何异常下都不得影响下发决策
         return None
     if not isinstance(est, dict) or est.get("kv_total_mb") is None:
         return None
-    return int(est["kv_total_mb"])
+    # 向上取整：这是"节点至少要有这么多显存"的下界口径，int() 向下截断会把
+    # 255.4 判成 255，让 255MB 的节点通过它实际放不下的下发。
+    return math.ceil(float(est["kv_total_mb"]))
 
 
 def evaluate_gate(
@@ -129,9 +194,14 @@ def evaluate_gate(
 
     name = str(source.get("name", ""))
     engine = str(source.get("engine", ""))
-    need_gpus = int(source.get("gpu_count") or declared_gpu_count(source.get("raw"), engine))
     min_vram = int(source.get("min_vram_mb") or 0)
     requested = [g for g in (source.get("requested_gpus") or []) if isinstance(g, int)]
+    # 显式指定卡位时以卡位数为准：worker 侧 selected_gpus() 就是实际用卡数，
+    # gpu_list 覆盖计数字段（llamacpp/unsloth）或与 tp 必须一致（tp 系）。
+    # 用 profile 声明值判容量会自相矛盾：requested=[0,1] 却按 tp=8 拒掉 4 卡节点。
+    need_gpus = len(requested) if requested else int(
+        source.get("gpu_count") or declared_gpu_count(source.get("raw"), engine))
+    tp_conflict = _tp_conflict(engine, source.get("raw"), requested)
 
     verdicts: list[NodeVerdict] = []
     for node in candidates:
@@ -140,13 +210,42 @@ def evaluate_gate(
             node_id=nid, node=node, name=name, engine=engine, need_gpus=need_gpus,
             min_vram=min_vram, requested=requested, in_use=in_use.get(nid) or [],
             exists=f"{name}@@{nid}" in existing_goal_ids, lan_allow=lan_allow,
-            create=create, has_profile=bool(profile_exists.get(nid, False))))
+            create=create, has_profile=bool(profile_exists.get(nid, False)),
+            tp_conflict=tp_conflict))
     return verdicts
+
+
+def _tp_conflict(engine: str, raw: Any, requested: list[int]) -> str:
+    """gpu_list 卡位数与 profile 的 tensor_parallel_size 矛盾 → 冲突文案，否则 ""。
+
+    六个 tp 系适配器在 worker 侧对 `len(gpu_list) != tensor_parallel_size` 同文案
+    硬失败（engines/vllm.py:81-83 等），profile 未写该键时适配器按 len(gpus) 兜底、
+    天然一致。中心放行 = 下发一条 worker 必拒、永不收敛的 goal（与"stem 未过写盘
+    白名单"同族：中心多放行一步 = 下游必拒内容进入期望状态）。
+    """
+    if not requested or engine not in _TP_ENGINES:
+        return ""
+    ec = _engine_section(raw, engine)
+    if ec.get("tensor_parallel_size") in (None, ""):
+        return ""
+    try:
+        tp = int(ec["tensor_parallel_size"])
+    except (TypeError, ValueError):
+        return ""   # 坏值由 worker check_requirements 报错，这里不作为拒判依据
+    if tp == len(requested):
+        return ""
+    return (f"gpu_list 指定了 {len(requested)} 块 GPU，但 profile 的 "
+            f"tensor_parallel_size={tp}，二者必须一致（worker 侧必拒）")
 
 
 def _verdict_one(*, node_id: str, node: dict[str, Any], name: str, engine: str, need_gpus: int,
                  min_vram: int, requested: list[int], in_use: list[int], exists: bool,
-                 lan_allow: list[str], create: bool, has_profile: bool) -> NodeVerdict:
+                 lan_allow: list[str], create: bool, has_profile: bool,
+                 tp_conflict: str = "") -> NodeVerdict:
+    if node.get("disabled"):
+        # store 行的 disabled 位（运维 cluster disable）与 status 独立存在：rejoin 会把
+        # status 刷回 online，只查 status 会让"已停用"节点被 --node 显式指定时重新下发。
+        return NodeVerdict(node_id, RESULT_SKIP, "节点已停用（disabled），不可下发")
     status = str(node.get("status", ""))
     if status not in _GATEABLE:
         return NodeVerdict(node_id, RESULT_SKIP, f"节点状态 {status or '未知'} 不可下发（需 online/stale）")
@@ -162,6 +261,8 @@ def _verdict_one(*, node_id: str, node: dict[str, Any], name: str, engine: str, 
         detail = "（节点未上报运行时信息）" if not runtimes else ""
         return NodeVerdict(node_id, RESULT_SKIP,
                            f"engine {engine} 在 {node_id} 上不可用{detail}，需先 modelctl env setup {engine}")
+    if tp_conflict:
+        return NodeVerdict(node_id, RESULT_SKIP, tp_conflict)
 
     capacity = node.get("capacity")
     if isinstance(capacity, dict):
