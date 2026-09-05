@@ -18,6 +18,7 @@ join_token。ENV_PATH 模块级变量便于测试重定向。
 
 from __future__ import annotations
 
+import copy
 import json
 import socket
 import threading
@@ -71,7 +72,11 @@ def collect_heartbeat(rt: Any = None) -> dict[str, Any]:
     if rt is None:
         return payload
     try:
-        payload.update(rt.heartbeat_payload())
+        # 深拷贝：reconciler 正常路径返回的快照与其内部 `_last_snapshot` 缓存共享引用
+        # （snapshot() 的降级分支更是直接返回缓存本身）。心跳段只承诺"调用方只读"，
+        # 这里在边界结构性兑现该契约，避免任何下游就地改写污染 reconciler 缓存；
+        # 心跳 payload 只有几百字节量级，拷贝成本可忽略。
+        payload.update(copy.deepcopy(rt.heartbeat_payload()))
     except Exception as exc:  # noqa: BLE001 — 扩展段缺失只是本轮少报，不影响注册/租约
         logger.debug(f"心跳扩展段采集失败（本轮省略）: {exc}")
         payload.pop("profiles", None)
@@ -140,9 +145,13 @@ class WorkerAgent:
                     break
                 rt = self._reconciler_now()
                 ws.send(wsproto.dumps(wsproto.make_heartbeat(collect_heartbeat(rt))))
-                ack = json.loads(ws.recv())          # 等 ack，保持请求-应答有序
+                ack = json.loads(ws.recv())          # 等本帧的回帧，保持请求-应答收支平衡
                 for frame in deliver_ack(ack, rt):   # 受理回执随同一次往返送出
                     ws.send(wsproto.dumps(frame))
+                    # 中心对每入帧必回一帧（现网 result 落 error 分支、Task 11 后回 ack），
+                    # 逐条排空其回帧丢弃：只 send 不 recv 会让读队列每轮净积压 N 帧，
+                    # 次轮读到陈旧帧、本轮真 sync/actions 被静默丢弃且错位线性增长。
+                    ws.recv()
 
     def run(self) -> None:
         backoff = 1
