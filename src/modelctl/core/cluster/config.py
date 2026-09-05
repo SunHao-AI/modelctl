@@ -74,3 +74,17 @@ def lease_s() -> int:
 
 def ws_insecure() -> bool:
     return os.environ.get("CLUSTER_WS_INSECURE", "").strip() == "1"
+
+
+_DEFAULT_RECONCILE_S = 5
+_DEFAULT_START_TIMEOUT_S = 300
+
+
+def reconcile_interval_s() -> int:
+    """worker 本地逼近期望状态的周期。刻意独立于心跳周期（见 reconcile 模块头）。"""
+    return _int_env("CLUSTER_RECONCILE_INTERVAL_S", _DEFAULT_RECONCILE_S, floor=1)
+
+
+def start_timeout_s() -> int:
+    """单次启动等待引擎就绪的上限；与 all_service.start_all(timeout=300) 同默认。"""
+    return _int_env("CLUSTER_START_TIMEOUT_S", _DEFAULT_START_TIMEOUT_S, floor=5)

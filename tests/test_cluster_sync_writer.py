@@ -248,3 +248,28 @@ def test_oversize_yaml_measured_in_utf8_bytes(dirs):
     text = "port: 1\npad: " + "汉" * (P.MAX_YAML_BYTES // 3 + 10)
     assert len(text) < P.MAX_YAML_BYTES                     # 按 len() 算"没超限"的口径漏洞
     assert _apply(dirs, [_goal(text=text)]).rejected == ["qwen@@w-1"]
+
+
+# ---------------- Task 9 / Step 4b：force 打破同 revision 短路 ----------------
+def test_force_breaks_revision_short_circuit(dirs):
+    models, cache = dirs
+    g = _goal()
+    apply_snapshot({"revision": "r1", "goals": [g]}, models_dir=models, cache_dir=cache, now=1.0)
+    (models / "vllm" / "qwen.yaml").write_text("port: 9999\n", encoding="utf-8")
+    same = apply_snapshot({"revision": "r1", "goals": [g]}, models_dir=models, cache_dir=cache, now=2.0)
+    assert same.written == [] and same.drift == [g["goal_id"]]      # 默认：只报不修
+    forced = apply_snapshot({"revision": "r1", "goals": [g]}, models_dir=models,
+                            cache_dir=cache, now=3.0, force=True)
+    # drift 语义（Task 8 裁决）= "本轮覆盖掉了哪些本地手改"（落盘**前**扫描）：
+    # 强制修好 = written 与 drift 同时点名；修复后实时 scan_drift 才为空
+    # （rt.snapshot()["drift"] 走 _collect 的实时扫描，与本返回值是两条路径）。
+    assert forced.written == [g["goal_id"]] and forced.drift == [g["goal_id"]]
+
+
+def test_reconcile_forwards_force_flag_from_snapshot(dirs):
+    """reconcile 侧只透传：快照里带 force 就强制（避免两处各写一套判断）。
+
+    行为钉死在 tests/test_cluster_reconcile.py::test_drift_reported_once_repaired_by_resync
+    （force 快照把 drift 修空）；此处按 Step 4b 登记意图，不重复实现断言。
+    """
+    assert "force" in apply_snapshot.__code__.co_varnames

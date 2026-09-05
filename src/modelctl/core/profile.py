@@ -278,6 +278,20 @@ def _load_profile_from_path(path: Path) -> Profile:
     return _to_profile(_interpolate(raw, path.name), path)
 
 
+def load_profile_at(path: Path) -> Profile:
+    """按**绝对路径**加载 profile —— 集群下发文件的唯一正确入口。
+
+    `load_profile(name)` 靠目录扫描按 name 匹配，而中心只认文件 stem；YAML 里
+    显式写了 `name:` 时两者会分叉（PID/GPU 锁用 name，中心用 stem）。直接按路径
+    加载再把 `Profile.name` 交给下游，可让"集群下发的文件"与"本地台账记录"
+    天然是同一条记录。
+
+    `_load_profile_from_path` 内部会做 `${VAR}` 插值，worker 本地 .env 缺变量时抛
+    `ProfileError`——调用方必须捕获（reconcile 把它折叠成一次 FAILED 而非中断整轮）。
+    """
+    return _load_profile_from_path(Path(path))
+
+
 def list_profiles(models_dir: Path | None = None) -> list[Profile]:
     """递归扫描 models_dir 下所有 *.yaml profile，根目录优先并去重。"""
     models_dir = models_dir or PROJECT_ROOT / "models"

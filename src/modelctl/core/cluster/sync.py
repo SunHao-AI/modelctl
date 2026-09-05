@@ -123,8 +123,11 @@ def _validate(goal: dict[str, Any]) -> str:
 
 
 def apply_snapshot(snapshot: dict[str, Any], *, models_dir: Path, cache_dir: Path,
-                   now: float) -> SyncResult:
-    """把中心快照落盘。同 revision 直接短路（幂等 + 省 IO）。
+                   now: float, force: bool = False) -> SyncResult:
+    """把中心快照落盘。同 revision 直接短路（幂等 + 省 IO）；`force=True` 打破短路。
+
+    `force` 供中心 `POST /nodes/{id}/sync` 使用：本地文件被人为改坏时，revision
+    并未变化，若不强制就会**永远修不好**（漂移被短路跳过，只上报不修复）。
 
     剪枝以"快照全集"为准：上一次落过、这次不在快照里的 goal，其 YAML 被删除。
     中心从不送"已删除列表"——goal 从快照消失即是删除语义（§6.5）。
@@ -135,7 +138,7 @@ def apply_snapshot(snapshot: dict[str, Any], *, models_dir: Path, cache_dir: Pat
     state = read_state(cache_dir)
     result = SyncResult(revision=revision)
 
-    if revision and state["revision"] == revision:
+    if revision and not force and state["revision"] == revision:
         # 订正①（task-8-review 裁决）：短路路径只产 revision + drift，skipped 死字段不赋值
         result.drift = scan_drift(cache_dir, models_dir)
         return result
