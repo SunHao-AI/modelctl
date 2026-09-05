@@ -923,4 +923,6 @@ CREATE TABLE IF NOT EXISTS audit (
 
 - **M0（基础框架 + 注册/心跳）**：CLUSTER_ROLE 矩阵 + `cluster init/join` + WS 协议（hello/welcome/heartbeat/event）+ nodes 表（含 lease）+ `cluster status/nodes` CLI + 中心 dashboard 加 "node" 列。**验收**：A 机看到 1 个 worker online，心跳数据正确，solo 模式零影响。
 - **M1（目标状态 + placement gate）**：goals 表（含 8 态 stage） + `goal set/sync/remove`（含 placement gate + `--dry-run`）+ profile 同步（原子写 + drift）+ 远程启停 + intent reconciler + `cluster launch/stop`。**验收**：`goal set qwen3.8-vllm --node w-210 --create` 后 w-210 上模型 healthy ready，stage=READY。
-- **M2（视图 + 摘要 + token + 备份）**：ClusterNodesView / ClusterGoalsView vue + 事件流 + `--cluster` 聚合 flag +
+- **M2（视图 + 治理 + 备份）**：ClusterGoalsView / ClusterNodeDetailView vue（目标矩阵 + 批量下发两段式 + 行内动作 + 事件流轮询）+ 节点治理（禁用/启用/token 轮换/主动踢除/退役）+ `cluster events/node …/backup/restore` CLI + `status/list --cluster` 聚合 flag + 中心 SQLite 备份/恢复 + M1 留 M2 小项波。**硬约束：worker 面零 diff、WS 协议不升版**（rollup 上报与审计反向帧移出 M2）。**验收**：dashboard 不开终端完成 goal 全生命周期 + 治理 + 备份对账闭环。详见 `2026-09-05-cluster-m2-views-governance-design.md`。（2026-09-05 修订：本行原文在此截断，且原"M2 含摘要/反向拉取"范围已按该 spec §0.2 移入 M3。）
+- **M3（摘要 + 反向帧 + 实时推送）**：`metrics_summary` 帧 + `metrics_rollups` 读写 + `cluster stats` + `audit.query` 反向帧 + 远程节点日志 + dashboard 推送通道 + `_drift_seen` 落库（WS v3，需改 worker）。
+- **P2（增强）**：RBAC/mTLS、多中心联邦、placement 智能调度（装箱/亲和）等，另行立项。
