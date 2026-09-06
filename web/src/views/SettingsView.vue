@@ -162,7 +162,7 @@ onMounted(() => { fetchVersion(); fetchSettings(); });
           <div><dt class="text-slate-500">快照上限</dt><dd class="text-slate-200">{{ settings.max_snapshot_bytes }} 字节</dd></div>
           <div><dt class="text-slate-500">join token</dt><dd class="font-mono text-slate-400">{{ settings.join_token_mask }}</dd></div>
         </dl>
-        <span v-else class="text-xs text-slate-500">配置加载中…</span>
+        <span v-else-if="!clusterError" class="text-xs text-slate-500">配置加载中…</span>
         <p class="mt-2 text-xs text-slate-500">
           以上为进程启动时读取的 .env 现值，改配置请在中心机改 <span class="font-mono">.env</span> 后重启 webui（远程写可自断控制面，刻意不提供）。
         </p>

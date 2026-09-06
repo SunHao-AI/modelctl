@@ -1758,13 +1758,15 @@ def _cmd_cluster_stop(args) -> int:
 
 
 def _cmd_cluster_sync(args) -> int:
+    from urllib.parse import quote
+
     nodes, err = _sync_targets(args)
     if err:
         logger.error(err)
         return 2
     rc = 0
     for node in nodes:
-        status, body = _cluster_request("POST", f"/cluster/nodes/{node}/sync")
+        status, body = _cluster_request("POST", f"/cluster/nodes/{quote(node, safe='')}/sync")
         if status != 200:
             logger.error(f"强制同步失败 {node}: {_center_detail(status, body)}")
             rc = 2

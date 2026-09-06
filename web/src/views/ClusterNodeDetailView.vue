@@ -48,15 +48,24 @@ function fmtEpoch(v: number | null): string {
   return v === null ? '-' : dayjs.unix(v).format('YYYY-MM-DD HH:mm:ss');
 }
 
+/** 轮询请求序号 + 节点快照：晚到的过期响应/错误直接丢弃，防串节点渲染 */
+let refreshSeq = 0;
+
 async function refresh() {
+  const seq = ++refreshSeq;
+  const target = nodeId.value;
   try {
-    detail.value = await getClusterNodeDetail(nodeId.value);
-    events.value = (await listClusterEvents({ node_id: nodeId.value, limit: 100 })).events;
+    const d = await getClusterNodeDetail(target);
+    const ev = (await listClusterEvents({ node_id: target, limit: 100 })).events;
+    if (seq !== refreshSeq || nodeId.value !== target) return; // 过期响应：已切节点或有更新的轮询
+    detail.value = d;
+    events.value = ev;
     notFound.value = '';
     error.value = '';
   } catch (e) {
+    if (seq !== refreshSeq || nodeId.value !== target) return;
     const st = (e as AxiosError).response?.status;
-    if (st === 404) notFound.value = `节点 ${nodeId.value} 不存在（或已退役）`;
+    if (st === 404) notFound.value = `节点 ${target} 不存在（或已退役）`;
     else error.value = errText(e);
   }
 }
