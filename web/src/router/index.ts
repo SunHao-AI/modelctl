@@ -86,6 +86,12 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/ClusterNodesView.vue'),
         meta: { title: '集群节点' },
       },
+      {
+        path: 'cluster/nodes/:id',
+        name: 'cluster-node-detail',
+        component: () => import('@/views/ClusterNodeDetailView.vue'),
+        meta: { title: '节点详情' },
+      },
     ],
   },
   {
