@@ -167,6 +167,8 @@ const envText = ref('');
 const preview = ref<GoalCreateResult | null>(null);
 /** 预览成功才点亮提交；表单任何改动经 @change/@input 调 resetPreview 复位（永不盲发） */
 const previewOk = ref(false);
+/** dry-run 请求序号：resetPreview/新预览递增，晚到的过期响应直接丢弃，防复活失效预览 */
+let previewSeq = 0;
 const drawerError = ref('');
 
 const catalogNames = computed(() => [...new Set(catalog.value.map((p) => p.name))].sort());
@@ -199,6 +201,7 @@ const formValid = computed(
 );
 
 function resetPreview() {
+  previewSeq++; // 作废所有在途 dry-run：旧响应到达时 seq 校验不通过即被丢弃
   preview.value = null;
   previewOk.value = false;
 }
@@ -231,10 +234,14 @@ async function doPreview() {
   if (!formValid.value) return;
   drawerError.value = '';
   resetPreview();
+  const seq = ++previewSeq;
   try {
-    preview.value = await createClusterGoal(payload(true));
+    const out = await createClusterGoal(payload(true));
+    if (seq !== previewSeq) return; // 过期响应：表单已改动或有更新的预览
+    preview.value = out;
     previewOk.value = true;
   } catch (e) {
+    if (seq !== previewSeq) return;
     drawerError.value = errText(e);
   }
 }
