@@ -37,6 +37,27 @@ client.interceptors.response.use(
   },
 );
 
+/**
+ * Blob 下载（备份导出等二进制端点）：复用同一 axios 实例 ⇒ Bearer 注入与
+ * 401 跳登录零重复。文件名优先取 Content-Disposition（后端已带时间戳），
+ * 落盘动作走临时 <a download>，随后立即回收 ObjectURL。
+ */
+export async function downloadBlob(path: string, fallbackFilename: string): Promise<string> {
+  const res = await client.get(path, { responseType: 'blob', timeout: 120_000 });
+  const disp = String(res.headers['content-disposition'] || '');
+  const match = /filename="?([^";]+)"?/i.exec(disp);
+  const filename = match?.[1] || fallbackFilename;
+  const url = URL.createObjectURL(res.data as Blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  return filename;
+}
+
 /** 解包响应体（返回 res.data），统一各 api 模块取值 */
 export function dataOf<T>(p: Promise<{ data: T }>): Promise<T> {
   return p.then((r) => r.data);
