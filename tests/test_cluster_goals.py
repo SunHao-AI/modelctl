@@ -10,6 +10,7 @@
 # ===============================================================================
 
 import hashlib
+import json
 
 import pytest
 import yaml
@@ -610,3 +611,46 @@ def test_snapshot_empty_node_shape_unchanged_under_tiny_cap(store, monkeypatch):
 
     monkeypatch.setenv("CLUSTER_MAX_SNAPSHOT_BYTES", "65536")
     assert GoalService(store).snapshot_for("nobody") == {"revision": "", "goals": []}
+
+
+def test_snapshot_exactly_at_limit_is_not_overflow(store, svc, monkeypatch):
+    """判据是 `>` 而非 `>=`：恰好等于上限是"塞得下"的合法边界，不得误判超限。
+
+    上限必须**恰好**等于夹具快照的 canon 字节数才有钉力——随手设个大值是恒真断言。
+    先把快照灌到 floor 之上（`max_snapshot_bytes` 有 64 KiB 下限，低于 floor 的 env
+    会被丢弃回退默认，边界钉不住），再按实测字节数反设上限。
+    """
+    _online(store, "w-1")
+    svc.set_goals(profile="qwen", node_ids=["w-1"], create=True)
+    store.update_goal("qwen@@w-1", now=2.0, profile_yaml="x" * 70000)
+    size = len(json.dumps(svc.snapshot_for("w-1")["goals"],
+                          sort_keys=True, ensure_ascii=False).encode("utf-8"))
+    assert size >= 65536                                   # 低于 floor 则本钉恒真，先自证
+    monkeypatch.setenv("CLUSTER_MAX_SNAPSHOT_BYTES", str(size))
+    assert svc.snapshot_for("w-1")["sync_overflow"] is False
+    assert "goal.sync_overflow" not in [e["kind"] for e in store.recent_events()]
+
+
+def test_snapshot_overflow_event_suppressed_until_payload_changes(store, svc, monkeypatch):
+    """毒 goal 存续期间 `snapshot_for` 每心跳被调用一次（超限不写水位 → 下拍再犯）：
+    同节点同 payload 必须抑制事件与 error 日志，否则 recent_events 的 100 条窗口数分钟
+    内被同一告警刷满、其它事件被挤出展示面，事件表还无界增长。
+
+    payload 变化（本例把 profile_yaml 改大 → bytes 变）即重新记录——抑制的是"重复刷屏"，
+    不是"同一节点只报一次"。
+    """
+    monkeypatch.setenv("CLUSTER_MAX_SNAPSHOT_BYTES", "65536")   # floor 64 KiB
+    _online(store, "w-1")
+    svc.set_goals(profile="qwen", node_ids=["w-1"], create=True)
+    store.update_goal("qwen@@w-1", now=2.0, profile_yaml="x" * 70000)
+    size = len(json.dumps(svc.snapshot_for("w-1")["goals"],
+                          sort_keys=True, ensure_ascii=False).encode("utf-8"))
+    for beat in range(3):                                      # 模拟连续三拍心跳
+        assert svc.snapshot_for("w-1")["sync_overflow"] is True, f"第 {beat + 1} 拍仍应判超限"
+    events = store.recent_events(node_id="w-1", kind="goal.sync_overflow")
+    assert len(events) == 1                                    # 三拍只记一条
+    # digest（Task 3 定版）读 payload["limit"] 渲染"上限 N"，缺键恒显"上限 ?"
+    assert events[0]["payload"] == {"bytes": size, "goal_count": 1, "limit": 65536}
+    store.update_goal("qwen@@w-1", now=3.0, profile_yaml="x" * 90000)   # 快照被改更大
+    assert svc.snapshot_for("w-1")["sync_overflow"] is True
+    assert len(store.recent_events(node_id="w-1", kind="goal.sync_overflow")) == 2

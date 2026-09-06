@@ -229,3 +229,6 @@ def test_ack_omits_sync_on_snapshot_overflow(env, monkeypatch):
     assert goals.snapshot_for("w-1")["sync_overflow"] is True
     ack = reg.handle_heartbeat("w-1", _hb(goal_sync={"revision": ""}), now=100.0)
     assert "sync" not in ack
+    # 双钉：ack 不带 sync 段之外，投递水位同样不得写入——写了水位就等于"承认已送达"，
+    # worker 下拍报同一 revision，毒 goal 撤掉前永不再尝试。
+    assert store.get_node("w-1")["last_goal_sync_sha"] is None

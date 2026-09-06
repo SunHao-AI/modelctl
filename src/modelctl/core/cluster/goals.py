@@ -335,15 +335,24 @@ class GoalService:
         if not goals:
             return {"revision": "", "goals": []}
         canon = json.dumps(goals, sort_keys=True, ensure_ascii=False)
-        overflow = len(canon.encode("utf-8")) > config.max_snapshot_bytes()
+        data = canon.encode("utf-8")
+        size = len(data)
+        limit = config.max_snapshot_bytes()
+        overflow = size > limit
         if overflow:
-            logger.error(f"节点 {node_id} 的 goal 快照 {len(canon.encode('utf-8'))} B 超过上限 "
-                         f"{config.max_snapshot_bytes()} B：本轮不下发 sync（goal 数 {len(goals)}，"
-                         f"检查是否误下发超大 profile YAML）")
-            self.store.append_event("goal.sync_overflow", node_id=node_id,
-                                    payload={"bytes": len(canon.encode("utf-8")),
-                                             "goal_count": len(goals)})
-        return {"revision": hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16],
+            # limit 键是 events.digest（Task 3 定版）渲染"上限 N"的必需项，缺键恒显"上限 ?"。
+            payload = {"bytes": size, "goal_count": len(goals), "limit": limit}
+            # 刷屏抑制：超限不写水位 → 毒 goal 存续期间每心跳都再犯一次，事件与 error
+            # 日志照记会在数分钟内刷满 recent_events 的 100 条窗口（其它事件被挤出展示
+            # 面），事件表亦无界增长。只比对"该节点最近一条同类事件"的 payload：全等即
+            # 抑制，payload 变化（goal 被改大/改小 → bytes 变）即重新记录。刻意不引入
+            # 新表/新列/进程内状态位——中心重启后仍能抑制，且非超限路径零额外查询。
+            last = self.store.recent_events(limit=1, node_id=node_id, kind="goal.sync_overflow")
+            if not (last and last[0].get("payload") == payload):
+                logger.error(f"节点 {node_id} 的 goal 快照 {size} B 超过上限 {limit} B：本轮不下发 "
+                             f"sync（goal 数 {len(goals)}，检查是否误下发超大 profile YAML）")
+                self.store.append_event("goal.sync_overflow", node_id=node_id, payload=payload)
+        return {"revision": hashlib.sha256(data).hexdigest()[:16],
                 "goals": goals, "sync_overflow": overflow}
 
     # ---------------- worker 回流（Task 7 调用）----------------
