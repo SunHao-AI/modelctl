@@ -508,3 +508,34 @@ def center_revision(client, node_id: str) -> str:
     import modelctl.core.webui.admin_cluster as ac
 
     return ac.get_registry().goals.snapshot_for(node_id)["revision"]
+
+
+# ---------------- A-3：model_verb 展示名归一（M2 Task 9）----------------
+def _make_display_profile(center_fixture_models, stem="qwen-fast", display="qwen-display"):
+    (center_fixture_models / "vllm").mkdir(parents=True, exist_ok=True)
+    (center_fixture_models / "vllm" / f"{stem}.yaml").write_text(
+        f"port: 8001\nname: {display}\n", encoding="utf-8")
+
+
+def test_model_verb_accepts_display_name(center, monkeypatch, tmp_path):
+    import modelctl.core.cluster.goals as goals_mod
+
+    _make_display_profile(tmp_path / "models")
+    monkeypatch.setattr(goals_mod, "MODELS_DIR", tmp_path / "models")
+    import modelctl.core.webui.admin_cluster as ac
+    reg = ac.get_registry()
+    reg.store.upsert_goal(goal_id="qwen-fast@@w-1", node_id="w-1", profile="qwen-fast",
+                          engine="vllm", profile_yaml="port: 8001\nname: qwen-display\n",
+                          profile_sha="sha-a", profile_version=None, intent="start",
+                          params=None, env_overlay=None, placement=None, runtime_ref=None,
+                          target_role="primary", stage="READY", created_by="op", now=time.time())
+    r = center.post("/admin/api/cluster/nodes/w-1/model/qwen-display/stop", headers=_h())
+    assert r.status_code == 200
+    # action 帧给 worker 的 profile 必须是 stem（worker 用它对本地文件/进程名寻址）
+    queued = reg._actions.get("w-1", [])
+    assert queued and queued[-1]["profile"] == "qwen-fast"
+
+
+def test_model_verb_unknown_name_404(center):
+    r = center.post("/admin/api/cluster/nodes/w-1/model/nope/stop", headers=_h())
+    assert r.status_code == 404

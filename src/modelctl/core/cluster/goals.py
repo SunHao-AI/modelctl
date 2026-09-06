@@ -317,6 +317,19 @@ class GoalService:
         return updated, ""
 
     # ---------------- 下发快照（心跳 ack 捎带）----------------
+    def find_goal_by_name(self, profile: str, node_id: str) -> dict | None:
+        """按寻址名（文件名或展示名）定位 (profile,node) 的 goal 行（终审 A-3）。
+
+        与 remove/stop 共用 `_resolve_names` 的归一口径：set 侧把展示名归一成 stem
+        落库，读侧不归一就会出现"展示名下发的 goal，展示名却操作不了"的分裂。
+        候选顺序 = stem 优先，原词兜底（goal 源文件被删后仍能按落库名操作）。
+        """
+        for name in self._resolve_names(profile):
+            goal = self.store.get_goal(goal_id_of(name, node_id))
+            if goal is not None:
+                return goal
+        return None
+
     def snapshot_for(self, node_id: str) -> dict[str, Any]:
         """该节点的全量期望状态。revision 是内容哈希：同一 goal 集在中心重启后同值，
         故 worker 端"要不要重写盘"的判据在两侧都稳定。空节点用空串（不是哈希）。

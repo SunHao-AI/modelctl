@@ -138,3 +138,35 @@ def test_append_event_unknown_kind_still_stored(store: ClusterStore, caplog) -> 
     # 告警语义（全局裁决 1）：未知 kind 入库 + warning，绝不抛——worker 上报炸不得
     store.append_event("vendor.custom", node_id="w-1", now=1.0)
     assert [e["kind"] for e in store.recent_events()] == ["vendor.custom"]
+
+
+def test_explicit_columns_cover_full_row(store: ClusterStore) -> None:
+    """显式列改造的护栏：三类读路径返回的键集合必须与 schema 全列一致。"""
+    store.upsert_node(node_id="w-1", node_token="t", lan_id="l", role="worker",
+                      host_ip="", hostname="", engines=None, now=1.0)
+    store.upsert_goal(goal_id="g@@w-1", node_id="w-1", profile="g", engine="vllm",
+                      profile_yaml="port: 1\n", profile_sha="s", profile_version=None,
+                      intent="start", params=None, env_overlay=None, placement=None,
+                      runtime_ref=None, target_role="primary", stage="READY",
+                      created_by="op", now=1.0)
+    store.upsert_model_state(node_id="w-1", profile="g", state="running",
+                             gpu=[0], port=8001, pid=1, now=1.0)
+    node = store.get_node("w-1")
+    goal = store.get_goal("g@@w-1")
+    ms = store.list_model_states(node_id="w-1")[0]
+    # brief 缺陷适配：_row_to_node 恒附加 capacity/runtimes/local_profiles 三个派生键
+    # （gate/nodes/goals/reconcile 承重，"行为零变更"禁删），逐字 == 全列恒假；
+    # 先减派生键，原始列集合断言逐字未动。
+    assert set(node) - {"capacity", "runtimes", "local_profiles"} == {
+        "node_id", "node_token", "lan_id", "role", "host_ip", "hostname", "engines",
+        "created_at", "last_seen", "lease_expiry", "status", "disabled", "capacity_json",
+        "runtime_json", "gateway_url", "last_goal_sync_sha", "local_profiles_json"}
+    assert set(goal) == {
+        "goal_id", "node_id", "profile", "engine", "profile_yaml", "profile_sha",
+        "profile_version", "intent", "params", "env_overlay", "placement", "runtime_ref",
+        "target_role", "traffic_weight", "stage", "stage_reason", "error_class",
+        "created_by", "created_at", "updated_at"}
+    assert set(ms) == {
+        "node_id", "profile", "state", "gpu", "port", "pid", "reason", "endpoint_url",
+        "endpoint_ready", "engine_version", "gpu_util", "metrics_p50_ms", "last_probe_ms",
+        "error_class", "updated_at"}

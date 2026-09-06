@@ -32,7 +32,7 @@ from pydantic import BaseModel, Field
 
 from modelctl.core.cluster import backup, config, conns, tokens, wsproto
 from modelctl.core.cluster import events as events_mod
-from modelctl.core.cluster.goals import GoalService, goal_id_of
+from modelctl.core.cluster.goals import GoalService
 from modelctl.core.cluster.nodes import AuthError, NodeRegistry
 from modelctl.core.cluster.store import ClusterStore, mask_tail
 from modelctl.core.gpu_utils import GPUValidationError, parse_gpu_list
@@ -437,11 +437,14 @@ async def model_verb(node_id: str, profile: str, verb: str,
     if verb not in _MODEL_VERBS:
         return _bad_request(f"不支持的操作 {verb!r}（仅 {sorted(_MODEL_VERBS)}）")
     reg = get_registry()
-    goal = reg.store.get_goal(goal_id_of(profile, node_id))
+    goal = _goals().find_goal_by_name(profile, node_id)
     if goal is None:
         return JSONResponse(status_code=404,
                             content={"detail": f"节点 {node_id} 上没有 profile {profile} 的托管目标"})
-    queued = reg.push_action(node_id, verb, goal_id=str(goal["goal_id"]), profile=profile)
+    # A-3（终审）：action 帧的 profile 是 worker 侧文件/进程寻址成分，必须是 goal 行的
+    # stem（展示名寻址时调用方原词与落库名不同，原词下发 worker 摸不到文件）。
+    queued = reg.push_action(node_id, verb, goal_id=str(goal["goal_id"]),
+                             profile=str(goal["profile"]))
     reg.store.append_event("node.model_action", node_id=node_id, goal_id=str(goal["goal_id"]),
                            payload={"verb": verb, "queued": queued, "operator": "api"},
                            now=time.time())

@@ -273,3 +273,23 @@ def test_reconcile_forwards_force_flag_from_snapshot(dirs):
     （force 快照把 drift 修空）；此处按 Step 4b 登记意图，不重复实现断言。
     """
     assert "force" in apply_snapshot.__code__.co_varnames
+
+
+def test_engine_change_prunes_old_engine_file(dirs):
+    """同 goal_id 换 engine：新目录写盘 + 旧引擎目录的孤儿 YAML 必须删除。
+
+    旧文件不删 = worker 上残留一份"中心不知道"的 YAML；后续有人手工
+    load_profile 会启动中心从未声明过的服务（幽灵服务，终审 T8）。
+    """
+    models, cache = dirs
+    _apply(dirs, [_goal(engine="vllm")])
+    assert (models / "vllm" / "qwen.yaml").is_file()
+    out = _apply(dirs, [_goal(engine="sglang")], revision="r2")
+    assert (models / "sglang" / "qwen.yaml").is_file()
+    assert not (models / "vllm" / "qwen.yaml").exists()
+    assert out.pruned == []                     # 不是 goal 撤销，不进 pruned 账
+    state = read_state(cache)
+    # brief 缺陷适配：原文 `.endswith(...).replace(...)` 对 bool 调 replace 恒抛
+    # AttributeError；replace 移到 path 上，断言语义（state 指向新引擎目录）逐字不变。
+    assert state["goals"][0]["path"].replace("\\", "/").endswith("sglang/qwen.yaml") or \
+        state["goals"][0]["path"].endswith("sglang\\qwen.yaml")

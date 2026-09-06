@@ -171,7 +171,7 @@ def _opt_str_list(value: Any, *, limit: int) -> list[str] | None:
         return None
     if not isinstance(value, list):
         return None
-    return [str(v) for v in value if isinstance(v, str)][:limit]
+    return [str(v)[:512] for v in value if isinstance(v, str)][:limit]
 
 
 def parse_heartbeat_v2(data: Any) -> dict[str, Any]:

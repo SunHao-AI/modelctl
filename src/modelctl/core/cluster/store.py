@@ -90,6 +90,22 @@ _NODE_COLS = ("node_id", "node_token", "lan_id", "role", "host_ip", "hostname",
               "capacity_json", "runtime_json", "gateway_url", "last_goal_sync_sha",
               "local_profiles_json")
 
+# T1-④（终审）：三类读路径零 SELECT *——列清单与 _SCHEMA 逐列一致（护栏：
+# tests/test_cluster_store.py::test_explicit_columns_cover_full_row）。加列必须同步
+# 这里的常量，漏列会静默丢字段（视图/CLI 显示空值而非报错）。
+_GOAL_COLS = ("goal_id", "node_id", "profile", "engine", "profile_yaml", "profile_sha",
+              "profile_version", "intent", "params", "env_overlay", "placement",
+              "runtime_ref", "target_role", "traffic_weight", "stage", "stage_reason",
+              "error_class", "created_by", "created_at", "updated_at")
+
+_MODEL_STATE_COLS = ("node_id", "profile", "state", "gpu", "port", "pid", "reason",
+                     "endpoint_url", "endpoint_ready", "engine_version", "gpu_util",
+                     "metrics_p50_ms", "last_probe_ms", "error_class", "updated_at")
+
+_NODE_SELECT = "SELECT " + ", ".join(_NODE_COLS) + " FROM nodes"
+_GOAL_SELECT = "SELECT " + ", ".join(_GOAL_COLS) + " FROM goals"
+_MODEL_STATE_SELECT = "SELECT " + ", ".join(_MODEL_STATE_COLS) + " FROM model_states"
+
 
 def mask_tail(value: str) -> str:
     """密钥脱敏：*** + 末 4 位；空值或长度 ≤4 的短值一律返回 ***。"""
@@ -196,19 +212,19 @@ class ClusterStore:
 
     def get_node(self, node_id: str) -> dict | None:
         with self._lock:
-            row = self._db().execute("SELECT * FROM nodes WHERE node_id=?", (node_id,)).fetchone()
+            row = self._db().execute(_NODE_SELECT + " WHERE node_id=?", (node_id,)).fetchone()
         return self._row_to_node(row) if row else None
 
     def find_node_by_token(self, token: str) -> dict | None:
         if not token:
             return None
         with self._lock:
-            row = self._db().execute("SELECT * FROM nodes WHERE node_token=?", (token,)).fetchone()
+            row = self._db().execute(_NODE_SELECT + " WHERE node_token=?", (token,)).fetchone()
         return self._row_to_node(row) if row else None
 
     def list_nodes(self) -> list[dict]:
         with self._lock:
-            rows = self._db().execute("SELECT * FROM nodes ORDER BY node_id").fetchall()
+            rows = self._db().execute(_NODE_SELECT + " ORDER BY node_id").fetchall()
         return [self._row_to_node(r) for r in rows]
 
     def touch_heartbeat(self, node_id: str, now: float, lease_s: int) -> None:
@@ -391,11 +407,11 @@ class ClusterStore:
 
     def get_goal(self, goal_id: str) -> dict | None:
         with self._lock:
-            row = self._db().execute("SELECT * FROM goals WHERE goal_id=?", (goal_id,)).fetchone()
+            row = self._db().execute(_GOAL_SELECT + " WHERE goal_id=?", (goal_id,)).fetchone()
         return self._row_to_goal(row) if row else None
 
     def list_goals(self, *, node_id: str = "", profile: str = "") -> list[dict]:
-        sql, params, conds = "SELECT * FROM goals", [], []
+        sql, params, conds = _GOAL_SELECT, [], []
         if node_id:
             conds.append("node_id=?")
             params.append(node_id)
@@ -460,7 +476,7 @@ class ClusterStore:
             self._db().commit()
 
     def list_model_states(self, *, node_id: str = "") -> list[dict]:
-        sql, params = "SELECT * FROM model_states", []
+        sql, params = _MODEL_STATE_SELECT, []
         if node_id:
             sql += " WHERE node_id=?"
             params.append(node_id)
@@ -469,7 +485,7 @@ class ClusterStore:
             rows = self._db().execute(sql, params).fetchall()
         out = []
         for r in rows:
-            d = {k: r[k] for k in r.keys()}
+            d = {c: r[c] for c in _MODEL_STATE_COLS}
             d["gpu"] = json.loads(r["gpu"]) if r["gpu"] else None
             out.append(d)
         return out

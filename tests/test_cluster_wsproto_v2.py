@@ -115,3 +115,10 @@ def test_parse_result_rejects_non_dict_and_bool_seq():
     assert wsproto.parse_result(None) == {"seq": 0, "ok": None, "detail": ""}
     assert wsproto.parse_result({"seq": True, "ok": True, "detail": 5}) == {
         "seq": 0, "ok": True, "detail": ""}
+
+
+def test_opt_str_list_caps_each_entry_length():
+    """条数封顶之外，单条也须截断（drift/local_profiles 元素是 worker 自由串）。"""
+    long_item = "x" * 2000
+    out = wsproto._opt_str_list([long_item, "ok"], limit=10)
+    assert out == ["x" * 512, "ok"]

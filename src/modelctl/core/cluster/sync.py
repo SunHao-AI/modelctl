@@ -172,6 +172,16 @@ def apply_snapshot(snapshot: dict[str, Any], *, models_dir: Path, cache_dir: Pat
                             "engine": str(goal["engine"]), "path": str(path),
                             "sha": profile_sha(text), "intent": str(goal.get("intent", "start")),
                             "params": goal.get("params"), "env_overlay": goal.get("env_overlay")}
+        # T8（终审）：同 goal_id 换 engine（如 vllm→sglang 的同名 profile）时，旧引擎
+        # 目录那份 YAML 已成孤儿——中心快照里再也不会出现该路径，prune 分支永远摸不到
+        # 它。不删 = worker 上潜伏一份"中心不知道"的 YAML，被手工 load 后就是一台
+        # 中心从未声明的幽灵服务。goal 未撤销故不进 pruned 账（撤销与换目录语义不同）。
+        old = previous.get(goal_id)
+        if old is not None:
+            old_path = Path(str(old.get("path", "")))
+            if old_path.name and old_path != path and old_path.is_file():
+                _prune(old_path)
+                logger.info(f"集群 sync：goal {goal_id} 换引擎，已清理旧文件 {old_path}")
         result.written.append(goal_id)
 
     # 被拒 ≠ 撤销：同 goal 的坏更新（sha 截断等）被拒时必须**维持上轮版本**——文件
