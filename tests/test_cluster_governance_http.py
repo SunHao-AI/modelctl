@@ -166,6 +166,30 @@ def test_profiles_catalog_lists_same_name_per_engine(center, monkeypatch, tmp_pa
         assert p["display_name"] and p["version"][:10].count("-") == 2   # 版本号=日期前缀
 
 
+def _models_with_unsafe_stem(tmp_path):
+    """port/engine 均合法但 stem 非法（中文名）的文件：内容合法不是放行理由。"""
+    root = tmp_path / "models"
+    (root / "vllm").mkdir(parents=True, exist_ok=True)
+    (root / "vllm" / "qwen.yaml").write_text("port: 8001\n", encoding="utf-8")
+    (root / "vllm" / "中文名.yaml").write_text("port: 8002\n", encoding="utf-8")
+    return root
+
+
+def test_profiles_catalog_skips_unsafe_stem(center, monkeypatch, tmp_path):
+    """非法名（stem 非安全名）文件跳过：弹窗不得出现 POST /goals 必被 400 拒的死行。
+
+    brief Interfaces：非法名/超限/读败文件跳过，目录扫描面绝不抛——中文名即使
+    port/engine 合法，read_profile_source 的 is_safe_name 也会在 POST 侧 400 拒收。
+    """
+    import modelctl.core.cluster.goals as goals_mod
+
+    monkeypatch.setattr(goals_mod, "MODELS_DIR", _models_with_unsafe_stem(tmp_path))
+    r = center.get("/admin/api/cluster/profiles", headers=_h())
+    assert r.status_code == 200                                  # 不抛、不 500
+    rows = r.json()["profiles"]
+    assert [(p["name"], p["engine"]) for p in rows] == [("qwen", "vllm")]
+
+
 def test_profiles_requires_auth(center):
     assert center.get("/admin/api/cluster/profiles").status_code == 401
 

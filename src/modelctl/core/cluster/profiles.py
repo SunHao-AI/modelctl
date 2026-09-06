@@ -291,6 +291,8 @@ def list_profile_catalog(models_dir: Path | None = None) -> list[dict[str, Any]]
         return []
     out: list[dict[str, Any]] = []
     for path in _root_first(_scan(root)[0], root):
+        if not is_safe_name(path.stem):
+            continue  # stem 非法 = POST /goals 必被 read_profile_source 400 拒的死行（与 _resolve 同口径）
         got = _load_candidate(path)
         if isinstance(got, str):
             continue
