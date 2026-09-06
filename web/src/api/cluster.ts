@@ -66,8 +66,8 @@ export interface ModelState {
 /** GET /cluster/events 定版行：ts/text 均由后端单端拼装，前端零加工 */
 export interface EventRow {
   ts: string;
-  node_id: string;
-  goal_id: string;
+  node_id: string | null;
+  goal_id: string | null;
   kind: string;
   text: string;
 }
