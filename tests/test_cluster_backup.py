@@ -193,3 +193,86 @@ def test_restore_bak_snapshot_covers_uncheckpointed_wal(live, tmp_path, monkeypa
         assert conn.execute("SELECT 1 FROM nodes WHERE node_id='w-1'").fetchone() is not None
     finally:
         conn.close()
+
+
+# ---------------- CLI 接线（probe 打桩）----------------
+BASE = "http://center:4173"
+
+
+# brief 缺陷最小适配：cli_env 在模板中定义却未挂在用例上（同 goal_cli 先例为 autouse），
+# 不生效则 CLUSTER_CENTER_URL 缺失、URL 断言必挂；补 autouse=True，用例体逐字未动。
+@pytest.fixture(autouse=True)
+def cli_env(monkeypatch, tmp_path):
+    for k in ("CLUSTER_ROLE", "CLUSTER_CENTER_URL", "CLUSTER_NODE_ID", "CLUSTER_LAN",
+              "CLUSTER_JOIN_TOKEN", "CLUSTER_NODE_TOKEN", "API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("CLUSTER_CENTER_URL", BASE)
+    monkeypatch.setenv("API_KEY", "sk-cli")
+    import modelctl.core.envfile as ef
+
+    monkeypatch.setattr(ef, "PROJECT_ROOT", tmp_path)
+
+
+def _main(argv):
+    from modelctl import cli
+
+    return cli.main(argv)
+
+
+def test_cli_backup_downloads_and_verifies_sha(monkeypatch, tmp_path, capsys):
+    from modelctl.core.cluster import center_probe
+
+    payload = b"fake-sqlite-bytes"
+    import hashlib
+    sha = hashlib.sha256(payload).hexdigest()
+
+    def fake_download(url, dest, api_key="", timeout=60.0):
+        assert url.startswith(BASE + "/admin/api/cluster/backup")
+        dest.write_bytes(payload)
+        return 200, {"sha256": sha, "header_sha256": sha, "bytes": len(payload)}
+
+    monkeypatch.setattr(center_probe, "download_file", fake_download)
+    dest = tmp_path / "bk.db"
+    assert _main(["cluster", "backup", "--to", str(dest)]) == 0
+    assert dest.read_bytes() == payload
+    assert sha[:12] in capsys.readouterr().out
+
+
+def test_cli_backup_sha_mismatch_exit2_and_removes_file(monkeypatch, tmp_path):
+    from modelctl.core.cluster import center_probe
+
+    def fake_download(url, dest, api_key="", timeout=60.0):
+        dest.write_bytes(b"x")
+        return 200, {"sha256": "0" * 64, "header_sha256": "f" * 64, "bytes": 1}
+
+    monkeypatch.setattr(center_probe, "download_file", fake_download)
+    dest = tmp_path / "bk.db"
+    assert _main(["cluster", "backup", "--to", str(dest)]) == 2
+    assert not dest.exists()                   # 对账失败的文件不留
+
+
+def test_cli_restore_yes_calls_core_restore(monkeypatch, tmp_path):
+    calls = {}
+
+    def fake_restore(src, *, assume_stopped=False):
+        calls["src"] = src
+        from pathlib import Path
+
+        return Path(str(src) + ".bak")
+
+    monkeypatch.setattr("modelctl.core.cluster.backup.restore_backup", fake_restore)
+    src = tmp_path / "bk.db"
+    src.write_bytes(b"x")
+    assert _main(["cluster", "restore", "--from", str(src), "--yes"]) == 0
+    assert calls["src"] == src
+
+
+def test_cli_restore_declined_no_call(monkeypatch, tmp_path):
+    called = []
+    monkeypatch.setattr("modelctl.core.cluster.backup.restore_backup",
+                        lambda *a, **k: called.append(1))
+    monkeypatch.setattr("builtins.input", lambda *_: "n")
+    src = tmp_path / "bk.db"
+    src.write_bytes(b"x")
+    assert _main(["cluster", "restore", "--from", str(src)]) == 2
+    assert called == []

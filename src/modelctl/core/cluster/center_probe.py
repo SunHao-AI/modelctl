@@ -65,6 +65,31 @@ def delete_json(url: str, api_key: str = "", timeout: float = 5.0) -> tuple[int,
     return _request("DELETE", url, None, api_key, timeout)
 
 
+def download_file(url: str, dest, api_key: str = "", timeout: float = 60.0) -> tuple[int, dict]:
+    """GET 二进制落盘 + sha 对账素材：(status, {"sha256","header_sha256","bytes"})。
+
+    专给 `cluster backup`：JSON 折叠的 _request 会毁掉 SQLite 字节，下载必须独立通道。
+    写盘失败（权限/磁盘满）折叠为 (-1, {"error"})——与网络故障同一处置面。
+    """
+    import hashlib
+    import pathlib
+
+    try:
+        req = urllib.request.Request(url, method="GET")
+        if api_key:
+            req.add_header("Authorization", f"Bearer {api_key}")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            data = resp.read()
+            header_sha = str(resp.headers.get("X-Backup-Sha256", ""))
+        pathlib.Path(dest).write_bytes(data)
+        return resp.status, {"sha256": hashlib.sha256(data).hexdigest(),
+                             "header_sha256": header_sha, "bytes": len(data)}
+    except urllib.error.HTTPError as exc:
+        return exc.code, _safe_json(exc.read().decode("utf-8", errors="replace"))
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        return -1, {"error": str(exc)}
+
+
 def check_join(center_url: str, token: str, node_id: str, lan: str = "") -> tuple[bool, str, str]:
     """join 预检：(ok, node_token, message)。center_url 末尾斜杠容错。"""
     base = center_url.rstrip("/")

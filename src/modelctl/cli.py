@@ -267,6 +267,12 @@ def build_parser() -> argparse.ArgumentParser:
     ce.add_argument("--node", default="", metavar="NODE_ID", help="按节点过滤")
     ce.add_argument("--kind", default="", metavar="KIND", help="事件类型过滤（非法值中心 400）")
     ce.add_argument("--limit", type=int, default=50, help="条数上限 1..1000（默认 50）")
+    cb = csub.add_parser("backup", help="下载中心台账热备份（含 sha 对账）")
+    cb.add_argument("--to", required=True, metavar="PATH", help="落盘路径")
+    cb.add_argument("--force", action="store_true", help="目标已存在时覆盖")
+    cr = csub.add_parser("restore", help="从备份恢复中心台账（须先停中心；不走 REST）")
+    cr.add_argument("--from", dest="src", required=True, metavar="PATH")
+    cr.add_argument("--yes", action="store_true", help="跳过二次确认")
     # §2.2 TensorRT-LLM 引擎编译
     tp = sub.add_parser("trtllm", help="TensorRT-LLM 编译/检查子命令")
     tp.add_argument("action", choices=["build", "status"])
@@ -1297,6 +1303,10 @@ def _cmd_cluster(args) -> int:
         return _cmd_cluster_node(args)
     if args.action == "events":
         return _cmd_cluster_events(args)
+    if args.action == "backup":
+        return _cmd_cluster_backup(args)
+    if args.action == "restore":
+        return _cmd_cluster_restore(args)
     if args.action == "join-token":
         return _cmd_cluster_join_token(args)
     return 2
@@ -1758,6 +1768,51 @@ def _cmd_cluster_events(args) -> int:
     rows = [[e.get("ts", ""), e.get("node_id") or "-", e.get("kind", ""), e.get("text", "")]
             for e in body.get("events", [])]
     _print_table(["时间", "节点", "类型", "描述"], rows, dim_indices=(2,))
+    return 0
+
+
+def _cmd_cluster_backup(args) -> int:
+    from pathlib import Path as _P
+
+    from modelctl.core.cluster import center_probe
+
+    dest = _P(args.to)
+    if dest.exists() and not args.force:
+        logger.error(f"目标已存在（覆盖加 --force）: {dest}")
+        return 2
+    url = f"{_cluster_center_base()}/admin/api/cluster/backup"
+    status, info = center_probe.download_file(url, dest, api_key=_cluster_api_key())
+    if status != 200:
+        logger.error(f"备份下载失败: {_center_detail(status, info)}")
+        return 2
+    if not info.get("header_sha256") or info["sha256"] != info["header_sha256"]:
+        dest.unlink(missing_ok=True)
+        logger.error(f"sha 对账不符（本地 {info['sha256'][:12]}… != 中心 "
+                     f"{str(info.get('header_sha256'))[:12]}…），已删除落盘文件")
+        return 2
+    print(f"备份就绪: {dest}（{info['bytes']} 字节, sha256 {info['sha256'][:12]}…）")
+    return 0
+
+
+def _cmd_cluster_restore(args) -> int:
+    from pathlib import Path as _P
+
+    from modelctl.core.cluster import backup
+
+    src = _P(args.src)
+    if not src.is_file():
+        logger.error(f"备份文件不存在: {src}")
+        return 2
+    if not _confirm_or_yes(args, f"将用 {src} 覆盖中心台账（现库自动留 .pre-restore.bak），确认？"):
+        print("已取消")
+        return 2
+    try:
+        bak = backup.restore_backup(src)
+    except backup.BackupError as exc:
+        logger.error(f"恢复失败: {exc}")
+        return 2
+    print(f"恢复完成（恢复前状态: {bak}）")
+    print("提醒: 中心已停机的话现在 modelctl webui start 即加载新库")
     return 0
 
 

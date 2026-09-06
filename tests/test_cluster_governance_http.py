@@ -121,3 +121,20 @@ def test_join_check_rejects_disabled(center):
     r = center.post("/admin/api/cluster/join-check",
                     json={"node_id": "w-1", "key": join})
     assert r.status_code == 401 and "禁用" in r.json()["detail"]
+
+
+# ---------------- GET /cluster/backup（Task 6）----------------
+def test_backup_download_streams_and_records_event(center):
+    r = center.get("/admin/api/cluster/backup", headers=_h())
+    assert r.status_code == 200
+    sha_header = r.headers.get("x-backup-sha256", "")
+    import hashlib
+    assert sha_header == hashlib.sha256(r.content).hexdigest()
+    assert "attachment" in r.headers.get("content-disposition", "")
+    assert "modelctl-cluster-" in r.headers.get("content-disposition", "")
+    kinds = [e["kind"] for e in _store().recent_events()]
+    assert "db.backup" in kinds
+
+
+def test_backup_download_requires_auth(center):
+    assert center.get("/admin/api/cluster/backup").status_code == 401

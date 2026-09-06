@@ -20,15 +20,17 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import shutil
 import time
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from modelctl.core.cluster import config, conns, tokens, wsproto
+from modelctl.core.cluster import backup, config, conns, tokens, wsproto
 from modelctl.core.cluster import events as events_mod
 from modelctl.core.cluster.goals import GoalService, goal_id_of
 from modelctl.core.cluster.nodes import AuthError, NodeRegistry
@@ -458,6 +460,36 @@ async def cluster_export(_base: None = Depends(require_auth)):
             "goals": [_goal_view(g, None, with_yaml=True, now=now)
                       for g in reg.store.list_goals()],
             "model_states": reg.store.list_model_states()}
+
+
+@router.get("/cluster/backup")
+async def cluster_backup_download(background: BackgroundTasks,
+                                  _base: None = Depends(require_auth)):
+    """台账热备下载（spec §2.1）：FileResponse 附件 + X-Backup-Sha256 + db.backup 事件。
+
+    备份含 node_token/join_token 明文——require_auth 管理员域（总 spec §11 信任模型），
+    事件只记动作与字节数，永不记内容。
+    """
+    if (off := _disabled()) is not None:
+        return off
+    import tempfile
+
+    from fastapi.responses import FileResponse
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="modelctl-backup-"))
+    fname = f"modelctl-cluster-{_dt.datetime.now().strftime('%Y%m%d-%H%M%S')}.db"
+    dest = tmp_dir / fname
+    try:
+        out = backup.create_backup(dest)
+    except backup.BackupError as exc:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return _bad_request(str(exc))
+    get_registry().store.append_event("db.backup",
+                                      payload={"bytes": out["bytes"], "operator": "api"},
+                                      now=time.time())
+    background.add_task(shutil.rmtree, tmp_dir, True)
+    return FileResponse(path=str(dest), filename=fname,
+                        headers={"X-Backup-Sha256": out["sha256"]})
 
 
 @router.post("/cluster/join-tokens/rotate")
