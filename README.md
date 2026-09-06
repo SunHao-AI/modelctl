@@ -827,6 +827,24 @@ gate 报告解读：`[ok]`/`[skip]`/`[err]` 逐节点一行（runtimes/空闲显
 
 CLI 一律走中心 REST（需 `CLUSTER_CENTER_URL` + `API_KEY`），不直读中心台账；dashboard 集群页 M2 接入同一组端点。
 
+#### 10.7 治理、备份与中心聚合（M2）
+
+| 命令 | 效果 |
+|---|---|
+| `modelctl cluster events [--node w-210] [--kind goal.update] [--limit 200]` | 中心事件流（与 dashboard 事件流同一响应，后端单端拼装文本） |
+| `modelctl cluster node disable --node w-210` | 禁用：在线则即刻断连，hello/join 被拒；**goal 台账不动**，重新启用后按既有 revision 收敛 |
+| `modelctl cluster node enable --node w-210` | 解除禁用（状态由下一次 hello/心跳自然决定） |
+| `modelctl cluster node rotate-token --node w-210` | 轮换节点令牌（**新令牌仅本次打印**）+ 连带断连；在该节点 `.env` 更新 `CLUSTER_NODE_TOKEN` 后重启 |
+| `modelctl cluster node kick --node w-210` | 一次性断连（worker 指数退避重连，最坏 30s 回来） |
+| `modelctl cluster node retire --node w-210` | 退役：删节点 + 运行事实 + **连带撤销全部 goal**；事件历史保留 |
+| `modelctl cluster backup --to D:\bak\cluster.db [--force]` | 经中心 REST 热备下载，落盘后本地 sha256 与响应头对账 |
+| `modelctl cluster restore --from D:\bak\cluster.db [--yes]` | 恢复（**不走 REST**）：要求中心 webui 已停机；校验通过后先把当前库备份为 `<db>.pre-restore.<时间戳>.bak` 再替换 |
+| `modelctl status --cluster` / `modelctl list --cluster` | 中心聚合视图（按节点/按 profile 分组）；中心不可达**报错退 2，绝不回退本机视图** |
+
+备份文件含 join/node token **明文**——它等价于中心 `.env` 的敏感度，按同一等级保管。dashboard 的「设置 → 集群 → 下载数据库备份」是同一端点。
+
+restore 的完整性校验 = 可打开 + `PRAGMA integrity_check` + 五张必备表齐备；老备份缺 `join_token` 只告警不拦截。`probe --cluster` 不提供：worker 只出站、中心不反连，聚合无数据源。
+
 ## 文档
 
 部署前置条件、目录布局、日志/停止/重启、参数速查等详见 [docs/DeepSeek-V4-Flash后台启动指南.md](docs/DeepSeek-V4-Flash后台启动指南.md)。

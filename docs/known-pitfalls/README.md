@@ -65,6 +65,9 @@
 | 2026-09-05 | 后端 / 集群下发 | agent 心跳 rt=None 按 M0 形状带 `profiles:{}`，中心按"显式空集"覆盖 model_states 抹台账 | M0 逐键兼容刻意取舍（{} 已被"没有模型"占用，"未知"只能用 None/缺键）；缓解=server 先 reconciler 后 Agent 的启动顺序消常态窗，跨组件启动顺序是数据正确性约束。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-05 | 测试 / 覆盖 | 隐式下界类测试常量（rounds=3）无注释，为提速缩减会静默失去判别力 | "最小可判别规模"是隐式契约：注释须交代低于该值为何测不出、判据哪轮显形、常量与断言联动改写；单元素/单轮证明不了关系类不变量。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-05 | 测试 / 隔离 | conftest 的 CLUSTER_* 清理用白名单枚举，新增配置键必然漏进清单 | 枚举与生产配置键集合赛跑且漏键是软污染（结论随机器漂移）；改为 `k.startswith("CLUSTER_")` 前缀扫描，清理范围随配置自动扩张。 | [backend/test-isolation.md](backend/test-isolation.md) |
+| 2026-09-06 | 后端 / 集群下发 | goal 快照超尺寸时"截断下发"会让 worker 剪掉服役文件 | 半套快照比不下发更危险（prune 语义会把缺失当撤销）；定版：超限整段不下发 + `goal.sync_overflow` 事件 + logger.error，worker 保持旧快照继续服役。 | [backend/cluster-governance-backup.md](backend/cluster-governance-backup.md) |
+| 2026-09-06 | 后端 / 集群治理 | 事件 kind 词表守卫若 fail-fast，worker 一条未知 kind 就把 WS 循环打成 500 | 对端可控输入只能告警入库，fail-fast 只用于导入期自检与测试钉；`--cluster` 聚合中心不可达时报错退 2 而非静默回退本机视图（假报数据源比报错恶劣）。 | [backend/cluster-governance-backup.md](backend/cluster-governance-backup.md) |
+| 2026-09-06 | 后端 / 集群备份 | 在线替换自身运行库：restore 若走 REST 等于让进程抽掉自己的地基 | restore 只留 CLI 且前置 `is_running(WEBUI_INSTANCE)` 判停；备份用 sqlite3 backup API 热备不阻写，落盘后必须 sha256 对账（传输损坏在恢复时才炸就晚了）。 | [backend/cluster-governance-backup.md](backend/cluster-governance-backup.md) |
 
 ## 目录约定
 
