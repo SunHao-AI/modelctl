@@ -75,6 +75,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '设置' },
       },
       {
+        path: 'cluster/goals',
+        name: 'cluster-goals',
+        component: () => import('@/views/ClusterGoalsView.vue'),
+        meta: { title: '集群目标' },
+      },
+      {
         path: 'cluster/nodes',
         name: 'cluster-nodes',
         component: () => import('@/views/ClusterNodesView.vue'),

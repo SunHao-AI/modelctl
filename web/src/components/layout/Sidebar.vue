@@ -17,6 +17,7 @@ const menus: MenuItem[] = [
   { to: '/envs', label: '环境', icon: 'envs' },
   { to: '/probe', label: '体检', icon: 'probe' },
   { to: '/audit', label: '审计', icon: 'audit' },
+  { to: '/cluster/goals', label: '集群目标', icon: 'goals' },
   { to: '/cluster/nodes', label: '集群', icon: 'cluster' },
   { to: '/config', label: '配置', icon: 'config' },
   { to: '/settings', label: '设置', icon: 'settings' },
@@ -71,6 +72,8 @@ function isActive(item: MenuItem) {
           <template v-else-if="m.icon === 'settings'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20v-6" /><path d="M5 4h14l-2 4H7l-2-4z" /><path d="M19 8v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V8" /></svg></template>
           <!-- cluster -->
           <template v-else-if="m.icon === 'cluster'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="8.5" y="14" width="7" height="7" rx="1" /><path d="M6.5 10v1.5h11V10M12 11.5V14" /></svg></template>
+          <!-- goals -->
+          <template v-else-if="m.icon === 'goals'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6h11M9 12h11M9 18h11" /><circle cx="4.5" cy="6" r="1.5" /><circle cx="4.5" cy="12" r="1.5" /><circle cx="4.5" cy="18" r="1.5" /></svg></template>
           <!-- fallback -->
           <svg v-else class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9" /></svg>
         </span>
