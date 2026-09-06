@@ -69,7 +69,7 @@ def create_backup(dest: Path, *, force: bool = False) -> dict[str, Any]:
         data = tmp.read_bytes()
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp.replace(dest)
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, OSError) as exc:   # read_bytes/replace 在 Windows dest 被占用时抛 PermissionError
         tmp.unlink(missing_ok=True)
         raise BackupError(f"备份失败: {exc}") from exc
     return {"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
@@ -115,11 +115,32 @@ def restore_backup(src: Path, *, assume_stopped: bool = False) -> Path:
     ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     bak = db.with_name(db.name + f".pre-restore.{ts}.bak")
     if db.is_file():
-        shutil.copyfile(db, bak)
+        # 台账是 WAL 模式（store.py 强制 journal_mode=WAL）：中心崩溃/PID 残留被误判
+        # "未运行"时，-wal 里可能压着已提交未 checkpoint 的事务，裸 copyfile 出来的安全网
+        # 会静默缺最近数据。走 backup API 才能取到含 WAL 的一致性快照。
+        try:
+            with contextlib.closing(sqlite3.connect(str(db))) as src_conn:
+                with contextlib.closing(sqlite3.connect(str(bak))) as dst_conn:
+                    src_conn.backup(dst_conn)
+                    dst_conn.commit()
+        except (sqlite3.Error, OSError) as exc:
+            bak.unlink(missing_ok=True)
+            raise BackupError(f"恢复前安全网备份失败，现库未做任何改动: {exc}") from exc
+    # 覆写活库必须原子：copyfile 直写 db 中途失败 = 半截库。先写同目录临时文件再改名。
+    tmp = db.with_name(db.name + ".restore-tmp")
+    try:
+        shutil.copyfile(src, tmp)
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        raise BackupError(f"恢复失败（现库未做任何改动）: {exc}") from exc
     for suffix in ("-wal", "-shm"):           # 陈旧 WAL/SHM 配新主文件 = 日志回放进错库
         side = db.with_name(db.name + suffix)
         side.unlink(missing_ok=True)
-    shutil.copyfile(src, db)
+    try:
+        tmp.replace(db)
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        raise BackupError(f"恢复失败（现库未做任何改动）: {exc}") from exc
     from modelctl.core.cluster.store import ClusterStore
 
     store = ClusterStore(db)

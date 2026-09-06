@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -137,3 +140,56 @@ def test_restore_refuses_corrupt_source(live, tmp_path, monkeypatch):
     with pytest.raises(BackupError):
         restore_backup(bad)
     assert ClusterStore(db).get_node("w-1") is not None   # 现库未被碰
+
+
+# ---- fix round 1：Important 1 / Important 2 的聚焦回归 ----
+
+@pytest.mark.parametrize("broken", ["read_bytes", "replace"])
+def test_create_backup_oserror_becomes_backup_error(live, tmp_path, monkeypatch, broken):
+    """Windows dest 被占用是现实场景：PermissionError 必须转 BackupError 且不留 tmp。"""
+    _, db = live
+    dest = tmp_path / "occ" / "m.db"
+    dest.parent.mkdir()
+
+    def boom(*_a, **_kw):
+        raise PermissionError(13, "The process cannot access the file because it is being used")
+
+    monkeypatch.setattr(Path, broken, boom)
+    with pytest.raises(BackupError):
+        create_backup(dest)
+    assert not dest.exists()                              # dest 未被污染
+    assert not dest.with_name(dest.name + ".tmp").exists()  # tmp 未残留
+
+
+def test_restore_bak_snapshot_covers_uncheckpointed_wal(live, tmp_path, monkeypatch):
+    """安全网 .bak 必须走 backup API：台账 -wal 里已提交未 checkpoint 的数据也要在内。"""
+    s, db = live
+    dest = tmp_path / "m.db"
+    create_backup(dest)
+    if s._conn is not None:                               # 释放句柄，让子进程独占 WAL 写入
+        s._conn.close()
+    # 子进程提交后 os._exit：进程死亡不留句柄，-wal 里留下未 checkpoint 的已提交事务
+    child = (
+        "import os, sqlite3; "
+        f"c = sqlite3.connect(r'{db}'); "
+        "c.execute('PRAGMA journal_mode=WAL'); "
+        "c.execute(\"INSERT INTO meta(key,value) VALUES('pre-crash','yes')\"); "
+        "c.commit(); os._exit(0)"
+    )
+    subprocess.run([sys.executable, "-c", child], check=True)
+    wal = db.with_name(db.name + "-wal")
+    assert wal.is_file() and wal.stat().st_size > 0       # 场景成立：确有未回放日志
+    monkeypatch.setattr("modelctl.core.cluster.backup._center_running", lambda: False)
+    bak = restore_backup(dest)
+
+    assert bak.exists() and ".pre-restore." in bak.name
+    conn = sqlite3.connect(f"file:{bak}?mode=ro", uri=True)
+    try:
+        assert str(conn.execute("PRAGMA integrity_check").fetchone()[0]).lower() == "ok"
+        have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"nodes", "goals", "model_states", "events", "meta"} <= have
+        row = conn.execute("SELECT value FROM meta WHERE key='pre-crash'").fetchone()
+        assert row is not None and row[0] == "yes"        # 裸 copyfile 会静默丢掉这行
+        assert conn.execute("SELECT 1 FROM nodes WHERE node_id='w-1'").fetchone() is not None
+    finally:
+        conn.close()
