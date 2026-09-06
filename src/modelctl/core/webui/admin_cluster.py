@@ -34,7 +34,7 @@ from modelctl.core.cluster import backup, config, conns, tokens, wsproto
 from modelctl.core.cluster import events as events_mod
 from modelctl.core.cluster.goals import GoalService, goal_id_of
 from modelctl.core.cluster.nodes import AuthError, NodeRegistry
-from modelctl.core.cluster.store import ClusterStore
+from modelctl.core.cluster.store import ClusterStore, mask_tail
 from modelctl.core.gpu_utils import GPUValidationError, parse_gpu_list
 from modelctl.core.webui.admin_auth import require_auth
 
@@ -446,6 +446,31 @@ async def model_verb(node_id: str, profile: str, verb: str,
                            payload={"verb": verb, "queued": queued, "operator": "api"},
                            now=time.time())
     return {"queued": queued}
+
+
+# ================================ 只读目录/设置（M2，spec §2.3/§4.3）================================
+@router.get("/cluster/profiles")
+async def cluster_profiles(_base: None = Depends(require_auth)):
+    """profile 目录（goal 弹窗数据源）：只呈现不裁决，选边留在 POST gate。"""
+    if (off := _disabled()) is not None:
+        return off
+    from modelctl.core.cluster import goals as goals_module
+    from modelctl.core.cluster import profiles
+
+    return {"profiles": profiles.list_profile_catalog(goals_module.MODELS_DIR)}
+
+
+@router.get("/cluster/settings")
+async def cluster_settings(_base: None = Depends(require_auth)):
+    """集群配置只读展示（spec §4.3 定版新端点）：零写端点；join token 仅脱敏出参。"""
+    if (off := _disabled()) is not None:
+        return off
+    join = get_registry().store.get_meta("join_token")
+    return {"role": config.cluster_role(), "center_url": config.center_url(),
+            "heartbeat_interval_s": config.heartbeat_interval_s(), "lease_s": config.lease_s(),
+            "reconcile_interval_s": config.reconcile_interval_s(),
+            "max_snapshot_bytes": config.max_snapshot_bytes(),
+            "join_token_mask": mask_tail(join)}
 
 
 @router.get("/cluster/export")

@@ -138,3 +138,54 @@ def test_backup_download_streams_and_records_event(center):
 
 def test_backup_download_requires_auth(center):
     assert center.get("/admin/api/cluster/backup").status_code == 401
+
+
+# ---------------- GET /cluster/profiles（Task 7）----------------
+def _models_with_dup_engine(tmp_path):
+    """vllm/sglang 同名 qwen.yaml（逐条列出的判据）+ 一份坏文件（跳过判据）。"""
+    root = tmp_path / "models"
+    (root / "vllm").mkdir(parents=True, exist_ok=True)
+    (root / "sglang").mkdir(parents=True, exist_ok=True)
+    (root / "vllm" / "qwen.yaml").write_text("port: 8001\n", encoding="utf-8")
+    (root / "sglang" / "qwen.yaml").write_text("port: 8002\n", encoding="utf-8")
+    (root / "vllm" / "broken.yaml").write_text("port: not-a-port\n", encoding="utf-8")
+    return root
+
+
+def test_profiles_catalog_lists_same_name_per_engine(center, monkeypatch, tmp_path):
+    import modelctl.core.cluster.goals as goals_mod
+
+    monkeypatch.setattr(goals_mod, "MODELS_DIR", _models_with_dup_engine(tmp_path))
+    r = center.get("/admin/api/cluster/profiles", headers=_h())
+    assert r.status_code == 200
+    rows = r.json()["profiles"]
+    assert ("qwen", "vllm") in [(p["name"], p["engine"]) for p in rows]
+    assert ("qwen", "sglang") in [(p["name"], p["engine"]) for p in rows]
+    assert all(p["name"] != "broken" for p in rows)      # 坏文件静默跳过，绝不 500
+    for p in rows:
+        assert p["display_name"] and p["version"][:10].count("-") == 2   # 版本号=日期前缀
+
+
+def test_profiles_requires_auth(center):
+    assert center.get("/admin/api/cluster/profiles").status_code == 401
+
+
+# ---------------- GET /cluster/settings（Task 7）----------------
+def test_settings_readonly_shape(center, monkeypatch):
+    import modelctl.core.webui.admin_cluster as ac
+    from modelctl.core.cluster import config
+
+    monkeypatch.setenv("CLUSTER_CENTER_URL", "http://10.0.0.9:4173")
+    ac.get_registry().ensure_join_token()
+    body = center.get("/admin/api/cluster/settings", headers=_h()).json()
+    assert body["role"] == "both"
+    assert body["center_url"] == "http://10.0.0.9:4173"
+    # 数值键与 config 现值逐一相等（同一 env 源；不锁死默认值，避免 env 残留假红）
+    assert body["heartbeat_interval_s"] == config.heartbeat_interval_s()
+    assert body["lease_s"] == config.lease_s()
+    assert body["max_snapshot_bytes"] == config.max_snapshot_bytes()
+    assert body["join_token_mask"].startswith("***")      # 明文永不外泄
+
+
+def test_settings_requires_auth(center):
+    assert center.get("/admin/api/cluster/settings").status_code == 401

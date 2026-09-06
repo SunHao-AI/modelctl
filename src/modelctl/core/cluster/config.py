@@ -88,3 +88,11 @@ def reconcile_interval_s() -> int:
 def start_timeout_s() -> int:
     """单次启动等待引擎就绪的上限；与 all_service.start_all(timeout=300) 同默认。"""
     return _int_env("CLUSTER_START_TIMEOUT_S", _DEFAULT_START_TIMEOUT_S, floor=5)
+
+
+_DEFAULT_MAX_SNAPSHOT_B = 8 * 1024 * 1024
+
+
+def max_snapshot_bytes() -> int:
+    """单节点 goal 快照总量封顶（spec §2.4）；floor 64 KiB 防误配把 sync 整体禁掉。"""
+    return _int_env("CLUSTER_MAX_SNAPSHOT_BYTES", _DEFAULT_MAX_SNAPSHOT_B, floor=64 * 1024)

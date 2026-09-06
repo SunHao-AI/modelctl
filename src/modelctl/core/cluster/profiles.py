@@ -277,3 +277,26 @@ def read_profile_source(name: str, models_dir: Path | None = None,
     if display != stem:  # 与文件名相同时省略，避免下游回显出现 "qwen (qwen)"
         result["display_name"] = display
     return result
+
+
+def list_profile_catalog(models_dir: Path | None = None) -> list[dict[str, Any]]:
+    """goal 新建弹窗的 profile 目录：同名多引擎**逐条列出**（选边是 POST gate 的事）。
+
+    纯展示面：校验失败的文件**静默跳过**（与 `_resolve` 展示名回退同口径）——目录里
+    一份坏 YAML 不该让 GET 500；"能不能下发"由 POST /goals 的 gate 逐项裁决，
+    本函数绝不重复实现选边/歧义逻辑（单一裁决点）。
+    """
+    root = models_dir or PROJECT_ROOT / "models"
+    if not root.is_dir():
+        return []
+    out: list[dict[str, Any]] = []
+    for path in _root_first(_scan(root)[0], root):
+        got = _load_candidate(path)
+        if isinstance(got, str):
+            continue
+        engine, raw, text = got
+        sha = profile_sha(text)
+        out.append({"name": path.stem, "engine": engine,
+                    "display_name": display_name_of(raw, path, engine),
+                    "version": default_profile_version(sha)})
+    return out

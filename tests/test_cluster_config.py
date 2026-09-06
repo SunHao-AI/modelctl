@@ -18,7 +18,7 @@ from modelctl.core.cluster import config
 CLUSTER_KEYS = [
     "CLUSTER_ROLE", "CLUSTER_CENTER_URL", "CLUSTER_NODE_ID", "CLUSTER_LAN",
     "CLUSTER_JOIN_TOKEN", "CLUSTER_NODE_TOKEN", "CLUSTER_HEARTBEAT_INTERVAL_S",
-    "CLUSTER_LEASE_S", "CLUSTER_WS_INSECURE",
+    "CLUSTER_LEASE_S", "CLUSTER_WS_INSECURE", "CLUSTER_MAX_SNAPSHOT_BYTES",
 ]
 
 
@@ -61,3 +61,11 @@ def test_ws_insecure_flag(monkeypatch) -> None:
     assert not config.ws_insecure()
     monkeypatch.setenv("CLUSTER_WS_INSECURE", "1")
     assert config.ws_insecure()
+
+
+def test_max_snapshot_bytes_default_override_floor(monkeypatch) -> None:
+    assert config.max_snapshot_bytes() == 8 * 1024 * 1024          # 默认 8 MiB
+    monkeypatch.setenv("CLUSTER_MAX_SNAPSHOT_BYTES", "1048576")
+    assert config.max_snapshot_bytes() == 1048576
+    monkeypatch.setenv("CLUSTER_MAX_SNAPSHOT_BYTES", "1024")       # < floor 64 KiB → 回默认
+    assert config.max_snapshot_bytes() == 8 * 1024 * 1024
