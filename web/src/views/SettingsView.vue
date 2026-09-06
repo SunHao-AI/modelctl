@@ -78,6 +78,7 @@ async function onRotateJoin() {
   clusterError.value = '';
   try {
     joinTokenOnce.value = (await rotateJoinToken()).join_token;
+    try { settings.value = await getClusterSettings(); } catch { /* 掩码刷新失败不影响一次性令牌展示 */ }
   } catch (e) {
     clusterError.value = (e as AxiosError<{ detail?: string }>).response?.data?.detail || (e as Error).message;
   } finally {
