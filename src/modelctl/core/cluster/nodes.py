@@ -19,6 +19,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from loguru import logger
+
 from modelctl.core.cluster import config, tokens, wsproto
 from modelctl.core.cluster.goals import GoalService
 from modelctl.core.cluster.store import ClusterStore, mask_tail
@@ -138,7 +140,12 @@ class NodeRegistry:
             # 也必须带快照——这正是"强制"的全部含义：worker 本地文件被改坏而 revision
             # 未变，短路会让漂移永不自愈。标记一次性（消费即清），不会每拍白传全量。
             forced = self._consume_force_sync(node_id)
-            if snapshot["revision"] != reported or forced:
+            # overflow 闸门（M2 Task 8，spec §2.4）：中心自己算出的快照超限就不下发，
+            # worker 保持上一份**完整**快照继续收敛；不写水位，下拍继续尝试（运维
+            # 撤掉毒 goal 后立即恢复）。acked 条件在既有 revision 判断上叠加。
+            if snapshot.get("sync_overflow"):
+                logger.warning(f"节点 {node_id} 快照超限，本轮 ack 不带 sync 段")
+            elif snapshot["revision"] != reported or forced:
                 ack["sync"] = dict(snapshot, force=True) if forced else snapshot
                 self.store.set_node_last_goal_sync_sha(node_id, snapshot["revision"])
         self._record_drift(node_id, hb.get("drift"), now=now)

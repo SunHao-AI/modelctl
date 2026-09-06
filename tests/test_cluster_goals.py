@@ -576,3 +576,37 @@ def test_service_updatable_subset_of_store_mutable():
     assert set(GoalService._UPDATABLE) <= set(ClusterStore._GOAL_MUTABLE), (
         f"PUT 可改但落不了库的字段："
         f"{sorted(set(GoalService._UPDATABLE) - set(ClusterStore._GOAL_MUTABLE))}")
+
+
+# ---------------- snapshot 尺寸封顶（M2 Task 8，spec §2.4）----------------
+def test_snapshot_overflow_refuses_delivery_and_events(store, svc, monkeypatch):
+    """超限判据基于 canonical JSON 字节数：夹具 YAML 只有几十字节，必须人为灌大
+    profile_yaml 才能越限（update_goal 允许改 profile_yaml，_GOAL_MUTABLE 在列）。"""
+    monkeypatch.setenv("CLUSTER_MAX_SNAPSHOT_BYTES", "65536")   # floor 64 KiB
+    _online(store, "w-1")
+    svc.set_goals(profile="qwen", node_ids=["w-1"], create=True)
+    store.update_goal("qwen@@w-1", now=2.0, profile_yaml="x" * 70000)
+    kinds_before = [e["kind"] for e in store.recent_events(node_id="w-1")]
+    snap = svc.snapshot_for("w-1")
+    assert snap["sync_overflow"] is True
+    assert snap["revision"]                                      # 诊断面保留（观测不丢）
+    # recent_events 是 ts DESC（新→旧），brief 原式 `[len(before):]` 会切到旧端；
+    # 先转成时间升序再按既有长度取"新增段"，断言逐字不动。
+    new_kinds = list(reversed([e["kind"] for e in store.recent_events(node_id="w-1")]))[len(kinds_before):]
+    assert new_kinds == ["goal.sync_overflow"]                   # 恰好补记一条
+
+
+def test_snapshot_within_limit_no_overflow_flag(store, svc):
+    _online(store, "w-1")
+    svc.set_goals(profile="qwen", node_ids=["w-1"], create=True)
+    snap = svc.snapshot_for("w-1")
+    assert snap.get("sync_overflow") is False                     # 常态形状仅多一个 False 键
+    assert "goal.sync_overflow" not in [e["kind"] for e in store.recent_events()]
+
+
+def test_snapshot_empty_node_shape_unchanged_under_tiny_cap(store, monkeypatch):
+    """空快照永不判超限：返回形状必须与 M1 逐字节一致（既有 == 断言是回归锚）。"""
+    from modelctl.core.cluster.goals import GoalService
+
+    monkeypatch.setenv("CLUSTER_MAX_SNAPSHOT_BYTES", "65536")
+    assert GoalService(store).snapshot_for("nobody") == {"revision": "", "goals": []}

@@ -112,11 +112,15 @@ def build_parser() -> argparse.ArgumentParser:
     for cmd in ("start", "stop", "restart", "status"):
         p = sub.add_parser(cmd)
         p.add_argument("name", nargs="?" if cmd == "status" else None)
+        if cmd == "status":
+            p.add_argument("--cluster", action="store_true",
+                           help="中心聚合视图：走中心 REST 按节点展示 goal 声明/实际（中心不可达退 2，不回退本机）")
         if cmd in ("start", "restart"):
             # 默认 600s：vLLM 首次冷启动（torch.compile + warmup + CUDA graph 捕获）实测约 6 分钟
             p.add_argument("--timeout", type=float, default=600, help="健康检查超时秒数（默认 600）")
             p.add_argument("--gpus", default=None, help="逗号分隔的 GPU 索引，如 0,1,2（覆盖环境变量 MODELCTL_GPUS）")
-    sub.add_parser("list", help="列出所有 profile")
+    sub.add_parser("list", help="列出所有 profile").add_argument(
+        "--cluster", action="store_true", help="中心聚合视图：按 profile 分组展示各节点托管状态")
     sub.add_parser("probe", help="探测硬件与引擎二进制")
     sp = sub.add_parser("stats", help="用量统计服务控制")
     sp.add_argument("action", choices=["start", "stop", "restart", "status"])
@@ -570,6 +574,64 @@ def _stats_token_rate(profile) -> tuple[float, float] | None:
     if isinstance(prompt_rate, (int, float)) and isinstance(predicted_rate, (int, float)):
         return float(prompt_rate), float(predicted_rate)
     return None
+
+
+def _cluster_aggregate() -> tuple[list[dict], list[dict], str]:
+    """--cluster 数据源：中心 nodes + goals。失败给错误文案（调用方退 2）。
+
+    不回退本机视图是定版裁决：数据源静默切换比报错恶劣——用户会拿本机数字
+    当集群全貌做运维决策。probe --cluster 不提供（中心无法反连 worker，spec §0.3）。
+    """
+    status_n, nodes = _cluster_request("GET", "/cluster/nodes")
+    if status_n != 200:
+        return [], [], f"中心聚合不可用: {_center_detail(status_n, nodes)}"
+    status_g, goals = _cluster_request("GET", "/cluster/goals")
+    if status_g != 200:
+        return [], [], f"中心 goal 台账不可用: {_center_detail(status_g, goals)}"
+    return nodes.get("nodes", []), goals.get("goals", []), ""
+
+
+def _cmd_status_cluster() -> int:
+    nodes, goals, err = _cluster_aggregate()
+    if err:
+        logger.error(err)
+        return 2
+    per: dict[str, dict[str, int]] = {}
+    for g in goals:
+        cell = per.setdefault(str(g.get("node_id", "")), {"start": 0, "stop": 0, "ready": 0})
+        intent = str(g.get("intent", "start"))
+        cell[intent] = cell.get(intent, 0) + 1
+        if g.get("stage") == "READY":
+            cell["ready"] += 1
+    rows = [[n.get("node_id", ""), n.get("status", ""), n.get("lan_id") or "-",
+             n.get("capacity_text") or "-",
+             f"{c['ready']}/{c['start']}" if c else "0/0",
+             str(c["stop"]) if c else "0"]
+            for n in nodes for c in [per.get(str(n.get("node_id", "")), {})]]
+    _print_table(["节点", "状态", "LAN", "容量", "goal(start 收敛/声明)", "goal(stop)"],
+                 rows, dim_indices=(2, 3, 5))
+    return 0
+
+
+def _cmd_list_cluster() -> int:
+    nodes, goals, err = _cluster_aggregate()
+    if err:
+        logger.error(err)
+        return 2
+    grouped: dict[str, list[dict]] = {}
+    for g in goals:
+        grouped.setdefault(str(g.get("profile", "")), []).append(g)
+    for idx, profile in enumerate(sorted(grouped)):
+        if idx > 0:
+            print()
+        rows = [[g.get("node_id", ""), g.get("intent", ""), g.get("stage", ""),
+                 g.get("state") or "-", "-" if g.get("port") is None else g["port"]]
+                for g in grouped[profile]]
+        print(_table_paint(f"{profile}（{len(rows)} 节点托管）", "SECTION"))
+        _print_table(["节点", "intent", "stage", "实际状态", "端口"], rows, dim_indices=(1, 3))
+    if not grouped:
+        print("集群暂无 goal（中心台账为空）")
+    return 0
 
 
 def _cmd_status(args, models_dir: Path | None, caps) -> int:
@@ -1840,6 +1902,13 @@ def main(argv: list[str] | None = None) -> int:
     models_dir = models_dir or args.models_dir
     if getattr(args, "gpus", None):
         os.environ["MODELCTL_GPUS"] = args.gpus
+    # --cluster 聚合走纯中心数据源，短路于 probe() 之前：纯中心机器可能没有本地
+    # 引擎环境（无 venv/无 GPU），聚合视图不该被硬件探测拦住或拖慢。
+    if getattr(args, "cluster", False):
+        if args.command == "status":
+            return _cmd_status_cluster()
+        if args.command == "list":
+            return _cmd_list_cluster()
     caps = probe()
     try:
         if args.command == "start":

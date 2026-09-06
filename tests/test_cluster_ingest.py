@@ -218,3 +218,14 @@ def test_push_action_rejects_when_queue_full(env):
         assert reg.push_action("w-1", "retry", goal_id=f"g{i}") is True
     assert reg.push_action("w-1", "retry", goal_id="overflow") is False
     assert len(reg.drain_actions("w-1")) == 16
+
+
+def test_ack_omits_sync_on_snapshot_overflow(env, monkeypatch):
+    """封顶的执行点在 ack：快照超限 → 不带 sync 段，worker 保持上一份完整快照。"""
+    store, goals, reg = env
+    monkeypatch.setenv("CLUSTER_MAX_SNAPSHOT_BYTES", "65536")
+    goals.set_goals(profile="qwen", node_ids=["w-1"], create=True)
+    store.update_goal("qwen@@w-1", now=2.0, profile_yaml="x" * 70000)   # 灌大越限
+    assert goals.snapshot_for("w-1")["sync_overflow"] is True
+    ack = reg.handle_heartbeat("w-1", _hb(goal_sync={"revision": ""}), now=100.0)
+    assert "sync" not in ack

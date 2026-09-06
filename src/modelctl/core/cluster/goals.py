@@ -34,7 +34,7 @@ from typing import Any
 import yaml
 from loguru import logger
 
-from modelctl.core.cluster import gate, profiles
+from modelctl.core.cluster import config, gate, profiles
 from modelctl.core.cluster.store import ClusterStore
 from modelctl.core.envfile import PROJECT_ROOT
 
@@ -320,6 +320,12 @@ class GoalService:
     def snapshot_for(self, node_id: str) -> dict[str, Any]:
         """该节点的全量期望状态。revision 是内容哈希：同一 goal 集在中心重启后同值，
         故 worker 端"要不要重写盘"的判据在两侧都稳定。空节点用空串（不是哈希）。
+
+        尺寸封顶（终审 A-4，spec §2.4）：总量超 `max_snapshot_bytes` → sync_overflow
+        置真，消费方（handle_heartbeat 的 ack 组装）**不下发**。刻意不静默截断——
+        半套声明会让 worker 剪掉仍服役的模型文件，比一份不发更危险；也不抛异常——
+        心跳 ack 组装路径"回流炸不掉"是铁律。revision 照算照回：观测面（列表/CLI
+        显示期望代际）不因此失明。
         """
         rows = self.store.list_goals(node_id=node_id)
         goals = [{"goal_id": g["goal_id"], "profile": g["profile"], "engine": g["engine"],
@@ -329,7 +335,16 @@ class GoalService:
         if not goals:
             return {"revision": "", "goals": []}
         canon = json.dumps(goals, sort_keys=True, ensure_ascii=False)
-        return {"revision": hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16], "goals": goals}
+        overflow = len(canon.encode("utf-8")) > config.max_snapshot_bytes()
+        if overflow:
+            logger.error(f"节点 {node_id} 的 goal 快照 {len(canon.encode('utf-8'))} B 超过上限 "
+                         f"{config.max_snapshot_bytes()} B：本轮不下发 sync（goal 数 {len(goals)}，"
+                         f"检查是否误下发超大 profile YAML）")
+            self.store.append_event("goal.sync_overflow", node_id=node_id,
+                                    payload={"bytes": len(canon.encode("utf-8")),
+                                             "goal_count": len(goals)})
+        return {"revision": hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16],
+                "goals": goals, "sync_overflow": overflow}
 
     # ---------------- worker 回流（Task 7 调用）----------------
     def mark_stage(self, goal_id: str, stage: str, *, reason: str = "",
