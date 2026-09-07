@@ -1,94 +1,114 @@
 /**
- * SSE 订阅工具：通用任务流（/admin/api/tasks/{id}/stream）。
+ * 任务 SSE 订阅与单条查询工具。
  *
- * 后端 admin_tasks.Task.event() 推送事件，典型形态：
- *   data: {"type": "status"|"log"|"error"|"done", "data": ...}
- * 本模块把 EventSource 包裹为带 close() 的句柄，调用方在 mount 钩子里
- * 创建，在 beforeUnmount 里 close 即可。
+ * 后端 _sse_task_stream 发送**命名事件**（EventSource 必须 addEventListener 按名接收）：
+ *   event: step      data: {"step":0,"label":"...","status":"running","task_id":"..."}
+ *   event: log       data: {"line":"..."}
+ *   event: done      data: {"status":"success|error","exit_code":0,"message"?:"...","task_id":"..."}
+ *   event: heartbeat data: {}
+ * 本模块按事件名拆分回调；调用方必须在 onBeforeUnmount 调 close()。
  */
 
-/** 任务 SSE 数据类型（覆盖后端 admin_tasks.Task 的广播事件） */
-export interface TaskSseEvent {
-  /** 事件类型 */
-  type: 'status' | 'log' | 'error' | 'done';
-  /** 携带数据（log 含 line / done 含 status + exit_code + message 等） */
-  data: unknown;
+import client, { dataOf } from './client';
+import { useAuthStore } from '@/stores/auth';
+import type { TaskInfo } from './types';
+
+/** SSE step 事件体 */
+export interface TaskStepEvent {
+  step: number;
+  label: string;
+  status: string;
+  task_id: string;
+}
+/** SSE log 事件体 */
+export interface TaskLogEvent {
+  line: string;
+}
+/** SSE done 事件体 */
+export interface TaskDoneEvent {
+  status: string;
+  exit_code: number;
+  message?: string;
+  task_id: string;
 }
 
 /** 单个任务订阅句柄 */
 export interface TaskStreamHandle {
-  /** 关闭 EventSource 并清理监听器 */
   close(): void;
 }
 
 /** 回调集合 */
 export interface TaskStreamHooks {
-  /** 收到任意 type / data */
-  onData?: (evt: TaskSseEvent) => void;
-  /** 解析失败 / 网络错误 */
+  onStep?: (evt: TaskStepEvent) => void;
+  onLog?: (evt: TaskLogEvent) => void;
+  onDone?: (evt: TaskDoneEvent) => void;
+  /** EventSource 底层 error（网络层；重连与降级决策交调用方） */
   onError?: (err: Event) => void;
-  /** 收到 type === "done" 时调用（一般在这时关流） */
-  onDone?: (evt: TaskSseEvent) => void;
 }
 
 /**
- * 打开任务 SSE 流。
+ * 打开任务 SSE 流（命名事件版）。
  *
  * @param taskId 后端返回的 task_id（task-xxxxxxxx）
  * @param hooks  回调集合
  * @returns 句柄（{ close() }），必须在 onBeforeUnmount 调用 close()。
  */
-export function openTaskStream(
-  taskId: string,
-  hooks: TaskStreamHooks = {},
-): TaskStreamHandle {
-  // 注意：EventSource 不带 Authorization header；
-  // 若后端依赖 401 拦截，前端应保留 token query 或本地代理。这里按
-  // admin_tasks.py 的约定不强制鉴权（任务流是「内部通道」，同一线程
-  // 已有 require_auth 门槛）。
-  const url = `/admin/api/tasks/${encodeURIComponent(taskId)}/stream`;
+export function openTaskStream(taskId: string, hooks: TaskStreamHooks = {}): TaskStreamHandle {
+  // EventSource 不能带 Authorization 头；后端 SSE 端点用 require_auth_or_query，
+  // 必须经 ?key= query 携带 token，否则 401（旧实现漏带 key，流从未连通）。
+  const token = useAuthStore().token;
+  const url = `/admin/api/tasks/${encodeURIComponent(taskId)}/stream?key=${encodeURIComponent(token)}`;
   const es = new EventSource(url);
 
-  /** 解析 SSE 行（data: {...} 一行 JSON） */
-  function dispatch(raw: string): void {
-    // 仅处理 data 行；其余行忽略
-    if (!raw.startsWith('data:')) return;
-    const body = raw.slice(5).trim();
-    if (!body) return;
-    let evt: TaskSseEvent;
+  /** 命名事件的 data 已是纯 JSON 字符串，直接解析；解析异常走 onError */
+  function dispatch<T>(raw: string | undefined, cb?: (evt: T) => void) {
+    if (typeof raw !== 'string' || !raw) return;
     try {
-      evt = JSON.parse(body) as TaskSseEvent;
+      cb?.(JSON.parse(raw) as T);
     } catch {
-      hooks.onError?.(new Event(`Malformed SSE data: ${body}`));
-      return;
-    }
-    if (!evt || typeof evt !== 'object') {
-      hooks.onError?.(new Event('Empty SSE payload'));
-      return;
-    }
-    if (evt.type === 'done') {
-      hooks.onDone?.(evt);
-    } else {
-      hooks.onData?.(evt);
+      hooks.onError?.(new Error(`Malformed SSE data: ${raw}`) as unknown as Event);
     }
   }
 
-  // 后端 task stream 不发 `event:` 标签（全部走默认 message），消息首为 data 行。
-  // 用单一 message 监听兜底；如果未来后端加上 event: 标签，再按名字拆分。
-  const onMsg = (e: MessageEvent) => dispatch(String(e.data));
-  const onErr = (e: Event) => hooks.onError?.(e);
-  es.addEventListener('message', onMsg);
+  const listeners: Array<[string, EventListener]> = [
+    ['step', ((e: MessageEvent) => dispatch<TaskStepEvent>(e.data, hooks.onStep)) as EventListener],
+    ['log', ((e: MessageEvent) => dispatch<TaskLogEvent>(e.data, hooks.onLog)) as EventListener],
+    ['done', ((e: MessageEvent) => dispatch<TaskDoneEvent>(e.data, hooks.onDone)) as EventListener],
+    ['heartbeat', (() => { /* 保活帧，忽略 */ }) as EventListener],
+  ];
+  for (const [name, fn] of listeners) es.addEventListener(name, fn);
+  const onErr: EventListener = (e) => hooks.onError?.(e);
   es.addEventListener('error', onErr);
 
   return {
     close() {
       try {
-        es.removeEventListener('message', onMsg);
+        for (const [name, fn] of listeners) es.removeEventListener(name, fn);
         es.removeEventListener('error', onErr);
         es.close();
       } catch {
-        // 已 close，忽略
+        /* 已 close，忽略 */
       }
     },
   };
+}
+
+/**
+ * GET /admin/api/tasks/{taskId} — 单条任务详情。
+ *
+ * 404（webui 重启导致任务丢失）时抛 Error 且 err.code === 'not_found'，
+ * 调用方据此判定"服务已重启，任务状态丢失"。
+ */
+export async function getTask(taskId: string): Promise<TaskInfo> {
+  try {
+    return await dataOf(client.get<TaskInfo>(`/tasks/${encodeURIComponent(taskId)}`));
+  } catch (err) {
+    const status = (err as { response?: { status?: number } }).response?.status;
+    if (status === 404) {
+      const e = new Error('任务不存在或已过期') as Error & { code: string };
+      e.code = 'not_found';
+      throw e;
+    }
+    throw err;
+  }
 }

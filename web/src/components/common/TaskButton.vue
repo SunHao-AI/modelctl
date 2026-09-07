@@ -157,11 +157,12 @@ async function onClick() {
 
   try {
     streamHandle = openTaskStream(taskRef.task_id, {
-      onData: handleSseDone,
-      onDone: handleSseDone,
+      onStep: (evt) => handleSseDone({ type: 'status', data: evt }),
+      onLog: (evt) => handleSseDone({ type: 'log', data: evt }),
+      onDone: (evt) => handleSseDone({ type: 'done', data: evt }),
       onError: (err) => {
         console.warn('SSE 错误:', err?.type, err);
-        // 不立即 fail：浏览器自动会重试；靠 5 分钟超时兜底
+        // 不立即 fail：浏览器自动重连；靠 5 分钟超时兜底（Task 4 会整体重写本组件）
       },
     });
   } catch (err) {

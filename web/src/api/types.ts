@@ -369,3 +369,28 @@ export interface StaticConfigResponse {
   /** 关键路径 */
   paths: Record<string, string>;
 }
+
+/** 任务状态（后端 TaskStatus） */
+export type TaskStatus = 'queued' | 'running' | 'success' | 'skipped' | 'error';
+
+/** 单条任务详情（GET /tasks/{id} 与 GET /tasks 列表项同构） */
+export interface TaskInfo {
+  /** 任务 id（task-xxxxxxxx） */
+  id: string;
+  /** 任务种类：model_start|service_start|env_setup|trtllm_build|all_start|... */
+  kind: string;
+  /** 动作：start|stop|restart|setup|remove|build|... */
+  action: string;
+  /** 目标（profile / service / env 名） */
+  target: string;
+  status: TaskStatus;
+  /** 退出码；0=成功 */
+  exit_code: number;
+  /** ISO 时间戳；未开始为空串 */
+  started_at: string;
+  finished_at: string | null;
+  /** 详情（进度描述 / 错误信息） */
+  detail: string | null;
+  /** 内存环形日志（后端最多 500 行） */
+  logs: string[];
+}
