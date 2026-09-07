@@ -259,7 +259,10 @@ export const useTasksStore = defineStore('tasks', () => {
       });
     tasks.value.unshift(rec);
     trim();
-    attachStream(rec);
+    // 必须把数组里的响应式代理交给 attachStream：ref<TaskRecord[]> 是深代理，
+    // 组件读到的是 reactive(rec)，若闭包捕获 raw rec 则写入不触发依赖更新
+    const proxy = tasks.value[idx(rec.id)];
+    if (proxy) attachStream(proxy);
   }
 
   /** 页面重载后：拉历史 + 对活动任务重挂 SSE */
