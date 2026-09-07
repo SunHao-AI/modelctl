@@ -256,7 +256,31 @@ class NodeRegistry:
         return {"kicked": kicked}
 
     def enable_node(self, node_id: str) -> dict | None:
-        if not self.store.set_node_disabled(node_id, False):
+        """启用：清 disabled 并**当场**按 lease 实态重算 status。
+
+        禁用把 status 写成 disabled，而 sweep_expired 刻意跳过 disabled 行——启用若不
+        重算，台账就永远停在 disabled：gate 拒下发、dashboard 显示已停用，只能等 worker
+        下次心跳才自愈（节点一直没回来则永久卡住）。判定阈值逐条镜像 sweep_expired，
+        避免两处各写一套 lease 语义。
+        """
+        node = self.store.get_node(node_id)
+        if node is None:
+            return None
+        now = time.time()
+        lease = config.lease_s()
+        last_seen = node.get("last_seen")
+        lease_expiry = node.get("lease_expiry")
+        if lease_expiry is None:
+            # join-check 预注册后从未连上的节点没有 lease：真实 online 只属于 WS hello，
+            # 落到下面的 else 会被谎报在线，让 --node 指名把模型下发到从没见过的机器。
+            status = "offline"
+        elif last_seen is not None and last_seen + 3 * lease < now:
+            status = "offline"
+        elif lease_expiry < now:
+            status = "stale"
+        else:
+            status = "online"
+        if not self.store.set_node_disabled(node_id, False, status=status):
             return None
         self.store.append_event("node.enable", node_id=node_id, payload={"operator": "api"})
         return {"ok": True}

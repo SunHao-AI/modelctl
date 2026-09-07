@@ -16,6 +16,15 @@
 - **解决方案**：守卫降级为 `logger.warning`（kind 经 `[:64]` 消毒）后照常入库；fail-fast 断言只用于导入期自检（中心自有埋点必须全在 `EVENT_KINDS` 内）与测试钉。`event_text` 兜底分支保证词表外 kind 也有合法展示、永不抛。
 - **同族裁决**：`status/list --cluster` 中心不可达时报错退 2，**绝不静默回退本机视图**——数据源静默切换会让用户拿本机数字当集群全貌做运维决策。`--cluster` 分发短路于 `caps = probe()` 之前（纯中心机可能无本地引擎环境）。
 
+## 启用节点只清 disabled 位不回写 status：台账永久卡在 disabled
+
+- **日期**：2026-09-06　**分类**：后端 / 集群治理
+- **根因**：`disable_node` 用 `set_node_disabled(id, True, status="disabled")` 一次写两列，而 `enable_node` 只调 `set_node_disabled(id, False)` 不清 status；`sweep_expired` 又显式 `continue` 跳过 `disabled`/`offline` 行，不会把它迁移回来。于是启用后 `disabled=0` 但 `status='disabled'`：`_verdict_one` 的 status 白名单（online/stale）拒下发，dashboard 与节点列表继续显示"已停用"，只有 worker 下次心跳的 `touch_heartbeat`（硬写 `status='online'`）才自愈——节点若在禁用期间一直没回来，就永久卡住。
+- **解决方案**：`enable_node` 先 `get_node` 拿 lease 实态，**逐条镜像 `sweep_expired` 的阈值**当场算出 online/stale/offline，再 `set_node_disabled(id, False, status=...)` 同语句双写。判据顺序须与 sweep 一致（先 3×lease 判 offline，再 lease_expiry 判 stale，否则 online），别自创第二套 lease 语义。
+- **额外判据（不能漏）**：`lease_expiry IS NULL` 的行——join-check 预注册后从未连上的节点——必须直接判 offline。`sweep_expired` 靠 `lease_expiry is not None` 守卫天然跳过这类行，直接照搬阈值会让它落到 online 分支，等于谎报在线，`--node` 指名能把模型下发到从没见过的机器。
+- **通用教训**：一对反操作上"写两列 / 清一列"的不对称是状态机漏边的典型形态；凡 `X=1` 时连带改写的派生列，`X=0` 时必须显式恢复，且不能依赖后台 sweep 兜底（sweep 常把该状态当终态跳过）。照搬 sweep 阈值前先确认它的 None 守卫是不是隐性判据。
+- **测试钉**：`tests/test_cluster_governance.py::test_enable_restores_online_while_lease_valid` / `::test_enable_falls_back_offline_when_lease_expired` / `::test_enable_never_claims_online_for_never_connected_node`（启用既不能残留 disabled、不能谎报 online；无 lease 用例须把 `last_seen` 设为当下，否则超期分支也返回 offline 而使判据失去判别力）。
+
 ## 在线替换自身运行库：restore 若走 REST 等于让进程抽掉自己的地基
 
 - **日期**：2026-09-06　**分类**：后端 / 集群备份

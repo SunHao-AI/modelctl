@@ -68,6 +68,7 @@
 | 2026-09-06 | 后端 / 集群下发 | goal 快照超尺寸时"截断下发"会让 worker 剪掉服役文件 | 半套快照比不下发更危险（prune 语义会把缺失当撤销）；定版：超限整段不下发 + `goal.sync_overflow` 事件 + logger.error，worker 保持旧快照继续服役。 | [backend/cluster-governance-backup.md](backend/cluster-governance-backup.md) |
 | 2026-09-06 | 后端 / 集群治理 | 事件 kind 词表守卫若 fail-fast，worker 一条未知 kind 就把 WS 循环打成 500 | 对端可控输入只能告警入库，fail-fast 只用于导入期自检与测试钉；`--cluster` 聚合中心不可达时报错退 2 而非静默回退本机视图（假报数据源比报错恶劣）。 | [backend/cluster-governance-backup.md](backend/cluster-governance-backup.md) |
 | 2026-09-06 | 后端 / 集群备份 | 在线替换自身运行库：restore 若走 REST 等于让进程抽掉自己的地基 | restore 只留 CLI 且前置 `is_running(WEBUI_INSTANCE)` 判停；备份用 sqlite3 backup API 热备不阻写，落盘后必须 sha256 对账（传输损坏在恢复时才炸就晚了）。 | [backend/cluster-governance-backup.md](backend/cluster-governance-backup.md) |
+| 2026-09-06 | 后端 / 集群治理 | enable 只清 disabled 位不回写 status，台账永久卡 disabled（gate 拒下发、UI 显示已停用） | 反操作必须对称：disable 连带改写的派生列，enable 要显式恢复且不能指望后台 sweep（它把 disabled 当终态跳过）；重算阈值逐条镜像 `sweep_expired`。 | [backend/cluster-governance-backup.md](backend/cluster-governance-backup.md) |
 
 ## 目录约定
 

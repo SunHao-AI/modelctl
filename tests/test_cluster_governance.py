@@ -11,6 +11,8 @@
 """治理动作的正确性只盯台账与世表实态，不信任方法返回值自述。"""
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from modelctl.core.cluster import conns as conns_mod
@@ -140,6 +142,40 @@ def test_enable_clears_disabled_flag(store, reg):
     reg.disable_node("w-1")
     assert reg.enable_node("w-1") is not None
     assert store.get_node("w-1")["disabled"] == 0
+
+
+def test_enable_restores_online_while_lease_valid(store, reg):
+    """禁用把 status 写成 disabled 且 sweep 跳过该值：启用必须自己按 lease 实态重算，
+    否则 gate 继续拒下发、dashboard 继续显示已停用。"""
+    _node(store)
+    now = time.time()
+    store.touch_heartbeat("w-1", now=now, lease_s=3600)
+    reg.disable_node("w-1")
+    assert reg.enable_node("w-1") is not None
+    assert store.get_node("w-1")["status"] == "online"
+
+
+def test_enable_falls_back_offline_when_lease_expired(store, reg):
+    """节点禁用期间一直没回来：启用不能谎报 online，否则 --node 指名会下发到死机。"""
+    _node(store)
+    store.touch_heartbeat("w-1", now=time.time() - 7200, lease_s=3600)
+    reg.disable_node("w-1")
+    assert reg.enable_node("w-1") is not None
+    assert store.get_node("w-1")["status"] == "offline"
+
+
+def test_enable_never_claims_online_for_never_connected_node(store, reg):
+    """join-check 预注册行 lease_expiry 恒 NULL：无 lease 即无从推断在线，只能 offline。
+
+    last_seen 刻意设为"刚刚"：否则 3×lease 超期分支也会给 offline，用例就证明不了
+    lease_expiry 为 NULL 这条独立判据。
+    """
+    _node(store, now=time.time())
+    store.set_node_status("w-1", "offline")  # 镜像 join-check 预注册后的回落
+    reg.disable_node("w-1")
+    assert reg.enable_node("w-1") is not None
+    row = store.get_node("w-1")
+    assert row["lease_expiry"] is None and row["status"] == "offline"
 
 
 def test_kick_records_event_and_revokes(store, reg):
