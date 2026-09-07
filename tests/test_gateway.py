@@ -1059,6 +1059,16 @@ def test_v1_messages_accepts_x_api_key(monkeypatch):
     assert captured["headers"].get("x-api-key") == "profile-key-1"
 
 
+def test_v1_messages_requires_key():
+    """/v1/messages 匿名请求 401（Anthropic 信封同 OpenAI 格式），钉住 anthropic_proxy 首行校验。"""
+    reg = {"qwen3.8": GatewayModel("qwen3.8", "vllm", "http://upstream", "qwen3.8", None, "http://upstream/")}
+    app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    resp = _run(_post_headers(app, "/v1/messages",
+                              json={"model": "qwen3.8", "messages": [], "max_tokens": 8}, headers={}))
+    assert resp.status_code == 401
+    assert resp.json()["error"]["type"] == "authentication_error"
+
+
 def test_v1_all_endpoints_fail_closed_when_unconfigured(monkeypatch):
     """服务端未配 key：即使带管理面 API_KEY 也全部 401，message 指向网关未配置。"""
     monkeypatch.setenv("GATEWAY_CLIENT_API_KEY", "")  # 非 delenv，理由见 Task 1 同名说明
