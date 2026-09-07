@@ -124,6 +124,7 @@ export const useTasksStore = defineStore('tasks', () => {
 
   /** 推进到终态：清资源、裁剪、toast 通知、触发回调 */
   function finalize(t: TaskRecord, status: TaskStatus, detail: string, exitCode: number) {
+    if (!isActive(t)) return; // 幂等：已终态则忽略（防 SSE onDone 与降级轮询双路各 finalize 一次）
     t.status = status;
     t.detail = detail;
     t.exitCode = exitCode;
