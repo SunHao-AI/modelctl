@@ -292,9 +292,82 @@ export interface DockerBypassEntry {
 
 /** Docker 完整诊断（GET /envs/docker/diagnose） */
 export interface DockerDiagnose {
-  checks: Array<{ key: string; label: string; ok: boolean; detail: string }>;
-  /** 可复制到部署机 root shell 的安装脚本 */
+  /** 当前诊断平台：linux / windows（Task 3 后端新增顶层字段） */
+  platform: "linux" | "windows";
+  checks: Array<{
+    key: string;
+    label: string;
+    ok: boolean;
+    detail: string;
+    /** Windows 分支附带的修复提示；Linux 分支恒为 null */
+    hint?: string | null;
+  }>;
+  /** 可复制到部署机 root shell 的安装脚本（Windows 分支为空字符串） */
   instructions: string;
+}
+
+/**
+ * Docker 一键安装 SSE 事件（Task 1 后端 core/sse_stage_event.py 权威定义）
+ * 所有阶段事件统一通过 task.event("stage", ev.to_sse_dict()) 广播。
+ */
+export type DockerSSEEventType = "stage" | "log" | "error" | "complete";
+
+/**
+ * 安装阶段：与后端 windows_setup.STAGES（12 值）严格对齐；前端只消费字面量进行 UI 分派。
+ */
+export type DockerSSEStage =
+  | "detect_winget"
+  | "detect_wsl2"
+  | "winget_running"
+  | "need_UAC"
+  | "winget_done"
+  | "write_daemon_json"
+  | "test_docker_version"
+  | "test_gpus"
+  | "post_install_plan"
+  | "already_installed"
+  | "done"
+  | "error";
+
+/** 阶段 B 用户引导步骤（payload.steps 的单项；action 枚举固定 4 值 + null） */
+export interface PostInstallStep {
+  /** 后端下发的稳定 id（与 style key 匹配） */
+  id: string;
+  /** 步骤标题（用户可见） */
+  label: string;
+  /** 可触发的系统动作；null 表示只读提示（如 "打开 Docker Desktop 并核对"） */
+  action: "restart" | "open_desktop" | "verify" | null;
+  /** CLI 命令提示（设计中：给运维参考复制用） */
+  cmd_hint: string | null;
+  /** 可选步骤标记（UI 加 "(可选)" 徽标） */
+  optional?: boolean;
+}
+
+/** Docker 一键安装 SSE 单事件（data 载荷） */
+export interface DockerSSEEvent {
+  type: DockerSSEEventType;
+  stage: DockerSSEStage;
+  /** 对人看的消息文本（前端直接展示，不做二次格式化） */
+  message: string;
+  /** 后端已格式化的 YYYY-MM-DD HH:mm:ss，直接展示 */
+  ts: string;
+  /** 错误分类码（error 帧专属；如 platform_mismatch / bad_os 等，未必有） */
+  code?: number | string;
+  /**
+   * - type=complete 且 stage=post_install_plan → { steps: PostInstallStep[] }
+   * - type=error → { tail: string[] }（winget 失败最后 50 行）
+   */
+  payload?: { steps: PostInstallStep[] } | { tail: string[] };
+}
+
+/** POST /envs/docker/install 响应（202） */
+export interface DockerInstallStartResponse {
+  task_id: string;
+  /** 完整 SSE 订阅地址（/admin/api/envs/docker/install/{task_id}/events） */
+  events: string;
+  os: "linux" | "windows";
+  /** 5 分钟窗口内已有活跃 task，后端复用原 id 并显式标记 */
+  already_running?: boolean;
 }
 
 /** 非托管引擎（ollama / unsloth / llamacpp）安装情况，仅用于说明，不可 setup/remove */

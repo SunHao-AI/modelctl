@@ -75,6 +75,7 @@
 | 2026-09-07 | 后端 / 环境管理 | 平台限制文案承诺"走 docker 镜像绕过"，UI 却没有任何落地入口 | 能力矩阵必须落常量并由测试锚定实现（`DOCKER_CAPABLE_ENGINES`），未支持引擎只给 note 不造假 steps；只读 PATH 探测与子进程诊断分层，平台不支持的操作在按钮入口即禁用而非事后报错。 | [backend/docker-bypass-guide-single-source.md](backend/docker-bypass-guide-single-source.md) |
 | 2026-09-07 | 后端 / 网关鉴权 | 网关 /v1 端点匿名可白嫖 GPU，客户端带的 key 也被覆盖丢弃 | 数据面无任何凭据校验且公网 http 暴露，须三层加固：nginx map 常量比对 + 网关 fail-closed + 引擎 api-key（Ollama/TRT-LLM 引擎侧无能力，仅靠前两层兜底）。 | [backend/网关鉴权.md](backend/网关鉴权.md) |
 | 2026-09-07 | 后端 / 错误分类 | 失败提示指向 CLI 命令而 WebUI 已有同能力——指向错误的一端 | 解法是后端结构化错误码贯通任务事件（SSE done + to_dict 条件加键，向后兼容），前端按 code 渲染修复动作，绝不正则解析错误文案；含 `_ERROR_RULES` 包含先后顺序陷阱与 classify_error 兜底语义的相反区别。 | [backend/错误分类与修复引导.md](backend/错误分类与修复引导.md) |
+| 2026-09-07 | 后端 / 环境管理 | `modelctl env setup docker --os` dispatcher：4 交叉矩阵 / StageEvent SoT / Check 字段锁 / 路由顺序 / platform monkeypatch | 跨平台有 4 种"host × --os × 是否 --run"组合，各行为不同（预览/硬拒/diagnose/执行）；SSE `StageEvent` 以 `core/sse_stage_event.py` 为单一事实来源且前后端字段名锁；FastAPI 精确路由必须先于 `/{target}` 通配注册；`import sys` vs `from sys import platform` 决定 monkeypatch 是否能改平台判定。 | [backend/docker-setup-os-dispatch.md](backend/docker-setup-os-dispatch.md) |
 
 ## 目录约定
 

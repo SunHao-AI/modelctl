@@ -5,6 +5,7 @@ import { dockerDiagnose, envRemove, envSetup, envTargets } from '@/api/envs';
 import type { DockerBypassEntry, DockerDiagnose, DockerEnv, EnvTarget, UnmanagedTarget } from '@/api/types';
 import TaskButton from '@/components/common/TaskButton.vue';
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue';
+import DockerInstallPanel from '@/components/docker/DockerInstallPanel.vue';
 
 const route = useRoute();
 const router = useRouter();
@@ -308,6 +309,14 @@ onMounted(async () => {
         </div>
       </div>
     </section>
+
+    <!-- Docker 一键安装（Windows-only）：放在「Docker 旁路」section 之后，构成"Docker 环境补齐"入口。
+         platform 取自 diagData.platform（Task 3 后端新增顶层字段；诊断未跑时默认为 linux，
+         面板会降级为引导 alert 而非假装 Windows）。 -->
+    <DockerInstallPanel
+      :platform="diagData ? diagData.platform : 'linux'"
+      :initial-diagnose="diagData"
+    />
 
     <!-- 非托管引擎说明：原生二进制 / 官方安装器 / 源码编译，不建 venv 故不在上表 -->
     <section v-if="unmanaged.length" class="card space-y-2">
