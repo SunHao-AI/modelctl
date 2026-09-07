@@ -23,8 +23,6 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
-import datetime
-import json
 import subprocess
 import sys
 import threading
@@ -44,6 +42,7 @@ router = APIRouter()
 # 否则 `{target}` 路径参数会把 "docker" 吞进 setup 端点。
 docker_install_task_manager = TaskManager()
 _user_active_installs: dict[str, dict] = {}  # user_id -> {task_id, started_at}
+_user_pending: dict[str, set[str]] = {}      # user_id -> {task_id} 未完成 docker install 集合
 _DOCKER_DEDUP_WINDOW_SEC: float = 300.0     # 5 分钟去重窗
 _DOCKER_MAX_ACTIVE_PER_USER: int = 3
 
@@ -283,9 +282,6 @@ async def docker_install(
       或 ``docker_setup.run_install``（os=linux），逐 stage 通过
       ``task.event("stage", ev.to_sse_dict())`` 广播给 SSE 订阅者。
     """
-    from modelctl.core.webui.admin_tasks import TaskManager as _TM  # noqa: F401 — 仅为类型提示
-    from modelctl.core.windows_setup import _ts_now as _ts_now_win
-
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001 — 空 body 视为 {}
@@ -330,11 +326,8 @@ async def docker_install(
             # prev 已被 trim 但没有清去重状态：清掉让下一请求可以创建新任务
             _user_active_installs.pop(user_id, None)
 
-    # 每用户 max 未完成任务数
-    active_count = sum(
-        1 for t in docker_install_task_manager.list_tasks(limit=200)
-        if t.target == f"docker:{target_os}" and t.status in ("queued", "running")
-    )
+    # 每用户 max 未完成任务数（per-user pending 集合计数，避免跨 user 累加误 429）
+    active_count = len(_user_pending.get(user_id, ()))
     if active_count >= _DOCKER_MAX_ACTIVE_PER_USER:
         return JSONResponse(
             status_code=429,
@@ -345,6 +338,7 @@ async def docker_install(
     task = docker_install_task_manager.create_task(
         kind="docker", action="install", target=f"docker:{target_os}"
     )
+    _user_pending.setdefault(user_id, set()).add(task.id)
     registry_mirrors = body.get("registry_mirrors") or []
     max_downloads = body.get("max_concurrent_downloads", 0) or 0
     if not isinstance(max_downloads, int) or max_downloads < 0 or max_downloads > 8:
@@ -397,6 +391,9 @@ def _run_docker_install_task(task, target_os: str,
 
             def _on_stage(ev):
                 task.event("stage", ev.to_sse_dict())
+                # 回写 detail 让 GET /{task_id} fallback 能读到当前 stage
+                if getattr(ev, "stage", None) and ev.stage != "unknown":
+                    task.update_detail(ev.stage)
 
             rc = runner(registry_mirrors, max_downloads, on_stage=_on_stage)
         else:
@@ -415,6 +412,12 @@ def _run_docker_install_task(task, target_os: str,
         info = _user_active_installs.get(user_id)
         if info and info.get("task_id") == task.id:
             _user_active_installs.pop(user_id, None)
+        # 精确清 pending 集合
+        pending = _user_pending.get(user_id)
+        if pending:
+            pending.discard(task.id)
+            if not pending:
+                _user_pending.pop(user_id, None)
 
 
 @router.get("/docker/install/{task_id}/events")

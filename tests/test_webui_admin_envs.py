@@ -169,6 +169,7 @@ def _clear_docker_installs(monkeypatch):
     import modelctl.core.webui.admin_envs as ae
 
     monkeypatch.setattr(ae, "_user_active_installs", {}, raising=False)
+    monkeypatch.setattr(ae, "_user_pending", {}, raising=False)
     # 将 task_manager 与本模块解耦重挂，确保每例独立
     from modelctl.core.webui.admin_tasks import TaskManager
 
@@ -200,9 +201,14 @@ def test_install_endpoint_202_win32_returns_task_id(admin_client, monkeypatch):
     assert body.get("task_id")
     assert body.get("events") == f"/admin/api/envs/docker/install/{body['task_id']}/events"
     assert body.get("os") == "windows"
-    # 等一下让后台线程跑完 → 去重窗被 finally 精确移除
-    ok = _wait_for(lambda: len(ae._user_active_installs) == 0)
-    assert ok, f"dedup window not cleared after thread done: {dict(ae._user_active_installs)}"
+    # 等一下让后台线程跑完 → 去重窗与 pending 集合均被 finally 精确移除
+    ok = _wait_for(
+        lambda: len(ae._user_active_installs) == 0 and len(ae._user_pending) == 0
+    )
+    assert ok, (
+        f"dedup window / pending not cleared after thread done: "
+        f"active={dict(ae._user_active_installs)} pending={dict(ae._user_pending)}"
+    )
     # run_install 真的被调到了
     assert mi.call_count == 1
 
@@ -323,3 +329,54 @@ def test_diagnose_endpoint_os_windows_non_win32_400(admin_client, monkeypatch):
     monkeypatch.setattr(ae.sys, "platform", "linux", raising=True)
     r = _get(admin_client, "/admin/api/envs/docker/diagnose?os=windows")
     assert r.status_code == 400
+
+
+def test_install_endpoint_bad_body_non_dict_still_202(admin_client, monkeypatch):
+    """body 非 dict（如数组）→ body 强制兜底 {}，走 sys.platform 默认分支仍应 202 或 400（不误 500）。"""
+    import modelctl.core.webui.admin_envs as ae
+
+    _clear_docker_installs(monkeypatch)
+    monkeypatch.setattr(ae.sys, "platform", "win32", raising=True)
+    with mock.patch("modelctl.core.windows_setup.run_install") as mi:
+        mi.return_value = 0
+        # 直接 POST raw array，绕开 json= body 序列化 dict 假设
+        r = admin_client.post(
+            "/admin/api/envs/docker/install",
+            content=b'[1, 2, 3]',
+            headers={"Authorization": f"Bearer {KEY}", "Content-Type": "application/json"},
+        )
+    assert r.status_code in (202, 400), f"unexpected status: {r.status_code} body={r.text}"
+
+
+def test_install_endpoint_rate_limit_per_user_not_cross_user(admin_client, monkeypatch):
+    """跨 user pending 集合不计入另一 user 的限流（回归 P1 review 结论）。"""
+    import modelctl.core.webui.admin_envs as ae
+
+    _clear_docker_installs(monkeypatch)
+    monkeypatch.setattr(ae.sys, "platform", "win32", raising=True)
+
+    # 预置 3 个他人的 pending（不同 user_id），本用户仍应 202 不受 429
+    other_user = "other_user_token"
+    ae._user_pending[other_user] = {f"task_{i}" for i in range(3)}
+
+    with mock.patch("modelctl.core.windows_setup.run_install") as mi:
+        mi.return_value = 0
+        r = _post(admin_client, "/admin/api/envs/docker/install", {"os": "windows"})
+    # Bearer token = KEY ≠ other_user_token → 本 user pending 为 0，不触发 429
+    assert r.status_code == 202, f"cross-user rate limit leaked: {r.status_code} {r.text}"
+
+
+def test_install_endpoint_rate_limit_when_self_at_max(admin_client, monkeypatch):
+    """同一 user pending 达 3 个 → 429 rate_limited。"""
+    import modelctl.core.webui.admin_envs as ae
+
+    _clear_docker_installs(monkeypatch)
+    monkeypatch.setattr(ae.sys, "platform", "win32", raising=True)
+
+    # 预置本 user（=KEY）pending 达上限
+    ae._user_pending[KEY] = {f"task_{i}" for i in range(3)}
+
+    r = _post(admin_client, "/admin/api/envs/docker/install", {"os": "windows"})
+    assert r.status_code == 429
+    err = r.json().get("error") or {}
+    assert err.get("code") == "rate_limited"
