@@ -394,5 +394,23 @@ def test_diagnose_runtime_configured(monkeypatch, tmp_path):
     assert checks["nvidia_runtime"].ok
 
 
+# ---- Check dataclass 字段锚定（防两端漂移） ----
+
+
+def test_check_dataclass_keeps_5_fields_match_windows_setup():
+    """防未来漂移：docker_setup.Check 字段名是 windows_setup.Check 字段名真子集。
+
+    背景：windows_setup 比重版本（hint 字段，Windows 专用提示），但字段名
+    集合必须对齐，这样前端模板（按字段名渲染表格）才能两端共用。
+    本测试断言 `ds.Check` 字段 ⊆ `ws.Check` 字段（即 `ws.Check` 是超集）。
+    """
+    from dataclasses import fields
+    from modelctl.core import windows_setup as ws
+
+    ds_fields = {f.name for f in fields(ds.Check)}
+    ws_fields = {f.name for f in fields(ws.Check)}
+    assert ds_fields <= ws_fields, (ds_fields, ws_fields)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
