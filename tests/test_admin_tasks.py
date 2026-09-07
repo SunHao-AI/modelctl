@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# ===============================================================================
+# @File   : tests/test_admin_tasks.py
+# @IDE    : VSCode
+# @Author : SunHao
+# @Email  : 2865467769@qq.com
+# @Date   : 2026/9/7 10:24
+# @Desc   : 任务端点与 update_detail 广播测试
+# ===============================================================================
+
 """admin_tasks / admin_router 任务端点测试。"""
 from __future__ import annotations
 
@@ -49,7 +58,10 @@ def test_get_task_not_found(admin_client):
     assert r.json()["error"]["code"] == "not_found"
 
 
-def test_update_detail_broadcasts_step(admin_client):
+@pytest.mark.filterwarnings(
+    r"ignore:There is no current event loop:DeprecationWarning:modelctl\.core\.webui\.admin_tasks"
+)
+def test_update_detail_broadcasts_step():
     """update_detail 必须让订阅者收到 step 事件（detail 可见性）。"""
     from modelctl.core.webui.admin_tasks import Task
 
