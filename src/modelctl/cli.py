@@ -1116,10 +1116,15 @@ def _cmd_env_setup_docker(args) -> int:
     print(_table_paint(
         f"开始自动安装（--run，os={target_os}），registry-mirrors："
         f"{', '.join(docker_setup.resolve_registry_mirrors(mirrors))}", "SECTION"))
-    if target_os == "windows":
-        from modelctl.core import windows_setup as _ws
-        return _ws.run_install(mirrors, limit)
-    return docker_setup.run_install(mirrors, limit, os_hint=target_os)
+    def _on_stage_cli(ev):
+        # 终端样式精简：用 _table_paint 前缀 + message；ts 用 DIM
+        label = ev.stage if ev.stage and ev.stage != "unknown" else "..."
+        prefix = _table_paint(f"[{label}]", "DIM")
+        print(f"{prefix} {ev.message}")
+
+    return docker_setup.run_install(
+        mirrors, limit, os_hint=target_os, on_stage=_on_stage_cli,
+    )
 
 
 def _cmd_env_list(args, models_dir: Path | None, caps) -> int:

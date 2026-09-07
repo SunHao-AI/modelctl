@@ -384,22 +384,18 @@ def _run_docker_install_task(task, target_os: str,
     避免误删同用户后续任务。
     """
     task.update_status("running")
+
+    def _on_stage(ev):
+        task.event("stage", ev.to_sse_dict())
+        # 回写 detail 让 GET /{task_id} fallback 能读到当前 stage
+        if getattr(ev, "stage", None) and ev.stage != "unknown":
+            task.update_detail(ev.stage)
+
     try:
-        if target_os == "windows":
-            from modelctl.core import windows_setup
-            runner = windows_setup.run_install
-
-            def _on_stage(ev):
-                task.event("stage", ev.to_sse_dict())
-                # 回写 detail 让 GET /{task_id} fallback 能读到当前 stage
-                if getattr(ev, "stage", None) and ev.stage != "unknown":
-                    task.update_detail(ev.stage)
-
-            rc = runner(registry_mirrors, max_downloads, on_stage=_on_stage)
-        else:
-            from modelctl.core import docker_setup
-            docker_setup.run_install(registry_mirrors, max_downloads, on_stage=None)
-            rc = 0  # _install_linux 无返回值；此分支保留兼容
+        from modelctl.core import docker_setup
+        rc = docker_setup.run_install(
+            registry_mirrors, max_downloads, os_hint=target_os, on_stage=_on_stage,
+        )
         if rc == 0:
             task.complete()
         else:
