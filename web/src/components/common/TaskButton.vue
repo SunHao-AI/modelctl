@@ -49,15 +49,18 @@ const record = computed(() => tasksStore.activityFor(props.target));
 const submitting = ref(false);
 
 /**
- * 当前时间戳：仅在存在活动任务时每 500ms 刷新（驱动"完成后 2s 回 idle"的结果窗）；
- * 无活动任务时定时器停止，phase 稳定回 idle，避免常驻定时器。
+ * 当前时间戳：tick 存活到"活动期 + 结果窗"（终态后 2s 内继续推进 now），
+ * 结果窗到期 getter 转 false 自动停表，phase 回 idle，避免常驻定时器。
  */
 const now = ref(Date.now());
 let tickId: number | undefined;
 watch(
   () => {
     const r = record.value;
-    return !!r && (r.status === 'queued' || r.status === 'running');
+    if (!r) return false;
+    if (r.status === 'queued' || r.status === 'running') return true;
+    // 结果窗：终态后 2s 内保持 tick 推进 now，到期自动停表 → phase 回 idle
+    return !!r.finishedAt && now.value - new Date(r.finishedAt).getTime() < 2000;
   },
   (active) => {
     if (active && tickId === undefined) {
@@ -117,6 +120,7 @@ async function onClick() {
     } else {
       toast.error(msg);
     }
+    props.onError?.(msg);
     emit('error', msg);
     return;
   }
@@ -124,6 +128,7 @@ async function onClick() {
   if (!refVal?.task_id) {
     const msg = '后端未返回 task_id';
     toast.error(msg);
+    props.onError?.(msg);
     emit('error', msg);
     return;
   }
