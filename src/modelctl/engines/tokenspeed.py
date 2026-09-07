@@ -115,6 +115,7 @@ class TokenSpeedAdapter(EngineAdapter):
             ]
             if cfg.get("max_model_len"):
                 cmd += ["--max-model-len", str(cfg["max_model_len"])]
+            cmd += self.api_key_args()
             cmd += extra
             env = {}
             if gpus:

@@ -104,3 +104,13 @@ def test_sglang_tp_mismatch_raises(tmp_path, monkeypatch):
     a = get_adapter("sglang")(p, _sgl_caps(4))
     with pytest.raises(RequirementError):
         a.check_requirements()
+
+
+def test_sglang_command_includes_api_key(tmp_path, monkeypatch):
+    """SGLang 支持 --api-key；此前未下发，导致直连引擎端口可匿名推理。"""
+    _stub_venv(tmp_path, monkeypatch, "sglang")
+    p = _write(tmp_path, "name: s\nengine: sglang\nport: 30000\napi_key: sk-eng-key\nsglang:\n  model: /models/s\n")
+    a = get_adapter("sglang")(p, CAPS8)
+    cmd, _env = a.build_command()
+    assert "--api-key" in cmd
+    assert cmd[cmd.index("--api-key") + 1] == "sk-eng-key"

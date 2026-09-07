@@ -109,6 +109,7 @@ class SglangAdapter(EngineAdapter):
             cmd += ["--context-length", str(cfg["context_length"])]
         if cfg.get("mem_fraction_static"):
             cmd += ["--mem-fraction-static", str(cfg["mem_fraction_static"])]
+        cmd += self.api_key_args()
         if cfg.get("extra_args"):
             cmd += shlex.split(str(cfg["extra_args"]))
         env = {"HF_HOME": os.environ["HF_HOME"]} if os.environ.get("HF_HOME") else {}

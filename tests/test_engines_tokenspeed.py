@@ -64,6 +64,23 @@ def test_tokenspeed_docker_command(tmp_path, monkeypatch):
     assert "--enable-prefix-caching" in cmd
 
 
+def test_tokenspeed_docker_command_includes_api_key(tmp_path, monkeypatch):
+    """docker 分支此前漏发 --api-key（venv 分支已有），容器暴露端口可匿名推理。"""
+    model_dir = tmp_path / "models" / "Qwen3.5-397B-A17B"
+    model_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: tokenspeed\nport: 8150\napi_key: sk-test\ntokenspeed:\n"
+        f"  model: {model_dir}\n  tensor_parallel_size: 8\n"
+        f"  docker_image: lightseekorg/tokenspeed:latest\n",
+    )
+    a = get_adapter("tokenspeed")(p, CAPS8)
+    cmd, _env = a.build_command()
+    assert cmd[0] == "docker"
+    assert "--api-key" in cmd
+    assert cmd[cmd.index("--api-key") + 1] == "sk-test"
+
+
 def test_tokenspeed_docker_command_carries_tz(tmp_path, monkeypatch):
     """容器时区只认 -e，缺了它容器内日志是 UTC（与 modelctl 侧差 8 小时）。"""
     monkeypatch.setenv("TZ", "Asia/Shanghai")
