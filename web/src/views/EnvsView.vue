@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
-import { envRemove, envSetup, envTargets } from '@/api/envs';
-import type { EnvTarget, UnmanagedTarget } from '@/api/types';
+import { dockerDiagnose, envRemove, envSetup, envTargets } from '@/api/envs';
+import type { DockerBypassEntry, DockerDiagnose, DockerEnv, EnvTarget, UnmanagedTarget } from '@/api/types';
 import TaskButton from '@/components/common/TaskButton.vue';
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue';
 
@@ -20,12 +20,26 @@ const loading = ref(true);
 const pendingRemove = ref<string | null>(null);
 const removeBusy = ref(false);
 
+/** Docker 环境就绪探测（随列表加载返回） */
+const dockerEnv = ref<DockerEnv | null>(null);
+/** 逐引擎 Docker 旁路指引 */
+const dockerBypass = ref<DockerBypassEntry[]>([]);
+/** 诊断面板：展开态 / 结果（懒加载一次）/ 错误 / 加载态 */
+const diagOpen = ref(false);
+const diagData = ref<DockerDiagnose | null>(null);
+const diagErr = ref('');
+const diagBusy = ref(false);
+/** 复制反馈的当前 key（'inst' 或引擎名） */
+const copiedKey = ref('');
+
 async function load() {
   loading.value = true;
   try {
     const r = await envTargets();
     targets.value = r.targets ?? [];
     unmanaged.value = r.unmanaged ?? [];
+    dockerEnv.value = r.docker_env ?? null;
+    dockerBypass.value = r.docker_bypass ?? [];
     errMsg.value = '';
   } catch (err) {
     console.warn('envTargets 失败:', err);
@@ -47,6 +61,41 @@ async function doRemove(target: string) {
   } finally {
     removeBusy.value = false;
     pendingRemove.value = null;
+  }
+}
+
+/** Setup 失败提示：平台限制类错误附旁路区块引导语 */
+function onSetupError(name: string, msg: string) {
+  notice.value = `${name} setup 失败：${msg}`;
+  if (msg.includes('docker 镜像绕过')) {
+    notice.value += '——旁路步骤见下方「Docker 旁路」区块';
+  }
+}
+
+/** 展开/收起完整诊断；首次展开懒加载一次 */
+async function onDiagnose() {
+  diagOpen.value = !diagOpen.value;
+  if (!diagOpen.value || diagData.value || diagBusy.value) return;
+  diagBusy.value = true;
+  diagErr.value = '';
+  try {
+    diagData.value = await dockerDiagnose();
+  } catch (err) {
+    console.warn('dockerDiagnose 失败:', err);
+    diagErr.value = (err as { message?: string })?.message || '诊断失败';
+  } finally {
+    diagBusy.value = false;
+  }
+}
+
+/** 复制任意文本（ConfigView copySnippet 同款 1.5s 反馈） */
+async function copyText(key: string, text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    copiedKey.value = key;
+    setTimeout(() => (copiedKey.value = ''), 1500);
+  } catch (err) {
+    console.warn('复制失败:', err);
   }
 }
 
@@ -100,9 +149,13 @@ onMounted(load);
                   label="Setup"
                   variant="primary"
                   :target="t.name"
+                  :disabled="!t.platform_supported"
+                  :disabled-reason="
+                    t.platform_supported ? undefined : '托管 venv 仅支持 Linux 部署机，可走下方「Docker 旁路」区块'
+                  "
                   :task-target="() => envSetup(t.name)"
                   @success="() => load()"
-                  @error="(msg) => (notice = `${t.name} setup 失败：${msg}`)"
+                  @error="(msg) => onSetupError(t.name, msg)"
                 />
                 <!-- 已安装可用 Remove -->
                 <button
@@ -118,6 +171,97 @@ onMounted(load);
       </table>
       <div v-else-if="!loading" class="p-6 text-sm text-slate-500">尚无受管目标</div>
       <div v-else class="p-6 text-sm text-slate-500">加载中…</div>
+    </section>
+
+    <!-- Docker 旁路：托管 venv 仅支持 Linux，已支持引擎可改用官方 docker 镜像 -->
+    <section v-if="dockerBypass.length" class="card space-y-3">
+      <div class="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h2 class="text-sm font-medium text-slate-200">Docker 旁路</h2>
+          <p class="mt-0.5 text-xs text-slate-500">
+            托管 venv 仅支持 Linux；下列引擎可改用官方 docker 镜像绕过 venv（编辑模型 yaml 后仍由 modelctl 启停）
+          </p>
+        </div>
+        <div class="flex items-center gap-2">
+          <span
+            class="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs"
+            :class="dockerEnv?.ready
+              ? 'bg-emerald-600/15 text-emerald-300 border border-emerald-500/30'
+              : 'bg-red-600/15 text-red-300 border border-red-500/30'"
+            :title="dockerEnv && !dockerEnv.ready ? dockerEnv.missing.join('；') : undefined"
+          >
+            <span class="size-1.5 rounded-full" :class="dockerEnv?.ready ? 'bg-emerald-400' : 'bg-red-400'" />
+            {{ dockerEnv?.ready ? 'Docker 环境就绪' : 'Docker 环境缺失' }}
+          </span>
+          <button class="btn-ghost !py-1 !px-2 text-xs" :disabled="diagBusy" @click="onDiagnose">
+            {{ diagBusy ? '诊断中…' : diagOpen ? '收起诊断' : '完整诊断' }}
+          </button>
+        </div>
+      </div>
+
+      <p v-if="dockerEnv && !dockerEnv.ready" class="text-xs text-slate-500">{{ dockerEnv.guide }}</p>
+
+      <!-- 完整诊断：首次展开懒加载一次（后端含子进程探测） -->
+      <div v-if="diagOpen" class="space-y-1.5 border-t border-slate-800/40 pt-3">
+        <p v-if="diagErr" class="text-xs text-red-400">{{ diagErr }}</p>
+        <template v-else-if="diagData">
+          <div v-for="c in diagData.checks" :key="c.key" class="flex flex-wrap items-center gap-x-2 text-xs">
+            <span class="size-1.5 rounded-full" :class="c.ok ? 'bg-emerald-400' : 'bg-red-400'" />
+            <span class="text-slate-300">{{ c.label }}</span>
+            <span v-if="!c.ok" class="break-all text-slate-500">{{ c.detail }}</span>
+          </div>
+          <div class="mt-2">
+            <div class="mb-1 flex items-center justify-between">
+              <span class="text-xs text-slate-500">
+                安装脚本（复制到部署机 root shell；WebUI 只展示不执行）
+              </span>
+              <button class="btn-ghost !py-1 !px-2 text-xs" @click="copyText('inst', diagData.instructions)">
+                {{ copiedKey === 'inst' ? '已复制' : '复制脚本' }}
+              </button>
+            </div>
+            <pre
+              class="max-h-72 overflow-auto bg-[#0b1120] p-3 font-mono text-xs leading-6 whitespace-pre text-slate-300"
+            >{{ diagData.instructions }}</pre>
+          </div>
+        </template>
+        <p v-else class="text-xs text-slate-500">诊断中…</p>
+      </div>
+
+      <!-- 逐引擎指引 -->
+      <div class="space-y-2">
+        <div v-for="b in dockerBypass" :key="b.name" class="space-y-1.5 border-t border-slate-800/40 pt-2.5">
+          <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+            <span class="font-mono text-slate-300">{{ b.name }}</span>
+            <span
+              class="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5"
+              :class="b.docker_supported
+                ? 'bg-emerald-600/15 text-emerald-300 border border-emerald-500/30'
+                : 'bg-slate-600/15 text-slate-400 border border-slate-500/30'"
+            >
+              <span class="size-1.5 rounded-full" :class="b.docker_supported ? 'bg-emerald-400' : 'bg-slate-500'" />
+              {{ b.docker_supported ? '支持 docker 运行时' : '暂不支持 docker' }}
+            </span>
+          </div>
+          <p v-if="!b.docker_supported" class="text-xs text-slate-500">{{ b.note }}</p>
+          <template v-else>
+            <div class="flex flex-wrap items-center gap-2 text-xs">
+              <span class="text-slate-500">yaml 片段</span>
+              <code class="break-all text-slate-300">{{ b.yaml_field_path }}: {{ b.image_example }}</code>
+              <button
+                class="btn-ghost !py-0.5 !px-2 text-xs"
+                @click="copyText(b.name, `${b.yaml_field_path}: ${b.image_example}`)"
+              >
+                {{ copiedKey === b.name ? '已复制' : '复制' }}
+              </button>
+              <span class="text-slate-600">·</span>
+              <span class="break-all text-slate-500">示例 <code class="text-slate-400">{{ b.example_yaml }}</code></span>
+            </div>
+            <ol class="ml-4 list-decimal space-y-0.5 text-xs text-slate-400">
+              <li v-for="(s, i) in b.steps" :key="i" class="break-all">{{ s }}</li>
+            </ol>
+          </template>
+        </div>
+      </div>
     </section>
 
     <!-- 非托管引擎说明：原生二进制 / 官方安装器 / 源码编译，不建 venv 故不在上表 -->
