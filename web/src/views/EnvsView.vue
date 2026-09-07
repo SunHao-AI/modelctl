@@ -105,6 +105,19 @@ async function copyText(key: string, text: string) {
   }
 }
 
+/**
+ * focus 是否需要额外高亮 Docker 旁路区块（规格 §4.4/§6）：
+ * 1) 纯 docker 语境 focus —— focus 名不在任何受管 target 行中；
+ * 2) focus 命中的引擎 platform_supported === false —— 托管 venv 装不了，只能走旁路。
+ */
+function focusNeedsBypass(): boolean {
+  const name = focusName.value;
+  if (!name) return false;
+  const hit = targets.value.find((t) => t.name === name);
+  if (!hit) return true;
+  return hit.platform_supported === false;
+}
+
 onMounted(async () => {
   await load();
   const f = route.query.focus;
@@ -200,11 +213,12 @@ onMounted(async () => {
     </section>
 
     <!-- Docker 旁路：托管 venv 仅支持 Linux，已支持引擎可改用官方 docker 镜像 -->
+    <!-- focus 命中非托管引擎（platform 不支持）或纯 docker 语境 focus 时高亮本区块 -->
     <section
       v-if="dockerBypass.length"
       id="docker-bypass"
       class="card space-y-3 transition-shadow"
-      :class="focusName && !targets.some((t) => t.name === focusName) ? 'ring-1 ring-amber-400/60' : ''"
+      :class="focusNeedsBypass() ? 'ring-1 ring-amber-400/60' : ''"
     >
       <div class="flex flex-wrap items-start justify-between gap-2">
         <div>
