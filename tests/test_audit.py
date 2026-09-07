@@ -722,3 +722,64 @@ def test_build_audit_entry_usage_wins_over_collector_diff():
     assert rec["tokens_source"] == "response-usage"
     assert rec["prompt_tokens"] == 7
     assert rec["completion_tokens"] == 3
+
+
+# ---- Task 3：审计 auth / client_ip 字段 ----
+
+def test_audit_records_rejected_request_with_auth_and_ip(tmp_path, monkeypatch):
+    """被拒请求同样落审计；auth 只记标签，明文 key 绝不入审计。"""
+    key = "sk-audit-key-123"
+    monkeypatch.setenv("GATEWAY_CLIENT_API_KEY", key)
+    audit = _new_audit_log(Path(tmp_path / "audit"))
+    app = create_app(
+        _reg_one(),
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"choices": []})),
+        audit_log=audit,
+    )
+
+    async def _go():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            # 不带凭据 → 401，必须落审计
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={"model": "q", "messages": [{"role": "user", "content": "hi"}]},
+                headers={"X-Forwarded-For": "203.0.113.9, 10.0.0.1"},
+            )
+            assert resp.status_code == 401
+
+    asyncio.run(_go())
+    rec = _first_audit_rec(tmp_path)
+    assert rec["status_code"] == 401
+    assert rec["auth"] == "missing"
+    assert rec["client_ip"] == "203.0.113.9"
+    assert rec["error"] == "auth_missing"
+    assert key not in json.dumps(rec, ensure_ascii=False)  # 明文 key 绝不入审计
+    audit.destroy()
+
+
+def test_audit_passed_request_auth_label_is_ok(tmp_path, monkeypatch):
+    """通过校验的请求 auth=ok，client_ip 无代理头时取 socket 或空串（不得缺键）。"""
+    key = "sk-audit-key-123"
+    monkeypatch.setenv("GATEWAY_CLIENT_API_KEY", key)
+    audit = _new_audit_log(Path(tmp_path / "audit"))
+    app = create_app(
+        _reg_one(),
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"choices": []})),
+        audit_log=audit,
+    )
+
+    async def _go():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={"model": "q", "messages": [{"role": "user", "content": "hi"}]},
+                headers={"Authorization": f"Bearer {key}", "X-Real-IP": "198.51.100.4"},
+            )
+            assert resp.status_code == 200
+
+    asyncio.run(_go())
+    rec = _first_audit_rec(tmp_path)
+    assert rec["auth"] == "ok"
+    assert rec["client_ip"] == "198.51.100.4"
+    assert key not in json.dumps(rec, ensure_ascii=False)
+    audit.destroy()

@@ -301,6 +301,8 @@ def _build_audit_entry(
     error: str | None,
     finish_reason: str | None,
     input_char_len: int,
+    auth: str = AUTH_OK,
+    client_ip: str = "",
     collector_diff_prompt: int = 0,
     collector_diff_completion: int = 0,
 ) -> dict:
@@ -310,6 +312,8 @@ def _build_audit_entry(
     tokens_source：响应含 usage 为 response-usage，否则 collector-diff（取 collector
     snapshot 差分 collector_diff_*/已 max(0) 保护负值）；usage 字段名兼容 OpenAI
     （prompt/completion_tokens）与 Anthropic（input/output_tokens）。
+    auth：准入校验结果标签（ok/missing/invalid/unconfigured），绝不记录 key 值；
+    client_ip：nginx 透传的真实来源 IP。
     """
     source = "vllm_native" if native_metrics else "gateway_estimate"
     if usage:
@@ -336,6 +340,8 @@ def _build_audit_entry(
         "input_char_len": input_char_len,
         "native_metrics": native_metrics,
         "gateway_metrics": gateway_metrics,
+        "auth": auth,
+        "client_ip": client_ip,
         "status_code": status_code,
         "error": error,
         "finish_reason": finish_reason,
@@ -654,6 +660,14 @@ def create_app(
         label = verify_client(request)
         if label != AUTH_OK:
             logger.warning(f"Anthropic 请求被拒 auth={label} ip={client_ip_of(request)}")
+            # 被拒请求同样落审计（尚无 target，模型字段留空；用闭包 audit_log 而非 target.audit_log）
+            audit_log.record(_build_audit_entry(
+                model_name="", profile_name="", profile_engine="",
+                path="messages", stream=False,
+                native_metrics=None, usage=None, gateway_metrics=None,
+                status_code=401, error=f"auth_{label}", finish_reason=None,
+                input_char_len=0, auth=label, client_ip=client_ip_of(request),
+            ))
             return auth_error_response(label)
         try:
             body = await request.json()
@@ -779,6 +793,7 @@ def create_app(
                                     error=None,
                                     finish_reason=None,
                                     input_char_len=body_char_len,
+                                    auth=label, client_ip=client_ip_of(request),
                                 ))
                         except Exception as exc:
                             logger.warning(f"审计写盘异常（SSE 不中断）: {exc}")
@@ -827,6 +842,7 @@ def create_app(
                         error=None,
                         finish_reason=None,  # Anthropic 非流式无 finish_reason 字段
                         input_char_len=body_char_len,
+                        auth=label, client_ip=client_ip_of(request),
                     ))
             except Exception as exc:
                 logger.warning(f"审计写盘异常（转发不受影响）: {exc}")
@@ -854,6 +870,14 @@ def create_app(
         label = verify_client(request)
         if label != AUTH_OK:
             logger.warning(f"网关请求被拒 path=/v1/{path} auth={label} ip={client_ip_of(request)}")
+            # 被拒请求同样落审计（尚无 target，模型字段留空；用闭包 audit_log 而非 target.audit_log）
+            audit_log.record(_build_audit_entry(
+                model_name="", profile_name="", profile_engine="",
+                path=path or "v1", stream=False,
+                native_metrics=None, usage=None, gateway_metrics=None,
+                status_code=401, error=f"auth_{label}", finish_reason=None,
+                input_char_len=0, auth=label, client_ip=client_ip_of(request),
+            ))
             return auth_error_response(label)
         if not path:
             return JSONResponse(status_code=200, content={"status": "ok"})
@@ -1049,6 +1073,7 @@ def create_app(
                                     error=None,
                                     finish_reason=seen_finish,
                                     input_char_len=body_char_len,
+                                    auth=label, client_ip=client_ip_of(request),
                                     collector_diff_prompt=_diff_prompt,
                                     collector_diff_completion=_diff_completion,
                                 ))
@@ -1126,6 +1151,7 @@ def create_app(
                         error=None,
                         finish_reason=_finish,
                         input_char_len=body_char_len,
+                        auth=label, client_ip=client_ip_of(request),
                         collector_diff_prompt=_diff_prompt,
                         collector_diff_completion=_diff_completion,
                     ))

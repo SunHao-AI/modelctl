@@ -124,12 +124,16 @@ def _filter_entries(
     since: str | None,
     model: str | None,
     endpoints: str | None,
-) -> tuple[_dt.datetime | None, frozenset[str], frozenset[str]]:
-    """构造过滤条件元组（since_dt, model_keys, ep_keys）；空参数回退空集合。"""
+    auth: str = "",
+    client_ip: str = "",
+) -> tuple[_dt.datetime | None, frozenset[str], frozenset[str], str, str]:
+    """构造过滤条件元组（since_dt, model_keys, ep_keys, auth, client_ip）；空参数回退空集合/空串。"""
     return (
         _parse_since(since),
         frozenset({model}) if model else frozenset(),
         frozenset(e.strip() for e in endpoints.split(",") if e.strip()) if endpoints else frozenset(),
+        auth or "",
+        client_ip or "",
     )
 
 
@@ -143,6 +147,8 @@ async def read_audit(
     since: str | None = Query(default=None, description="相对时间：30m | 1h | 24h | 7d"),
     model: str | None = Query(default=None, description="过滤 model 名"),
     endpoints: str | None = Query(default=None, description="逗号分隔的 endpoint 白名单"),
+    auth: str = Query(default="", description="过滤准入结果标签：ok | missing | invalid | unconfigured"),
+    client_ip: str = Query(default="", description="过滤来源 IP（精确匹配）"),
     limit: int = Query(default=100, ge=1, le=5000),
     _json: bool = Query(default=False, alias="json", description="true 时返回原始 JSONL 行文本"),
     _: None = Depends(require_auth),
@@ -150,11 +156,13 @@ async def read_audit(
     """GET /admin/api/audit — 读取匹配的审计记录（最新优先）。
 
     ``since`` 形如 ``1h/24h/7d``；``model`` 单值；``endpoints`` 逗号分隔白名单；
-    ``limit`` 默认 100 上限 5000。``json=true`` 时返回原始 JSONL 行文本
-    （``bytes`` 友好），否则解析为 dict 列表。
+    ``auth`` / ``client_ip`` 精确匹配准入标签与来源 IP；``limit`` 默认 100 上限 5000。
+    ``json=true`` 时返回原始 JSONL 行文本（``bytes`` 友好），否则解析为 dict 列表。
     """
 
-    since_dt, model_keys, ep_keys = _filter_entries(since, model, endpoints)
+    since_dt, model_keys, ep_keys, auth_key, client_ip_key = _filter_entries(
+        since, model, endpoints, auth, client_ip
+    )
 
     def _collect() -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -181,6 +189,10 @@ async def read_audit(
                 if model_keys and entry.get("model") not in model_keys:
                     continue
                 if ep_keys and entry.get("endpoint") not in ep_keys:
+                    continue
+                if auth_key and entry.get("auth") != auth_key:
+                    continue
+                if client_ip_key and entry.get("client_ip") != client_ip_key:
                     continue
                 out.append(entry)
         # 倒序（最新在前）：基于记录时间戳稳定排序，原始时间无法解析→排最前（视为最早）
