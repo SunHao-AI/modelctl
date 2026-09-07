@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
+import { useRouter } from 'vue-router';
 import { useTasksStore } from '@/stores/tasks';
 import type { TaskRecord } from '@/stores/tasks';
-import { useToastItems } from '@/utils/toast';
+import { useToastItems, toast } from '@/utils/toast';
+import { envSetup, envTargets } from '@/api/envs';
 
 /**
  * 全局任务抽屉：Header 经 ref 调 toggle/close 打开。
@@ -23,6 +25,62 @@ const { items: toastItems, KIND_CLASS: kindClass } = useToastItems();
 
 const tasksStore = useTasksStore();
 const tasks = computed(() => tasksStore.tasks);
+
+const router = useRouter();
+
+/** engine → 本平台可建托管 venv（懒加载一次 /envs；失败留空 → 保守"去环境页"） */
+const platformMap = ref<Record<string, boolean>>({});
+let platformRequested = false;
+async function ensurePlatformMap() {
+  if (platformRequested) return;
+  platformRequested = true;
+  try {
+    const r = await envTargets();
+    const m: Record<string, boolean> = {};
+    for (const t of r.targets ?? []) m[t.name] = t.platform_supported;
+    platformMap.value = m;
+  } catch {
+    /* 留空：fixAction 保守降级为 goto（跳转后由环境页展示真相） */
+  }
+}
+
+/** 本会话已提交过"创建环境"的引擎（防连点；409 由后端 target 互斥兜底） */
+const setupSubmitted = ref(new Set<string>());
+
+/** 失败卡片修复动作：'' = 无 | 'setup' = 一键创建环境 | 'goto' = 跳环境页 */
+function fixAction(t: TaskRecord): '' | 'setup' | 'goto' {
+  if (t.status !== 'error' || !t.code) return '';
+  if (t.code === 'docker_missing') return 'goto';
+  if (t.code !== 'venv_missing' || !t.engine) return '';
+  if (!(t.engine in platformMap.value)) {
+    // 平台信息未到：先给"去环境页"，懒加载完成后响应式重算为 [创建环境]
+    void ensurePlatformMap();
+    return 'goto';
+  }
+  return platformMap.value[t.engine] ? 'setup' : 'goto';
+}
+
+function gotoEnvs(t: TaskRecord) {
+  if (t.engine) void router.push({ path: '/envs', query: { focus: t.engine } });
+  else void router.push('/envs');
+}
+
+async function onCreateEnv(t: TaskRecord) {
+  const engine = t.engine;
+  if (!engine || setupSubmitted.value.has(engine)) return;
+  try {
+    const refVal = await envSetup(engine);
+    setupSubmitted.value.add(engine);
+    // 复用全局任务链路：新 env_setup 任务进抽屉跟踪
+    tasksStore.track(refVal, { target: engine, retryFn: () => envSetup(engine) });
+  } catch (err) {
+    if ((err as { response?: { status?: number } }).response?.status === 409) {
+      toast.warning('该环境已有任务在执行中');
+    } else {
+      toast.error((err as { message?: string })?.message || '提交创建环境任务失败');
+    }
+  }
+}
 
 /** 当前展开查看日志的任务 id（至多一个） */
 const expandedId = ref<string | null>(null);
@@ -115,6 +173,21 @@ function onDismiss(id: string) {
             <button v-if="t.status !== 'queued' && t.status !== 'running'" class="btn-ghost !px-2 !py-1 text-xs" @click="onDismiss(t.id)">
               忽略
             </button>
+          </div>
+
+          <!-- 修复动作：后端分类码驱动（仅 venv_missing/docker_missing 渲染，spec §4.4） -->
+          <div v-if="fixAction(t)" class="mt-2 flex flex-wrap items-center gap-2">
+            <template v-if="fixAction(t) === 'setup'">
+              <button
+                class="btn-primary !min-w-0 !px-2 !py-1 text-xs"
+                :disabled="setupSubmitted.has(t.engine ?? '')"
+                @click="onCreateEnv(t)"
+              >
+                {{ setupSubmitted.has(t.engine ?? '') ? '创建中…' : '创建环境' }}
+              </button>
+              <span class="text-xs text-slate-500">环境创建成功后，回到模型详情页点击启动</span>
+            </template>
+            <button v-else class="btn-ghost !px-2 !py-1 text-xs" @click="gotoEnvs(t)">去环境页</button>
           </div>
 
           <!-- 日志面板（数据源 = store，只读渲染） -->
