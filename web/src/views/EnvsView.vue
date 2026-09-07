@@ -1,9 +1,15 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { nextTick, onMounted, ref } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import { dockerDiagnose, envRemove, envSetup, envTargets } from '@/api/envs';
 import type { DockerBypassEntry, DockerDiagnose, DockerEnv, EnvTarget, UnmanagedTarget } from '@/api/types';
 import TaskButton from '@/components/common/TaskButton.vue';
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue';
+
+const route = useRoute();
+const router = useRouter();
+/** ?focus= 定位目标名（4s 后清除高亮） */
+const focusName = ref('');
 
 /**
  * 环境管理：拉取 targets（venv 安装状态），Setup 走 TaskButton（异步 28min+），
@@ -99,7 +105,21 @@ async function copyText(key: string, text: string) {
   }
 }
 
-onMounted(load);
+onMounted(async () => {
+  await load();
+  const f = route.query.focus;
+  if (typeof f !== 'string' || !f) return;
+  // 用后即清：刷新/前进后退不再重复滚动
+  void router.replace({ query: {} });
+  focusName.value = f;
+  await nextTick();
+  // 引擎行优先；查不到行（如纯 docker 语境）退回旁路区块
+  const el = document.getElementById(`env-row-${f}`) ?? document.getElementById('docker-bypass');
+  el?.scrollIntoView({ block: 'center' });
+  window.setTimeout(() => {
+    if (focusName.value === f) focusName.value = '';
+  }, 4000);
+});
 </script>
 
 <template>
@@ -127,7 +147,13 @@ onMounted(load);
           </tr>
         </thead>
         <tbody>
-          <tr v-for="t in targets" :key="t.name" class="border-b border-slate-800/40">
+          <tr
+            v-for="t in targets"
+            :id="`env-row-${t.name}`"
+            :key="t.name"
+            class="border-b border-slate-800/40 transition-colors"
+            :class="focusName === t.name ? 'bg-amber-500/10' : ''"
+          >
             <td class="px-3 py-2 font-mono text-slate-100">{{ t.name }}</td>
             <td class="px-3 py-2">
               <span
@@ -174,7 +200,12 @@ onMounted(load);
     </section>
 
     <!-- Docker 旁路：托管 venv 仅支持 Linux，已支持引擎可改用官方 docker 镜像 -->
-    <section v-if="dockerBypass.length" class="card space-y-3">
+    <section
+      v-if="dockerBypass.length"
+      id="docker-bypass"
+      class="card space-y-3 transition-shadow"
+      :class="focusName && !targets.some((t) => t.name === focusName) ? 'ring-1 ring-amber-400/60' : ''"
+    >
       <div class="flex flex-wrap items-start justify-between gap-2">
         <div>
           <h2 class="text-sm font-medium text-slate-200">Docker 旁路</h2>
