@@ -133,6 +133,18 @@ def _model_summary(p) -> dict:
     }
 
 
+def _fail_task(task, exit_code: int, message: str, engine: str) -> None:
+    """失败收尾统一入口：附启动失败分类码，任务抽屉据此渲染修复动作。
+
+    分类只认 venv_missing/docker_missing（reconcile.classify_start_failure），
+    其余失败 code/engine 均为 None——宁缺毋滥。
+    """
+    from modelctl.core.cluster.reconcile import classify_start_failure
+
+    code, eng = classify_start_failure(message, engine)
+    task.error(exit_code=exit_code, message=message, code=code, engine=eng)
+
+
 async def _do_start(profile, caps, timeout: float, task, gpus: str | None) -> None:
     """在 worker 线程中执行启动，完成后更新 task。"""
     from modelctl.core.all_service import start_profile
@@ -150,7 +162,7 @@ async def _do_start(profile, caps, timeout: float, task, gpus: str | None) -> No
         result = await asyncio.to_thread(start_profile, profile, caps, timeout)
         task.update_detail(result.detail)
         if result.status == "error":
-            task.error(exit_code=1, message=result.detail)
+            _fail_task(task, 1, result.detail, profile.engine)
         else:
             task.complete()
     except Exception as exc:
@@ -159,11 +171,11 @@ async def _do_start(profile, caps, timeout: float, task, gpus: str | None) -> No
             from modelctl.engines.base import RequirementError
 
             if isinstance(exc, RequirementError):
-                task.error(exit_code=2, message=str(exc))
+                _fail_task(task, 2, str(exc), profile.engine)
             else:
-                task.error(exit_code=1, message=str(exc))
+                _fail_task(task, 1, str(exc), profile.engine)
         except ImportError:
-            task.error(exit_code=1, message=str(exc))
+            _fail_task(task, 1, str(exc), profile.engine)
     finally:
         # 恢复环境变量
         if gpus:
@@ -189,7 +201,7 @@ async def _do_restart(profile, caps, timeout: float, task, gpus: str | None) -> 
         result = await asyncio.to_thread(restart_profile, profile, caps, timeout)
         task.update_detail(result.detail)
         if result.status == "error":
-            task.error(exit_code=1, message=result.detail)
+            _fail_task(task, 1, result.detail, profile.engine)
         else:
             task.complete()
     except Exception as exc:
@@ -198,11 +210,11 @@ async def _do_restart(profile, caps, timeout: float, task, gpus: str | None) -> 
             from modelctl.engines.base import RequirementError
 
             if isinstance(exc, RequirementError):
-                task.error(exit_code=2, message=str(exc))
+                _fail_task(task, 2, str(exc), profile.engine)
             else:
-                task.error(exit_code=1, message=str(exc))
+                _fail_task(task, 1, str(exc), profile.engine)
         except ImportError:
-            task.error(exit_code=1, message=str(exc))
+            _fail_task(task, 1, str(exc), profile.engine)
     finally:
         if gpus:
             if prev_gpus is None:
