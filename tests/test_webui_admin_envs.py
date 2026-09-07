@@ -68,6 +68,11 @@ def test_list_envs_docker_env_and_bypass(admin_client):
 
     bypass = {e["name"]: e for e in body["docker_bypass"]}
     assert set(bypass) == {"vllm", "sglang", "aphrodite", "lmdeploy", "tokenspeed", "tensorrt_llm"}
+    # 指引常量表的键集合必须与能力矩阵单一事实来源严格一致（防两集合漂移）
+    from modelctl.core.envs import DOCKER_CAPABLE_ENGINES
+    from modelctl.core.webui.admin_envs import DOCKER_BYPASS_GUIDES
+
+    assert set(DOCKER_BYPASS_GUIDES) == set(DOCKER_CAPABLE_ENGINES)
     v = bypass["vllm"]
     assert v["docker_supported"] is True
     assert v["image_example"].startswith("vllm/vllm-openai:")

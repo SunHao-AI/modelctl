@@ -380,6 +380,8 @@ def test_platform_limitation_message_windows_managed(monkeypatch):
     msg = envs.platform_limitation_message("vllm")
     assert msg is not None
     assert "Linux" in msg and "vllm" in msg and "modelctl env setup" in msg
+    # 前端 EnvsView.onSetupError 依赖此固定关键字追加旁路引导，措辞变更须同步前端
+    assert "docker 镜像绕过" in msg
 
 
 def test_platform_limitation_message_unknown_target():
