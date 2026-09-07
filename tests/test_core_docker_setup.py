@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 
 import pytest
 
@@ -312,8 +314,9 @@ def test_merge_daemon_json_invalid_json(monkeypatch, tmp_path):
 
 
 def test_run_install_rejects_non_linux(monkeypatch):
+    """_install_linux 在非 Linux 平台直接拒绝（不再经由 dispatcher 自动探测）。"""
     monkeypatch.setattr(ds.sys, "platform", "win32")
-    assert ds.run_install() == 2
+    assert ds._install_linux() == 2
 
 
 def test_run_install_rejects_non_root(monkeypatch):
@@ -410,6 +413,53 @@ def test_check_dataclass_keeps_5_fields_match_windows_setup():
     ds_fields = {f.name for f in fields(ds.Check)}
     ws_fields = {f.name for f in fields(ws.Check)}
     assert ds_fields <= ws_fields, (ds_fields, ws_fields)
+
+
+# ---- run_install dispatcher（--os linux|windows 分派） ----
+
+
+def test_run_install_dispatcher_linux_default(monkeypatch):
+    """Linux 主机缺省调用 → 路由到 _install_linux（透传参数与退出码）。"""
+    monkeypatch.setattr(ds.sys, "platform", "linux")
+    called: dict = {}
+
+    def _fake_linux(registry_mirrors=None, max_downloads=None, on_stage=None):
+        called.update(registry_mirrors=registry_mirrors,
+                      max_downloads=max_downloads, on_stage=on_stage)
+        return 0
+
+    monkeypatch.setattr(ds, "_install_linux", _fake_linux)
+    assert ds.run_install(["https://m1"], 2) == 0
+    assert called["registry_mirrors"] == ["https://m1"]
+    assert called["max_downloads"] == 2
+
+
+def test_run_install_dispatcher_windows_hints_windows(monkeypatch):
+    """win32 主机 + os_hint=windows → 委托 windows_setup.run_install（透传参数与退出码）。"""
+    monkeypatch.setattr(ds.sys, "platform", "win32")
+    called: dict = {}
+
+    def _fake_ws_run_install(registry_mirrors=None, max_downloads=None, on_stage=None):
+        called.update(registry_mirrors=registry_mirrors,
+                      max_downloads=max_downloads, on_stage=on_stage)
+        return 0
+
+    fake_mod = types.ModuleType("modelctl.core.windows_setup")
+    fake_mod.run_install = _fake_ws_run_install
+    # 同时设置包属性 + sys.modules，确保 from modelctl.core import windows_setup 命中 mock
+    _core_pkg = sys.modules["modelctl.core"]
+    monkeypatch.setitem(sys.modules, "modelctl.core.windows_setup", fake_mod)
+    monkeypatch.setattr(_core_pkg, "windows_setup", fake_mod, raising=False)
+    assert ds.run_install(["https://mw"], 1, os_hint="windows") == 0
+    assert called["registry_mirrors"] == ["https://mw"]
+    assert called["max_downloads"] == 1
+
+
+def test_run_install_dispatcher_windows_on_linux_reject(monkeypatch):
+    """Linux 主机 + os_hint=windows → 平台门禁拒绝（return 2，不调 windows_setup）。"""
+    monkeypatch.setattr(ds.sys, "platform", "linux")
+    # 不 mock windows_setup.run_install（若 dispatcher 误调它，会真实执行 winget —— 视为回归）
+    assert ds.run_install(None, None, os_hint="windows") == 2
 
 
 if __name__ == "__main__":

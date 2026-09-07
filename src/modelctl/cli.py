@@ -197,6 +197,12 @@ def build_parser() -> argparse.ArgumentParser:
                     dest="max_concurrent_downloads",
                     help="env setup docker：daemon.json max-concurrent-downloads（默认 2，"
                          "调小可缓解大 layer 并发互抢跨境链路导致的拉取中断；传 0 保留现值）")
+    # docker 专用跨平台：--os 指定目标 OS；缺省按本机平台。跨平台时仅可预览安装
+    # 脚本，跨平台 --run 一律拒绝（Docker Desktop / apt 安装与目标 OS 强绑定）。
+    ep.add_argument("--os", choices=["linux", "windows"], default=None,
+                    dest="os",
+                    help="env setup docker：目标操作系统（缺省按 sys.platform）；"
+                         "跨平台时可预览安装脚本，跨平台 --run 被拒绝")
     # ── 集群管理面（设计文档 §4.2 M0 子集：init/join/nodes/status/join-token）──
     cp = sub.add_parser("cluster", help="分布式集群管理面（单中心 + worker 注册）")
     csub = cp.add_subparsers(dest="action", required=True)
@@ -1035,9 +1041,12 @@ def _cmd_env_setup(args, models_dir: Path | None, caps) -> int:
     return 0
 
 
-def _print_docker_checks() -> bool:
-    """打印 Docker 诊断结果表，返回是否全部就绪。"""
-    checks = docker_setup.diagnose()
+def _print_docker_checks(diagnose_fn) -> bool:
+    """打印 Docker 诊断结果表，返回是否全部就绪。
+
+    diagnose_fn: 平台对应的诊断函数（docker_setup.diagnose 或 windows_setup.diagnose）。
+    """
+    checks = diagnose_fn()
     all_ok = all(c.ok for c in checks)
     for c in checks:
         state = "正常" if c.ok else "无响应"
@@ -1049,23 +1058,68 @@ def _print_docker_checks() -> bool:
 
 
 def _cmd_env_setup_docker(args) -> int:
-    """env setup docker：诊断 + 安装指引；--run 时实际执行（Linux + root）。"""
+    """env setup docker：诊断 + 安装指引；--run 时按 --os 分派执行（Linux+root / Windows）。
+
+    --os 缺省按本机平台（sys.platform），跨平台时仅可预览安装脚本，
+    跨平台 --run 一律拒绝（Docker 安装与目标 OS 强绑定）。
+    跨平台 diagnose 在本机不可靠（Linux 主机无法跑 wsl --version 等），
+    因此 preview 模式仅走 render_instructions，不执行 diagnose。
+    """
+    host_os = "windows" if sys.platform == "win32" else "linux"
+    target_os = getattr(args, "os", None) or host_os
+    mirrors = getattr(args, "registry_mirrors", None)
+    limit = getattr(args, "max_concurrent_downloads", None)
+
+    # 平台选择渲染器与诊断（本函数内本地导入，避免模块顶层循环依赖）
+    if target_os == "windows":
+        from modelctl.core import windows_setup as _ws
+        render = _ws.render_instructions
+        diagnose = _ws.diagnose
+    else:
+        render = docker_setup.render_instructions
+        diagnose = docker_setup.diagnose
+
+    cross_platform = target_os != host_os
+
+    # --- 跨平台：仅预览安装脚本，不 diagnose（本主机无法可靠跨平台探测） ---
+    if cross_platform and not args.run:
+        print(_table_paint(
+            f"跨平台预览（本机={host_os}，目标={target_os}；仅打印安装指引，不执行探测）：",
+            "WARNING"))
+        print(render(mirrors, limit))
+        print(_table_paint(
+            f"在目标 {target_os} 主机上执行：modelctl env setup docker --os={target_os} --run",
+            "DIM"))
+        return 0
+
+    # --- 跨平台 --run：硬拒（stderr 精确文案） ---
+    if cross_platform and args.run:
+        if target_os == "windows":
+            sys.stderr.write(
+                f"Windows 安装路径仅 Windows 主机可 --run，当前平台 {sys.platform!r}\n")
+        else:
+            sys.stderr.write(
+                f"Linux 安装路径仅 Linux 主机可 --run，当前平台 {sys.platform!r}\n")
+        return 2
+
+    # --- 同平台：先诊断 ---
     print(_table_paint("Docker 环境诊断：", "SECTION"))
-    all_ok = _print_docker_checks()
+    all_ok = _print_docker_checks(diagnose)
     if all_ok and not args.run:
         print(_table_paint("Docker 环境已就绪，无需安装", "SUCCESS"))
         return 0
-    mirrors = getattr(args, "registry_mirrors", None)
-    limit = getattr(args, "max_concurrent_downloads", None)
     if not args.run:
         print(_table_paint("\n未就绪项的安装指引（可直接复制到 root shell）：", "WARNING"))
-        print(docker_setup.render_instructions(mirrors, limit))
-        print(_table_paint("或自动执行：modelctl env setup docker --run", "DIM"))
+        print(render(mirrors, limit))
+        print(_table_paint(f"或自动执行：modelctl env setup docker --os={target_os} --run", "DIM"))
         return 0
     print(_table_paint(
-        f"开始自动安装（--run），registry-mirrors："
+        f"开始自动安装（--run，os={target_os}），registry-mirrors："
         f"{', '.join(docker_setup.resolve_registry_mirrors(mirrors))}", "SECTION"))
-    return docker_setup.run_install(mirrors, limit)
+    if target_os == "windows":
+        from modelctl.core import windows_setup as _ws
+        return _ws.run_install(mirrors, limit)
+    return docker_setup.run_install(mirrors, limit, os_hint=target_os)
 
 
 def _cmd_env_list(args, models_dir: Path | None, caps) -> int:

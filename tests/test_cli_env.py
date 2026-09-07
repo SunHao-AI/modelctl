@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from modelctl import cli
@@ -256,6 +258,7 @@ def test_parser_env_setup_docker_mirror_default_none():
 
 def test_env_setup_docker_not_dispatch_to_envs_setup(monkeypatch):
     """docker 分支绝不能落到托管 venv 的 envs_setup。"""
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(
         cli, "envs_setup",
         lambda engine, **kw: (_ for _ in ()).throw(AssertionError("docker 不应走 envs_setup")),
@@ -266,6 +269,7 @@ def test_env_setup_docker_not_dispatch_to_envs_setup(monkeypatch):
 
 def test_cmd_env_setup_docker_all_ok(monkeypatch, capsys):
     from modelctl.core.docker_setup import Check
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(cli.docker_setup, "diagnose", lambda: [
         Check("docker_cli", "docker CLI", True, ""),
         Check("nvidia_toolkit", "toolkit", True, ""),
@@ -278,6 +282,7 @@ def test_cmd_env_setup_docker_all_ok(monkeypatch, capsys):
 def test_cmd_env_setup_docker_prints_instructions(monkeypatch, capsys):
     """缺依赖且无 --run → 只打印指引，不调 run_install。"""
     from modelctl.core.docker_setup import Check
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(cli.docker_setup, "diagnose", lambda: [
         Check("docker_cli", "docker CLI", False, "docker 命令不在 PATH"),
     ])
@@ -286,7 +291,7 @@ def test_cmd_env_setup_docker_prints_instructions(monkeypatch, capsys):
                         lambda mirrors=None, limit=None: called.update(
                             mirrors=mirrors, limit=limit) or "SCRIPT")
     monkeypatch.setattr(cli.docker_setup, "run_install",
-                        lambda mirrors=None, limit=None: (_ for _ in ()).throw(AssertionError("不该执行安装")))
+                        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("不该执行安装")))
     assert cli._cmd_env_setup(_docker_args(mirrors=["https://m"]), None, None) == 0
     out = capsys.readouterr().out
     assert "SCRIPT" in out
@@ -296,12 +301,13 @@ def test_cmd_env_setup_docker_prints_instructions(monkeypatch, capsys):
 def test_cmd_env_setup_docker_run_delegates(monkeypatch, capsys):
     """--run → 委托 docker_setup.run_install 并透传镜像列表与退出码。"""
     from modelctl.core.docker_setup import Check
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(cli.docker_setup, "diagnose", lambda: [
         Check("docker_cli", "docker CLI", False, ""),
     ])
     called: dict = {}
     monkeypatch.setattr(cli.docker_setup, "run_install",
-                        lambda mirrors=None, limit=None: called.update(
+                        lambda mirrors=None, limit=None, **kw: called.update(
                             mirrors=mirrors, limit=limit) or 5)
     assert cli._cmd_env_setup(_docker_args(run=True, mirrors=["https://x"]), None, None) == 5
     assert called["mirrors"] == ["https://x"]
@@ -312,12 +318,13 @@ def test_cmd_env_setup_docker_run_delegates(monkeypatch, capsys):
 def test_cmd_env_setup_docker_passes_limit(monkeypatch, capsys):
     """--max-concurrent-downloads 原样透传（含 0 = 保留现值的语义）。"""
     from modelctl.core.docker_setup import Check
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(cli.docker_setup, "diagnose", lambda: [
         Check("docker_cli", "docker CLI", False, ""),
     ])
     called: dict = {}
     monkeypatch.setattr(cli.docker_setup, "run_install",
-                        lambda mirrors=None, limit=None: called.update(limit=limit) or 0)
+                        lambda mirrors=None, limit=None, **kw: called.update(limit=limit) or 0)
     assert cli._cmd_env_setup(_docker_args(run=True, limit=0), None, None) == 0
     assert called["limit"] == 0
 
@@ -333,3 +340,85 @@ def test_cmd_env_list_includes_docker_status(monkeypatch, capsys):
 
 class _Args_empty:
     pass
+
+
+# ---- env setup docker --os（dispatcher 上层 CLI 分派 + 跨平台预览/拒绝） ----
+
+
+def _docker_os_args(run: bool = False, mirrors: list[str] | None = None,
+                    limit=None, os_hint: str | None = None):
+    """构造带 --os 字段的 docker 参数对象（复用既有行为字段）。"""
+    class _Args:
+        engine = "docker"
+        wheels = None
+        offline = False
+    a = _Args()
+    a.run = run
+    a.registry_mirrors = mirrors
+    a.max_concurrent_downloads = limit
+    a.os = os_hint
+    return a
+
+
+def test_parser_env_setup_docker_os_flag():
+    """--os=windows → args.os=='windows'；无 --os → None；--os=macos → argparse 拒。"""
+    args = cli.build_parser().parse_args(["env", "setup", "docker", "--os", "windows"])
+    assert args.os == "windows"
+    assert cli.build_parser().parse_args(["env", "setup", "docker"]).os is None
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["env", "setup", "docker", "--os", "macos"])
+
+
+def test_env_setup_docker_os_linux_preview_cross_platform(monkeypatch, capsys):
+    """Windows host + --os=linux 无 --run → 只打印 Linux 安装指引，不调 run_install。
+
+    跨平台预览模式仅走 render_instructions（本主机无法对 Linux 目标做可靠的
+    Windows 诊断），因此短路 render 后 return 0，不触碰 diagnose/run_install。
+    """
+    # 模拟 Windows 主机（本测试机无论真实平台都强制该场景，保证确定性）
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(
+        cli.docker_setup, "render_instructions",
+        lambda mirrors=None, limit=None: "apt-get install docker-ce",
+    )
+    monkeypatch.setattr(
+        cli.docker_setup, "run_install",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("跨平台预览不该执行安装")),
+    )
+    rc = cli._cmd_env_setup(_docker_os_args(run=False, os_hint="linux"), None, None)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "apt-get install docker-ce" in out
+
+
+def test_env_setup_docker_os_linux_run_cross_platform_rejected(monkeypatch, capsys):
+    """Windows host + --os=linux --run → exit 2 + stderr 精确文案，不执行安装。"""
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(cli.docker_setup, "diagnose", lambda: [])
+
+    def _no_install(*a, **kw):
+        raise AssertionError("跨平台执行不该落到 run_install")
+
+    monkeypatch.setattr(cli.docker_setup, "run_install", _no_install)
+    rc = cli._cmd_env_setup(_docker_os_args(run=True, os_hint="linux"), None, None)
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "Linux 安装路径仅 Linux 主机可 --run" in err
+
+
+def test_env_setup_docker_os_windows_run_cross_platform_rejected(monkeypatch, capsys):
+    """Linux CI host + --os=windows --run → exit 2 + stderr 精确文案，不执行安装。
+
+    通过 monkeypatch 强制 Linux 主机场景，保证在任意真实平台上断言结果确定（rc=2）。
+    """
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(cli.docker_setup, "diagnose", lambda: [])
+
+    def _no_install(*a, **kw):
+        raise AssertionError("跨平台执行不该落到 run_install")
+
+    monkeypatch.setattr(cli.docker_setup, "run_install", _no_install)
+    rc = cli._cmd_env_setup(_docker_os_args(run=True, os_hint="windows"), None, None)
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "Windows 安装路径仅 Windows 主机可 --run" in err

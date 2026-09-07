@@ -34,6 +34,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from loguru import logger
 
@@ -392,11 +393,16 @@ def _merge_daemon_json(registry_mirrors: list[str], max_downloads: int = 0) -> b
     return True
 
 
-def run_install(
+def _install_linux(
     registry_mirrors: list[str] | None = None,
     max_downloads: int | None = None,
+    on_stage: Callable[..., None] | None = None,
 ) -> int:
-    """实际执行安装（仅 Linux + root）。返回退出码。"""
+    """执行 Linux（apt 体系）安装（仅 Linux + root）。返回退出码。
+
+    on_stage 预留回调签名（与 windows_setup.run_install 对齐，供未来统一
+    SSE 阶段事件）；当前 Linux 路径走 loguru 日志，暂不 emit StageEvent。
+    """
     if not sys.platform.startswith("linux"):
         logger.error(f"Docker 自动安装仅支持 Linux 部署机（apt 体系），当前平台 {sys.platform!r} 请参考指引手动安装")
         return 2
@@ -420,3 +426,37 @@ def run_install(
     logger.info("Docker 环境安装完成；可执行 "
                 "`docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi` 验证 GPU 透传")
     return 0
+
+
+def run_install(
+    registry_mirrors: list[str] | None = None,
+    max_downloads: int | None = None,
+    os_hint: str | None = None,
+    on_stage: Callable[..., None] | None = None,
+) -> int:
+    """run_install 平台分派器（缺省 None 完全向后兼容）。
+
+    - os_hint 为 None：按 sys.platform 自动选（win32 → windows，否则 → linux），
+      与 Task 2 之前"按本机平台执行"的直觉一致；
+    - os_hint="linux"：仅 Linux 主机可执行，否则拒绝 return 2；
+    - os_hint="windows"：仅 win32 主机可执行，否则拒绝 return 2，
+      且委托 windows_setup.run_install（带回 on_stage 回调）；
+    - 其它值：未知 hint → return 2。
+
+    向后兼容保证：缺省调用（无 os_hint / on_stage）在 Linux 主机上路由到
+    _install_linux，行为与 Task 2 之前 100% 一致。
+    """
+    hint = os_hint or ("windows" if sys.platform == "win32" else "linux")
+    if hint == "windows":
+        if sys.platform != "win32":
+            logger.error(f"Windows 安装路径仅 Windows 主机可 --run，当前平台 {sys.platform!r}")
+            return 2
+        from modelctl.core import windows_setup
+        return windows_setup.run_install(registry_mirrors, max_downloads, on_stage)
+    if hint == "linux":
+        if not sys.platform.startswith("linux"):
+            logger.error(f"Linux 安装路径仅 Linux 主机可 --run，当前平台 {sys.platform!r}")
+            return 2
+        return _install_linux(registry_mirrors, max_downloads, on_stage)
+    logger.error(f"未知 os_hint: {hint!r}")
+    return 2
