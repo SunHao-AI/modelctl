@@ -69,6 +69,9 @@
 | 2026-09-06 | 后端 / 集群治理 | 事件 kind 词表守卫若 fail-fast，worker 一条未知 kind 就把 WS 循环打成 500 | 对端可控输入只能告警入库，fail-fast 只用于导入期自检与测试钉；`--cluster` 聚合中心不可达时报错退 2 而非静默回退本机视图（假报数据源比报错恶劣）。 | [backend/cluster-governance-backup.md](backend/cluster-governance-backup.md) |
 | 2026-09-06 | 后端 / 集群备份 | 在线替换自身运行库：restore 若走 REST 等于让进程抽掉自己的地基 | restore 只留 CLI 且前置 `is_running(WEBUI_INSTANCE)` 判停；备份用 sqlite3 backup API 热备不阻写，落盘后必须 sha256 对账（传输损坏在恢复时才炸就晚了）。 | [backend/cluster-governance-backup.md](backend/cluster-governance-backup.md) |
 | 2026-09-06 | 后端 / 集群治理 | enable 只清 disabled 位不回写 status，台账永久卡 disabled（gate 拒下发、UI 显示已停用） | 反操作必须对称：disable 连带改写的派生列，enable 要显式恢复且不能指望后台 sweep（它把 disabled 当终态跳过）；重算阈值逐条镜像 `sweep_expired`。 | [backend/cluster-governance-backup.md](backend/cluster-governance-backup.md) |
+| 2026-09-07 | 后端 / SSE | 后端发 `event:` 命名事件，前端只监听 `message` —— 流连上了却永远收不到数据 | EventSource 的 onmessage 只派发无名/`message` 帧；命名事件必须逐个 `addEventListener(name)` 配对；叠加 SSE URL 漏拼 `?key=` 的 401 只触发 error 事件被静默吞掉，"连接 200"不能当 SSE 生效的证据。 | [backend/sse-named-events.md](backend/sse-named-events.md) |
+| 2026-09-07 | 前端 / 响应式 | `ref<T[]>` 深代理：闭包捕获入列前的 raw 对象，SSE 回调写入全部丢响应式 | 依赖追踪只认代理路径读写；unshift 后必须 `tasks.value[idx(id)]` 回读代理再交给长期闭包，否则同一 attachStream 在 track/bootstrap 两条链路响应式分裂（写 raw 不报错不刷新）。 | [frontend/reactive-proxy-in-closure.md](frontend/reactive-proxy-in-closure.md) |
+| 2026-09-07 | 前端 / 响应式 | 驱动时间 computed 的 tick 被自己的 watch 提前停表，phase 永久卡终态 | finalize 当轮 getter 变 false 即 clearInterval，now 冻结使 `now-finishedAt<2000` 恒真、computed 依赖全冻结 → 按钮永久禁点；修复：watch getter 终态分支继续读 `now`，把 tick 存活期延到结果窗结束、同轮原子停表。 | [frontend/computed-tick-timing.md](frontend/computed-tick-timing.md) |
 
 ## 目录约定
 
