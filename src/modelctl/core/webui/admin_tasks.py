@@ -132,7 +132,14 @@ class Task:
         self.finished_at = _now_iso()
         self.event("done", {"status": "success", "exit_code": 0, "task_id": self.id})
 
-    def error(self, exit_code: int = 1, message: str = "", *, code: str | None = None, engine: str | None = None) -> None:
+    def error(
+        self,
+        exit_code: int = 1,
+        message: str = "",
+        *,
+        code: str | None = None,
+        engine: str | None = None,
+    ) -> None:
         """标记任务失败并广播 done 事件。exit_code: 2=配置错误, 1=运行错误。
 
         code/engine 为可选失败分类码（reconcile.classify_start_failure 产出），
