@@ -56,7 +56,7 @@ certutil -addstore -f ROOT ca.crt
 - `-f` 覆盖旧版本（续签根 CA 后重导用）；弹窗确认"是否安装证书"选"是"。
 - 图形界面等价：双击 `ca.crt` → 安装证书 → 本地计算机 → 将所有的证书都放入下列存储 → 浏览选"受信任的根证书颁发机构"。
 - 删除旧条目：`certutil -delstore ROOT "modelctl-internal-CA"`。
-- 仅当前用户信任（不需管理员）：把 `ROOT` 换成 `Root` 前先确认策略允许；受管控的企业终端通常只允许机器级存储。
+- 仅当前用户信任（不需管理员）：加 `-user` 标志——`certutil -addstore -f -user ROOT ca.crt`（存储名仍是 `ROOT`，上文不带 `-user` 的写法是机器级存储，需管理员权限）；受管控的企业终端通常只允许机器级存储。
 
 ### Linux（Debian / Ubuntu 系）
 
