@@ -125,12 +125,16 @@ ERROR_CLASSES: tuple[str, ...] = (
 
 #: 有序子串规则表：先具体后笼统。`[gpu_lock]` 带方括号前缀（gpu_lock.py 的报错格式），
 #: 必须早于 `gpu_list`（profile 字段名），否则"卡位被占"会被误判成"profile 写错"。
+#: 同理 `Docker 环境未就绪`（docker_setup 统一文案）同时包含 `环境未就绪`，必须早于
+#: 该 venv 规则，否则配了 docker_image 但 docker 缺失的失败会被判成 venv_missing，
+#: 把 Windows 用户引导去建 Windows 上不可用的托管 venv。
 _ERROR_RULES: tuple[tuple[str, str], ...] = (
     ("[gpu_lock]", "gpu_lock"),
     ("gpu_list", "profile_invalid"),
     ("端口", "port_conflict"),
     ("专用环境未创建", "venv_missing"),
     ("PATH 中找不到", "venv_missing"),
+    ("Docker 环境未就绪", "docker_missing"),
     ("未安装", "venv_missing"),
     ("环境未就绪", "venv_missing"),
     ("显存不足", "oom"),
@@ -160,6 +164,25 @@ def classify_error(detail: str) -> str:
         if needle in text:
             return cls
     return "runtime_capability"
+
+
+#: 启动失败中"WebUI 能给出修复入口"的错误码（与前端 TaskDrawer 的修复动作一一对应）
+_ACTIONABLE_CODES = frozenset({"docker_missing", "venv_missing"})
+
+
+def classify_start_failure(detail: str, engine: str) -> tuple[str | None, str | None]:
+    """模型启动失败详情 → (错误码, 相关引擎)；不可归类时 (None, None)。
+
+    与 classify_error 共享 _ERROR_RULES（单一关键字源），但语义相反：classify_error
+    给集群中心做兜底归类（未知→runtime_capability），本函数只在"命中首个规则且该码
+    可操作"时才给码——宁缺毋滥，绝不在端口冲突/OOM 等失败上挂出误导性的"创建环境"
+    按钮。engine 由调用方从 profile.engine 直传，不从 detail 猜测。
+    """
+    text = detail or ""
+    for needle, code in _ERROR_RULES:
+        if needle in text:
+            return (code, engine) if code in _ACTIONABLE_CODES else (None, None)
+    return (None, None)
 
 
 def _raw_of(text: str) -> dict[str, Any]:

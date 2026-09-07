@@ -27,6 +27,7 @@ from modelctl.core.cluster.reconcile import (
     Outcome,
     Reconciler,
     classify_error,
+    classify_start_failure,
     local_profile_paths,
     profile_sha_safe,
     runtime_readiness,
@@ -82,6 +83,33 @@ def test_classify_error_rules_in_priority_order(detail, expected):
 def test_classify_error_falls_back_to_runtime_capability():
     assert classify_error("") == "runtime_capability"
     assert classify_error("完全没见过的报错") == "runtime_capability"
+
+
+def test_classify_error_docker_missing_wins_over_venv():
+    """'Docker 环境未就绪' 同时含 '环境未就绪'，docker_missing 规则必须先命中
+    （否则 Windows 用户会被引导去建 Windows 不可用的托管 venv，spec §4.1）。"""
+    detail = (
+        "docker_image 已配置但 Docker 环境未就绪：docker 命令不在 PATH；"
+        "nvidia-smi 不在 PATH / nvidia-container-toolkit 未就绪"
+        "——执行 `modelctl env setup docker` 查看安装指引"
+    )
+    assert classify_error(detail) == "docker_missing"
+
+
+#: 启动失败分类：仅"WebUI 可给修复入口"的码才返回 (code, engine)
+@pytest.mark.parametrize("detail,engine,expected", [
+    ("vllm 的专用环境未创建，请先执行：modelctl env setup vllm", "vllm", ("venv_missing", "vllm")),
+    ("引擎 ollama 的二进制在 PATH 中找不到", "ollama", ("venv_missing", "ollama")),
+    ("llamacpp 未安装", "llamacpp", ("venv_missing", "llamacpp")),
+    ("docker_image 已配置但 Docker 环境未就绪：docker 命令不在 PATH", "vllm", ("docker_missing", "vllm")),
+    # 不可操作码与未命中一律 (None, None)：绝不在端口冲突/OOM 上挂"创建环境"按钮
+    ("端口 8101 已被占用（nginx:80）", "vllm", (None, None)),
+    ("显存不足：需要 80GiB，实际 40GiB", "vllm", (None, None)),
+    ("", "vllm", (None, None)),
+    ("完全没见过的报错", "vllm", (None, None)),
+])
+def test_classify_start_failure(detail, engine, expected):
+    assert classify_start_failure(detail, engine) == expected
 
 
 def test_runtime_readiness_managed_engine_with_venv():
