@@ -30,6 +30,10 @@ export interface TaskDoneEvent {
   exit_code: number;
   message?: string;
   task_id: string;
+  /** 失败分类码（后端 Task.error 携带；success 时无） */
+  code?: string;
+  /** 分类码关联引擎名 */
+  engine?: string;
 }
 
 /** 单个任务订阅句柄 */

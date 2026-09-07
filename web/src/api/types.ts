@@ -427,6 +427,10 @@ export interface TaskInfo {
   finished_at: string | null;
   /** 详情（进度描述 / 错误信息） */
   detail: string | null;
+  /** 失败分类码（venv_missing|docker_missing）；未分类时后端不携带 */
+  code?: string;
+  /** 分类码关联的引擎名（修复动作定位 env target / 环境页 focus） */
+  engine?: string;
   /** 内存环形日志（后端最多 500 行） */
   logs: string[];
 }

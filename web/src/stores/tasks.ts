@@ -46,6 +46,10 @@ export interface TaskRecord {
   startedAt: string;
   finishedAt: string;
   exitCode: number;
+  /** 失败分类码（与后端 Task.code 同名；修复动作渲染依据） */
+  code?: string;
+  /** 分类码关联引擎名 */
+  engine?: string;
   logs: string[];
   retryFn?: () => Promise<TaskRef>;
   onSuccess?: (detail?: string) => void;
@@ -72,6 +76,8 @@ function toRecord(t: TaskInfo): TaskRecord {
     startedAt: t.started_at,
     finishedAt: t.finished_at ?? '',
     exitCode: t.exit_code,
+    code: t.code,
+    engine: t.engine,
     logs: [...t.logs],
     stream: null,
     pollTimer: 0,
@@ -171,6 +177,8 @@ export const useTasksStore = defineStore('tasks', () => {
           cur.detail = info.detail ?? cur.detail;
           if (info.started_at && !cur.startedAt) cur.startedAt = info.started_at;
         } else {
+          cur.code = info.code;
+          cur.engine = info.engine;
           finalize(cur, info.status, info.detail ?? '', info.exit_code);
         }
       } catch (err) {
@@ -232,6 +240,8 @@ export const useTasksStore = defineStore('tasks', () => {
       },
       onDone: (evt) => {
         t.lastEventAt = Date.now();
+        t.code = evt.code;
+        t.engine = evt.engine;
         if (evt.status === 'success' || evt.status === 'skipped') {
           finalize(t, evt.status as TaskStatus, t.detail, evt.exit_code);
         } else {
