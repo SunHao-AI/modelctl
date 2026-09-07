@@ -74,6 +74,7 @@
 | 2026-09-07 | 前端 / 响应式 | 驱动时间 computed 的 tick 被自己的 watch 提前停表，phase 永久卡终态 | finalize 当轮 getter 变 false 即 clearInterval，now 冻结使 `now-finishedAt<2000` 恒真、computed 依赖全冻结 → 按钮永久禁点；修复：watch getter 终态分支继续读 `now`，把 tick 存活期延到结果窗结束、同轮原子停表。 | [frontend/computed-tick-timing.md](frontend/computed-tick-timing.md) |
 | 2026-09-07 | 后端 / 环境管理 | 平台限制文案承诺"走 docker 镜像绕过"，UI 却没有任何落地入口 | 能力矩阵必须落常量并由测试锚定实现（`DOCKER_CAPABLE_ENGINES`），未支持引擎只给 note 不造假 steps；只读 PATH 探测与子进程诊断分层，平台不支持的操作在按钮入口即禁用而非事后报错。 | [backend/docker-bypass-guide-single-source.md](backend/docker-bypass-guide-single-source.md) |
 | 2026-09-07 | 后端 / 网关鉴权 | 网关 /v1 端点匿名可白嫖 GPU，客户端带的 key 也被覆盖丢弃 | 数据面无任何凭据校验且公网 http 暴露，须三层加固：nginx map 常量比对 + 网关 fail-closed + 引擎 api-key（Ollama/TRT-LLM 引擎侧无能力，仅靠前两层兜底）。 | [backend/网关鉴权.md](backend/网关鉴权.md) |
+| 2026-09-07 | 后端 / 错误分类 | 失败提示指向 CLI 命令而 WebUI 已有同能力——指向错误的一端 | 解法是后端结构化错误码贯通任务事件（SSE done + to_dict 条件加键，向后兼容），前端按 code 渲染修复动作，绝不正则解析错误文案；含 `_ERROR_RULES` 包含先后顺序陷阱与 classify_error 兜底语义的相反区别。 | [backend/错误分类与修复引导.md](backend/错误分类与修复引导.md) |
 
 ## 目录约定
 
