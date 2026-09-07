@@ -25,6 +25,10 @@ const props = withDefaults(
     target: string;
     /** 按钮风格 */
     variant?: 'primary' | 'danger' | 'ghost';
+    /** 外部强制禁用（如当前平台不支持建托管 venv） */
+    disabled?: boolean;
+    /** 外部禁用原因（禁用态下作为按钮 title 展示） */
+    disabledReason?: string;
     /** 任务目标：点击后返回 TaskRef */
     taskTarget: () => Promise<TaskRef>;
     /** 成功回调（store 终态时触发） */
@@ -106,7 +110,7 @@ const text = computed(() => {
 
 /** 提交：调 taskTarget → track 到 store（store 终态时回调本组件 onSuccess/onError） */
 async function onClick() {
-  if (phase.value !== 'idle') return;
+  if (props.disabled || phase.value !== 'idle') return;
   submitting.value = true;
   let refVal: TaskRef;
   try {
@@ -153,8 +157,8 @@ async function onClick() {
       phase === 'fail' ? 'btn-danger' : variant === 'primary' ? 'btn-primary' : variant === 'danger' ? 'btn-danger' : 'btn-ghost',
       'min-w-24',
     ]"
-    :disabled="phase !== 'idle'"
-    :title="text"
+    :disabled="disabled || phase !== 'idle'"
+    :title="disabled && disabledReason ? disabledReason : text"
     @click="onClick"
   >
     <!-- 等待 spinner -->

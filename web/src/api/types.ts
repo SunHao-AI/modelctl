@@ -259,6 +259,42 @@ export interface EnvTarget {
   installed: boolean;
   /** 描述文本（python 版本 / 包数量等） */
   detail: string;
+  /** 当前运行平台是否支持建托管 venv（托管引擎仅 Linux；gateway 恒 true） */
+  platform_supported: boolean;
+  /** 适配器是否支持 docker_image 运行时（UI 据此决定能否走 Docker 旁路） */
+  docker_supported: boolean;
+}
+
+/** Docker 环境就绪探测（PATH 级，无子进程） */
+export interface DockerEnv {
+  ready: boolean;
+  /** 缺失项描述（docker CLI / toolkit），ready=true 时为空数组 */
+  missing: string[];
+  /** 缺失时的统一安装指引文案 */
+  guide: string;
+}
+
+/** 单引擎 Docker 旁路指引（支持时带 steps，否则仅 note） */
+export interface DockerBypassEntry {
+  name: string;
+  docker_supported: boolean;
+  /** 官方镜像示例（如 vllm/vllm-openai:<tag>） */
+  image_example?: string;
+  /** yaml 字段路径（如 vllm.docker_image） */
+  yaml_field_path?: string;
+  /** 仓库内可直接参考的示例 yaml 路径 */
+  example_yaml?: string;
+  /** 三步操作指引 */
+  steps?: string[];
+  /** 不支持时的说明文案 */
+  note?: string;
+}
+
+/** Docker 完整诊断（GET /envs/docker/diagnose） */
+export interface DockerDiagnose {
+  checks: Array<{ key: string; label: string; ok: boolean; detail: string }>;
+  /** 可复制到部署机 root shell 的安装脚本 */
+  instructions: string;
 }
 
 /** 非托管引擎（ollama / unsloth / llamacpp）安装情况，仅用于说明，不可 setup/remove */

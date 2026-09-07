@@ -1,9 +1,30 @@
 import client, { dataOf } from './client';
-import type { ActionResponse, EnvTarget, TaskRef, UnmanagedTarget } from './types';
+import type {
+  ActionResponse,
+  DockerBypassEntry,
+  DockerDiagnose,
+  DockerEnv,
+  EnvTarget,
+  TaskRef,
+  UnmanagedTarget,
+} from './types';
+
+/** envTargets 响应（docker_* 为旁路指引与环境探测） */
+export interface EnvTargetsResponse {
+  targets: EnvTarget[];
+  unmanaged?: UnmanagedTarget[];
+  docker_env?: DockerEnv;
+  docker_bypass?: DockerBypassEntry[];
+}
 
 /** 列出所有受管 venv target（managed engine + gateway）及其安装状态；unmanaged 为非托管引擎说明。 */
-export function envTargets(): Promise<{ targets: EnvTarget[]; unmanaged?: UnmanagedTarget[] }> {
-  return dataOf<{ targets: EnvTarget[]; unmanaged?: UnmanagedTarget[] }>(client.get('/envs'));
+export function envTargets(): Promise<EnvTargetsResponse> {
+  return dataOf<EnvTargetsResponse>(client.get('/envs'));
+}
+
+/** Docker 环境完整诊断（只读，按需触发；内含 15s 级子进程探测，勿在列表加载时调用）。 */
+export function dockerDiagnose(): Promise<DockerDiagnose> {
+  return dataOf<DockerDiagnose>(client.get('/envs/docker/diagnose'));
 }
 
 /**
