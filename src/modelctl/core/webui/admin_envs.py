@@ -22,14 +22,30 @@ admin_models._do_start 同款模式）；remove 是快速的 rmtree，同步返�
 from __future__ import annotations
 
 import asyncio
+import ctypes
+import datetime
+import json
+import subprocess
+import sys
+import threading
+import time
 
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 
-from modelctl.core.webui.admin_auth import require_auth
+from modelctl.core.webui.admin_auth import require_auth, require_auth_or_query
+from modelctl.core.webui.admin_tasks import TaskManager
 
 router = APIRouter()
+
+# —— Docker 一键安装（Windows-only）单例
+# 端点注册顺序：这 5 个精确路由必须在下方 `POST /{target}/setup` 之前注册，
+# 否则 `{target}` 路径参数会把 "docker" 吞进 setup 端点。
+docker_install_task_manager = TaskManager()
+_user_active_installs: dict[str, dict] = {}  # user_id -> {task_id, started_at}
+_DOCKER_DEDUP_WINDOW_SEC: float = 300.0     # 5 分钟去重窗
+_DOCKER_MAX_ACTIVE_PER_USER: int = 3
 
 # 非托管引擎：原生二进制 / 官方安装器 / 源码编译，不建 venv，因此不出现在 targets 表格里。
 # 仅用于在 UI 上说明「为什么这里看不到它们」并给出安装方式。
@@ -184,30 +200,336 @@ async def list_envs(_: None = Depends(require_auth)):
 
 
 @router.get("/docker/diagnose")
-async def docker_diagnose(_: None = Depends(require_auth)):
+async def docker_diagnose(
+    request: Request,
+    os: str | None = Query(default=None, description="目标 OS：\"linux\" | \"windows\"；缺省按 sys.platform"),
+    _: None = Depends(require_auth),
+):
     """GET /admin/api/envs/docker/diagnose — Docker 环境完整诊断（只读，按需触发）。
 
-    透传 ``docker_setup.diagnose()``（含 ``docker info`` 子进程，内建 15s 超时，
-    故走 to_thread 且仅由前端按钮按需调用）与 ``render_instructions()``（可复制的
-    root 安装脚本）。本端点绝不执行任何安装动作——实际安装仍只走既有 CLI 通道
-    ``modelctl env setup docker --run``。
+    ``os`` 缺省按 ``sys.platform`` 判分支：
+    - windows → 走 ``windows_setup.diagnose()``（winget / WSL2 / Docker Desktop /
+      GPU 冒烟 5 项），非 win32 主机 400 硬拒；
+    - linux   → 走 ``docker_setup.diagnose()``（含 ``docker info`` 子进程，15s 超时）。
+    本端点绝不执行任何安装动作——实际安装仍只走既有 CLI 通道或
+    ``POST /envs/docker/install``（异步任务）新端点。
     """
-    from modelctl.core import docker_setup
-
+    target_os = os or ("windows" if sys.platform == "win32" else "linux")
+    if target_os == "windows" and sys.platform != "win32":
+        return JSONResponse(
+            status_code=400,
+            content={"error": {
+                "code": "platform_mismatch",
+                "message": f"Windows 诊断仅 Windows 主机可执行，当前平台 {sys.platform!r}",
+            }},
+        )
+    if target_os not in ("linux", "windows"):
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "bad_os", "message": f"未知 os: {os!r}"}},
+        )
     try:
-        checks = await asyncio.to_thread(docker_setup.diagnose)
-        return {
-            "checks": [
-                {"key": c.key, "label": c.label, "ok": c.ok, "detail": c.detail} for c in checks
-            ],
-            "instructions": docker_setup.render_instructions(),
-        }
+        if target_os == "windows":
+            from modelctl.core import windows_setup
+            checks = await asyncio.to_thread(windows_setup.diagnose)
+            checks_out = [{"key": c.key, "label": c.label, "ok": c.ok,
+                           "detail": c.detail, "hint": c.hint} for c in checks]
+            instructions = ""  # Windows 分支不返回 shell 脚本（走 winget 弹窗）
+        else:
+            from modelctl.core import docker_setup
+            checks = await asyncio.to_thread(docker_setup.diagnose)
+            checks_out = [{"key": c.key, "label": c.label, "ok": c.ok, "detail": c.detail}
+                          for c in checks]
+            instructions = docker_setup.render_instructions()
+        return {"platform": target_os, "checks": checks_out, "instructions": instructions}
     except Exception as exc:  # noqa: BLE001 — 诊断失败统一 500（与同文件 remove_env 惯例一致）
         logger.exception(f"Docker 诊断异常: {exc}")
         return JSONResponse(
             status_code=500,
             content={"error": {"code": "internal", "message": f"诊断失败: {exc}"}},
         )
+
+
+# ---------------------------------------------------------------------------
+# Docker 一键安装（Windows-only）：install SSE / system-action / diagnose?os=
+# 5 端点，必须在 `POST /{target}/setup` 之前注册（`{target}` 会吞精确路径）。
+# ---------------------------------------------------------------------------
+
+# 二次 Depends(bearer_scheme) 让 FastAPI 注入凭据对象，用于派生 user_id
+# （require_auth 用的依赖返回 None，不能直接读 credentials）。
+from modelctl.core.webui.admin_auth import (  # noqa: E402
+    bearer_scheme as _docker_bearer,
+    HTTPAuthorizationCredentials as _HTTPCredentials,
+)
+
+
+@router.post("/docker/install")
+async def docker_install(
+    request: Request,
+    os_: str = Query(default="", alias="os", description="可省略，body.os 优先"),
+    credentials: _HTTPCredentials = Depends(_docker_bearer),
+    _: None = Depends(require_auth),
+):
+    """POST /admin/api/envs/docker/install — 异步触发 Docker 一键安装，返回 202 + task_id。
+
+    body 结构：``{"os": "linux"|"windows"(可选), "registry_mirrors": [...],
+    "max_concurrent_downloads": 0~8}``。``os`` 缺省按 ``sys.platform`` 判分支：
+
+    - 非 win32 主机 + ``os=windows`` → 400 platform_mismatch（浏览器点按钮场景最常见）。
+    - 同一 user_id 在 5 分钟窗口内已有活跃 task → 直接返回原 task_id +
+      ``already_running: true``（不新建任务，前端刷新不会重复开线程）。
+    - 同一 user_id 未完成任务已达上限 → 429 rate_limited。
+    - 其它情况 → 建新 task，后台线程跑 ``windows_setup.run_install``（os=windows）
+      或 ``docker_setup.run_install``（os=linux），逐 stage 通过
+      ``task.event("stage", ev.to_sse_dict())`` 广播给 SSE 订阅者。
+    """
+    from modelctl.core.webui.admin_tasks import TaskManager as _TM  # noqa: F401 — 仅为类型提示
+    from modelctl.core.windows_setup import _ts_now as _ts_now_win
+
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 — 空 body 视为 {}
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    target_os = body.get("os") or os_ or ("windows" if sys.platform == "win32" else "linux")
+    if target_os == "windows" and sys.platform != "win32":
+        return JSONResponse(
+            status_code=400,
+            content={"error": {
+                "code": "platform_mismatch",
+                "message": f"Windows 安装仅 Windows 主机可执行（当前 {sys.platform!r}），"
+                            "请在本机浏览器上操作",
+            }},
+        )
+    if target_os not in ("linux", "windows"):
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "bad_os", "message": f"未知 os: {target_os!r}"}},
+        )
+
+    user_id = credentials.credentials if credentials and credentials.credentials else "anonymous"
+
+    # 去重窗：同一 user 5 分钟内已有活跃 task → 直接复用
+    existing = _user_active_installs.get(user_id)
+    if existing:
+        elapsed = time.time() - float(existing.get("started_at") or 0)
+        if elapsed < _DOCKER_DEDUP_WINDOW_SEC:
+            prev = docker_install_task_manager.get_task(existing.get("task_id", ""))
+            if prev is not None:
+                return JSONResponse(
+                    status_code=202,
+                    content={
+                        "task_id": prev.id,
+                        "events": f"/admin/api/envs/docker/install/{prev.id}/events",
+                        "os": target_os,
+                        "already_running": True,
+                    },
+                )
+            # prev 已被 trim 但没有清去重状态：清掉让下一请求可以创建新任务
+            _user_active_installs.pop(user_id, None)
+
+    # 每用户 max 未完成任务数
+    active_count = sum(
+        1 for t in docker_install_task_manager.list_tasks(limit=200)
+        if t.target == f"docker:{target_os}" and t.status in ("queued", "running")
+    )
+    if active_count >= _DOCKER_MAX_ACTIVE_PER_USER:
+        return JSONResponse(
+            status_code=429,
+            content={"error": {"code": "rate_limited",
+                                "message": f"用户 {user_id} 未完成的 docker install 已达 {active_count} 任务，请稍后再试"}},
+        )
+
+    task = docker_install_task_manager.create_task(
+        kind="docker", action="install", target=f"docker:{target_os}"
+    )
+    registry_mirrors = body.get("registry_mirrors") or []
+    max_downloads = body.get("max_concurrent_downloads", 0) or 0
+    if not isinstance(max_downloads, int) or max_downloads < 0 or max_downloads > 8:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "bad_body",
+                                "message": "max_concurrent_downloads 必须为 0-8 的整数"}},
+        )
+
+    _user_active_installs[user_id] = {
+        "task_id": task.id,
+        "started_at": time.time(),
+        "os": target_os,
+    }
+
+    thread = threading.Thread(
+        target=_run_docker_install_task,
+        kwargs={"task": task, "target_os": target_os,
+                "registry_mirrors": registry_mirrors, "max_downloads": max_downloads,
+                "user_id": user_id},
+        daemon=True,
+    )
+    thread.start()
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "task_id": task.id,
+            "events": f"/admin/api/envs/docker/install/{task.id}/events",
+            "os": target_os,
+        },
+    )
+
+
+def _run_docker_install_task(task, target_os: str,
+                              registry_mirrors: list[str], max_downloads: int,
+                              user_id: str) -> None:
+    """后台线程：调用 windows_setup / docker_setup 的 run_install，逐 stage 广播。
+
+    线程与 FastAPI 事件循环解耦（daemon）：客户端 SSE 断开不 kill 子进程，
+    winget / docker 会继续跑完（可能半吊子，但不会残留半成品 Desktop）。
+    ``user_id`` 仅用于在 finally 里精确清掉本任务占用的去重窗条目，
+    避免误删同用户后续任务。
+    """
+    task.update_status("running")
+    try:
+        if target_os == "windows":
+            from modelctl.core import windows_setup
+            runner = windows_setup.run_install
+
+            def _on_stage(ev):
+                task.event("stage", ev.to_sse_dict())
+
+            rc = runner(registry_mirrors, max_downloads, on_stage=_on_stage)
+        else:
+            from modelctl.core import docker_setup
+            docker_setup.run_install(registry_mirrors, max_downloads, on_stage=None)
+            rc = 0  # _install_linux 无返回值；此分支保留兼容
+        if rc == 0:
+            task.complete()
+        else:
+            task.error(exit_code=rc, message=f"docker install 退出码 {rc}")
+    except Exception as exc:  # noqa: BLE001 — 后台线程异常统一标记 error
+        logger.exception(f"docker install 线程异常: {exc}")
+        task.error(exit_code=1, message=f"异常: {exc}")
+    finally:
+        # 精确清去重窗：只清匹配 task_id 的条目
+        info = _user_active_installs.get(user_id)
+        if info and info.get("task_id") == task.id:
+            _user_active_installs.pop(user_id, None)
+
+
+@router.get("/docker/install/{task_id}/events")
+async def docker_install_events(
+    task_id: str,
+    key: str = Query(default=""),
+    _: None = Depends(require_auth_or_query),
+):
+    """GET /admin/api/envs/docker/install/{task_id}/events — SSE 流。
+
+    复用 ``admin_router._sse_task_stream`` 同款模式：先 flush 已有 logs + 当前
+    status，再实时广播；10s 心跳保活；收到 ``done`` 立即结束。
+    """
+    task = docker_install_task_manager.get_task(task_id)
+    if task is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "not_found", "message": f"install task {task_id} 不存在或已过期"}},
+        )
+    from modelctl.core.webui.admin_router import _sse_task_stream
+
+    return StreamingResponse(
+        _sse_task_stream(task),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/docker/install/{task_id}")
+async def docker_install_status(
+    task_id: str,
+    _: None = Depends(require_auth),
+):
+    """GET /admin/api/envs/docker/install/{task_id} — 只读状态（无 logs 全文）。
+
+    SSE 断开后前端重连时的 fallback：仅返回 stage/done/last_ts 三字段，
+    不返回 logs 避免长 payload。
+    """
+    task = docker_install_task_manager.get_task(task_id)
+    if task is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "not_found", "message": f"install task {task_id} 不存在或已过期"}},
+        )
+    last_ts = task.finished_at or task.started_at or ""
+    # stage 从 detail 里还原（后台线程用 task.update_detail(stage) 写入）
+    return {
+        "task_id": task.id,
+        "stage": task.detail if isinstance(task.detail, str) else "unknown",
+        "done": task.status in ("success", "error"),
+        "status": task.status,
+        "last_ts": last_ts,
+    }
+
+
+@router.post("/docker/system-action")
+async def docker_system_action(
+    request: Request,
+    _: None = Depends(require_auth),
+):
+    """POST /admin/api/envs/docker/system-action — 引导卡片触发的系统动作（Windows-only）。
+
+    仅识别 3 个 action：
+    - ``open_desktop`` → ShellExecuteW explorer.exe ms-settings:developers
+    - ``restart``      → subprocess.Popen shutdown.exe /r /t 5
+    - ``verify``       → 405（永远走 GET /docker/diagnose 只读，禁止 POST 触发探测）
+
+    Windows-only：非 win32 一律 400 platform_mismatch。
+    """
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    action = body.get("action")
+    if action not in ("open_desktop", "restart", "verify"):
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "bad_action",
+                                "message": "action 必须为 open_desktop|restart|verify"}},
+        )
+    if action == "verify":
+        return JSONResponse(
+            status_code=405,
+            content={"error": {"code": "method_not_allowed",
+                                "message": "verify 请使用 GET /admin/api/envs/docker/diagnose?os=windows"}},
+        )
+    if sys.platform != "win32":
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "platform_mismatch",
+                                "message": f"{action} 仅 Windows 主机可用（当前 {sys.platform!r}）"}},
+        )
+    from modelctl.core.windows_setup import _ts_now as _ts_now_win
+
+    if action == "open_desktop":
+        ctypes.windll.shell32.ShellExecuteW(
+            None, "open", "explorer.exe", "ms-settings:developers", None, 1
+        )
+        executed = "explorer.exe ms-settings:developers"
+    elif action == "restart":
+        subprocess.Popen(
+            ["shutdown.exe", "/r", "/t", "5", "/c", "modelctl 正在重启以启用 WSL2 backend"],
+            close_fds=True,
+        )
+        executed = "shutdown.exe /r /t 5"
+    else:  # pragma: no cover — defensive
+        return JSONResponse(status_code=400,
+                            content={"error": {"code": "bad_action", "message": f"未知 action: {action!r}"}})
+    return {"executed": executed, "ts": _ts_now_win()}
 
 
 @router.post("/{target}/setup")
