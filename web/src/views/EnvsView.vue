@@ -99,6 +99,7 @@ onMounted(load);
                   v-if="!t.installed"
                   label="Setup"
                   variant="primary"
+                  :target="t.name"
                   :task-target="() => envSetup(t.name)"
                   @success="() => load()"
                   @error="(msg) => (notice = `${t.name} setup 失败：${msg}`)"

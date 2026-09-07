@@ -1,49 +1,38 @@
 <script setup lang="ts">
-import { ref } from 'vue';
-import { onBeforeUnmount } from 'vue';
-import { openTaskStream } from '@/api/tasks';
+import { computed, onScopeDispose, ref, watch } from 'vue';
+import { toast } from '@/utils/toast';
+import { useTasksStore } from '@/stores/tasks';
 import type { TaskRef } from '@/api/types';
 
 /**
- * 任务式按钮：点击 → 调 target() 拿 TaskRef → 订阅 SSE stream → 完成/失败
+ * 任务式按钮：点击 → 调 taskTarget() 拿 TaskRef → 交给 tasksStore 跟踪。
  *
- * 用法（模型/服务/环境）：
- *   <TaskButton
- *     label="启动"
- *     variant="primary"
- *     :task-target="() => startModel(name)"
- *     @success="onRefresh"
- *     @error="onError"
- *   />
+ * 状态完全由 store 派生（跨视图/刷新存活）：
+ *   - idle:        无该 target 的任务记录
+ *   - submitting:  本地瞬时态（已点尚未拿到 task_ref）
+ *   - running:     activityFor(target).status ∈ {queued, running}
+ *   - ok:          最近任务终态 success/skipped（完成后 2s 内显示，随后回 idle）
+ *   - fail:        最近任务终态 error（同上）
  *
- * 按钮文本随状态切换：
- *   - idle:        label
- *   - submitting:  提交中…
- *   - running:     执行中…
- *   - ok:          ✔ 完成
- *   - fail:        ✗ 失败
- * 完成 / 失败 2s 后回到 idle；失败会在 2s 内调用 onError；成功调用 onSuccess。
- *
- * 兜底：
- *   - 未拿到 task_ref / 后端返回结构异常 → 失败
- *   - SSE 5 分钟未完成 → 超时失败
+ * 用法：
+ *   <TaskButton label="启动" :target="name" :task-target="() => startModel(name)" @success="onRefresh" />
  */
 const props = withDefaults(
   defineProps<{
     /** 按钮默认文本 */
     label: string;
-    /** 按钮风格：primary / danger / ghost */
+    /** 目标名：profile / service / env（store 匹配键） */
+    target: string;
+    /** 按钮风格 */
     variant?: 'primary' | 'danger' | 'ghost';
     /** 任务目标：点击后返回 TaskRef */
     taskTarget: () => Promise<TaskRef>;
-    /** 成功回调（detail 来自后端 done 事件 / task 详情） */
+    /** 成功回调（store 终态时触发） */
     onSuccess?: (detail?: string) => void;
-    /** 失败回调：message 来自后端 error 事件 / 网络异常 */
+    /** 失败回调 */
     onError?: (message: string) => void;
   }>(),
-  {
-    variant: 'primary',
-  },
+  { variant: 'primary' },
 );
 
 const emit = defineEmits<{
@@ -51,144 +40,106 @@ const emit = defineEmits<{
   (e: 'error', message: string): void;
 }>();
 
+const tasksStore = useTasksStore();
+
+/** 该 target 的活动/最近任务 */
+const record = computed(() => tasksStore.activityFor(props.target));
+
+/** 本地瞬时提交态（响应式，computed 才能感知） */
+const submitting = ref(false);
+
+/**
+ * 当前时间戳：仅在存在活动任务时每 500ms 刷新（驱动"完成后 2s 回 idle"的结果窗）；
+ * 无活动任务时定时器停止，phase 稳定回 idle，避免常驻定时器。
+ */
+const now = ref(Date.now());
+let tickId: number | undefined;
+watch(
+  () => {
+    const r = record.value;
+    return !!r && (r.status === 'queued' || r.status === 'running');
+  },
+  (active) => {
+    if (active && tickId === undefined) {
+      tickId = window.setInterval(() => (now.value = Date.now()), 500);
+    } else if (!active && tickId !== undefined) {
+      clearInterval(tickId);
+      tickId = undefined;
+    }
+  },
+  { immediate: true },
+);
+onScopeDispose(() => {
+  if (tickId !== undefined) clearInterval(tickId);
+});
+
 type Phase = 'idle' | 'submitting' | 'running' | 'ok' | 'fail';
-const text = ref<string>(props.label);
-const phase = ref<Phase>('idle');
+const phase = computed<Phase>(() => {
+  if (submitting.value) return 'submitting';
+  const r = record.value;
+  if (!r) return 'idle';
+  if (r.status === 'queued' || r.status === 'running') return 'running';
+  // 终态：完成后 2s 内显示结果，否则回 idle
+  if (!r.finishedAt) return 'idle';
+  const within = now.value - new Date(r.finishedAt).getTime() < 2000;
+  if (!within) return 'idle';
+  return r.status === 'error' ? 'fail' : 'ok';
+});
 
-/** SSE 句柄；onBeforeUnmount 兜底 close */
-let streamHandle: { close(): void } | null = null;
-/** 5 分钟超时 timer */
-let timeoutId: number | undefined;
-/** 2s 复位 timer */
-let resetId: number | undefined;
+const text = computed(() => {
+  switch (phase.value) {
+    case 'submitting':
+      return '提交中…';
+    case 'running':
+      return '执行中…';
+    case 'ok':
+      return '✔ 完成';
+    case 'fail':
+      return '✗ 失败';
+    default:
+      return props.label;
+  }
+});
 
-/** 终态：ok / fail。统一关闭 stream 并延时复位 */
-function finalize(finalPhase: 'ok' | 'fail', message?: string, detail?: string) {
-  // 重复 finalize 忽略
-  if (phase.value === finalPhase) return;
-  phase.value = finalPhase;
-  text.value = finalPhase === 'ok' ? '✔ 完成' : '✗ 失败';
-  // 关闭 stream + 定时器
-  try {
-    streamHandle?.close();
-  } catch {
-    /* ignore */
-  }
-  streamHandle = null;
-  if (timeoutId !== undefined) {
-    clearTimeout(timeoutId);
-    timeoutId = undefined;
-  }
-  if (finalPhase === 'ok') {
-    try {
-      props.onSuccess?.(detail);
-      emit('success', detail);
-    } catch (err) {
-      console.warn('onSuccess 回调异常:', err);
-    }
-  } else {
-    try {
-      props.onError?.(message || '');
-      emit('error', message || '');
-    } catch (err) {
-      console.warn('onError 回调异常:', err);
-    }
-  }
-  // 2s 复位回 idle
-  if (resetId !== undefined) clearTimeout(resetId);
-  resetId = window.setTimeout(() => {
-    phase.value = 'idle';
-    text.value = props.label;
-    resetId = undefined;
-  }, 2000);
-}
-
-/** 解析 SSE 任务事件并推进状态 */
-function handleSseDone(evt: {
-  type: 'status' | 'log' | 'error' | 'done';
-  data: unknown;
-}) {
-  if (phase.value === 'idle' || phase.value === 'ok' || phase.value === 'fail') return;
-  const d = evt.data as
-    | { status?: string; exit_code?: number; message?: string; detail?: string }
-    | undefined;
-  if (evt.type === 'done') {
-    if (d?.status === 'success') {
-      finalize('ok', undefined, d?.detail || d?.message);
-    } else if (d?.status === 'error') {
-      // 后端 done 事件带 status="error" 时按失败处理
-      finalize('fail', d?.message || d?.detail || '执行失败');
-    } else {
-      // done 但无 status（旧版兼容）
-      finalize('ok', undefined, d?.detail || d?.message);
-    }
-  } else if (evt.type === 'error') {
-    finalize('fail', d?.message || d?.detail || '执行失败');
-  } else if (evt.type === 'status' || evt.type === 'log') {
-    // 收到第一个 status/log 视为真正开工
-    if (phase.value === 'submitting') {
-      phase.value = 'running';
-      text.value = '执行中…';
-    }
-  }
-}
-
-/** 点击主入口 */
+/** 提交：调 taskTarget → track 到 store（store 终态时回调本组件 onSuccess/onError） */
 async function onClick() {
   if (phase.value !== 'idle') return;
-  phase.value = 'submitting';
-  text.value = '提交中…';
-
-  let taskRef: TaskRef;
+  submitting.value = true;
+  let refVal: TaskRef;
   try {
-    taskRef = await props.taskTarget();
+    refVal = await props.taskTarget();
   } catch (err) {
-    finalize('fail', (err as { message?: string })?.message || '提交失败');
-    return;
-  }
-  // 后端返回结构损失
-  if (!taskRef?.task_id) {
-    finalize('fail', '后端未返回 task_id');
-    return;
-  }
-
-  phase.value = 'running';
-  text.value = '执行中…';
-
-  try {
-    streamHandle = openTaskStream(taskRef.task_id, {
-      onStep: (evt) => handleSseDone({ type: 'status', data: evt }),
-      onLog: (evt) => handleSseDone({ type: 'log', data: evt }),
-      onDone: (evt) => handleSseDone({ type: 'done', data: evt }),
-      onError: (err) => {
-        console.warn('SSE 错误:', err?.type, err);
-        // 不立即 fail：浏览器自动重连；靠 5 分钟超时兜底（Task 4 会整体重写本组件）
-      },
-    });
-  } catch (err) {
-    finalize('fail', (err as { message?: string })?.message || 'SSE 订阅失败');
-    return;
-  }
-
-  // 5 分钟兜底
-  if (timeoutId !== undefined) clearTimeout(timeoutId);
-  timeoutId = window.setTimeout(() => {
-    if (phase.value === 'submitting' || phase.value === 'running') {
-      finalize('fail', '执行超过 300s 未完成（超时）');
+    submitting.value = false;
+    const msg = (err as { message?: string })?.message || '提交失败';
+    // 409 = 已有同 target 任务在跑
+    if ((err as { response?: { status?: number } }).response?.status === 409) {
+      toast.warning('该目标已有任务在执行中');
+    } else {
+      toast.error(msg);
     }
-  }, 5 * 60 * 1000);
-}
-
-onBeforeUnmount(() => {
-  try {
-    streamHandle?.close();
-  } catch {
-    /* ignore */
+    emit('error', msg);
+    return;
   }
-  streamHandle = null;
-  if (timeoutId !== undefined) clearTimeout(timeoutId);
-  if (resetId !== undefined) clearTimeout(resetId);
-});
+  submitting.value = false;
+  if (!refVal?.task_id) {
+    const msg = '后端未返回 task_id';
+    toast.error(msg);
+    emit('error', msg);
+    return;
+  }
+  tasksStore.track(refVal, {
+    target: props.target,
+    retryFn: props.taskTarget,
+    onSuccess: (detail) => {
+      props.onSuccess?.(detail);
+      emit('success', detail);
+    },
+    onError: (message) => {
+      props.onError?.(message);
+      emit('error', message);
+    },
+  });
+}
 </script>
 
 <template>

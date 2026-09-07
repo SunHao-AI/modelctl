@@ -137,8 +137,8 @@ const familyRows = computed<Array<{ group: string; members: Array<{ name: string
           <div v-if="data.stats.detail" class="break-all text-xs text-slate-400">{{ data.stats.detail }}</div>
         </div>
         <div class="mt-4 flex items-center gap-2">
-          <TaskButton label="启动" variant="ghost" :task-target="taskTargetFor('stats', 'start')" @success="() => load()" />
-          <TaskButton label="重启" variant="ghost" :task-target="taskTargetFor('stats', 'restart')" @success="() => load()" />
+          <TaskButton label="启动" variant="ghost" :target="'stats'" :task-target="taskTargetFor('stats', 'start')" @success="() => load()" />
+          <TaskButton label="重启" variant="ghost" :target="'stats'" :task-target="taskTargetFor('stats', 'restart')" @success="() => load()" />
           <button class="btn-danger" :disabled="data.stats.state !== 'running'" @click="stopSVC('stats')">停止</button>
         </div>
       </section>
@@ -158,8 +158,8 @@ const familyRows = computed<Array<{ group: string; members: Array<{ name: string
           <div v-if="data.gateway.detail" class="break-all text-xs text-slate-400">{{ data.gateway.detail }}</div>
         </div>
         <div class="mt-4 flex items-center gap-2">
-          <TaskButton label="启动" variant="ghost" :task-target="taskTargetFor('gateway', 'start')" @success="() => load()" />
-          <TaskButton label="重启" variant="ghost" :task-target="taskTargetFor('gateway', 'restart')" @success="() => load()" />
+          <TaskButton label="启动" variant="ghost" :target="'gateway'" :task-target="taskTargetFor('gateway', 'start')" @success="() => load()" />
+          <TaskButton label="重启" variant="ghost" :target="'gateway'" :task-target="taskTargetFor('gateway', 'restart')" @success="() => load()" />
           <button class="btn-danger" :disabled="data.gateway.state !== 'running'" @click="stopSVC('gateway')">停止</button>
         </div>
       </section>

@@ -167,9 +167,9 @@ function engineConfigEntries(): Array<{ key: string; value: string }> {
         </div>
         <!-- 操作按钮（外部写操作，stop 走 ConfirmDialog 防误触） -->
         <div class="flex flex-wrap items-center gap-3 pt-2" @click.stop>
-          <TaskButton label="启动" variant="primary" :task-target="() => startModel(name)" @success="() => refresh()" />
+          <TaskButton label="启动" variant="primary" :target="name" :task-target="() => startModel(name)" @success="() => refresh()" />
           <button class="btn-danger" :disabled="stopBusy || detail.state === 'stopped'" @click.stop="stopConfirm = true">{{ stopBusy ? '停止中…' : '停止' }}</button>
-          <TaskButton label="重启" variant="ghost" :task-target="() => restartModel(name)" @success="() => refresh()" />
+          <TaskButton label="重启" variant="ghost" :target="name" :task-target="() => restartModel(name)" @success="() => refresh()" />
           <!-- Unsloth Web 控制台（同步，仅 unsloth 引擎可启动） -->
           <template v-if="isUnsloth">
             <span class="mx-1 h-4 w-px bg-slate-700" />
