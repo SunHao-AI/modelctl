@@ -493,3 +493,34 @@ def test_run_probe_ignores_stderr_and_nonzero_exit():
         assert envs_mod._parse_version(envs_mod._run_probe(["python"], 1)) is None
     finally:
         envs_mod.subprocess.run = original
+
+
+def test_docker_capable_engines_matches_adapters(tmp_path):
+    """DOCKER_CAPABLE_ENGINES 必须与适配器 _resolve_runtime 实现一致（防漂移锚点）。
+
+    已支持三者：docker_image 非空 → ('docker', image)；
+    未支持引擎：适配器类不得定义 _resolve_runtime（即无 docker 分支）。
+    """
+    import modelctl.core.compat_rules  # noqa: F401 —— 导入即注册
+    from modelctl.core.capabilities import Capabilities
+    from modelctl.core.envs import DOCKER_CAPABLE_ENGINES, MANAGED_ENGINES
+    from modelctl.core.profile import load_profile
+    from modelctl.engines import get_adapter
+
+    assert set(DOCKER_CAPABLE_ENGINES) == {"vllm", "tokenspeed", "tensorrt_llm"}
+    assert set(DOCKER_CAPABLE_ENGINES) <= set(MANAGED_ENGINES)
+
+    caps = Capabilities(gpu_count=1, compute_capability="8.9", binaries={})
+    for i, engine in enumerate(DOCKER_CAPABLE_ENGINES):
+        f = tmp_path / f"m{i}.yaml"
+        f.write_text(
+            f"name: m{i}\nengine: {engine}\nport: {8000 + i}\n"
+            f"{engine}:\n  model: /models/x\n  docker_image: img:tag\n",
+            encoding="utf-8",
+        )
+        adapter = get_adapter(engine)(load_profile(f"m{i}", tmp_path), caps)
+        assert adapter._resolve_runtime() == ("docker", "img:tag"), engine
+
+    # 未支持引擎：注册表里的适配器类不应定义 _resolve_runtime（当前仅三适配器定义）
+    for engine in set(MANAGED_ENGINES) - set(DOCKER_CAPABLE_ENGINES):
+        assert not hasattr(get_adapter(engine), "_resolve_runtime"), engine
