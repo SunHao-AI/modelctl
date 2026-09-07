@@ -247,6 +247,13 @@ def start_gateway() -> ComponentResult:
     env["USAGE_DATA_DIR"] = str(usage_data_dir())
     pid, _ = start_detached("llm-gateway", cmd, env)
     port = int(os.environ.get("GATEWAY_PORT", str(GATEWAY_PORT)))
+    from modelctl.core.gateway import GATEWAY_CLIENT_KEY_ENV, client_api_key
+
+    if not client_api_key():
+        logger.warning(
+            f"{GATEWAY_CLIENT_KEY_ENV} 未配置：网关将以 fail-closed 运行，全部 /v1 请求返回 401。"
+            "请在 .env 设置该密钥后重启网关。"
+        )
     logger.info(f"网关已启动（PID {pid}），监听端口 {port}")
     return ComponentResult("gateway", "ok", f"http://127.0.0.1:{port}")
 
@@ -350,7 +357,15 @@ def status_webui() -> ComponentResult:
 def status_gateway() -> ComponentResult:
     port = int(os.environ.get("GATEWAY_PORT", str(GATEWAY_PORT)))
     if is_running("llm-gateway"):
-        ok = wait_health(f"http://127.0.0.1:{port}/v1/models", 3.0)
+        from modelctl.core.gateway import client_api_key
+
+        key = client_api_key()
+        if not key:
+            return ComponentResult(
+                "gateway", "ok",
+                "运行中，但未配置 GATEWAY_CLIENT_API_KEY——fail-closed，全部 /v1 请求返回 401",
+            )
+        ok = wait_health(f"http://127.0.0.1:{port}/v1/models", 3.0, key)
         return ComponentResult("gateway", "ok", "运行中，/v1/models " + ("正常" if ok else "无响应"))
     return ComponentResult("gateway", "ok", "已停止")
 

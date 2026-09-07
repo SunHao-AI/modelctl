@@ -506,3 +506,32 @@ def test_stop_all_uses_is_running_any(monkeypatch, tmp_path):
     r = stop_all(tmp_path)
     assert "n2" in seen and "n1" in seen  # 两个 profile 都问过了 is_running_any
     assert len([x for x in r if x.component.startswith("m:")]) == 1  # 仅 n2（is_running_any True）
+
+
+# ---- Task 4（网关客户端鉴权）：status_gateway 必须带客户端密钥 ----
+
+def test_status_gateway_sends_client_key(monkeypatch):
+    """fail-closed 后 /v1/models 需要凭据，status_gateway 必须带 key，否则误报"无响应"。"""
+    seen = {}
+
+    def fake_wait_health(url, timeout, api_key=None, alive_check=None):
+        seen["url"] = url
+        seen["api_key"] = api_key
+        return True
+
+    monkeypatch.setattr("modelctl.core.all_service.is_running", lambda name: True)
+    monkeypatch.setattr("modelctl.core.all_service.wait_health", fake_wait_health)
+    monkeypatch.setenv("GATEWAY_CLIENT_API_KEY", "sk-status-key")
+    result = status_gateway()
+    assert "/v1/models" in seen["url"]
+    assert seen["api_key"] == "sk-status-key"
+    assert "正常" in result.detail
+
+
+def test_status_gateway_unconfigured_key_reports_401_expected(monkeypatch):
+    """未配 key 时网关必然 401：status 需明确提示"未配置客户端密钥"，而非笼统的"无响应"。"""
+    monkeypatch.setattr("modelctl.core.all_service.is_running", lambda name: True)
+    monkeypatch.setattr("modelctl.core.all_service.wait_health", lambda *a, **k: False)
+    monkeypatch.setenv("GATEWAY_CLIENT_API_KEY", "")  # 非 delenv，理由见 Task 1 同名说明
+    result = status_gateway()
+    assert "GATEWAY_CLIENT_API_KEY" in result.detail
