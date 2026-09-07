@@ -55,7 +55,7 @@ from modelctl.core.envs import (
     status as envs_status,
 )
 from modelctl.core.logging import setup_logging
-from modelctl.core.nginx_snippet import build_llm_map
+from modelctl.core.nginx_snippet import build_client_auth_map, build_llm_map
 from modelctl.core.paths import audit_dir
 from modelctl.core.process import (
     is_running,
@@ -159,6 +159,10 @@ def build_parser() -> argparse.ArgumentParser:
     ns = sub.add_parser("nginx-snippet", help="生成 nginx 多模型路由 map 片段")
     ns.add_argument("--node", required=True, help="节点编号（URL 前缀，如 210）")
     ns.add_argument("--host", required=True, help="节点 IP（如 192.168.77.210）")
+    ns.add_argument("--client-key", default=None,
+                    help="数据面客户端密钥（默认取 .env 的 GATEWAY_CLIENT_API_KEY）；为空则不生成鉴权 map 并告警")
+    ns.add_argument("--no-auth", action="store_true",
+                    help="不生成客户端鉴权 map（仅用于本机调试，公网禁用）")
     wp = sub.add_parser("webui", help="Web 管理控制台服务（/admin/api + 前端 SPA）控制")
     wp.add_argument("action", choices=["start", "stop", "restart", "status"])
     wp.add_argument("--port", type=int, default=None, help="监听端口（默认 .env 的 WEBUI_PORT 或 4173）")
@@ -985,7 +989,19 @@ def _cmd_ui_stop(args, models_dir: Path | None, caps) -> int:
 
 def _cmd_nginx_snippet(args, models_dir) -> int:
     gateway_port = int(os.environ.get("GATEWAY_PORT", "5003"))
-    print(build_llm_map(list_profiles(models_dir), args.node, args.host, gateway_port), end="")
+    profiles = list_profiles(models_dir)
+    print(build_llm_map(profiles, args.node, args.host, gateway_port), end="")
+    if args.no_auth:
+        logger.warning("--no-auth：已跳过客户端鉴权片段，公网暴露将使模型可被匿名调用")
+        return 0
+    key = args.client_key or os.environ.get("GATEWAY_CLIENT_API_KEY", "")
+    if not key:
+        logger.warning(
+            "GATEWAY_CLIENT_API_KEY 未配置且未传 --client-key：未生成鉴权片段，"
+            "nginx 数据面将匿名可访问"
+        )
+        return 0
+    print(build_client_auth_map(key, [p.api_key for p in profiles]), end="")
     return 0
 
 

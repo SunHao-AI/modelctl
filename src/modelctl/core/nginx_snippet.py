@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 
 from modelctl.core.profile import Profile, ProfileError
 
@@ -45,4 +46,62 @@ def build_llm_map(profiles: list[Profile], node_id: str, host: str, gateway_port
         for alias in p.aliases:
             lines.append(f"    ~^/{node_id}/llm/{alias}/  http://{host}:{p.port};")
     lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def build_client_auth_map(client_key: str, extra_keys: Iterable[str] = ()) -> str:
+    """生成客户端凭据校验 map 片段（nginx http 块），供 B 机 include。
+
+    产出两组白名单，与两条路径的下游校验能力精确对齐：
+      $llm_reject      网关 location 用——只认 GATEWAY_CLIENT_API_KEY，与网关自身
+                       verify_client 口径完全一致（网关只认这一把，多放会表现为
+                       "过了 nginx 却被网关 401" 的配置矛盾）。
+      $llm_reject_all  模型直连 / 用量 location 用——额外放行各 profile api_key，
+                       因为直连不改写 Authorization，vLLM 等引擎只认 profile key；
+                       只放行 client_key 会让既有直连客户端全断。
+
+    双通道与网关一致：Authorization: Bearer <key> 或 x-api-key: <key> 任一命中即放行。
+
+    产物含明文密钥：上传后须 chmod 600，且严禁入库。
+    """
+    key = (client_key or "").strip()
+    if not key:
+        raise ProfileError("客户端密钥为空，无法生成 nginx 鉴权片段")
+    extra: list[str] = []
+    for item in extra_keys:
+        e = (item or "").strip()
+        if e and e != key and e not in extra:
+            extra.append(e)
+    for k in [key, *extra]:
+        if '"' in k or "\n" in k or "\\" in k:
+            raise ProfileError(f"密钥含双引号/反斜杠/换行，nginx map 值不安全：{k[:4]}***")
+
+    def _maps(suffix: str, keys: list[str]) -> list[str]:
+        lines = []
+        for var, out, prefix in (
+            ("$http_authorization", f"$llm_bearer_{suffix}", "Bearer "),
+            ("$http_x_api_key", f"$llm_xkey_{suffix}", ""),
+        ):
+            lines.append(f"map {var} {out} {{")
+            lines.append("    default 0;")
+            lines += [f'    "{prefix}{k}" 1;' for k in keys]
+            lines.append("}")
+        reject = "$llm_reject" if suffix == "gw" else "$llm_reject_all"
+        lines += [
+            f'map "$llm_bearer_{suffix}$llm_xkey_{suffix}" {reject} {{',
+            '    "11" 0;',
+            '    "10" 0;',
+            '    "01" 0;',
+            "    default 1;",
+            "}",
+        ]
+        return lines
+
+    lines = [
+        "# ---- 客户端凭据校验（modelctl nginx-snippet 生成，勿手改）----",
+        "# 产物含明文密钥：chmod 600，严禁入库",
+        "# $llm_reject=网关 location 专用（仅 client key）；$llm_reject_all=直连/用量 location 用（含 profile key）",
+    ]
+    lines += _maps("gw", [key])
+    lines += _maps("all", [key, *extra])
     return "\n".join(lines) + "\n"
