@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue';
+import { computed, onBeforeUnmount, onMounted } from 'vue';
 import { useRoute } from 'vue-router';
 import Sidebar from './Sidebar.vue';
 import Header from './Header.vue';
@@ -16,6 +16,8 @@ onMounted(() => {
     /* 列表拉取失败不阻塞页面渲染；降级依赖后续 SSE 事件 */
   });
 });
+// Layout 卸载（登出跳 /login）即释放全部 SSE/轮询；重新登录后 bootstrap 重建
+onBeforeUnmount(() => tasksStore.reset());
 </script>
 
 <template>

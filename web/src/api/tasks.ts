@@ -42,6 +42,8 @@ export interface TaskStreamHooks {
   onStep?: (evt: TaskStepEvent) => void;
   onLog?: (evt: TaskLogEvent) => void;
   onDone?: (evt: TaskDoneEvent) => void;
+  /** 保活帧（约 10s 一次）：静默长任务期间调用方借此刷新"最后活跃时间" */
+  onHeartbeat?: () => void;
   /** EventSource 底层 error（网络层；重连与降级决策交调用方） */
   onError?: (err: Event) => void;
 }
@@ -74,7 +76,7 @@ export function openTaskStream(taskId: string, hooks: TaskStreamHooks = {}): Tas
     ['step', ((e: MessageEvent) => dispatch<TaskStepEvent>(e.data, hooks.onStep)) as EventListener],
     ['log', ((e: MessageEvent) => dispatch<TaskLogEvent>(e.data, hooks.onLog)) as EventListener],
     ['done', ((e: MessageEvent) => dispatch<TaskDoneEvent>(e.data, hooks.onDone)) as EventListener],
-    ['heartbeat', (() => { /* 保活帧，忽略 */ }) as EventListener],
+    ['heartbeat', (() => hooks.onHeartbeat?.()) as EventListener],
   ];
   for (const [name, fn] of listeners) es.addEventListener(name, fn);
   const onErr: EventListener = (e) => hooks.onError?.(e);

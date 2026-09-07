@@ -107,7 +107,8 @@ export const useTasksStore = defineStore('tasks', () => {
     const done = tasks.value.filter((t) => !isActive(t));
     const overflow = done.length - MAX_TASKS;
     if (overflow <= 0) return;
-    const drop = new Set(done.slice(0, overflow).map((t) => t.id));
+    // 数组不变量：新在前（track unshift / bootstrap 降序 sort）→ 最旧终态在尾部
+    const drop = new Set(done.slice(-overflow).map((t) => t.id));
     for (const t of tasks.value) {
       if (drop.has(t.id)) teardown(t);
     }
@@ -175,6 +176,12 @@ export const useTasksStore = defineStore('tasks', () => {
       } catch (err) {
         if ((err as { code?: string }).code === 'not_found') {
           finalize(cur, 'error', '服务已重启，任务状态丢失', 1);
+          return;
+        }
+        // 401：token 失效后永续轮询无意义，直接判终态止损
+        if ((err as { response?: { status?: number } }).response?.status === 401) {
+          finalize(cur, 'error', '鉴权已失效，无法跟踪任务', 1);
+          return;
         }
         // 网络抖动：下一轮再试
       }
@@ -185,9 +192,29 @@ export const useTasksStore = defineStore('tasks', () => {
   function attachStream(t: TaskRecord) {
     teardown(t);
     t.lastEventAt = Date.now();
+    // 后端每次建流先 tail 全量日志（最多 500 行）再推增量；EventSource 自动重连
+    // 或 bootstrap 重挂都会重放整段日志。首个 step/log 事件到达时以服务端快照
+    // （GET /tasks/{id}）整体替换本地缓冲，清掉重放造成的重复段落。
+    // 竞态取舍：快照请求返回前到达的事件仍会短暂重复 append，随后被快照覆盖清掉；
+    // 快照返回后才到达的增量正常追加（快照与增量之间理论上可能丢极少量行，
+    // 相比整段重复，此取舍更可接受）。每次 attach 与每次 onError 都重置该标记。
+    let resyncPending = true;
+    const resync = () => {
+      if (!resyncPending) return;
+      resyncPending = false;
+      void getTask(t.id)
+        .then((info) => {
+          const cur = tasks.value[idx(t.id)];
+          if (cur) cur.logs = info.logs.slice(-MAX_LOG_LINES);
+        })
+        .catch(() => {
+          /* 快照失败则维持本地缓冲，接受可能的重复 */
+        });
+    };
     t.stream = openTaskStream(t.id, {
       onStep: (evt) => {
         t.lastEventAt = Date.now();
+        resync();
         if (evt.status === 'running' && !t.startedAt) {
           t.startedAt = new Date().toISOString();
         }
@@ -200,6 +227,7 @@ export const useTasksStore = defineStore('tasks', () => {
       },
       onLog: (evt) => {
         t.lastEventAt = Date.now();
+        resync();
         appendLog(t, evt.line);
       },
       onDone: (evt) => {
@@ -210,8 +238,15 @@ export const useTasksStore = defineStore('tasks', () => {
           finalize(t, 'error', evt.message || t.detail || '执行失败', evt.exit_code);
         }
       },
+      // 静默长任务期间仅有 10s 心跳：喂 lastEventAt，避免一次瞬时 error
+      // 因宽限期判据（只看 step/log/done）误触发降级轮询
+      onHeartbeat: () => {
+        t.lastEventAt = Date.now();
+      },
       onError: () => {
-        // 浏览器原生自动重连；宽限期后仍无活跃事件则降级轮询
+        // 浏览器原生自动重连；重连后同样会重放日志，重新置位 resync
+        resyncPending = true;
+        // 宽限期后仍无活跃事件则降级轮询
         window.setTimeout(() => {
           const i = idx(t.id);
           if (i < 0) return;
@@ -273,8 +308,10 @@ export const useTasksStore = defineStore('tasks', () => {
       if (idx(info.id) >= 0) continue; // 防重复登记
       tasks.value.push(toRecord(info));
     }
-    // 新在前（与后端 list_tasks 的 started_at 倒序一致，双保险）
-    tasks.value.sort((a, b) => (b.startedAt || '').localeCompare(a.startedAt || ''));
+    // 新在前（与后端 list_tasks 的 started_at 倒序一致，双保险）。
+    // 必须按时间戳数值排：后端 ISO 带时区偏移、本地 toISOString 带 Z，
+    // localeCompare 字符串比较在两种格式混排时会错位；空串 parse 为 NaN → ||0 兜底。
+    tasks.value.sort((a, b) => (Date.parse(b.startedAt) || 0) - (Date.parse(a.startedAt) || 0));
     trim();
     for (const t of tasks.value) {
       if (isActive(t)) attachStream(t);
@@ -338,5 +375,11 @@ export const useTasksStore = defineStore('tasks', () => {
     tasks.value.splice(i, 1);
   }
 
-  return { tasks, runningCount, track, bootstrap, activityFor, retry, dismiss };
+  /** 生命周期出口：登出/Layout 卸载时关全部 SSE + 轮询并清空记录 */
+  function reset() {
+    for (const t of tasks.value) teardown(t);
+    tasks.value = [];
+  }
+
+  return { tasks, runningCount, track, bootstrap, activityFor, retry, dismiss, reset };
 });

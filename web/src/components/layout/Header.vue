@@ -44,6 +44,8 @@ const maskedKey = () => {
 };
 
 function onLogout() {
+  // 先关全部 SSE/轮询并清空任务记录，再清凭据（避免残留请求带旧 token 打后端）
+  tasksStore.reset();
   auth.clear();
   router.push({ path: '/login' });
 }
