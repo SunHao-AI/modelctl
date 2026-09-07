@@ -1,12 +1,21 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, onMounted } from 'vue';
 import { useRoute } from 'vue-router';
 import Sidebar from './Sidebar.vue';
 import Header from './Header.vue';
+import { useTasksStore } from '@/stores/tasks';
 
 // 布局容器：left sidebar + top header + main router-view
 const route = useRoute();
 const pageTitle = computed(() => (route.meta?.title as string) ?? 'modelctl');
+
+// 全局任务层：挂载即回填历史 + 重挂活动任务 SSE（刷新/切页恢复）
+const tasksStore = useTasksStore();
+onMounted(() => {
+  void tasksStore.bootstrap().catch(() => {
+    /* 列表拉取失败不阻塞页面渲染；降级依赖后续 SSE 事件 */
+  });
+});
 </script>
 
 <template>

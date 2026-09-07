@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from '@/stores/auth';
 import { health } from '@/api/services';
+import TaskDrawer from '@/components/common/TaskDrawer.vue';
+import { useTasksStore } from '@/stores/tasks';
 
 const props = defineProps<{
   /** 页面标题 */
@@ -11,6 +13,11 @@ const props = defineProps<{
 
 const auth = useAuthStore();
 const router = useRouter();
+
+// 全局任务抽屉：入口按钮 + 运行中数量角标
+const tasksStore = useTasksStore();
+const drawerRef = ref<InstanceType<typeof TaskDrawer> | null>(null);
+const runningCount = computed(() => tasksStore.runningCount);
 
 // 后端健康状态
 type HealthState = 'loading' | 'ok' | 'bad';
@@ -79,8 +86,26 @@ function onLogout() {
       <!-- 用户脱敏 apiKey 前缀 -->
       <span class="hidden md:inline-flex items-center gap-1.5 text-xs text-slate-400 font-mono">{{ maskedKey() }}</span>
 
+      <!-- 任务抽屉入口 -->
+      <button class="btn-ghost !py-1.5 text-xs relative" title="后台任务" @click="drawerRef?.toggle()">
+        <svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="4" width="18" height="4" rx="1" />
+          <rect x="3" y="10" width="18" height="4" rx="1" />
+          <rect x="3" y="16" width="18" height="4" rx="1" />
+        </svg>
+        <span
+          v-if="runningCount > 0"
+          class="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-blue-500 px-1 text-[10px] font-semibold text-white"
+        >
+          {{ runningCount }}
+        </span>
+      </button>
+
       <!-- 退出登录 -->
       <button class="btn-ghost !py-1.5 text-xs" @click="onLogout">退出登录</button>
     </div>
   </header>
+
+  <!-- 全局任务抽屉（含 toast 宿主）：与 header 同级，fragment 根 -->
+  <TaskDrawer ref="drawerRef" />
 </template>
