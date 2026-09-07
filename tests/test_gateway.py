@@ -220,12 +220,14 @@ def test_proxy_404_when_no_default_matches():
 
 
 def test_anthropic_messages_passthrough():
-    """Anthropic /v1/messages：按 body.model 路由、改写模型名、透传 x-api-key。"""
+    """Anthropic /v1/messages：按 body.model 路由、改写模型名；keyless profile
+    不向上游转发任何客户端认证头（准入 key 验完即丢，见 gateway.py 注释）。"""
     captured = {}
 
     def upstream(request):
         captured["body"] = json.loads(request.content)
         captured["x-api-key"] = request.headers.get("x-api-key")
+        captured["authorization"] = request.headers.get("authorization")
         return httpx.Response(
             200,
             json={
@@ -241,10 +243,11 @@ def test_anthropic_messages_passthrough():
     app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
     body = {"model": "qwen3.8", "max_tokens": 100, "messages": [{"role": "user", "content": "hi"}]}
     resp = _run(_post_headers(app, "/v1/messages", json=body,
-                              headers={"x-api-key": "root123456", "Authorization": f"Bearer {_CLIENT_KEY}"}))
+                              headers={"x-api-key": _CLIENT_KEY, "Authorization": f"Bearer {_CLIENT_KEY}"}))
     assert resp.status_code == 200
     assert captured["body"]["model"] == "qwen3.8-vllm"  # 改写为后端期望名
-    assert captured["x-api-key"] == "root123456"  # x-api-key 头透传
+    assert captured["x-api-key"] is None  # keyless profile：客户端准入 key 绝不转发上游
+    assert captured["authorization"] is None
     assert resp.json()["content"][0]["text"] == "hi"
 
 
@@ -1057,6 +1060,39 @@ def test_v1_messages_accepts_x_api_key(monkeypatch):
     assert resp.status_code == 200
     assert captured["headers"].get("authorization") == "Bearer profile-key-1"
     assert captured["headers"].get("x-api-key") == "profile-key-1"
+
+
+def test_proxy_keyless_profile_strips_client_key():
+    """OpenAI 通道 keyless profile（Ollama 等）：准入 key 验完即丢，上游不得收到
+    任何 Authorization——否则皇冠密钥会溢入不校验该头却写日志的引擎进程。"""
+    captured = {}
+
+    def upstream(request):
+        captured["headers"] = dict(request.headers)
+        return httpx.Response(200, json={"choices": []})
+
+    reg = {"qwen3.8": GatewayModel("qwen3.8", "ollama", "http://upstream", "qwen3.8:27b", None, "http://upstream/")}
+    app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
+    resp = _run(_post_headers(app, "/v1/chat/completions", json={"messages": []},
+                              headers={"Authorization": f"Bearer {_CLIENT_KEY}"}))
+    assert resp.status_code == 200
+    assert captured["headers"].get("authorization") is None
+
+
+def test_proxy_keyed_profile_uses_profile_key():
+    """OpenAI 通道 keyed profile：上游收到 profile key，客户端准入 key 被覆盖不外泄。"""
+    captured = {}
+
+    def upstream(request):
+        captured["headers"] = dict(request.headers)
+        return httpx.Response(200, json={"choices": []})
+
+    reg = {"qwen3.8": GatewayModel("qwen3.8", "vllm", "http://upstream", "qwen3.8", "profile-key-1", "http://upstream/")}
+    app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
+    resp = _run(_post_headers(app, "/v1/chat/completions", json={"messages": []},
+                              headers={"Authorization": f"Bearer {_CLIENT_KEY}"}))
+    assert resp.status_code == 200
+    assert captured["headers"].get("authorization") == "Bearer profile-key-1"
 
 
 def test_v1_messages_requires_key():

@@ -711,7 +711,13 @@ def create_app(
         # 后端（vLLM 等）的 /v1/messages 认证头格式因实现而异（x-api-key /
         # Authorization Bearer），客户端自配 key 可能与后端不一致，故用
         # target 的有效 key 同时设置两种头，确保认证成功。
-        headers = {k: v for k, v in request.headers.items() if k.lower() in ("content-type", "authorization", "x-api-key", "anthropic-version", "anthropic-beta")}
+        # 无 key 引擎则剥离客户端认证头：准入 key 验完即丢，绝不转发上游（防皇冠
+        # 密钥溢入不校验认证、却把请求头写进日志的引擎进程）。
+        headers = {
+            k: v
+            for k, v in request.headers.items()
+            if k.lower() in ("content-type", "anthropic-version", "anthropic-beta")
+        }
         up_key = target.upstream_api_key()
         if up_key:
             headers["x-api-key"] = up_key
@@ -932,14 +938,12 @@ def create_app(
             body["chat_template_kwargs"] = {"enable_thinking": False}
         headers = {"Content-Type": "application/json"}
         up_key = target.upstream_api_key()
+        # 上游认证永远用 profile 有效 key（覆盖客户端自配 key：客户端如 Trae CN 配置的
+        # key 可能与后端不一致，透传会导致 vLLM 401；网关代劳认证更稳）。
+        # 无 key 引擎（Ollama 等）一律不带 Authorization：客户端准入 key 验完即丢，
+        # 绝不转发上游——否则皇冠密钥会溢入不校验该头、却把请求头写进日志的引擎进程。
         if up_key:
-            # 用 profile 有效 key 认证（覆盖客户端自配 key）：客户端（如 Trae CN）
-            # 配置的 key 可能与后端不一致，透传会导致 vLLM 401；网关代劳认证更稳
-            auth = f"Bearer {up_key}"
-        else:
-            auth = request.headers.get("Authorization") or (f"Bearer {target.api_key}" if target.api_key else None)
-        if auth:
-            headers["Authorization"] = auth
+            headers["Authorization"] = f"Bearer {up_key}"
         url = f"{target.backend_url}/v1/{path}"
         # 注意：不能用 `async with` 包裹后返回 StreamingResponse——客户端会在端点
         # 返回时立即关闭，而 SSE 是惰性迭代的，真实 uvicorn 下连接会被提前切断。
