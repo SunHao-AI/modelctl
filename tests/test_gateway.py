@@ -26,9 +26,12 @@ from modelctl.core.gateway import (
     _THINKING_DISABLED_GROUPS,
     build_groups,
     build_registry,
+    client_api_key,
+    client_ip_of,
     create_app,
     is_model_available,
     resolve_model,
+    verify_client,
 )
 
 
@@ -910,3 +913,77 @@ def test_proxy_streaming_chunk_split_usage_line():
     resp = _run(_post(app, "/v1/chat/completions", json={"model": "ds", "stream": True, "messages": []}))
     assert resp.status_code == 200
     assert collector.calls == [(8, 2)]
+
+
+# ---------- 客户端鉴权（GATEWAY_CLIENT_API_KEY，fail-closed） ----------
+
+_CLIENT_KEY = "sk-test-client-key-9f3a"
+
+
+def test_verify_client_bearer_ok(monkeypatch):
+    monkeypatch.setenv("GATEWAY_CLIENT_API_KEY", _CLIENT_KEY)
+    assert client_api_key() == _CLIENT_KEY
+    req = MagicMock()
+    req.headers = {"authorization": f"Bearer {_CLIENT_KEY}"}
+    assert verify_client(req) == "ok"
+
+
+def test_client_api_key_empty_when_unset(monkeypatch):
+    """未配置/空串一律返回 ""，调用方据此走 fail-closed。"""
+    monkeypatch.setenv("GATEWAY_CLIENT_API_KEY", "")
+    assert client_api_key() == ""
+
+
+def test_verify_client_xapikey_ok(monkeypatch):
+    """Anthropic 客户端（Trae CN 内置 Claude SDK）只带 x-api-key，必须认。"""
+    monkeypatch.setenv("GATEWAY_CLIENT_API_KEY", _CLIENT_KEY)
+    req = MagicMock()
+    req.headers = {"x-api-key": _CLIENT_KEY}
+    assert verify_client(req) == "ok"
+
+
+def test_verify_client_missing(monkeypatch):
+    monkeypatch.setenv("GATEWAY_CLIENT_API_KEY", _CLIENT_KEY)
+    req = MagicMock()
+    req.headers = {}
+    assert verify_client(req) == "missing"
+
+
+def test_verify_client_invalid(monkeypatch):
+    monkeypatch.setenv("GATEWAY_CLIENT_API_KEY", _CLIENT_KEY)
+    req = MagicMock()
+    req.headers = {"authorization": "Bearer wrong-key"}
+    assert verify_client(req) == "invalid"
+
+
+def test_verify_client_non_ascii_rejected(monkeypatch):
+    """非 ASCII key 经 UTF-8 编码后与期望值字节不一致，按不匹配返回 invalid 而非 500。"""
+    monkeypatch.setenv("GATEWAY_CLIENT_API_KEY", _CLIENT_KEY)
+    req = MagicMock()
+    req.headers = {"authorization": "Bearer 密钥"}
+    assert verify_client(req) == "invalid"
+
+
+def test_verify_client_fail_closed_when_unconfigured(monkeypatch):
+    """fail-closed：服务端未配 key 时一律拒绝，不得放行匿名请求。
+
+    用 setenv("") 而非 delenv：load_env 是 setdefault 语义，若本地 .env 恰好配了
+    该键，delenv 后首次 client_api_key() 会把它读回来，用例将随环境随机失败。
+    """
+    monkeypatch.setenv("GATEWAY_CLIENT_API_KEY", "")
+    monkeypatch.setenv("API_KEY", _CLIENT_KEY)  # 管理面 key 不得被复用
+    req = MagicMock()
+    req.headers = {"authorization": f"Bearer {_CLIENT_KEY}"}
+    assert verify_client(req) == "unconfigured"
+
+
+def test_client_ip_prefers_xff_then_xrealip_then_socket():
+    req = MagicMock()
+    req.headers = {"x-forwarded-for": "1.2.3.4, 10.0.0.1"}
+    req.client = None
+    assert client_ip_of(req) == "1.2.3.4"
+    req.headers = {"x-real-ip": "5.6.7.8"}
+    assert client_ip_of(req) == "5.6.7.8"
+    req.headers = {}
+    req.client = MagicMock(host="9.9.9.9")
+    assert client_ip_of(req) == "9.9.9.9"

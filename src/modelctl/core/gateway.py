@@ -24,6 +24,7 @@
 
 import asyncio
 import datetime as _dt
+import hmac
 import json
 import os
 import time
@@ -54,6 +55,82 @@ ENGINE_PRIORITY = {
     "vllm": 0, "sglang": 1, "unsloth": 2, "ollama": 3, "llamacpp": 4,
     "aphrodite": 5, "tokenspeed": 6, "lmdeploy": 7, "tensorrt_llm": 8,
 }
+
+# ---------- 数据面客户端鉴权（详见 spec 2026-09-07-gateway-client-auth） ----------
+# 与管理面 API_KEY 严格隔离：API_KEY 能改配置/启停模型，绝不可下发给外部推理客户端。
+GATEWAY_CLIENT_KEY_ENV = "GATEWAY_CLIENT_API_KEY"
+
+# 校验结果标签：写入审计的 auth 字段，只记结果，绝不记 key 值或片段
+AUTH_OK = "ok"
+AUTH_MISSING = "missing"
+AUTH_INVALID = "invalid"
+AUTH_UNCONFIGURED = "unconfigured"
+
+# .env 懒加载标记：webui 同 app 挂载 /v1 时不保证已 load_env（与 webui.admin_auth 同范式）
+_client_key_env_loaded: bool = False
+
+
+def client_api_key() -> str:
+    """网关客户端密钥；未配置/为空返回 ""（调用方须按 fail-closed 处理）。"""
+    global _client_key_env_loaded
+    if not _client_key_env_loaded:
+        try:
+            load_env()
+        except Exception:  # noqa: BLE001 — 加载失败走"未配置"分支，保持 401 路径
+            pass
+        _client_key_env_loaded = True
+    return os.environ.get(GATEWAY_CLIENT_KEY_ENV) or ""
+
+
+def verify_client(request) -> str:
+    """数据面准入校验：通过返回 AUTH_OK，否则返回失败标签（不抛异常）。
+
+    双通道嗅探（CLAUDE.md「嗅探请求头，不能强要求 Bearer」首次落地）：
+    Authorization: Bearer <key> 或 x-api-key: <key> 任一命中即通过——Anthropic
+    协议客户端（Trae CN 内置 Claude SDK）只带 x-api-key，只认 Bearer 会打挂 /v1/messages。
+    比较用 hmac.compare_digest 恒定时间防时序泄露；比较双方均编码为 UTF-8 bytes，
+    非 ASCII 输入（如 `Bearer 密钥`）只是编码后字节不一致，按不匹配返回 AUTH_INVALID。
+    """
+    expected = client_api_key()
+    if not expected:
+        return AUTH_UNCONFIGURED
+    auth = request.headers.get("authorization") or ""
+    candidate = ""
+    if auth.lower().startswith("bearer "):
+        candidate = auth[7:].strip()
+    if not candidate:
+        candidate = (request.headers.get("x-api-key") or "").strip()
+    if not candidate:
+        return AUTH_MISSING
+    try:
+        ok = hmac.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8"))
+    except TypeError:  # 纵深防御：headers 混入非 str 等意外类型时视为不匹配，不得冒泡成 500
+        ok = False
+    return AUTH_OK if ok else AUTH_INVALID
+
+
+def auth_error_response(label: str):
+    """401 响应：OpenAI 错误信封，保证 OpenAI/Anthropic SDK 能正常解析并抛客户端异常。"""
+    from fastapi.responses import JSONResponse
+
+    message = {
+        AUTH_UNCONFIGURED: "gateway client API key not configured",
+        AUTH_MISSING: "missing API key: send 'Authorization: Bearer <key>' or 'x-api-key: <key>'",
+    }.get(label, "invalid API key")
+    return JSONResponse(status_code=401, content={"error": {"message": message, "type": "authentication_error"}})
+
+
+def client_ip_of(request) -> str:
+    """真实来源 IP：nginx 已补 X-Real-IP / X-Forwarded-For，无前置代理时退回 socket。"""
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    real = request.headers.get("x-real-ip")
+    if real:
+        return real.strip()
+    client = getattr(request, "client", None)
+    return getattr(client, "host", "") or ""
+
 
 # 网关默认关闭 thinking 的模型家族（group）及其引擎。
 # 背景：Qwen3.5 家族 chat 模板强制把 <think> 放入 prompt，模型总是先思考，
