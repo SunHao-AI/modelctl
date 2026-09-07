@@ -152,6 +152,27 @@ def create_admin_router() -> APIRouter:
         tasks = tm.list_tasks(limit=50)
         return {"tasks": [t.to_dict() for t in tasks]}
 
+    @router.get("/tasks/{task_id}")
+    async def get_task(
+        task_id: str,
+        request: Request,
+        key: str = Query(default=""),
+        _: None = Depends(require_auth_or_query),
+    ):
+        """GET /admin/api/tasks/{task_id} — 单条任务详情（含 logs）。
+
+        前端刷新/降级轮询恢复状态用；不存在返回 404 not_found，
+        前端据此判定 webui 已重启、任务丢失。
+        """
+        tm: TaskManager = request.app.state.task_manager
+        task = tm.get_task(task_id)
+        if task is None:
+            return JSONResponse(
+                status_code=404,
+                content={"error": {"code": "not_found", "message": f"任务 {task_id} 不存在或已过期"}},
+            )
+        return task.to_dict()
+
     @router.get("/tasks/{task_id}/stream")
     async def task_stream(
         task_id: str,

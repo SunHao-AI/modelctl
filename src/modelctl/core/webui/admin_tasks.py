@@ -113,8 +113,9 @@ class Task:
         self.event("step", {"step": 0, "label": self.target, "status": status, "task_id": self.id})
 
     def update_detail(self, detail: str) -> None:
-        """更新任务详情（不改变 status）。"""
+        """更新任务详情并广播 step 事件（detail 对前端可见）。"""
         self.detail = detail
+        self.event("step", {"step": 0, "label": detail, "status": self.status, "task_id": self.id})
 
     def complete(self) -> None:
         """标记任务成功完成并广播 done 事件。"""
