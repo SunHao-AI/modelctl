@@ -43,6 +43,39 @@ UNMANAGED_INSTALL_HINTS = {
     "llamacpp": f"{_LLAMACPP_CLONE}\n{_LLAMACPP_BUILD}",
 }
 
+# —— Docker 旁路指引：镜像名/示例 yaml 事实与 models/<engine>/*.yaml 保持同步；
+#    支持矩阵的事实来源是 envs.DOCKER_CAPABLE_ENGINES（有测试锚定），勿在此另行硬编码集合。
+_DOCKER_STEP_PREP = (
+    "部署机准备 Docker + NVIDIA Container Toolkit（点上方「完整诊断」查看检查项与可复制安装脚本，"
+    "或执行 CLI：modelctl env setup docker --run）"
+)
+_DOCKER_STEP_START = (
+    "modelctl stop <模型> && modelctl start <模型>；docker 路径要求 model 为本地已有目录"
+    "（HuggingFace id 需先跑一次触发下载落地）"
+)
+DOCKER_BYPASS_GUIDES: dict[str, dict] = {
+    "vllm": {
+        "image_example": "vllm/vllm-openai:<tag>",
+        "yaml_field_path": "vllm.docker_image",
+        "example_yaml": "models/vllm/qwen3.8-flash-next.yaml",
+    },
+    "tokenspeed": {
+        "image_example": "lightseekorg/tokenspeed:latest",
+        "yaml_field_path": "tokenspeed.docker_image",
+        "example_yaml": "models/tokenspeed/qwen3.5-397b.yaml",
+    },
+    "tensorrt_llm": {
+        "image_example": "nvcr.io/nvidia/tensorrt-llm:<tag>",
+        "yaml_field_path": "tensorrt_llm.docker_image",
+        "example_yaml": "models/tensorrt_llm/qwen3.8.yaml",
+    },
+}
+# 未实现 docker 分支的引擎统一说明（不造假指引；缺口记录见 docs/TODO.md 2.2）
+DOCKER_UNSUPPORTED_NOTE = (
+    "modelctl 的该引擎适配器暂不支持 docker 运行时，官方镜像无法经 modelctl 启动；"
+    "建议改用已支持的引擎（vllm / tokenspeed / tensorrt_llm），或在 Linux 部署机上建托管 venv"
+)
+
 
 def _router() -> APIRouter:
     """子路由工厂：返回 APIRouter（主路由 include_router 时由其调用）。"""
@@ -106,10 +139,75 @@ async def list_envs(_: None = Depends(require_auth)):
         else:
             installed = False
             detail = "未安装"
-        out.append({"name": t, "installed": installed, "detail": detail})
+        out.append(
+            {
+                "name": t,
+                "installed": installed,
+                "detail": detail,
+                "platform_supported": envs.platform_supports(t),
+                "docker_supported": t in envs.DOCKER_CAPABLE_ENGINES,
+            }
+        )
 
     unmanaged = await asyncio.to_thread(_unmanaged_targets)
-    return {"targets": out, "unmanaged": unmanaged}
+
+    # Docker 环境就绪探测：纯 shutil.which，绝不落子进程，不拖慢列表页加载
+    from modelctl.core import docker_setup
+
+    missing = docker_setup.path_level_missing()
+    docker_env = {"ready": not missing, "missing": missing, "guide": docker_setup.MSG_GUIDE}
+
+    # Docker 旁路指引：已支持引擎给镜像事实 + 三步；其余仅 note（gateway 不适用旁路，天然排除）
+    bypass: list[dict] = []
+    for name in envs.MANAGED_ENGINES:
+        guide = DOCKER_BYPASS_GUIDES.get(name)
+        if guide:
+            bypass.append(
+                {
+                    "name": name,
+                    "docker_supported": True,
+                    "image_example": guide["image_example"],
+                    "yaml_field_path": guide["yaml_field_path"],
+                    "example_yaml": guide["example_yaml"],
+                    "steps": [
+                        f"编辑 models/{name}/<模型>.yaml，在 {name}: 块下加一行 "
+                        f"docker_image: {guide['image_example']}",
+                        _DOCKER_STEP_PREP,
+                        _DOCKER_STEP_START,
+                    ],
+                }
+            )
+        else:
+            bypass.append({"name": name, "docker_supported": False, "note": DOCKER_UNSUPPORTED_NOTE})
+
+    return {"targets": out, "unmanaged": unmanaged, "docker_env": docker_env, "docker_bypass": bypass}
+
+
+@router.get("/docker/diagnose")
+async def docker_diagnose(_: None = Depends(require_auth)):
+    """GET /admin/api/envs/docker/diagnose — Docker 环境完整诊断（只读，按需触发）。
+
+    透传 ``docker_setup.diagnose()``（含 ``docker info`` 子进程，内建 15s 超时，
+    故走 to_thread 且仅由前端按钮按需调用）与 ``render_instructions()``（可复制的
+    root 安装脚本）。本端点绝不执行任何安装动作——实际安装仍只走既有 CLI 通道
+    ``modelctl env setup docker --run``。
+    """
+    from modelctl.core import docker_setup
+
+    try:
+        checks = await asyncio.to_thread(docker_setup.diagnose)
+        return {
+            "checks": [
+                {"key": c.key, "label": c.label, "ok": c.ok, "detail": c.detail} for c in checks
+            ],
+            "instructions": docker_setup.render_instructions(),
+        }
+    except Exception as exc:  # noqa: BLE001 — 诊断失败统一 500（与同文件 remove_env 惯例一致）
+        logger.exception(f"Docker 诊断异常: {exc}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"code": "internal", "message": f"诊断失败: {exc}"}},
+        )
 
 
 @router.post("/{target}/setup")
