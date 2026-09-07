@@ -52,12 +52,15 @@ class Task:
     started_at: str = ""  # ISO 时间戳
     finished_at: str | None = None
     detail: str | None = None
+    # 失败分类码（venv_missing|docker_missing|...），仅命中分类规则的失败任务携带
+    code: str | None = None
+    engine: str | None = None
     logs: list[str] = field(default_factory=list)
     _subscribers: list[asyncio.Queue] = field(default_factory=list, repr=False)
 
     def to_dict(self) -> dict:
-        """对外序列化；排除 _subscribers 内部队列。"""
-        return {
+        """对外序列化；排除 _subscribers 内部队列；code/engine 仅携带时出现。"""
+        data = {
             "id": self.id,
             "kind": self.kind,
             "action": self.action,
@@ -69,6 +72,11 @@ class Task:
             "detail": self.detail,
             "logs": self.logs,
         }
+        if self.code is not None:
+            data["code"] = self.code
+        if self.engine is not None:
+            data["engine"] = self.engine
+        return data
 
     def subscribe(self) -> asyncio.Queue:
         """SSE 客户端订阅：加入独立队列，返回该队列供生成器迭代。"""
@@ -124,13 +132,24 @@ class Task:
         self.finished_at = _now_iso()
         self.event("done", {"status": "success", "exit_code": 0, "task_id": self.id})
 
-    def error(self, exit_code: int = 1, message: str = "") -> None:
-        """标记任务失败并广播 done 事件。exit_code: 2=配置错误, 1=运行错误。"""
+    def error(self, exit_code: int = 1, message: str = "", *, code: str | None = None, engine: str | None = None) -> None:
+        """标记任务失败并广播 done 事件。exit_code: 2=配置错误, 1=运行错误。
+
+        code/engine 为可选失败分类码（reconcile.classify_start_failure 产出），
+        非 None 时随 done 事件与 to_dict 透传给前端渲染修复动作。
+        """
         self.status = "error"
         self.exit_code = exit_code
         self.detail = message or self.detail
+        self.code = code
+        self.engine = engine
         self.finished_at = _now_iso()
-        self.event("done", {"status": "error", "exit_code": exit_code, "message": self.detail, "task_id": self.id})
+        payload = {"status": "error", "exit_code": exit_code, "message": self.detail, "task_id": self.id}
+        if code is not None:
+            payload["code"] = code
+        if engine is not None:
+            payload["engine"] = engine
+        self.event("done", payload)
 
     def log_line(self, line: str) -> None:
         """追加一行日志并广播 log 事件。"""
