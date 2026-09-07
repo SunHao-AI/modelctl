@@ -313,7 +313,9 @@ export interface DockerDiagnose {
 export type DockerSSEEventType = "stage" | "log" | "error" | "complete";
 
 /**
- * 安装阶段：与后端 windows_setup.STAGES（12 值）严格对齐；前端只消费字面量进行 UI 分派。
+ * 安装阶段：与后端 windows_setup.STAGES（12 值）严格对齐 + "unknown" 兜底
+ * （`GET /envs/docker/install/{task_id}` 中 `task.detail` 未回写时后端返 "unknown"，
+ * 前端渲染分支需容）。前端只消费字面量进行 UI 分派。
  */
 export type DockerSSEStage =
   | "detect_winget"
@@ -327,7 +329,8 @@ export type DockerSSEStage =
   | "post_install_plan"
   | "already_installed"
   | "done"
-  | "error";
+  | "error"
+  | "unknown";
 
 /** 阶段 B 用户引导步骤（payload.steps 的单项；action 枚举固定 4 值 + null） */
 export interface PostInstallStep {
@@ -351,8 +354,8 @@ export interface DockerSSEEvent {
   message: string;
   /** 后端已格式化的 YYYY-MM-DD HH:mm:ss，直接展示 */
   ts: string;
-  /** 错误分类码（error 帧专属；如 platform_mismatch / bad_os 等，未必有） */
-  code?: number | string;
+  /** 错误分类码（error 帧专属；后端 `core/sse_stage_event.py` 锁定 int，未必有） */
+  code?: number;
   /**
    * - type=complete 且 stage=post_install_plan → { steps: PostInstallStep[] }
    * - type=error → { tail: string[] }（winget 失败最后 50 行）

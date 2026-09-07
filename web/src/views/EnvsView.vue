@@ -315,7 +315,6 @@ onMounted(async () => {
          面板会降级为引导 alert 而非假装 Windows）。 -->
     <DockerInstallPanel
       :platform="diagData ? diagData.platform : 'linux'"
-      :initial-diagnose="diagData"
     />
 
     <!-- 非托管引擎说明：原生二进制 / 官方安装器 / 源码编译，不建 venv 故不在上表 -->

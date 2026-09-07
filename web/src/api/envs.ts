@@ -89,15 +89,19 @@ export function startDockerInstall(body: {
   return dataOf<DockerInstallStartResponse>(client.post('/envs/docker/install', body));
 }
 
-/** Docker 一键安装状态只读探针（SSE 断线后前端兜底用）。 */
-export function fetchDockerInstallStatus(taskId: string): Promise<{
+/** Docker 一键安装 SSE 状态（与 `GET /envs/docker/install/{task_id}` 返回体同构） */
+export interface DockerInstallStatus {
+  /** 当前 stage（Task.detail 回写）；未推进时后端返 "unknown" */
   stage: DockerSSEStage;
+  /** 是否达终态（success/error） */
   done: boolean;
+  /** 最后更新时刻（后端 `YYYY-MM-DD HH:mm:ss` 已格式化，前端直用） */
   last_ts: string;
-}> {
-  return dataOf(
-    client.get(`/envs/docker/install/${encodeURIComponent(taskId)}`),
-  ) as Promise<{ stage: DockerSSEStage; done: boolean; last_ts: string }>;
+}
+
+/** Docker 一键安装状态只读探针（SSE 断线后前端兜底用）。 */
+export function fetchDockerInstallStatus(taskId: string): Promise<DockerInstallStatus> {
+  return dataOf<DockerInstallStatus>(client.get(`/envs/docker/install/${encodeURIComponent(taskId)}`));
 }
 
 /**

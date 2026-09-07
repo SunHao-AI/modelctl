@@ -9,7 +9,6 @@ import {
   withSseAuthKey,
 } from '@/api/envs';
 import type {
-  DockerDiagnose,
   DockerSSEEvent,
   PostInstallStep,
 } from '@/api/types';
@@ -38,15 +37,10 @@ import type {
  * 后端契约以 src/modelctl/core/sse_stage_event.py + windows_setup.STAGES 为
  * 单一事实来源（12 值 stage 枚举）；前端只消费字面量进行 UI 分派。
  */
-withDefaults(
-  defineProps<{
-    /** 宿主平台：linux 显示降级 alert，windows 显示完整面板 */
-    platform: 'linux' | 'windows';
-    /** 初始诊断结果（EnvsView 透传 dockerDiag ref，含 platform / checks 等） */
-    initialDiagnose?: DockerDiagnose | null;
-  }>(),
-  { initialDiagnose: null },
-);
+defineProps<{
+  /** 宿主平台：linux 显示降级 alert，windows 显示完整面板 */
+  platform: 'linux' | 'windows';
+}>();
 
 type Phase = 'idle' | 'installing' | 'need_reboot' | 'done' | 'error';
 /**
@@ -219,19 +213,14 @@ function onSseEvent(e: MessageEvent) {
     // need_UAC 不中断安装（后端 UAC_SILENCE_SEC 监测继续等）；显弹窗
     uacDialogShow.value = true;
   } else if (
-    evt.type === 'complete' &&
     evt.stage === 'post_install_plan' &&
     evt.payload &&
     'steps' in evt.payload &&
     Array.isArray(evt.payload.steps)
   ) {
-    // 阶段 A 完成 + 阶段 B 引导步骤集合下发
+    // 阶段 A 完成 + 阶段 B 引导步骤集合下发（后端 windows_setup L556 用 type='stage'）
     phase.value = 'need_reboot';
     steps.value = evt.payload.steps;
-  } else if (evt.stage === 'post_install_plan' && evt.payload && 'steps' in evt.payload) {
-    // 兼容：如果后端 type 仍是 stage 但 stage=post_install_plan，也切 need_reboot
-    phase.value = 'need_reboot';
-    steps.value = Array.isArray(evt.payload.steps) ? evt.payload.steps : [];
   } else if (evt.stage === 'done') {
     phase.value = 'done';
   }
