@@ -72,6 +72,7 @@
 | 2026-09-07 | 后端 / SSE | 后端发 `event:` 命名事件，前端只监听 `message` —— 流连上了却永远收不到数据 | EventSource 的 onmessage 只派发无名/`message` 帧；命名事件必须逐个 `addEventListener(name)` 配对；叠加 SSE URL 漏拼 `?key=` 的 401 只触发 error 事件被静默吞掉，"连接 200"不能当 SSE 生效的证据。 | [backend/sse-named-events.md](backend/sse-named-events.md) |
 | 2026-09-07 | 前端 / 响应式 | `ref<T[]>` 深代理：闭包捕获入列前的 raw 对象，SSE 回调写入全部丢响应式 | 依赖追踪只认代理路径读写；unshift 后必须 `tasks.value[idx(id)]` 回读代理再交给长期闭包，否则同一 attachStream 在 track/bootstrap 两条链路响应式分裂（写 raw 不报错不刷新）。 | [frontend/reactive-proxy-in-closure.md](frontend/reactive-proxy-in-closure.md) |
 | 2026-09-07 | 前端 / 响应式 | 驱动时间 computed 的 tick 被自己的 watch 提前停表，phase 永久卡终态 | finalize 当轮 getter 变 false 即 clearInterval，now 冻结使 `now-finishedAt<2000` 恒真、computed 依赖全冻结 → 按钮永久禁点；修复：watch getter 终态分支继续读 `now`，把 tick 存活期延到结果窗结束、同轮原子停表。 | [frontend/computed-tick-timing.md](frontend/computed-tick-timing.md) |
+| 2026-09-07 | 后端 / 环境管理 | 平台限制文案承诺"走 docker 镜像绕过"，UI 却没有任何落地入口 | 能力矩阵必须落常量并由测试锚定实现（`DOCKER_CAPABLE_ENGINES`），未支持引擎只给 note 不造假 steps；只读 PATH 探测与子进程诊断分层，平台不支持的操作在按钮入口即禁用而非事后报错。 | [backend/docker-bypass-guide-single-source.md](backend/docker-bypass-guide-single-source.md) |
 
 ## 目录约定
 
