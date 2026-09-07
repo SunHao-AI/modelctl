@@ -35,24 +35,53 @@ from modelctl.core.gateway import (
 )
 
 
+# /v1* 强制鉴权用的测试客户端 key：置于 autouse fixture 之前（fixture 引用它）
+_CLIENT_KEY = "sk-test-client-key-9f3a"
+
+
 @pytest.fixture(autouse=True)
 def _isolate_cache_dir(monkeypatch, tmp_path):
-    """Test 全局隔离 PID 命名空间：CACHE_DIR 强制指向 tmp_path，避免 is_running_any 走假 PID 命中 / 真 PID 干扰。"""
+    """Test 全局隔离 PID 命名空间 + 注入网关客户端 key：避免 is_running_any 走假 PID 命中，
+    同时使 /v1* 用例默认携带合法凭据（fail-closed 后无 key 一律 401）。"""
     monkeypatch.setenv("CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("GATEWAY_CLIENT_API_KEY", _CLIENT_KEY)
 
 
 def _run(coro):
     return asyncio.run(coro)
 
 
-async def _post(app, path: str, json: dict | None = None):
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+def _auth_headers() -> dict:
+    """默认客户端凭据：/v1* 已强制鉴权，测试统一带合法 key。"""
+    return {"Authorization": f"Bearer {_CLIENT_KEY}"}
+
+
+# 注意用 `is not None` 而非 `or` 判定默认凭据：显式传 headers={}（意图为"匿名请求"）
+# 是 falsy 值，`headers or _auth_headers()` 会静默塞入合法 key，401 用例将恒通过。
+async def _post(app, path: str, json: dict | None = None, headers: dict | None = None):
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+        headers=_auth_headers() if headers is None else headers,
+    ) as client:
         return await client.post(path, json=json or {})
 
 
 async def _post_headers(app, path: str, json: dict | None = None, headers: dict | None = None):
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers or {}) as client:
+    """不注入默认凭据：调用方完全掌控请求头（含 headers={} 的匿名场景）。"""
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers or {}
+    ) as client:
         return await client.post(path, json=json or {})
+
+
+async def _get(app, path: str, headers: dict | None = None):
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+        headers=_auth_headers() if headers is None else headers,
+    ) as client:
+        return await client.get(path)
 
 
 def test_build_registry(tmp_path):
@@ -77,11 +106,6 @@ def test_resolve_model():
     assert resolve_model(reg, "unknown", None) is None
 
 
-async def _get(app, path: str):
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        return await client.get(path)
-
-
 def test_list_models_health_filtered():
     reg = {"qwen3.8": GatewayModel("qwen3.8", "ollama", "http://upstream", "qwen3.8:27b", None, "http://upstream/")}
     app = create_app(reg, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
@@ -94,7 +118,7 @@ def test_list_models_health_filtered():
 def test_bare_v1_returns_ok_not_redirect():
     """裸 /v1（无尾斜杠）不得 307 重定向：FastAPI redirect_slashes 的 Location 是
     根相对路径 /v1/，经 B 机 nginx 前缀路由后客户端跟随会丢 /<node>/llm 前缀落空。
-    裸 /v1 视为连通性探测，返回 200；真实请求走 /v1/chat/completions 子路径。"""
+    裸 /v1 视为连通性探测，带合法凭据返回 200；无凭据一律 401（fail-closed）。"""
     reg = {"qwen3.8": GatewayModel("qwen3.8", "ollama", "http://upstream", "qwen3.8:27b", None, "http://upstream/")}
     app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(lambda r: httpx.Response(200)))
     for path in ("/v1", "/v1/"):
@@ -102,6 +126,8 @@ def test_bare_v1_returns_ok_not_redirect():
         assert resp.status_code == 200
         assert resp.headers.get("location") is None  # 不重定向
         assert resp.json()["status"] == "ok"
+        # 行为变更点：无凭据的连通性探测不再放行（通知依赖 baseUrl 探测的客户端）
+        assert _run(_post_headers(app, path, headers={})).status_code == 401
 
 
 def test_proxy_rewrites_model_to_upstream():
@@ -214,7 +240,8 @@ def test_anthropic_messages_passthrough():
     reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None, "http://upstream/", group="qwen3.8")}
     app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
     body = {"model": "qwen3.8", "max_tokens": 100, "messages": [{"role": "user", "content": "hi"}]}
-    resp = _run(_post_headers(app, "/v1/messages", json=body, headers={"x-api-key": "root123456"}))
+    resp = _run(_post_headers(app, "/v1/messages", json=body,
+                              headers={"x-api-key": "root123456", "Authorization": f"Bearer {_CLIENT_KEY}"}))
     assert resp.status_code == 200
     assert captured["body"]["model"] == "qwen3.8-vllm"  # 改写为后端期望名
     assert captured["x-api-key"] == "root123456"  # x-api-key 头透传
@@ -236,7 +263,9 @@ def test_anthropic_messages_uses_target_api_key():
     reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", "fly@@see", "http://upstream/", group="qwen3.8")}
     app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
     body = {"model": "qwen3.8", "max_tokens": 100, "messages": [{"role": "user", "content": "hi"}]}
-    resp = _run(_post_headers(app, "/v1/messages", json=body, headers={"x-api-key": "root123456"}))
+    # 准入凭据走 x-api-key 通道（Anthropic 客户端原生形态）：网关须把它连同
+    # Authorization 一起换成 profile key，上游绝不看到客户端 key
+    resp = _run(_post_headers(app, "/v1/messages", json=body, headers={"x-api-key": _CLIENT_KEY}))
     assert resp.status_code == 200
     assert captured["x-api-key"] == "fly@@see"  # 覆盖为 profile 有效 key
     assert captured["auth"] == "Bearer fly@@see"  # 同时设置 Authorization
@@ -916,8 +945,7 @@ def test_proxy_streaming_chunk_split_usage_line():
 
 
 # ---------- 客户端鉴权（GATEWAY_CLIENT_API_KEY，fail-closed） ----------
-
-_CLIENT_KEY = "sk-test-client-key-9f3a"
+# _CLIENT_KEY 已上移到 _isolate_cache_dir 之前（autouse fixture 引用它）
 
 
 def test_verify_client_bearer_ok(monkeypatch):
@@ -987,3 +1015,57 @@ def test_client_ip_prefers_xff_then_xrealip_then_socket():
     req.headers = {}
     req.client = MagicMock(host="9.9.9.9")
     assert client_ip_of(req) == "9.9.9.9"
+
+
+# ---------- /v1* 端点强制鉴权（Task 2：三个处理器接入 verify_client） ----------
+
+def test_v1_chat_completions_requires_key():
+    reg = {"qwen3.8": GatewayModel("qwen3.8", "ollama", "http://upstream", "qwen3.8:27b", None, "http://upstream/")}
+    app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    resp = _run(_post_headers(app, "/v1/chat/completions", json={"messages": []}, headers={}))
+    assert resp.status_code == 401
+    assert resp.json()["error"]["type"] == "authentication_error"
+
+
+def test_v1_wrong_key_rejected():
+    reg = {"qwen3.8": GatewayModel("qwen3.8", "ollama", "http://upstream", "qwen3.8:27b", None, "http://upstream/")}
+    app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    resp = _run(_post_headers(app, "/v1/chat/completions", json={"messages": []},
+                              headers={"Authorization": "Bearer nope"}))
+    assert resp.status_code == 401
+    assert "invalid API key" in resp.json()["error"]["message"]
+
+
+def test_v1_models_requires_key():
+    reg = {"qwen3.8": GatewayModel("qwen3.8", "ollama", "http://upstream", "qwen3.8:27b", None, "http://upstream/")}
+    app = create_app(reg, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    assert _run(_get(app, "/v1/models", headers={})).status_code == 401
+
+
+def test_v1_messages_accepts_x_api_key(monkeypatch):
+    """Anthropic 客户端只带 x-api-key：准入通过，且上游收到的仍是 profile key（覆盖逻辑不变）。"""
+    captured = {}
+
+    def upstream(request):
+        captured["headers"] = dict(request.headers)
+        return httpx.Response(200, json={"id": "1", "type": "message", "content": []})
+
+    reg = {"qwen3.8": GatewayModel("qwen3.8", "vllm", "http://upstream", "qwen3.8", "profile-key-1", "http://upstream/")}
+    app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
+    resp = _run(_post_headers(app, "/v1/messages", json={"model": "qwen3.8", "messages": [], "max_tokens": 8},
+                              headers={"x-api-key": _CLIENT_KEY}))
+    assert resp.status_code == 200
+    assert captured["headers"].get("authorization") == "Bearer profile-key-1"
+    assert captured["headers"].get("x-api-key") == "profile-key-1"
+
+
+def test_v1_all_endpoints_fail_closed_when_unconfigured(monkeypatch):
+    """服务端未配 key：即使带管理面 API_KEY 也全部 401，message 指向网关未配置。"""
+    monkeypatch.setenv("GATEWAY_CLIENT_API_KEY", "")  # 非 delenv，理由见 Task 1 同名说明
+    reg = {"qwen3.8": GatewayModel("qwen3.8", "ollama", "http://upstream", "qwen3.8:27b", None, "http://upstream/")}
+    app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    for path, method in (("/v1/models", "GET"), ("/v1/chat/completions", "POST"), ("/v1", "POST")):
+        call = _get if method == "GET" else _post
+        resp = _run(call(app, path, headers={"Authorization": f"Bearer {_CLIENT_KEY}"}))
+        assert resp.status_code == 401, path
+        assert "not configured" in resp.json()["error"]["message"]

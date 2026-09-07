@@ -17,6 +17,7 @@ import asyncio
 import json
 
 import httpx
+import pytest
 
 from modelctl.core.gateway import (
     ContextSwitchRule,
@@ -31,6 +32,14 @@ DS = "deepseek-v4-flash"
 DS_HIGH = "deepseek-v4-flash-vllm-high"
 DS_BAL = "deepseek-v4-flash-vllm"
 DS_LIGHT = "deepseek-v4-flash-vllm-light"
+
+# /v1* 已强制客户端鉴权：本文件用例统一携带合法凭据（fail-closed 后匿名一律 401）
+_CLIENT_KEY = "sk-test-ctxswitch-client-key-7b2e"
+
+
+@pytest.fixture(autouse=True)
+def _gateway_client_key(monkeypatch):
+    monkeypatch.setenv("GATEWAY_CLIENT_API_KEY", _CLIENT_KEY)
 
 
 def _registry():
@@ -119,7 +128,11 @@ def _run(coro):
 
 
 async def _post(app, path: str, json: dict | None = None):
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {_CLIENT_KEY}"},
+    ) as client:
         return await client.post(path, json=json or {})
 
 

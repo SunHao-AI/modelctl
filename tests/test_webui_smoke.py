@@ -5,8 +5,9 @@
 预期（在 API_KEY 已配置时）：
 - /admin/api/health            200
 - /admin/api/overview 等       200
-- /v1/models                   200
 - 无凭据访问管理面             401
+- /v1/models                   仅网关客户端 key 放行；管理面 API_KEY 一律 401
+  （数据面/管理面凭据严格隔离，详见 2026-09-07-gateway-client-auth spec）
 
 原为脚本（模块级 create_app + print + sys.exit），会被 pytest 收集并在
 collection 阶段 sys.exit 掀翻整个 session；现改为标准用例。
@@ -23,12 +24,15 @@ from loguru import logger  # noqa: E402
 from modelctl.core.gateway import create_app  # noqa: E402
 
 KEY = "test_key_12345"
+# 数据面客户端 key：与管理面 KEY 严格隔离，/v1* 只认它
+CLIENT_KEY = "sk-smoke-client-key-1a2b"
 
 
 @pytest.fixture()
 def admin_client(monkeypatch, tmp_path):
-    """注入 API_KEY 并挂载管理面；AUDIT_DIR 由 conftest 隔离到 tmp_path。"""
+    """注入管理面 API_KEY + 网关客户端 key 并挂载管理面；AUDIT_DIR 由 conftest 隔离到 tmp_path。"""
     monkeypatch.setenv("API_KEY", KEY)
+    monkeypatch.setenv("GATEWAY_CLIENT_API_KEY", CLIENT_KEY)
     logger.remove()  # 冒烟期间静音 loguru（与脚本行为一致）
     app = create_app(admin=True)
     with TestClient(app) as c:
@@ -47,7 +51,6 @@ CHECKS = [
     ("/admin/api/nginx-snippet", {"node": "210", "host": "x"}, 200),
     ("/admin/api/cluster/status", {}, 404),
     ("/admin/api/config/static", {}, 200),
-    ("/v1/models", {}, 200),
 ]
 
 
@@ -80,3 +83,10 @@ def test_admin_requires_auth(admin_client):
     """无凭据访问管理面返回 401。"""
     r = admin_client.get("/admin/api/overview")
     assert r.status_code == 401
+
+
+def test_v1_models_requires_client_key(admin_client):
+    """数据面/管理面凭据隔离：/v1/models 只认网关客户端 key，管理面 API_KEY 一律 401。"""
+    assert admin_client.get("/v1/models", headers={"Authorization": f"Bearer {CLIENT_KEY}"}).status_code == 200
+    assert admin_client.get("/v1/models", headers={"Authorization": f"Bearer {KEY}"}).status_code == 401
+    assert admin_client.get("/v1/models").status_code == 401

@@ -274,6 +274,23 @@ import httpx  # noqa: E402
 from modelctl.core.audit import _new_audit_log  # noqa: E402
 from modelctl.core.gateway import GatewayModel, create_app  # noqa: E402
 
+# /v1* 已强制客户端鉴权：网关接线用例统一携带合法凭据（fail-closed 后匿名一律 401）
+_CLIENT_KEY = "sk-test-audit-client-key-4c1d"
+
+
+@pytest.fixture(autouse=True)
+def _gateway_client_key(monkeypatch):
+    monkeypatch.setenv("GATEWAY_CLIENT_API_KEY", _CLIENT_KEY)
+
+
+def _client(app) -> httpx.AsyncClient:
+    """带合法客户端凭据的 ASGI 传输客户端。"""
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {_CLIENT_KEY}"},
+    )
+
 
 def _gm(engine: str = "vllm") -> GatewayModel:
     """最小 GatewayModel（仅 gateway 必填字段，与 test_gateway.py 构造方式一致）。"""
@@ -309,7 +326,7 @@ def test_openai_non_stream_emits_audit_vllm_native(tmp_path):
     app = create_app(_reg_one(), transport=httpx.MockTransport(upstream), audit_log=audit)
 
     async def _go():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        async with _client(app) as client:
             resp = await client.post("/v1/chat/completions", json={
                 "model": "q", "messages": [{"role": "user", "content": "hi"}],
             })
@@ -339,7 +356,7 @@ def test_openai_non_stream_gateway_estimate_when_no_metrics(tmp_path):
     app = create_app(_reg_one(), transport=httpx.MockTransport(upstream), audit_log=audit)
 
     async def _go():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        async with _client(app) as client:
             resp = await client.post("/v1/chat/completions", json={
                 "model": "q", "messages": [{"role": "user", "content": "hi"}],
             })
@@ -376,7 +393,7 @@ def test_openai_stream_emits_audit_vllm_native(tmp_path):
     app = create_app(_reg_one(), transport=httpx.MockTransport(upstream), audit_log=audit)
 
     async def _go():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        async with _client(app) as client:
             async with client.stream("POST", "/v1/chat/completions", json={
                 "model": "q", "messages": [{"role": "user", "content": "hi"}], "stream": True,
             }) as resp:
@@ -411,7 +428,7 @@ def test_openai_stream_fallback_when_no_usage(tmp_path):
     app = create_app(_reg_one(), transport=httpx.MockTransport(upstream), audit_log=audit)
 
     async def _go():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        async with _client(app) as client:
             async with client.stream("POST", "/v1/chat/completions", json={
                 "model": "q", "messages": [{"role": "user", "content": "hi"}], "stream": True,
             }) as resp:
@@ -439,7 +456,7 @@ def test_anthropic_non_stream_usage_capture(tmp_path):
     app = create_app(_reg_one(), transport=httpx.MockTransport(upstream), audit_log=audit)
 
     async def _go():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        async with _client(app) as client:
             resp = await client.post("/v1/messages", json={
                 "model": "q", "max_tokens": 100,
                 "messages": [{"role": "user", "content": "hi"}],
@@ -472,7 +489,7 @@ def test_audit_failure_does_not_break_proxy(tmp_path):
     app = create_app(_reg_one(), transport=httpx.MockTransport(upstream), audit_log=_FailingAudit())
 
     async def _go():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        async with _client(app) as client:
             resp = await client.post("/v1/chat/completions", json={
                 "model": "q", "messages": [{"role": "user", "content": "hi"}],
             })
@@ -638,7 +655,7 @@ def test_openai_stream_collector_diff_when_no_usage(tmp_path):
     app = create_app(_rec_one_with_collector(collector), transport=httpx.MockTransport(upstream), audit_log=audit)
 
     async def _go():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        async with _client(app) as client:
             async with client.stream("POST", "/v1/chat/completions", json={
                 "model": "q", "messages": [{"role": "user", "content": "hi"}], "stream": True,
             }) as resp:
@@ -672,7 +689,7 @@ def test_openai_non_stream_collector_diff_when_no_usage(tmp_path):
     app = create_app(_rec_one_with_collector(collector), transport=httpx.MockTransport(upstream), audit_log=audit)
 
     async def _go():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        async with _client(app) as client:
             resp = await client.post("/v1/chat/completions", json={
                 "model": "q", "messages": [{"role": "user", "content": "hi"}],
             })

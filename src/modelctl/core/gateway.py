@@ -601,7 +601,10 @@ def create_app(
         model.audit_log = audit_log
 
     @app.get("/v1/models")
-    async def list_models() -> dict:
+    async def list_models(request: Request):
+        label = verify_client(request)
+        if label != AUTH_OK:
+            return auth_error_response(label)
         # 注册表同时含 name 与 alias 两个 key（指向同一 GatewayModel），须按 name 去重
         seen: set[str] = set()
         models = []
@@ -648,6 +651,10 @@ def create_app(
         vLLM 0.27+ 原生支持 /v1/messages，此处按 body.model 路由并原样透传；
         流式必须保留 event: 行（不能复用 /v1/chat/completions 的 data: 行解析）。
         """
+        label = verify_client(request)
+        if label != AUTH_OK:
+            logger.warning(f"Anthropic 请求被拒 auth={label} ip={client_ip_of(request)}")
+            return auth_error_response(label)
         try:
             body = await request.json()
         except ValueError:
@@ -665,7 +672,7 @@ def create_app(
             f"effort={body.get('reasoning_effort')!r} "
             f"top_keys={sorted(body.keys())} "
             f"msg_blocks={[ [b.get('type') for b in (m.get('content') or []) if isinstance(b, dict)] if isinstance(m.get('content'), list) else type(m.get('content')).__name__ for m in (body.get('messages') or []) ]} "
-            f"auth_xkey={'x-api-key' in request.headers} auth={'Authorization' in request.headers}"
+            f"auth_xkey={'x-api-key' in request.headers} auth={label}"
         )
         target = resolve_model(registry, body.get("model"), default_model, groups)
         if target is None:
@@ -839,9 +846,15 @@ def create_app(
     # 307 重定向（重定向 Location 为根路径 /v1/，经 nginx 前缀路由会丢 /<node>/llm）。
     # 裸 /v1（连通性探测，如 hertz 客户端 POST baseUrl）直接返回 200 而非 404，
     # 避免客户端把 404 当作端点不可用而中止；真实请求走 /v1/chat/completions 等子路径。
+    # 2026-09-07 起该探测同样要求客户端凭据（verify_client 在短路返回之前，见下）：
+    # 无 key 一律 401，不再匿名放行——破坏性变更，依赖 baseUrl 探测的客户端需配 key。
     @app.post("/v1")
     @app.post("/v1/{path:path}")
     async def proxy(request: Request, path: str = ""):
+        label = verify_client(request)
+        if label != AUTH_OK:
+            logger.warning(f"网关请求被拒 path=/v1/{path} auth={label} ip={client_ip_of(request)}")
+            return auth_error_response(label)
         if not path:
             return JSONResponse(status_code=200, content={"status": "ok"})
         if path not in ("chat/completions", "completions", "embeddings"):
@@ -862,7 +875,7 @@ def create_app(
             f"OpenAI 代理请求 {path} model={body.get('model')!r} stream={body.get('stream')} "
             f"max_tokens={body.get('max_tokens')} tools={'tools' in body} "
             f"resp_format={'response_format' in body} msgs={len(body.get('messages') or [])} "
-            f"auth={'Authorization' in request.headers} stream_options={'stream_options' in body}"
+            f"auth={label} stream_options={'stream_options' in body}"
         )
         target = resolve_model(registry, body.get("model"), default_model, groups)
         if target is None:
