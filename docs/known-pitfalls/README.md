@@ -76,6 +76,9 @@
 | 2026-09-07 | 后端 / 网关鉴权 | 网关 /v1 端点匿名可白嫖 GPU，客户端带的 key 也被覆盖丢弃 | 数据面无任何凭据校验且公网 http 暴露，须三层加固：nginx map 常量比对 + 网关 fail-closed + 引擎 api-key（Ollama/TRT-LLM 引擎侧无能力，仅靠前两层兜底）。 | [backend/网关鉴权.md](backend/网关鉴权.md) |
 | 2026-09-07 | 后端 / 错误分类 | 失败提示指向 CLI 命令而 WebUI 已有同能力——指向错误的一端 | 解法是后端结构化错误码贯通任务事件（SSE done + to_dict 条件加键，向后兼容），前端按 code 渲染修复动作，绝不正则解析错误文案；含 `_ERROR_RULES` 包含先后顺序陷阱与 classify_error 兜底语义的相反区别。 | [backend/错误分类与修复引导.md](backend/错误分类与修复引导.md) |
 | 2026-09-07 | 后端 / 环境管理 | `modelctl env setup docker --os` dispatcher：4 交叉矩阵 / StageEvent SoT / Check 字段锁 / 路由顺序 / platform monkeypatch | 跨平台有 4 种"host × --os × 是否 --run"组合，各行为不同（预览/硬拒/diagnose/执行）；SSE `StageEvent` 以 `core/sse_stage_event.py` 为单一事实来源且前后端字段名锁；FastAPI 精确路由必须先于 `/{target}` 通配注册；`import sys` vs `from sys import platform` 决定 monkeypatch 是否能改平台判定。 | [backend/docker-setup-os-dispatch.md](backend/docker-setup-os-dispatch.md) |
+| 2026-09-08 | 后端 / 日志 | loguru 的 Windows `TERM` 特判把 ANSI 色码写进重定向文件 | `should_colorize` 在 TTY 检测与 `NO_COLOR` 之前特判 `TERM`，stderr 重定向到 launch-*.log 仍上色；必须显式 `colorize=color_enabled()`。 | [backend/日志编码与噪声治理.md](backend/日志编码与噪声治理.md) |
+| 2026-09-08 | 后端 / 子进程 | 子进程 stdio 重定向到文件时编码回退 locale（中文 Windows=GBK） | Python stdio 连管道/文件时不用 UTF-8；`start_detached` 须在 env **末位**恒定注入 `PYTHONIOENCODING=utf-8`，否则被 extra_env 覆盖。 | [backend/日志编码与噪声治理.md](backend/日志编码与噪声治理.md) |
+| 2026-09-08 | 后端 / 日志 | 心跳轮询 / `GET /metrics` access 日志刷满 INFO | uvicorn access 记录级别固定 INFO，调 logger level 会连 4xx/5xx 一起丢；在 access handler 挂 `logging.Filter` 实现"等价 DEBUG"，dictConfig 的 `"()"` 须传类对象防 venv 旧副本。 | [backend/日志编码与噪声治理.md](backend/日志编码与噪声治理.md) |
 
 ## 目录约定
 

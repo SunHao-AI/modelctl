@@ -81,7 +81,10 @@ def start_detached(name: str, command: list[str], extra_env: dict[str, str],
     # TZ 显式兜底：正常已由 os.environ 继承，此处防止日后改成"只传白名单 env"的
     # 重构静默丢掉时区（引擎日志会退回 UTC）。Windows 下返回空 dict，绝不注入
     # IANA 名——UCRT 会把 "Asia/Shanghai" 解析成 +0100，反而污染子进程。
-    env = {**os.environ, **subprocess_timezone(), **extra_env}
+    env = {**os.environ, **subprocess_timezone(), **extra_env, "PYTHONIOENCODING": "utf-8"}
+    # PYTHONIOENCODING：Python 子进程 stdout/stderr 被重定向到文件时，编码回退
+    # locale（中文 Windows = GBK；Linux C locale = ASCII），中文日志直接乱码或抛
+    # UnicodeEncodeError。显式钉死 UTF-8，与日志文件统一编码口径。
     fp = open(log_path, "w", encoding="utf-8")  # "w"：每次启动覆盖旧日志
     kwargs: dict = {"stdout": fp, "stderr": subprocess.STDOUT, "env": env, "stdin": subprocess.DEVNULL}
     kwargs["start_new_session"] = True  # nohup 语义：SSH 断开不影响

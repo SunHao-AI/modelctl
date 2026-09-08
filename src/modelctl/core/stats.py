@@ -1049,6 +1049,12 @@ def _targets_from_profiles(data_dir: Path) -> list[StatsTarget]:
 
 def main() -> None:
     """独立运行入口：加载全部 profile 并启动统计服务。"""
+    from modelctl.core.logging import setup_logging
+
+    load_env()
+    # 后台模式下 stdout 已重定向到 launch-usage-stats.log：显式无 ANSI + LOG_LEVEL
+    # 过滤（loguru 默认 handler 是 DEBUG，会把 profile 解析刷屏）
+    setup_logging(file_sink=False)
     run_server()
 
 

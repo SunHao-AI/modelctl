@@ -128,6 +128,11 @@ def main() -> None:
     from modelctl.core.timezone import apply_timezone
 
     load_env()
+    # 后台模式下 stdout 已重定向到 launch-<name>.log：只挂 console handler，
+    # ANSI 色码不再进文件，且 DEBUG 级日志（如 profile 解析）被 LOG_LEVEL 过滤
+    from modelctl.core.logging import setup_logging, uvicorn_log_config
+
+    setup_logging(file_sink=False)
     apply_timezone()
 
     import uvicorn
@@ -141,7 +146,8 @@ def main() -> None:
 
     hint = "（未找到 dist/，仅暴露 /admin/api；先执行 npm run build）" if not dist_ready() else ""
     print(f"modelctl Web UI 运行于 http://{host}:{port}/ {hint}", flush=True)
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    # 前端 3-5s 轮询 /admin/api 属心跳式访问：access 日志降级为 DEBUG 语义
+    uvicorn.run(app, host=host, port=port, log_level="info", log_config=uvicorn_log_config())
 
 
 if __name__ == "__main__":

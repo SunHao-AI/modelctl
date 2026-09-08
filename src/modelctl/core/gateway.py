@@ -1189,9 +1189,13 @@ def create_app(
 
 def main() -> None:
     """独立运行入口：python -m modelctl.core.gateway。"""
+    from modelctl.core.logging import setup_logging, uvicorn_log_config
     from modelctl.core.timezone import apply_timezone
 
     load_env()
+    # 后台模式下 stdout 已重定向到 launch-<name>.log：只挂 console handler
+    # （无 ANSI、LOG_LEVEL 过滤），避免与 CLI 进程争抢 modelctl.log 轮转
+    setup_logging(file_sink=False)
     apply_timezone()
     host = os.environ.get("GATEWAY_HOST", "0.0.0.0")
     port = int(os.environ.get("GATEWAY_PORT", str(GATEWAY_PORT)))
@@ -1207,7 +1211,8 @@ def main() -> None:
         stats_data_dir=data_dir,
     )
     print(f"modelctl 网关运行于 http://{host}:{port}/v1（默认模型：{default_model or '未配置'}）", flush=True)
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    # access 日志（含 /metrics、/health 等心跳轮询）降级为 DEBUG 语义
+    uvicorn.run(app, host=host, port=port, log_level="info", log_config=uvicorn_log_config())
 
 
 if __name__ == "__main__":
