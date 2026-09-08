@@ -43,3 +43,27 @@ def test_pull_parser_bytes_units_and_extracting():
     # extracting 半程：权重 0.5 + 0.5*0.5 = 0.75
     u = p.feed("aaa: Extracting 500kB/1MB")
     assert 0.7 < u.pct < 0.8
+
+
+def test_pct_clamped_when_cur_exceeds_total():
+    # docker 偶发 cur > total（如 1.5GB/1GB）：pct 必须夹紧在 [0,1]，否则下游 eta 为负
+    p = PullParser("img")
+    p.feed("aaa: Pulling fs layer")
+    u = p.feed("aaa: Downloading 1.5GB/1GB")
+    assert u is not None and 0.0 <= u.pct <= 1.0
+
+
+def test_pct_monotonic_across_download_complete():
+    # 单层完整生命周期逐行喂入：pct 序列必须单调不减（进度条不许倒退）
+    p = PullParser("img")
+    lines = [
+        "aaa: Pulling fs layer",
+        "aaa: Downloading 900MB/1GB",
+        "aaa: Downloading 1GB/1GB",
+        "aaa: Download complete",
+        "aaa: Extracting 0bytes/1GB",
+        "aaa: Extracting 1GB/1GB",
+        "aaa: Pull complete",
+    ]
+    pcts = [u.pct for u in (p.feed(x) for x in lines)]
+    assert all(a <= b for a, b in zip(pcts, pcts[1:], strict=False)), pcts

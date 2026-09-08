@@ -66,9 +66,13 @@ class PullParser:
     def __init__(self, image: str) -> None:
         self.image = image
         self._layers: dict[str, tuple[str, float]] = {}  # id -> (state, frac)
+        # id -> 历史最大权重：跨状态迁移（down frac≈1 → downed 0.5 → ext frac≈0）时
+        # 原始权重会回落，求和取历史最大值保证 pct 单调不减（进度条不倒退）。
+        self._max_w: dict[str, float] = {}
 
     def reset(self) -> None:
         self._layers.clear()
+        self._max_w.clear()
 
     def feed(self, line: str) -> PullUpdate | None:
         line = (line or "").strip()
@@ -92,7 +96,8 @@ class PullParser:
                 return None
             cur = _to_bytes(float(pm.group("cur")), pm.group("cu"))
             tot = _to_bytes(float(pm.group("total")), pm.group("tu"))
-            frac = cur / tot if tot > 0 else 0.0
+            # docker 偶发 cur > total（如 1.5GB/1GB），夹紧到 1.0 保证 pct ∈ [0,1]
+            frac = min(cur / tot, 1.0) if tot > 0 else 0.0
             stage = pm.group("stage").lower()
             self._layers[lid] = (_S_DOWN if stage == "downloading" else _S_EXT, frac)
         return self._update()
@@ -113,7 +118,11 @@ class PullParser:
         if total == 0:
             return PullUpdate(pct=None, label=f"拉取镜像 {self.image}", done_layers=0, total_layers=0)
         done = sum(1 for st, _ in self._layers.values() if st == _S_DONE)
-        acc = sum(self._weight(st, fr) for st, fr in self._layers.values())
+        acc = 0.0
+        for lid, (st, fr) in self._layers.items():
+            w = max(self._weight(st, fr), self._max_w.get(lid, 0.0))
+            self._max_w[lid] = w
+            acc += w
         pct = acc / total
         label = f"拉取镜像 {self.image}（{done}/{total} 层）"
         return PullUpdate(pct=round(pct, 4), label=label, done_layers=done, total_layers=total)
