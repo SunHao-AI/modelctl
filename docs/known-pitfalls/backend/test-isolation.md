@@ -114,3 +114,70 @@ for key in list(os.environ):
   的前提，前提失效即改前缀式。
 - 判据："这个前缀下未来会不会加新键？"会 ⇒ 枚举必然漏 ⇒ 用前缀扫描。漏一个键的
   代价不是失败而是**软污染**（结论随机器/时序漂移），比硬失败更难归因。
+
+## CLI `--gpus` 用 `os.environ[...] =` 直写，跨用例泄漏让 31 个引擎用例"全量红单跑绿"
+
+**日期**：2026-09-08
+**症状**：全量 `pytest` 报 90 failed，其中 31 个横跨 vllm/tokenspeed/tensorrt_llm/
+aphrodite/lmdeploy/unsloth/sglang/ollama/llamacpp/compat_flow，主导签名完全一致：
+
+```
+modelctl.engines.base.RequirementError: [gpu_list] 配置的 GPU 索引 [0, 1] 超出可用范围。
+当前可用 GPU 索引：
+```
+
+而逐个文件、逐个用例单跑全部通过。
+
+**根因**：`cli.py` 处理 `--gpus` 与 `admin_models/admin_services` 处理卡位时是
+**直写**而非 setdefault：
+
+```python
+os.environ["MODELCTL_GPUS"] = args.gpus      # cli.py —— 不受 monkeypatch 管辖
+```
+
+`tests/test_cluster_goal_cli.py::test_goal_set_dry_run_and_gpus_passthrough` 调
+`cli.main([... "--gpus", "0,1"])` 后该键永久留在进程环境里（字母序 goal_cli 在
+engines_* 之前）。后续引擎用例的 `Capabilities` 多数用默认构造（`gpu_indices=[]`），
+`EngineAdapter.validate_gpu_selection()` 撞上泄漏的 `[0, 1]` → 硬失败。错误消息里
+"当前可用 GPU 索引："后面是空的，正是"caps 正常、env 是外来的"这一指纹。
+
+**解决方案**：conftest autouse fixture 补一条 `delenv`（与 GATEWAY_*/HF_ENDPOINT 同口径）：
+
+```python
+monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+```
+
+全量从 90 failed 降到 5 failed（余下均与本仓变更无关）。
+
+**教训**：
+
+- 污染面不止 `load_env()` 的 `setdefault`：**生产代码任何 `os.environ[k] = v` 直写
+  同样跨用例存活**，且比 setdefault 更隐蔽——它看起来像"函数内部的局部副作用"。
+  审计口径应是 grep 全仓 `os.environ[`，而不是只盯 envfile。
+- 归因三步（本次实测有效）：① 单跑绿 ⇒ 判定全局态污染而非代码缺陷；② 最小两例
+  复现（`pytest <污染源> <失败例>`）钉死因果；③ **git worktree 检出基线复跑全量**，
+  与本次失败清单逐条比对签名——基线同样红的 31 条直接排除在本次变更之外，
+  避免把历史欠账误记到新代码头上。
+
+## 生产函数新增带默认值参数，monkeypatch 的位置参数桩立刻"错红"
+
+**日期**：2026-09-08
+**症状**：`tests/test_admin_models_classify.py` 3 条用例在全量跑中失败，断言表现很怪：
+`assert None == 'venv_missing'`、`assert 1 == 2`，而非直接报 TypeError。
+
+**根因**：给 `all_service.start_profile()` 新增 `on_progress=None` 参数后，
+`admin_models._do_start` 改为 `start_profile(profile, caps, timeout, on_progress=_on_stage)`。
+测试桩是位置签名 `def boom(profile, caps, timeout)`，收到 kwarg 抛
+`TypeError: boom() got an unexpected keyword argument 'on_progress'`；而 `_do_start`
+的兜底 `except Exception` 把它当普通启动异常归到 `exit_code=1 / code=None` 分支，
+于是 TypeError 被"成功"吞掉，用例在下游断言处才炸——**错误信息离根因隔了一层**。
+
+**解决方案**：桩签名同步为 `def boom(profile, caps, timeout, on_progress=None)`。
+
+**教训**：
+
+- 扩展生产函数签名（哪怕带默认值）时，**grep 所有 monkeypatch 桩**一并改；桩是
+  "手写的方法签名快照"，编译器与类型检查都不会替你发现。
+- 兜底 `except Exception` 会把测试桩的签名错误伪装成业务失败。看到分类码/exit_code
+  断言莫名不对时，先把 task 的 error message 打全（本次即 `boom() got an unexpected
+  keyword argument 'on_progress'`），根因往往就在那一行。
