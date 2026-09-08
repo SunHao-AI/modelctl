@@ -1,0 +1,45 @@
+# vllm/qwen2.5-1.5b.yaml —— Qwen2.5-1.5B-Instruct（vLLM 引擎，小显存冒烟测试用）
+# 定位：qwen2.5-1.5b 家族在 vLLM 上的基线，与 llamacpp/qwen2.5-1.5b.yaml 同参数口径
+#       （tp=1、ctx 8192、无量化加速），用于跨引擎横向对比与功能链路验证。
+# 平台限制：vllm 属托管引擎（MANAGED_ENGINES），venv 仅 Linux 可建 —— Windows 开发机
+#       上 check_requirements 会直接报 EngineEnvError，本文件需在有 .venvs/vllm 的部署机上使用；
+#       也可配 docker_image 走容器旁路（本机未配置，见文件末尾注释）。
+# 显存估算：BF16 权重约 3.09GB + KV（qwen2 GQA 28层×2KV头×64维，fp16 约 14KB/token，
+#       8192 ctx ≈ 120MB）+ CUDA 上下文/激活约 0.6GB → 6GB 单卡可容纳但余量有限。
+# CC 提示：本机 CC 7.5（Turing）不满足 FP8 规则（fp8_quant_cc 要求 ≥ 8.9），
+#       故 quantization 留空、kv_cache_dtype 不设置 —— 与 qwen3.8 系列的 fp8 写法相反。
+group: qwen2.5-1.5b
+# 注意：本家族除 llamacpp 成员持有 alias: qwen2.5-1.5b 外，其余成员一律不写 alias。
+# name 自动推导为 qwen2.5-1.5b-vllm；若再写同名 alias 会触发 ProfileError 导致整条被跳过。
+# port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
+port: 8107
+# api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值
+api_key: ${API_KEY}
+
+vllm:
+  # model：HuggingFace 模型 ID。本地 $MODEL_ROOT 下不存在时按 download 段自动下载
+  model: Qwen/Qwen2.5-1.5B-Instruct
+  # download：ModelScope HF 格式仓库（官方仓库，BF16 全量约 3.09GB）
+  download:
+    modelscope_id: Qwen/Qwen2.5-1.5B-Instruct
+  # tensor_parallel_size：单卡机器必须为 1
+  tensor_parallel_size: 1
+  # max_model_len：与家族其他成员对齐压到 8192（模型原生支持 32K，小卡没必要开满）
+  max_model_len: 8192
+  # gpu_memory_utilization：显存利用率上限。0.9×6144MB ≈ 5.5GB 预分配，
+  # 3.09GB 权重 + KV + 激活可容纳；若启动报 OOM 可降到 0.8
+  gpu_memory_utilization: 0.85
+  # quantization：留空 = BF16 原精度。不要学 qwen3.8 系列写 fp8（CC 7.5 会被规则拦截）
+  quantization: ""
+  # extra_args：Qwen2.5 非思考模型，不需要 --reasoning-parser；保持干净便于观察启动日志
+  extra_args: ""
+  # docker_image：Windows 试跑的唯一途径 —— 配置后 _resolve_runtime 走 docker 分支，
+  # 跳过 .venvs/vllm 的 venv 校验。前置：镜像已 pull；model 必须是本地目录（HF id 会
+  # 在 docker 路径下被当作相对路径挂载，通常报路径不存在），需先跑一次 llamacpp 或
+  # 在 $MODEL_ROOT 下放置该目录。
+  docker_image: vllm/vllm-openai:latest
+
+usage:
+  # price_in / price_out：每千 token 计价（元），供 cc-switch 用量统计
+  price_in: 0.5
+  price_out: 1.0

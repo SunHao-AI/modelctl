@@ -1,0 +1,41 @@
+# tensorrt_llm/qwen2.5-1.5b.yaml —— Qwen2.5-1.5B-Instruct（TensorRT-LLM 引擎，小显存冒烟测试用）
+# 定位：qwen2.5-1.5b 家族在 TensorRT-LLM 上的基线，参数口径与家族其他成员对齐
+#       （tp=1、ctx 8192、无量化加速）。
+# 平台限制（本机跑不通的三个原因，参数正确也没用）：
+#   1. tensorrt_llm 属托管引擎（MANAGED_ENGINES），venv 仅 Linux 可建；
+#   2. TensorRT-LLM 官方要求 CC ≥ 8.6（Ampere 起），本机 CC 7.5（Turing）不被支持；
+#   3. engine_dir 必填且须先有编译产物：先 `modelctl trtllm build <profile>` 执行
+#      trtllm-build 把 HF 权重编译进 engine_dir，编译完成前 `modelctl start` 会因
+#      engine_dir 不存在/为空直接报错 —— 这是 tensorrt_llm 与其他引擎最大的使用差异。
+# 其他机器使用：engine_dir 为绝对路径，换部署机时改成本机可写目录即可。
+group: qwen2.5-1.5b
+# 注意：不写 alias（家族短名 qwen2.5-1.5b 已被 llamacpp 成员占用；写与 name 同名的
+# alias 会触发 ProfileError 导致整条被 list_profiles 跳过）。name 自动推导为 qwen2.5-1.5b-tensorrt_llm。
+# port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）；8120 已被同引擎 qwen3.8 占用
+port: 8121
+# api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值
+api_key: ${API_KEY}
+
+tensorrt_llm:
+  # model：HuggingFace 模型目录（trtllm-build 的 --model_dir 输入）
+  model: Qwen/Qwen2.5-1.5B-Instruct
+  # engine_dir：编译产物缓存目录（必填）。空目录时先跑 `modelctl trtllm build qwen2.5-1.5b-tensorrt_llm`
+  engine_dir: /raid5/sh/trt_engines/qwen2.5-1.5b-tp1
+  # tensor_parallel_size：单卡机器必须为 1
+  tensor_parallel_size: 1
+  # quantization：留空 = 不量化（CC 7.5 连 fp8 都不支持，Ampere 卡测试也无需给 1.5B 上量化）
+  quantization: ""
+  # dtype：BF16。注意 Turing 无 BF16 硬件单元，Ampere 起才有意义；CC 7.5 机器改 float16
+  dtype: bfloat16
+  # max_input_len / max_output_len：合计与家族其他成员的 8192 上下文口径对齐
+  max_input_len: 6144
+  max_output_len: 2048
+  # max_batch_size：冒烟测试 1 并发即可，编译出的 engine 也更小更快
+  max_batch_size: 1
+  # extra_args：透传给 trtllm-build / trtllm serve 的额外参数
+  extra_args: ""
+
+usage:
+  # price_in / price_out：每千 token 计价（元），供 cc-switch 用量统计
+  price_in: 0.5
+  price_out: 1.0

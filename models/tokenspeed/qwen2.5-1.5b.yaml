@@ -1,0 +1,33 @@
+# tokenspeed/qwen2.5-1.5b.yaml —— Qwen2.5-1.5B-Instruct（TokenSpeed 引擎，小显存冒烟测试用）
+# 定位：qwen2.5-1.5b 家族在 TokenSpeed 上的基线，与 llamacpp/qwen2.5-1.5b.yaml 同参数口径
+#       （tp=1、ctx 8192），用于跨引擎横向对比与功能链路验证。
+# 平台限制：tokenspeed 属托管引擎（MANAGED_ENGINES），venv 仅 Linux 可建 —— Windows 开发机
+#       上 check_requirements 会直接报 EngineEnvError，本文件需在有 .venvs/tokenspeed 的部署机
+#       上使用；也可配 docker_image 走容器旁路（见文件末尾注释）。
+# 显存估算：BF16 权重约 3.09GB + KV（8192 ctx ≈ 120MB），6GB 单卡可容纳但余量有限。
+group: qwen2.5-1.5b
+# 注意：不写 alias（家族短名 qwen2.5-1.5b 已被 llamacpp 成员占用；写与 name 同名的
+# alias 会触发 ProfileError 导致整条被 list_profiles 跳过）。name 自动推导为 qwen2.5-1.5b-tokenspeed。
+# port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）；8150 已被同引擎 qwen3.5-397b 占用
+port: 8151
+# api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值
+api_key: ${API_KEY}
+
+tokenspeed:
+  # model：HuggingFace 模型 ID。本地不存在时按 download 段自动下载
+  model: Qwen/Qwen2.5-1.5B-Instruct
+  # download：ModelScope HF 格式仓库（官方仓库，BF16 全量约 3.09GB）
+  download:
+    modelscope_id: Qwen/Qwen2.5-1.5B-Instruct
+  # tensor_parallel_size：单卡机器必须为 1（现有 397B  profile 的 8 卡配置不可抄）
+  tensor_parallel_size: 1
+  # max_model_len：与家族其他成员对齐压到 8192
+  max_model_len: 8192
+  # extra_args：透传给 tokenspeed 启动命令的额外参数
+  extra_args: "--enable-prefix-caching"
+  # docker_image: lightseekorg/tokenspeed:latest  # 可选，配置后优先 docker 模式
+
+usage:
+  # price_in / price_out：每千 token 计价（元），供 cc-switch 用量统计
+  price_in: 0.5
+  price_out: 1.0

@@ -1,0 +1,36 @@
+# unsloth/qwen2.5-1.5b.yaml —— Qwen2.5-1.5B-Instruct（Unsloth 引擎，小显存冒烟测试用）
+# 定位：qwen2.5-1.5b 家族在 Unsloth 上的基线，与 llamacpp/qwen2.5-1.5b.yaml 同为 GGUF
+#       Q4_K_M 口径（约 986MB），6GB 单卡余量充足；用于验证 unsloth 无头 API 链路。
+# 平台提示：unsloth 属非托管引擎，Windows 可尝试（需先 pip 安装 unsloth 且 PATH 可见
+#       `unsloth` 命令），但官方对 Windows 支持有限，跑不通优先在 Linux 上测。
+# 显存估算：Q4_K_M 约 986MB × 1.1 ≈ 1.1GB（_check_vram 按文件大小预检），6GB 卡充足。
+group: qwen2.5-1.5b
+# 注意：不写 alias（家族短名 qwen2.5-1.5b 已被 llamacpp 成员占用；写与 name 同名的
+# alias 会触发 ProfileError 导致整条被 list_profiles 跳过）。name 自动推导为 qwen2.5-1.5b-unsloth。
+# port：服务监听端口（健康检查 http://127.0.0.1:<port>/v1/models）；8001/8010 已被同引擎其他 profile 占用
+port: 8002
+# api_key：仅兜底（上游实际使用 unsloth 每次启动自动生成的 key，见启动成功后打印的提示）
+api_key: ${UNSLOTH_API_KEY}
+
+unsloth:
+  # model：unsloth 官方 GGUF 仓库 ID；配合 gguf_variant 组装成 <id>:Q4_K_M 由 studio 侧拉取
+  model: unsloth/Qwen2.5-1.5B-Instruct-GGUF
+  # gguf_variant：动态量化后缀（单文件 Q4_K_M 约 986MB）；model 为本地路径时忽略
+  gguf_variant: Q4_K_M
+  # context_length：与家族其他成员对齐压到 8192（模型原生支持 32K，小卡没必要开满）
+  context_length: 8192
+  # tensor_parallel：单卡必须 false（true 需要至少 2 块 GPU，check_requirements 直接拒绝）
+  tensor_parallel: false
+  # load_in_4bit：仅对非 GGUF 的 HF 模型生效，本条走 GGUF 无需开启
+  load_in_4bit: false
+  # download：ModelScope 兜底（studio 在线拉取失败时走此仓库落到 $MODEL_ROOT）
+  download:
+    modelscope_id: second-state/Qwen2.5-1.5B-Instruct-GGUF
+    quant: Q4_K_M
+  # extra_args：透传其他 unsloth 参数
+  extra_args: ""
+
+usage:
+  # price_in / price_out：每千 token 计价（元），供 cc-switch 用量统计
+  price_in: 0.5
+  price_out: 1.0
