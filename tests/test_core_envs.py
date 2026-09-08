@@ -169,6 +169,29 @@ def test_setup_calls_uv_sync_linux(tmp_path, monkeypatch):
     assert call["kwargs"]["env"]["UV_PROJECT_ENVIRONMENT"] == str(root / "vllm")
 
 
+def test_setup_appends_index_url(tmp_path, monkeypatch):
+    """index_url 透传为 uv sync --index-url <url>。"""
+    from modelctl.core.envs import ENVS_ROOT, setup
+
+    monkeypatch.setattr(envs_mod, "_is_linux", lambda: True)
+    _redirect(tmp_path, monkeypatch)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _RunResult(0)
+
+    monkeypatch.setattr(envs_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(envs_mod.shutil, "which", lambda name: "uv")
+
+    code = setup("vllm", index_url="https://mirrors.aliyun.com/pypi/simple/")
+    assert code == 0
+    assert calls[0] == [
+        "uv", "sync", "--project", str(ENVS_ROOT / "vllm"),
+        "--index-url", "https://mirrors.aliyun.com/pypi/simple/",
+    ]
+
+
 def test_setup_raises_on_non_linux(tmp_path, monkeypatch):
     from modelctl.core.envs import EngineEnvError, setup
 

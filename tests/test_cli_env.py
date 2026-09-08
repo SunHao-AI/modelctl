@@ -45,6 +45,14 @@ def test_parser_env_setup(monkeypatch):
     assert args.engine == "vllm"
 
 
+def test_parser_env_setup_index_url():
+    """--index-url → args.index_url；未传 → None。"""
+    args = cli.build_parser().parse_args(
+        ["env", "setup", "vllm", "--index-url", "https://mirrors.aliyun.com/pypi/simple/"])
+    assert args.index_url == "https://mirrors.aliyun.com/pypi/simple/"
+    assert cli.build_parser().parse_args(["env", "setup", "vllm"]).index_url is None
+
+
 def test_parser_env_list_no_engine(monkeypatch):
     """env list 不接收 engine。"""
     args = cli.build_parser().parse_args(["env", "list"])
@@ -105,11 +113,12 @@ def test_cmd_env_setup_success(monkeypatch, capsys):
 
 
 def test_cmd_env_setup_passes_offline_options(monkeypatch, tmp_path):
-    """--wheels/--offline → 转成 envs_setup 的 wheels_dir/offline。"""
+    """--wheels/--offline/--index-url → 转成 envs_setup 的对应参数。"""
     called = {}
 
-    def _fake(engine, *, wheels_dir=None, offline=False):
-        called["engine"], called["wheels_dir"], called["offline"] = engine, wheels_dir, offline
+    def _fake(engine, *, wheels_dir=None, offline=False, index_url=None):
+        called["engine"], called["wheels_dir"], called["offline"], called["index_url"] = (
+            engine, wheels_dir, offline, index_url)
         return 0
 
     monkeypatch.setattr(cli, "envs_setup", _fake)
@@ -118,18 +127,20 @@ def test_cmd_env_setup_passes_offline_options(monkeypatch, tmp_path):
         engine = "vllm"
         wheels = str(tmp_path)
         offline = True
+        index_url = "https://mirrors.aliyun.com/pypi/simple/"
 
     assert cli._cmd_env_setup(_Args(), None, None) == 0
     assert called["wheels_dir"] == tmp_path
     assert called["offline"] is True
+    assert called["index_url"] == "https://mirrors.aliyun.com/pypi/simple/"
 
 
 def test_cmd_env_setup_offline_defaults(monkeypatch):
-    """未给 --wheels/--offline → wheels_dir=None、offline=False。"""
+    """未给 --wheels/--offline/--index-url → 三者均为 None/False。"""
     called = {}
 
-    def _fake(engine, *, wheels_dir=None, offline=False):
-        called["wheels_dir"], called["offline"] = wheels_dir, offline
+    def _fake(engine, *, wheels_dir=None, offline=False, index_url=None):
+        called["wheels_dir"], called["offline"], called["index_url"] = wheels_dir, offline, index_url
         return 0
 
     monkeypatch.setattr(cli, "envs_setup", _fake)
@@ -140,6 +151,7 @@ def test_cmd_env_setup_offline_defaults(monkeypatch):
     assert cli._cmd_env_setup(_Args(), None, None) == 0
     assert called["wheels_dir"] is None
     assert called["offline"] is False
+    assert called["index_url"] is None
 
 
 def test_cmd_env_setup_engine_env_error(monkeypatch, capsys):

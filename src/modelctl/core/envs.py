@@ -183,12 +183,15 @@ def setup(
     *,
     wheels_dir: Path | None = None,
     offline: bool = False,
+    index_url: str | None = None,
 ) -> int:
     """同步受管子项目依赖到 `.venvs/<target>`。
 
     wheels_dir：本地 wheel 目录（透传 `--find-links`），作为额外包来源；
     offline：配合 wheels_dir 使用，透传 `--offline` 完全禁用网络（要求目录内依赖自闭包）。
     两者用于内网/弱网机器绕开跨境 PyPI 下载（先在有网机器 `pip download` 备好目录）。
+    index_url：自定义包索引（透传 `uv sync --index-url`），用于指定 PyPI 镜像
+    （如 `https://mirrors.aliyun.com/pypi/simple/`）加速跨域下载。
     """
     if not _is_target(target):
         raise ValueError(f"非受管环境：{target}")
@@ -210,6 +213,8 @@ def setup(
         "UV_PROJECT_ENVIRONMENT": str(VENV_ROOT / target),
     }
     cmd = [exe, "sync", "--project", str(project_root)]
+    if index_url is not None:
+        cmd += ["--index-url", index_url]
     if wheels_dir is not None:
         cmd += ["--find-links", str(wheels_dir.resolve())]
         if offline:
