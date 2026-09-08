@@ -4,13 +4,14 @@ import type {
   GetLog,
   ModelDetail,
   ModelsListResponse,
+  StartupSnapshot,
   TaskRef,
   YamlResponse,
 } from './types';
 
 /** 异步操作（start / restart）参数：超时秒 + GPU 列表（逗号串） */
 export interface ModelActionOpts {
-  /** 等待健康超时秒数（1 ~ 3600，默认 600） */
+  /** 等待健康超时秒数；不传则由后端按运行时自适应（docker 1800 / 其它 600） */
   timeout?: number;
   /** GPU 列表（逗号串，例如 "0,1"） */
   gpus?: string;
@@ -54,6 +55,11 @@ export function getModelLog(name: string, lines = 200): Promise<GetLog> {
   return dataOf<GetLog>(
     client.get(`/models/${encodeURIComponent(name)}/log`, { params: { lines } }),
   );
+}
+
+/** 最近一次启动的阶段进度快照（无记录 404，调用方需 catch）。 */
+export function getStartup(name: string): Promise<StartupSnapshot> {
+  return dataOf<StartupSnapshot>(client.get(`/models/${encodeURIComponent(name)}/startup`));
 }
 
 /** 模型日志 SSE 地址（前端用 EventSource 订阅）。 */

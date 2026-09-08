@@ -47,7 +47,6 @@ let handle: { close(): void } | null = null;
 
 /** 收到一个新行：append 到 lines 末尾（限制长度免爆），跟随则滚到底 */
 function push(evt: LogSseEvent) {
-  if (state.value === 'connecting') state.value = 'open';
   lines.push(evt.line);
   // 限制最多保留 4000 行
   if (lines.length > 4000) {
@@ -77,6 +76,9 @@ function open() {
   if (state.value === 'open') return;
   state.value = 'connecting';
   handle = openModelLogStream(props.url, {
+    onOpen: () => {
+      if (state.value === 'connecting') state.value = 'open';
+    },
     onLine: push,
     onError: () => {
       // EventSource 内部会自动重试 3 次，不在此主动关

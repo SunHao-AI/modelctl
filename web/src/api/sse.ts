@@ -26,6 +26,8 @@ export interface LogStreamHandle {
 
 /** 回调集合 */
 export interface LogStreamHooks {
+  /** EventSource 连接建立（open 事件），状态由它驱动而非首行日志 */
+  onOpen?: () => void;
   /** 收到 line / tail */
   onLine?: (evt: LogSseEvent) => void;
   /** done 时关闭流（后端日志流通常没有 done，这里仅为对称 API） */
@@ -64,14 +66,17 @@ export function openModelLogStream(name: string, hooks: LogStreamHooks = {}): Lo
     hooks.onLine?.(evt);
   }
 
+  const onOpen = () => hooks.onOpen?.();
   const onMsg = (e: MessageEvent) => dispatch(String(e.data));
   const onErr = (e: Event) => hooks.onError?.(e);
+  es.addEventListener('open', onOpen);
   es.addEventListener('message', onMsg);
   es.addEventListener('error', onErr);
 
   return {
     close() {
       try {
+        es.removeEventListener('open', onOpen);
         es.removeEventListener('message', onMsg);
         es.removeEventListener('error', onErr);
         es.close();
