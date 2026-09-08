@@ -116,8 +116,10 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument("--cluster", action="store_true",
                            help="中心聚合视图：走中心 REST 按节点展示 goal 声明/实际（中心不可达退 2，不回退本机）")
         if cmd in ("start", "restart"):
-            # 默认 600s：vLLM 首次冷启动（torch.compile + warmup + CUDA graph 捕获）实测约 6 分钟
-            p.add_argument("--timeout", type=float, default=600, help="健康检查超时秒数（默认 600）")
+            # 未显式指定时按运行时自适应：docker 1800s（容器内引擎冷启动含 import + 权重
+            # 加载，WSL2 实测单 import 就 800s+）/ 其它 600s；MODELCTL_START_TIMEOUT 覆盖
+            p.add_argument("--timeout", type=float, default=None,
+                           help="健康检查超时秒数（默认 docker 1800 / 其它 600）")
             p.add_argument("--gpus", default=None, help="逗号分隔的 GPU 索引，如 0,1,2（覆盖环境变量 MODELCTL_GPUS）")
     sub.add_parser("list", help="列出所有 profile").add_argument(
         "--cluster", action="store_true", help="中心聚合视图：按 profile 分组展示各节点托管状态")
@@ -129,7 +131,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap = sub.add_parser("all", help="一键启停（默认模型 + 网关 + 统计）")
     ap.add_argument("action", choices=["start", "stop", "restart", "status"])
     ap.add_argument("--model", default=None, help="默认模型 profile（缺省解析 GATEWAY_DEFAULT_MODEL）")
-    ap.add_argument("--timeout", type=float, default=600, help="模型健康检查超时秒数（默认 600）")
+    ap.add_argument("--timeout", type=float, default=None,
+                    help="模型健康检查超时秒数（默认 docker 1800 / 其它 600）")
     ap.add_argument("--gpus", default=None, help="逗号分隔的 GPU 索引，如 0,1,2（覆盖环境变量 MODELCTL_GPUS）")
     au = sub.add_parser("audit", help="请求级审计日志查询/统计/清理")
     au.add_argument("sub", nargs="?", choices=["path", "stats"], default=None,
@@ -411,9 +414,51 @@ def _instance_state(profile: Profile | None = None, name: str | None = None) -> 
     return "已停止"
 
 
+def _start_timeout(args, profile: Profile, caps) -> float:
+    """--timeout 未显式指定（None）→ 按运行时自适应；显式值优先（含 MODELCTL_START_TIMEOUT）。"""
+    if getattr(args, "timeout", None) is not None:
+        return float(args.timeout)
+    return all_service.default_start_timeout(profile, caps)
+
+
+def _human_eta(seconds: int) -> str:
+    """ETA 秒数转口语时长：< 60s 用秒，整分钟省略秒。"""
+    if seconds < 60:
+        return f"{int(seconds)} 秒"
+    m, s = divmod(int(seconds), 60)
+    return f"{m} 分钟" if not s else f"{m} 分 {s} 秒"
+
+
+def _cli_progress(profile: Profile):
+    """CLI 侧 StageEvent → loguru 单行；消息在调用侧拼好（日志对齐规范：loguru 只管前缀）。
+
+    纯顺序拼接（`阶段 —— 明细（40%，约剩 2 分钟）`），不做定宽补齐，故不涉及 CJK 双宽对齐。
+    回调内不吞异常：StartupTracker._emit 已负责隔离，进度输出失败不应静默。
+    """
+    from modelctl.core.startup_progress import STAGE_LABELS  # 延迟导入：与 core 既有约定一致
+
+    def sink(ev) -> None:
+        label = STAGE_LABELS.get(ev.stage, ev.stage)
+        if ev.status == "error":
+            logger.error(f"[{profile.name}] {label}失败：{ev.error}")
+            return
+        msg = f"{label} —— {ev.label}" if ev.status == "running" else f"{label}：{ev.label}"
+        extras = []
+        if ev.pct is not None:
+            extras.append(f"{round(ev.pct * 100)}%")
+        if ev.eta_s is not None:
+            extras.append(f"约剩 {_human_eta(ev.eta_s)}")
+        if extras:
+            msg += "（" + "，".join(extras) + "）"
+        logger.info(f"[{profile.name}] {msg}")
+
+    return sink
+
+
 def _cmd_start(args, models_dir: Path | None, caps) -> int:
     profile = load_profile(args.name, models_dir)
-    r = all_service.start_profile(profile, caps, args.timeout)
+    r = all_service.start_profile(profile, caps, _start_timeout(args, profile, caps),
+                                  on_progress=_cli_progress(profile))
     if r.status == "skipped":
         logger.info(r.detail)
     return 0 if r.status in ("ok", "skipped") else 1
@@ -427,7 +472,8 @@ def _cmd_stop(args, models_dir: Path | None, caps) -> int:
 
 def _cmd_restart(args, models_dir: Path | None, caps) -> int:
     profile = load_profile(args.name, models_dir)
-    r = all_service.restart_profile(profile, caps, args.timeout)
+    r = all_service.restart_profile(profile, caps, _start_timeout(args, profile, caps),
+                                    on_progress=_cli_progress(profile))
     return 0 if r.status in ("ok", "skipped") else 1
 
 

@@ -493,8 +493,12 @@ def status_stats() -> ComponentResult:
     return ComponentResult("stats", "ok", "已停止")
 
 
-def start_all(models_dir: Path | None, model_name: str | None = None, timeout: float = 300) -> list[ComponentResult]:
-    """一键启动：默认模型 → gateway → stats；单组件失败继续后续。"""
+def start_all(models_dir: Path | None, model_name: str | None = None,
+              timeout: float | None = 300) -> list[ComponentResult]:
+    """一键启动：默认模型 → gateway → stats；单组件失败继续后续。
+
+    timeout=None（CLI 未显式指定 --timeout）→ 按 profile 运行时自适应（见 default_start_timeout）。
+    """
     caps = probe()
     results: list[ComponentResult] = []
     profile = resolve_default_profile(models_dir, model_name)
@@ -509,6 +513,8 @@ def start_all(models_dir: Path | None, model_name: str | None = None, timeout: f
             )
         )
     else:
+        if timeout is None:
+            timeout = default_start_timeout(profile, caps)
         try:
             results.append(start_profile(profile, caps, timeout))
         except RequirementError as error:  # check_requirements 失败（配置错误）
@@ -529,8 +535,12 @@ def stop_all(models_dir: Path | None) -> list[ComponentResult]:
     return results
 
 
-def restart_all(models_dir: Path | None, model_name: str | None = None, timeout: float = 300) -> list[ComponentResult]:
-    """一键重启：仅默认模型 + gateway + stats。"""
+def restart_all(models_dir: Path | None, model_name: str | None = None,
+                timeout: float | None = 300) -> list[ComponentResult]:
+    """一键重启：仅默认模型 + gateway + stats。
+
+    timeout=None（CLI 未显式指定 --timeout）→ 按 profile 运行时自适应（见 default_start_timeout）。
+    """
     caps = probe()
     results: list[ComponentResult] = []
     profile = resolve_default_profile(models_dir, model_name)
@@ -545,6 +555,8 @@ def restart_all(models_dir: Path | None, model_name: str | None = None, timeout:
             )
         )
     else:
+        if timeout is None:
+            timeout = default_start_timeout(profile, caps)
         try:
             results.append(restart_profile(profile, caps, timeout))
         except RequirementError as error:
