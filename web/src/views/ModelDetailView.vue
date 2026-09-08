@@ -63,12 +63,14 @@ async function refreshYaml() {
     yamlErr.value = (err as { message?: string })?.message || 'YAML 读取失败';
   }
 }
-/** 拉一次启动进度快照（无记录 404 → 清空卡片） */
+/** 拉一次启动进度快照（仅无记录 404 → 清空卡片；其它故障保留上一帧防闪烁） */
 async function refreshStartup() {
   try {
     startup.value = await getStartup(name.value);
-  } catch {
-    startup.value = null;
+  } catch (err) {
+    if ((err as { response?: { status?: number } }).response?.status === 404) {
+      startup.value = null;
+    }
   }
 }
 /** 卡片可见：启动中/停止态但进度未收尾，或失败收尾 */

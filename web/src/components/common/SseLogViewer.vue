@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue';
+import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { openModelLogStream } from '@/api/sse';
 import type { LogSseEvent } from '@/api/sse';
 
@@ -107,6 +107,9 @@ async function onCopy() {
     console.warn('复制日志失败:', err);
   }
 }
+
+/** 挂载即建流：组件常在 v-if 下挂载，url 恒定不会触发下方 watch，缺此则永停 connecting */
+onMounted(open);
 
 onBeforeUnmount(closeStream);
 
