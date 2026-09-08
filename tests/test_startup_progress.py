@@ -165,3 +165,48 @@ def test_timing_ema_takes_over_after_min_samples(tmp_path):
     # n≥5 后转 EMA(α=0.4)：0.4*550 + 0.6*100 = 280，且跨实例持久化
     assert StartupTiming(path=p).eta("vllm", "loading", 0.0) == 280
     assert json.loads(p.read_text(encoding="utf-8"))["vllm:loading"]["n"] == 6
+
+
+def test_tracker_emits_and_writes_snapshot(tmp_path):
+    from modelctl.core.startup_progress import STAGES, StartupTiming, StartupTracker
+
+    events = []
+    snap = tmp_path / "startup.json"
+    tr = StartupTracker("q", "vllm", "docker", on_progress=events.append,
+                        timing=StartupTiming(path=tmp_path / "t.json"),
+                        snapshot_path=snap)
+    tr.begin("preflight", "依赖检查")
+    tr.done("preflight")
+    tr.begin("prepare_env", "准备环境")
+    tr.progress("prepare_env", "拉取镜像（3/9 层）", pct=0.4)
+    assert events[0].stage == "preflight" and events[0].status == "running"
+    assert events[-1].pct == 0.4
+    data = json.loads(snap.read_text(encoding="utf-8"))
+    assert data["runtime"] == "docker"
+    assert [s["stage"] for s in data["stages"]] == list(STAGES)
+    assert data["stages"][0]["status"] == "done"
+    assert data["stages"][1]["pct"] == 0.4
+
+
+def test_tracker_fail_marks_error(tmp_path):
+    from modelctl.core.startup_progress import StartupTiming, StartupTracker
+
+    events = []
+    tr = StartupTracker("q", "vllm", "docker", on_progress=events.append,
+                        timing=StartupTiming(path=tmp_path / "t.json"),
+                        snapshot_path=tmp_path / "s.json")
+    tr.begin("preflight", "依赖检查")
+    tr.fail("preflight", "依赖检查", "docker 不在 PATH")
+    assert events[-1].status == "error" and "docker" in events[-1].error
+
+
+def test_tracker_eta_from_timing(tmp_path):
+    from modelctl.core.startup_progress import StartupTiming, StartupTracker
+
+    timing = StartupTiming(path=tmp_path / "t.json")
+    timing.record("vllm", "loading", 200.0)
+    events = []
+    tr = StartupTracker("q", "vllm", "docker", on_progress=events.append,
+                        timing=timing, snapshot_path=tmp_path / "s.json")
+    tr.begin("loading", "加载模型", pct=0.5)
+    assert events[-1].eta_s == 100  # 200*(1-0.5)

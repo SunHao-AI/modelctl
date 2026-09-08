@@ -20,6 +20,7 @@ import json
 import math
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -218,3 +219,159 @@ class StartupTiming:
             os.replace(tmp, self._path)
         except OSError as exc:
             logger.debug(f"startup-timing 落盘失败（忽略）：{exc}")
+
+
+# ---------------------------------------------------------------------------
+# 阶段进度事件与发射器（on_progress 回调 + 快照文件 + EMA ETA）
+# ---------------------------------------------------------------------------
+
+STAGES: tuple[str, ...] = ("preflight", "prepare_env", "launch", "loading", "health")
+STAGE_LABELS: dict[str, str] = {
+    "preflight": "依赖检查",
+    "prepare_env": "准备环境",
+    "launch": "拉起进程",
+    "loading": "加载模型",
+    "health": "就绪",
+}
+
+
+@dataclass
+class StageEvent:
+    """一次阶段状态变更；status ∈ running | done | error。"""
+
+    stage: str
+    status: str
+    label: str
+    pct: float | None = None  # 0.0–1.0；None = 不确定态（前端条纹动画）
+    eta_s: int | None = None  # 预估剩余秒；None = 无历史样本
+    error: str | None = None  # status=error 的原因（RequirementError 文案原样透传）
+
+    def to_dict(self) -> dict:
+        return {
+            "stage": self.stage,
+            "status": self.status,
+            "label": self.label,
+            "pct": self.pct,
+            "eta_s": self.eta_s,
+            "error": self.error,
+        }
+
+
+@dataclass
+class _StageState:
+    """单阶段在快照中的落盘态（含起止时间戳，_t0 仅用于测本次耗时不落盘）。"""
+
+    stage: str
+    status: str = "pending"
+    label: str = ""
+    pct: float | None = None
+    eta_s: int | None = None
+    error: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    _t0: float = 0.0
+
+    def to_dict(self) -> dict:
+        return {
+            "stage": self.stage,
+            "status": self.status,
+            "label": self.label,
+            "pct": self.pct,
+            "eta_s": self.eta_s,
+            "error": self.error,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+        }
+
+
+class StartupTracker:
+    """一次 start 的阶段进度发射器：on_progress 回调 + 快照文件 + EMA ETA。
+
+    pct 单调不减由各来源保证（PullParser 逐层历史最大、LoadingWatcher._last_pct），
+    Tracker 只做状态搬运与落盘，不二次夹紧——避免误伤同阶段重开（begin 重置）。
+    """
+
+    def __init__(self, profile_name: str, engine: str, runtime: str,
+                 on_progress=None, timing: StartupTiming | None = None,
+                 snapshot_path: Path | None = None) -> None:
+        self.profile_name = profile_name
+        self.engine = engine
+        self.runtime = runtime
+        self._on_progress = on_progress
+        self._timing = timing or StartupTiming()
+        self._snapshot_path = snapshot_path or (
+            self._timing._default_dir() / f"{profile_name}.startup.json")
+        self._stages: dict[str, _StageState] = {
+            s: _StageState(stage=s, label=STAGE_LABELS[s]) for s in STAGES}
+
+    # -- 阶段生命周期 --------------------------------------------------------
+
+    def begin(self, stage: str, label: str | None = None, pct: float | None = None) -> None:
+        st = self._stages[stage]
+        st.status = "running"
+        st.label = label or STAGE_LABELS[stage]
+        st.pct = pct
+        st.error = None
+        st.started_at = _now_str()
+        st._t0 = time.monotonic()
+        st.eta_s = self._timing.eta(self.engine, stage, pct)
+        self._emit(StageEvent(stage, "running", st.label, pct, st.eta_s, None))
+
+    def progress(self, stage: str, label: str, pct: float | None = None) -> None:
+        st = self._stages[stage]
+        if st.status != "running":
+            # 未 begin 或已收尾：以 running 重新开一帧（done/error 后仍来的进度按运行处理）
+            self.begin(stage, label, pct)
+            return
+        st.label = label
+        st.pct = pct
+        st.eta_s = self._timing.eta(self.engine, stage, pct)
+        self._emit(StageEvent(stage, "running", label, pct, st.eta_s, None))
+
+    def done(self, stage: str, label: str | None = None, pct: float | None = 1.0) -> None:
+        st = self._stages[stage]
+        st.status = "done"
+        st.label = label or STAGE_LABELS[stage]
+        st.pct = pct
+        st.eta_s = None
+        st.finished_at = _now_str()
+        # 耗时仅在真正 begin 过（_t0 非零）时取样，避免未开阶段（如 health）记伪样本
+        elapsed = time.monotonic() - st._t0 if st._t0 else 0.0
+        if elapsed > 0:
+            self._timing.record(self.engine, stage, elapsed)
+        self._emit(StageEvent(stage, "done", st.label, pct, None, None))
+
+    def fail(self, stage: str, label: str, error: str) -> None:
+        st = self._stages[stage]
+        st.status = "error"
+        st.label = label
+        st.error = error
+        st.finished_at = _now_str()
+        self._emit(StageEvent(stage, "error", label, st.pct, None, error))
+
+    # -- 输出 ---------------------------------------------------------------
+
+    def _emit(self, event: StageEvent) -> None:
+        if self._on_progress is not None:
+            try:
+                self._on_progress(event)
+            except Exception as exc:  # noqa: BLE001 —— 进度回调异常绝不回灌启动线程
+                logger.debug(f"on_progress 回调异常（忽略）：{exc}")
+        self._write_snapshot()
+
+    def _write_snapshot(self) -> None:
+        payload = {
+            "profile": self.profile_name,
+            "engine": self.engine,
+            "runtime": self.runtime,
+            "updated_at": _now_str(),
+            "stages": [self._stages[s].to_dict() for s in STAGES],
+        }
+        try:
+            self._snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+            # tmp 带 PID：并发启动（多 profile 共享 cache 目录）互不覆写对方的中间文件
+            tmp = self._snapshot_path.with_name(f"{self._snapshot_path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp, self._snapshot_path)
+        except OSError as exc:
+            logger.debug(f"startup 快照落盘失败（忽略）：{exc}")
