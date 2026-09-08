@@ -16,8 +16,14 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+
+from loguru import logger
 
 # ---------------------------------------------------------------------------
 # docker pull 非 TTY 逐层输出解析
@@ -126,3 +132,71 @@ class PullParser:
         pct = acc / total
         label = f"拉取镜像 {self.image}（{done}/{total} 层）"
         return PullUpdate(pct=round(pct, 4), label=label, done_layers=done, total_layers=total)
+
+
+# ---------------------------------------------------------------------------
+# 阶段耗时 EMA 计时（data/cache/startup-timing.json）
+# ---------------------------------------------------------------------------
+
+_EMA_ALPHA = 0.4
+_MIN_SAMPLES_EMA = 5  # n<该值用算术均值，之后转 EMA
+
+
+def _now_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+class StartupTiming:
+    """按 `engine:stage` 记录阶段耗时滑动估计，给出剩余时间 ETA。
+
+    文件损坏/不可写 → 静默降级为无 ETA（返回 None），绝不影响启动。
+    """
+
+    def __init__(self, path: Path | None = None) -> None:
+        self._path = path or (self._default_dir() / "startup-timing.json")
+        self._data: dict[str, dict] = self._load()
+
+    @staticmethod
+    def _default_dir() -> Path:
+        from modelctl.core.paths import cache_dir
+
+        return cache_dir()
+
+    def _load(self) -> dict[str, dict]:
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+            return raw if isinstance(raw, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def eta(self, engine: str, stage: str, pct: float | None) -> int | None:
+        rec = self._data.get(f"{engine}:{stage}")
+        if not rec:
+            return None
+        base = float(rec.get("ema_s", 0.0))
+        if base <= 0:
+            return None
+        remain = (1.0 - (pct or 0.0))
+        return max(0, round(base * remain))
+
+    def record(self, engine: str, stage: str, elapsed_s: float) -> None:
+        key = f"{engine}:{stage}"
+        prev = self._data.get(key)
+        n = (prev.get("n", 0) if prev else 0) + 1
+        if n < _MIN_SAMPLES_EMA or not prev:
+            # 前几样本用增量算术均值累积，避免单次异常值定死基线
+            prev_avg = prev.get("ema_s", 0.0) if prev else 0.0
+            avg = ((prev_avg * (n - 1)) + elapsed_s) / n
+        else:
+            avg = _EMA_ALPHA * elapsed_s + (1 - _EMA_ALPHA) * prev["ema_s"]
+        self._data[key] = {"ema_s": round(avg, 1), "n": n, "updated_at": _now_str()}
+        self._flush()
+
+    def _flush(self) -> None:
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(self._data, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp, self._path)
+        except OSError as exc:
+            logger.debug(f"startup-timing 落盘失败（忽略）：{exc}")

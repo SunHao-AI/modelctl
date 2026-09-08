@@ -67,3 +67,39 @@ def test_pct_monotonic_across_download_complete():
     ]
     pcts = [u.pct for u in (p.feed(x) for x in lines)]
     assert all(a <= b for a, b in zip(pcts, pcts[1:], strict=False)), pcts
+
+
+def test_timing_cold_start_returns_none(tmp_path):
+    from modelctl.core.startup_progress import StartupTiming
+
+    t = StartupTiming(path=tmp_path / "timing.json")
+    assert t.eta("vllm", "prepare_env", 0.5) is None
+
+
+def test_timing_record_then_eta_scales_with_pct(tmp_path):
+    from modelctl.core.startup_progress import StartupTiming
+
+    t = StartupTiming(path=tmp_path / "timing.json")
+    t.record("vllm", "prepare_env", 100.0)
+    # pct=0.5 → 剩余 50；pct=None → 全量 100
+    assert t.eta("vllm", "prepare_env", 0.5) == 50
+    assert t.eta("vllm", "prepare_env", None) == 100
+
+
+def test_timing_persists_across_instances(tmp_path):
+    from modelctl.core.startup_progress import StartupTiming
+
+    p = tmp_path / "timing.json"
+    StartupTiming(path=p).record("vllm", "loading", 200.0)
+    assert StartupTiming(path=p).eta("vllm", "loading", 0.0) == 200
+
+
+def test_timing_corrupt_file_survives(tmp_path):
+    from modelctl.core.startup_progress import StartupTiming
+
+    p = tmp_path / "timing.json"
+    p.write_text("{ not json", encoding="utf-8")
+    t = StartupTiming(path=p)
+    assert t.eta("vllm", "loading", 0.5) is None
+    t.record("vllm", "loading", 10.0)  # 损坏文件被忽略后仍可写
+    assert t.eta("vllm", "loading", 0.5) == 5
