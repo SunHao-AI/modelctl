@@ -145,21 +145,18 @@ def _fail_task(task, exit_code: int, message: str, engine: str) -> None:
     task.error(exit_code=exit_code, message=message, code=code, engine=eng)
 
 
-async def _do_start(profile, caps, timeout: float, task, gpus: str | None) -> None:
-    """在 worker 线程中执行启动，完成后更新 task。"""
-    from modelctl.core.all_service import start_profile
-    from modelctl.core.gpu_utils import resolve_gpu_list
+def _stage_event_bridge(task, loop: asyncio.AbstractEventLoop):
+    """构建 stage 事件桥接回调（start/restart 共用），把进度事件安全投递到事件循环线程。
 
-    # gpus 逗号字符串 → 环境变量（让 adapter.selected_gpus() 可见）
-    prev_gpus = os.environ.get("MODELCTL_GPUS")
-    if gpus:
-        parsed = resolve_gpu_list(None, None, gpus)
-        if parsed:
-            os.environ["MODELCTL_GPUS"] = ",".join(str(g) for g in parsed)
-
+    `on_progress` 由 worker 线程（`asyncio.to_thread`）与 LoadingWatcher daemon 线程调用，
+    而 `Task.event` 依赖当前线程的事件循环——工作线程里没有，直接调用会抛 RuntimeError
+    并被其内部 except 静默吞掉，浏览器永远收不到 `stage` 帧。故此处以调用方在**事件循环
+    线程**捕获的 `loop` 经 `call_soon_threadsafe` 派发；loop 已关闭时降级 debug 日志
+    （进度尽力而为，绝不影响启动）。
+    """
     def _on_stage(ev) -> None:
         """阶段事件 → task SSE（与 docker 一键安装同一事件基建，_sse_task_stream 零改动透传）。"""
-        task.event("stage", {
+        payload = {
             "stage": ev.stage,
             "status": ev.status,
             "label": ev.label,
@@ -167,9 +164,37 @@ async def _do_start(profile, caps, timeout: float, task, gpus: str | None) -> No
             "etaSeconds": ev.eta_s,
             "error": ev.error,
             "task_id": task.id,
-        })
+        }
         pct = "" if ev.pct is None else f" {round(ev.pct * 100)}%"
-        task.update_detail(f"{ev.label}{pct}")
+        detail = f"{ev.label}{pct}"
+
+        def _dispatch() -> None:
+            task.event("stage", payload)
+            task.update_detail(detail)
+
+        try:
+            loop.call_soon_threadsafe(_dispatch)
+        except (RuntimeError, TypeError) as exc:
+            logger.debug(f"stage 事件投递失败（循环已关闭，忽略）：{exc}")
+
+    return _on_stage
+
+
+async def _do_start(profile, caps, timeout: float, task, gpus: str | None) -> None:
+    """在 worker 线程中执行启动，完成后更新 task。"""
+    from modelctl.core.all_service import start_profile
+    from modelctl.core.gpu_utils import resolve_gpu_list
+
+    # 进入 to_thread 前仍在事件循环线程：此处取到的 loop 才能供跨线程派发
+    loop = asyncio.get_running_loop()
+    _on_stage = _stage_event_bridge(task, loop)
+
+    # gpus 逗号字符串 → 环境变量（让 adapter.selected_gpus() 可见）
+    prev_gpus = os.environ.get("MODELCTL_GPUS")
+    if gpus:
+        parsed = resolve_gpu_list(None, None, gpus)
+        if parsed:
+            os.environ["MODELCTL_GPUS"] = ",".join(str(g) for g in parsed)
 
     try:
         task.update_status("running")
@@ -206,25 +231,15 @@ async def _do_restart(profile, caps, timeout: float, task, gpus: str | None) -> 
     from modelctl.core.all_service import restart_profile
     from modelctl.core.gpu_utils import resolve_gpu_list
 
+    # 与 _do_start 同构：事件循环线程捕获 loop，restart 复用 start 的阶段序列
+    loop = asyncio.get_running_loop()
+    _on_stage = _stage_event_bridge(task, loop)
+
     prev_gpus = os.environ.get("MODELCTL_GPUS")
     if gpus:
         parsed = resolve_gpu_list(None, None, gpus)
         if parsed:
             os.environ["MODELCTL_GPUS"] = ",".join(str(g) for g in parsed)
-
-    def _on_stage(ev) -> None:
-        """阶段事件 → task SSE（与 _do_start 同构，restart 复用 start 的阶段序列）。"""
-        task.event("stage", {
-            "stage": ev.stage,
-            "status": ev.status,
-            "label": ev.label,
-            "pct": ev.pct,
-            "etaSeconds": ev.eta_s,
-            "error": ev.error,
-            "task_id": task.id,
-        })
-        pct = "" if ev.pct is None else f" {round(ev.pct * 100)}%"
-        task.update_detail(f"{ev.label}{pct}")
 
     try:
         task.update_status("running")
