@@ -157,9 +157,25 @@ async def _do_start(profile, caps, timeout: float, task, gpus: str | None) -> No
         if parsed:
             os.environ["MODELCTL_GPUS"] = ",".join(str(g) for g in parsed)
 
+    def _on_stage(ev) -> None:
+        """阶段事件 → task SSE（与 docker 一键安装同一事件基建，_sse_task_stream 零改动透传）。"""
+        task.event("stage", {
+            "stage": ev.stage,
+            "status": ev.status,
+            "label": ev.label,
+            "pct": ev.pct,
+            "etaSeconds": ev.eta_s,
+            "error": ev.error,
+            "task_id": task.id,
+        })
+        pct = "" if ev.pct is None else f" {round(ev.pct * 100)}%"
+        task.update_detail(f"{ev.label}{pct}")
+
     try:
         task.update_status("running")
-        result = await asyncio.to_thread(start_profile, profile, caps, timeout)
+        result = await asyncio.to_thread(
+            lambda: start_profile(profile, caps, timeout, on_progress=_on_stage)
+        )
         task.update_detail(result.detail)
         if result.status == "error":
             _fail_task(task, 1, result.detail, profile.engine)
@@ -196,9 +212,25 @@ async def _do_restart(profile, caps, timeout: float, task, gpus: str | None) -> 
         if parsed:
             os.environ["MODELCTL_GPUS"] = ",".join(str(g) for g in parsed)
 
+    def _on_stage(ev) -> None:
+        """阶段事件 → task SSE（与 _do_start 同构，restart 复用 start 的阶段序列）。"""
+        task.event("stage", {
+            "stage": ev.stage,
+            "status": ev.status,
+            "label": ev.label,
+            "pct": ev.pct,
+            "etaSeconds": ev.eta_s,
+            "error": ev.error,
+            "task_id": task.id,
+        })
+        pct = "" if ev.pct is None else f" {round(ev.pct * 100)}%"
+        task.update_detail(f"{ev.label}{pct}")
+
     try:
         task.update_status("running")
-        result = await asyncio.to_thread(restart_profile, profile, caps, timeout)
+        result = await asyncio.to_thread(
+            lambda: restart_profile(profile, caps, timeout, on_progress=_on_stage)
+        )
         task.update_detail(result.detail)
         if result.status == "error":
             _fail_task(task, 1, result.detail, profile.engine)
@@ -329,7 +361,7 @@ async def get_model(name: str, _: None = Depends(require_auth)):
 async def start_model(
     name: str,
     request: Request,
-    timeout: float = Query(default=600, ge=1, le=3600),
+    timeout: float | None = Query(default=None, ge=1, le=7200),
     gpus: str | None = Query(default=None),
     _: None = Depends(require_auth),
 ):
@@ -356,9 +388,15 @@ async def start_model(
 
     try:
         caps = await asyncio.to_thread(_probe_caps)
+        from modelctl.core.all_service import default_start_timeout
+
+        # timeout 缺省 → 按 profile/运行时自适应（docker 1800s，其余 600s）
+        eff_timeout = timeout if timeout is not None else await asyncio.to_thread(
+            default_start_timeout, profile, caps
+        )
         task = tm.create_task(kind="model_start", action="start", target=name)
         task.update_status("queued")
-        asyncio.ensure_future(_do_start(profile, caps, timeout, task, gpus))
+        asyncio.ensure_future(_do_start(profile, caps, eff_timeout, task, gpus))
         return JSONResponse(
             status_code=202,
             content={"task_id": task.id, "stream_url": f"/admin/api/tasks/{task.id}/stream"},
@@ -396,7 +434,7 @@ async def stop_model(name: str, _: None = Depends(require_auth)):
 async def restart_model(
     name: str,
     request: Request,
-    timeout: float = Query(default=600, ge=1, le=3600),
+    timeout: float | None = Query(default=None, ge=1, le=7200),
     gpus: str | None = Query(default=None),
     _: None = Depends(require_auth),
 ):
@@ -422,15 +460,76 @@ async def restart_model(
 
     try:
         caps = await asyncio.to_thread(_probe_caps)
+        from modelctl.core.all_service import default_start_timeout
+
+        # timeout 缺省 → 按 profile/运行时自适应（docker 1800s，其余 600s）
+        eff_timeout = timeout if timeout is not None else await asyncio.to_thread(
+            default_start_timeout, profile, caps
+        )
         task = tm.create_task(kind="model_restart", action="restart", target=name)
         task.update_status("queued")
-        asyncio.ensure_future(_do_restart(profile, caps, timeout, task, gpus))
+        asyncio.ensure_future(_do_restart(profile, caps, eff_timeout, task, gpus))
         return JSONResponse(
             status_code=202,
             content={"task_id": task.id, "stream_url": f"/admin/api/tasks/{task.id}/stream"},
         )
     finally:
         await tm.release(name, "restart")
+
+
+@router.get("/{name}/startup")
+async def get_startup_progress(name: str, _: None = Depends(require_auth)):
+    """GET /admin/api/models/{name}/startup — 最近一次启动的阶段进度快照。
+
+    数据源为 all_service 每次阶段事件覆写的 `cache/<name>.startup.json`（尽力而为，
+    写失败则无快照 → 404）。非发起者浏览器 / 页面刷新后据此渲染进度卡片，不依赖 SSE 时序。
+    """
+    from modelctl.core.paths import cache_dir
+    from modelctl.core.startup_progress import STAGES
+
+    path = cache_dir() / f"{name}.startup.json"
+    if not path.is_file():
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "not_found", "message": f"模型 {name} 暂无启动进度记录"}},
+        )
+    try:
+        raw = json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        # ValueError 覆盖 JSONDecodeError 与 UnicodeDecodeError（快照半写/编码异常）
+        logger.warning(f"启动进度快照不可读（{path}）：{exc}")
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "not_found", "message": f"模型 {name} 启动进度快照损坏"}},
+        )
+    if not isinstance(raw, dict):
+        logger.warning(f"启动进度快照结构异常（{path}）：非对象 JSON")
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "not_found", "message": f"模型 {name} 启动进度快照损坏"}},
+        )
+    stages = []
+    for s in raw.get("stages") or []:
+        if not isinstance(s, dict):
+            continue
+        stages.append({
+            "stage": s.get("stage"),
+            "status": s.get("status", "pending"),
+            "label": s.get("label") or "",
+            "pct": s.get("pct"),
+            "etaSeconds": s.get("eta_s"),
+            "error": s.get("error"),
+            "startedAt": s.get("started_at"),
+            "finishedAt": s.get("finished_at"),
+        })
+    return {
+        "profile": raw.get("profile") or name,
+        "engine": raw.get("engine") or "",
+        "runtime": raw.get("runtime") or "",
+        "updatedAt": raw.get("updated_at") or "",
+        "stages": stages,
+        "knownStages": list(STAGES),
+    }
 
 
 @router.get("/{name}/log")
