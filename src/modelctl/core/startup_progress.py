@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -165,9 +166,23 @@ class StartupTiming:
     def _load(self) -> dict[str, dict]:
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
-            return raw if isinstance(raw, dict) else {}
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
+            # ValueError 覆盖 JSONDecodeError 与 UnicodeDecodeError（均为其子类）
             return {}
+        if not isinstance(raw, dict):
+            return {}
+        # 形状过滤：结构畸形的记录整条丢弃，保证下游 eta/record 不会再遇到坏值
+        return {
+            k: {"ema_s": float(v["ema_s"]), "n": v["n"]}
+            for k, v in raw.items()
+            if isinstance(v, dict)
+            and isinstance(v.get("ema_s"), (int, float))
+            and not isinstance(v.get("ema_s"), bool)
+            and isinstance(v.get("n"), int)
+            and not isinstance(v.get("n"), bool)
+            and v["n"] >= 0
+            and math.isfinite(v["ema_s"])
+        }
 
     def eta(self, engine: str, stage: str, pct: float | None) -> int | None:
         rec = self._data.get(f"{engine}:{stage}")
@@ -180,10 +195,13 @@ class StartupTiming:
         return max(0, round(base * remain))
 
     def record(self, engine: str, stage: str, elapsed_s: float) -> None:
+        # 非正/非有限耗时是坏样本（时钟回拨、异常路径），直接忽略以保护基线
+        if elapsed_s <= 0 or not math.isfinite(elapsed_s):
+            return
         key = f"{engine}:{stage}"
         prev = self._data.get(key)
         n = (prev.get("n", 0) if prev else 0) + 1
-        if n < _MIN_SAMPLES_EMA or not prev:
+        if n < _MIN_SAMPLES_EMA:
             # 前几样本用增量算术均值累积，避免单次异常值定死基线
             prev_avg = prev.get("ema_s", 0.0) if prev else 0.0
             avg = ((prev_avg * (n - 1)) + elapsed_s) / n

@@ -1,6 +1,10 @@
 """startup_progress 单测：pull 解析 / 模式表 / EMA / 快照 / 阶段序列。"""
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from modelctl.core.startup_progress import PullParser, PullUpdate
 
 
@@ -103,3 +107,61 @@ def test_timing_corrupt_file_survives(tmp_path):
     assert t.eta("vllm", "loading", 0.5) is None
     t.record("vllm", "loading", 10.0)  # 损坏文件被忽略后仍可写
     assert t.eta("vllm", "loading", 0.5) == 5
+
+
+@pytest.mark.parametrize("payload", [
+    '{"vllm:loading": "oops"}',                      # 值非 dict → AttributeError
+    '{"vllm:loading": {"ema_s": NaN, "n": 3}}',      # NaN → int() ValueError
+    '{"vllm:loading": {"ema_s": Infinity, "n": 2}}', # 非有限
+    '{"vllm:loading": {"n": 9}}',                    # 缺 ema_s → EMA 分支 KeyError
+    '{"vllm:loading": {"ema_s": 5.0, "n": "3"}}',    # n 为字符串 → TypeError
+])
+def test_timing_malformed_records_never_raise(tmp_path, payload):
+    # 结构畸形但 JSON 合法的记录：eta/record 均不得抛异常，坏记录被丢弃
+    from modelctl.core.startup_progress import StartupTiming
+
+    p = tmp_path / "timing.json"
+    p.write_text(payload, encoding="utf-8")
+    t = StartupTiming(path=p)
+    assert t.eta("vllm", "loading", 0.5) is None
+    t.record("vllm", "loading", 10.0)  # 坏记录被过滤后仍可正常记录
+    assert t.eta("vllm", "loading", 0.5) == 5
+
+
+def test_timing_invalid_utf8_file_survives(tmp_path):
+    from modelctl.core.startup_progress import StartupTiming
+
+    p = tmp_path / "timing.json"
+    p.write_bytes(b'{"vllm:loading": {"ema_s": 1.0, "n": 1}} \xff\xfe')
+    t = StartupTiming(path=p)  # UnicodeDecodeError 不得冒泡
+    assert t.eta("vllm", "loading", 0.5) is None
+
+
+def test_timing_record_ignores_bad_samples(tmp_path):
+    # 非正/非有限耗时样本必须被忽略：既不产生 ETA，也不得污染已有基线
+    from modelctl.core.startup_progress import StartupTiming
+
+    p = tmp_path / "timing.json"
+    t = StartupTiming(path=p)
+    for bad in (-50.0, 0.0, float("nan"), float("inf")):
+        t.record("vllm", "loading", bad)
+        assert t.eta("vllm", "loading", 0.5) is None
+    assert not p.exists()  # 全坏样本不应落盘
+
+    t.record("vllm", "loading", 100.0)
+    assert t.eta("vllm", "loading", 0.5) == 50
+    t.record("vllm", "loading", -50.0)  # 坏样本不得污染基线
+    assert t.eta("vllm", "loading", 0.5) == 50
+
+
+def test_timing_ema_takes_over_after_min_samples(tmp_path):
+    from modelctl.core.startup_progress import StartupTiming
+
+    p = tmp_path / "timing.json"
+    t = StartupTiming(path=p)
+    for _ in range(5):
+        t.record("vllm", "loading", 100.0)
+    t.record("vllm", "loading", 550.0)
+    # n≥5 后转 EMA(α=0.4)：0.4*550 + 0.6*100 = 280，且跨实例持久化
+    assert StartupTiming(path=p).eta("vllm", "loading", 0.0) == 280
+    assert json.loads(p.read_text(encoding="utf-8"))["vllm:loading"]["n"] == 6
