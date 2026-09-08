@@ -12,7 +12,7 @@
 
 沿用 `core/cluster/store.py` 已验证的范式：stdlib sqlite3 + 单连接
 （`check_same_thread=False`）+ `threading.Lock` 写串行化 + WAL + busy_timeout +
-幂等建表/补列 + 读路径零 `SELECT *`。
+幂等建表/补列 + 读路径显式列清单（禁止通配选列）。
 
 设计要点（改动前必读）：
 
@@ -180,6 +180,18 @@ def _like_pattern(keyword: str) -> str:
     return f"%{escaped}%"
 
 
+def _alter_column_type(sql_type: str) -> str:
+    """给补列用的列定义兜默认值：SQLite 禁止 `ADD COLUMN ... NOT NULL` 且无 DEFAULT
+    （既有行无处取值直接报错）。schema 里没写 DEFAULT 的 NOT NULL 列在 ALTER 时补一个
+    与类型匹配的常量默认值，仅影响**旧库补齐**这一路径，新库建表仍按原 schema。
+    """
+    upper = sql_type.upper()
+    if "NOT NULL" in upper and "DEFAULT" not in upper:
+        base = "0" if upper.startswith("INTEGER") else "''"
+        return f"{sql_type} DEFAULT {base}"
+    return sql_type
+
+
 class AccountsStore:
     """账号台账。进程内共享一个连接（check_same_thread=False），写经锁串行化。"""
 
@@ -234,7 +246,8 @@ class AccountsStore:
             have = {r["name"] for r in self._db().execute(f"PRAGMA table_info({table})").fetchall()}
             for name, sql_type in columns:
                 if name not in have:
-                    self._db().execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+                    self._db().execute(
+                        f"ALTER TABLE {table} ADD COLUMN {name} {_alter_column_type(sql_type)}")
 
     # ---- row → dict ----
 
@@ -408,7 +421,10 @@ class AccountsStore:
                 _KEY_SELECT + " WHERE user_id=? ORDER BY id", (user_id,)).fetchall()
         return [self._row_to_key(r) for r in rows]
 
-    def set_key_status(self, key_id: int, status: str, *, now: float) -> bool:
+    def set_key_status(self, key_id: int, status: str) -> bool:
+        """启/禁/吊销 Key。无 `now` 形参：api_keys 没有 updated_at 列，本方法不写时间
+        （活跃时刻归 `touch_key_last_used` 单责，同 cluster.set_node_status 口径）。
+        """
         if status not in KEY_STATUSES:
             raise ValueError(f"非法 Key 状态: {status!r}，允许值 {KEY_STATUSES}")
         with self._lock:

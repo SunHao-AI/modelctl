@@ -36,13 +36,15 @@ def store(tmp_path):
     s.close()
 
 
-def _mk_user(store, username="alice", **kw):
+def _mk_user(store, username="alice", now=1.0, **kw):
     kw.setdefault("password_hash", "bcrypt$fake")
-    return store.create_user(username=username, **kw)
+    return store.create_user(username=username, now=now, **kw)
 
 
-def _mk_key(store, user_id, name="default", key_hash="hash-a", key_prefix="sk-mctl-***aaaa"):
-    return store.create_key(user_id=user_id, key_hash=key_hash, key_prefix=key_prefix, name=name)
+def _mk_key(store, user_id, name="default", key_hash="hash-a", key_prefix="sk-mctl-***aaaa",
+            now=1.0, **kw):
+    return store.create_key(user_id=user_id, key_hash=key_hash, key_prefix=key_prefix,
+                            name=name, now=now, **kw)
 
 
 # ---------- schema ----------
@@ -171,7 +173,7 @@ def test_set_user_status_validates_and_persists(store):
     store.set_user_status(uid, "disabled", now=5.0)
     assert store.get_user_by_id(uid)["status"] == "disabled"
     with pytest.raises(ValueError):
-        store.set_user_status(uid, "deleted")
+        store.set_user_status(uid, "deleted", now=6.0)
 
 
 def test_set_user_password_hash(store):
@@ -223,7 +225,7 @@ def test_key_status_whitelist_and_expiry(store):
     uid = _mk_user(store, "kate")
     kid = _mk_key(store, uid, key_hash="k9", expires_at=123.0)
     assert store.get_key_by_id(kid)["expires_at"] == 123.0
-    store.set_key_status(kid, "revoked", now=8.0)
+    store.set_key_status(kid, "revoked")
     assert store.get_key_by_id(kid)["status"] == "revoked"
     with pytest.raises(ValueError):
         store.set_key_status(kid, "expired")
@@ -301,11 +303,12 @@ def test_session_idle_window_aggregation(store):
     uid = _mk_user(store, "sam")
     kid = _mk_key(store, uid, key_hash="ki")
     a = store.get_or_create_session(user_id=uid, key_id=kid, model="qwen", now=1000.0)
-    b = store.get_or_create_session(user_id=uid, key_id=kid, model="qwen", now=1000.0 + 1799)
-    assert a["id"] == b["id"]  # 窗口内（默认 30min）归同一会话
-    c = store.get_or_create_session(user_id=uid, key_id=kid, model="qwen", now=1000.0 + 1801)
+    b = store.get_or_create_session(user_id=uid, key_id=kid, model="qwen", now=2799.0)
+    assert a["id"] == b["id"]  # 窗口内（默认 30min）归同一会话，活跃时刻刷新到 2799
+    # 空闲窗口以"最后一次活跃"起算（spec §6.1）：2799+1801 才超窗，而非距创建 1801s
+    c = store.get_or_create_session(user_id=uid, key_id=kid, model="qwen", now=4600.0)
     assert c["id"] != a["id"]  # 超窗新建
-    d = store.get_or_create_session(user_id=uid, key_id=kid, model="deepseek", now=1000.0 + 1801)
+    d = store.get_or_create_session(user_id=uid, key_id=kid, model="deepseek", now=4600.0)
     assert d["id"] not in (a["id"], c["id"])  # 换 model 也是新会话
     auto = store.get_session(a["id"], user_id=uid)
     assert auto["session_key"].startswith("s-")  # 无 X-Session-Id 时内部生成

@@ -186,6 +186,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="setup 时从本地 wheel 目录安装（uv --find-links），绕开跨境 PyPI 下载")
     ep.add_argument("--offline", action="store_true",
                     help="配合 --wheels 使用：完全禁用网络，要求目录内依赖已自闭包")
+    # 自定义 PyPI 镜像源：--index-url 指定替代默认 PyPI（如国内镜像加速跨域下载）。
+    ep.add_argument("--index-url", default=None, metavar="URL", dest="index_url",
+                    help="setup 时用 uv --index-url 指定包索引（替代默认 PyPI，"
+                         "如 https://mirrors.aliyun.com/pypi/simple/）")
     # docker 专用：--run 实际执行安装（默认仅诊断+指引）；--registry-mirror 写 daemon.json。
     ep.add_argument("--run", action="store_true",
                     help="env setup docker：实际执行安装脚本（Linux + root），默认仅输出诊断与指引")
@@ -1030,6 +1034,7 @@ def _cmd_env_setup(args, models_dir: Path | None, caps) -> int:
             args.engine,
             wheels_dir=Path(wheels).expanduser() if wheels else None,
             offline=bool(getattr(args, "offline", False)),
+            index_url=getattr(args, "index_url", None),
         )
     except EngineEnvError as exc:
         logger.error(str(exc))
