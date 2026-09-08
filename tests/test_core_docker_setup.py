@@ -151,12 +151,19 @@ def test_classify_pull_error_hard_failures():
 
 
 class _PullProc:
-    """伪造 docker pull 的 CompletedProcess。"""
+    """伪造 docker pull 的子进程（ensure_image 流式化后走 Popen 契约：可迭代 + wait）。"""
 
     def __init__(self, rc: int, stderr: str = ""):
         self.returncode = rc
         self.stderr = stderr
         self.stdout = ""
+        self._lines = [f"{stderr}\n"] if stderr else []
+
+    def __iter__(self):
+        return iter(self._lines)
+
+    def wait(self):
+        return self.returncode
 
 
 def test_ensure_image_skips_when_present(monkeypatch):
@@ -172,11 +179,11 @@ def test_ensure_image_retries_transient(monkeypatch):
     monkeypatch.setattr(ds, "image_present", lambda image: False)
     monkeypatch.setattr(ds, "PULL_RETRY_WAIT", 0)
 
-    def fake_run(cmd, **kw):
+    def fake_popen(cmd, **kw):
         calls.append(cmd)
         return _PullProc(1 if len(calls) < 3 else 0, "short read: unexpected EOF")
 
-    monkeypatch.setattr(ds.subprocess, "run", fake_run)
+    monkeypatch.setattr(ds.subprocess, "Popen", fake_popen)
     assert ds.ensure_image("img:1", attempts=5) is True
     assert len(calls) == 3
 
@@ -187,11 +194,11 @@ def test_ensure_image_stops_on_dead_mirror(monkeypatch):
     monkeypatch.setattr(ds, "image_present", lambda image: False)
     monkeypatch.setattr(ds, "PULL_RETRY_WAIT", 0)
 
-    def fake_run(cmd, **kw):
+    def fake_popen(cmd, **kw):
         calls.append(cmd)
         return _PullProc(1, "lookup x on 127.0.0.53:53: no such host")
 
-    monkeypatch.setattr(ds.subprocess, "run", fake_run)
+    monkeypatch.setattr(ds.subprocess, "Popen", fake_popen)
     assert ds.ensure_image("img:1", attempts=5) is False
     assert len(calls) == 1
 
@@ -201,11 +208,11 @@ def test_ensure_image_exhausts_attempts(monkeypatch):
     monkeypatch.setattr(ds, "image_present", lambda image: False)
     monkeypatch.setattr(ds, "PULL_RETRY_WAIT", 0)
 
-    def fake_run(cmd, **kw):
+    def fake_popen(cmd, **kw):
         calls.append(cmd)
         return _PullProc(1, "i/o timeout")
 
-    monkeypatch.setattr(ds.subprocess, "run", fake_run)
+    monkeypatch.setattr(ds.subprocess, "Popen", fake_popen)
     assert ds.ensure_image("img:1", attempts=3) is False
     assert len(calls) == 3
 

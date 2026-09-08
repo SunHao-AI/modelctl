@@ -38,6 +38,8 @@ from typing import Callable
 
 from loguru import logger
 
+from modelctl.core.startup_progress import PullParser
+
 #: env 子命令族的系统级目标名（区别于托管 venv 目标）
 TARGET = "docker"
 
@@ -167,31 +169,58 @@ def image_present(image: str) -> bool:
     return rc == 0
 
 
-def ensure_image(image: str, attempts: int | None = None) -> bool:
-    """确保 docker_image 就位：本地已有即复用，否则拉取并按错误类型决定是否重试。
+def ensure_image(image: str, attempts: int | None = None,
+                 on_progress: "Callable[[str, float | None], None] | None" = None) -> bool:
+    """确保 docker_image 就位：本地已有即复用，否则流式拉取并按错误类型决定重试。
 
     显式 pull 还有个附带好处：失败原因直接进 modelctl 日志。走 `docker run` 隐式
     pull 时，同样的报错会被 launch 日志的截断规则吃掉，只剩健康检查超时的
     `Connection refused`，迫使人去反推。
+
+    on_progress(label, pct)：逐层聚合进度（PullParser）；缺省 None 行为与旧实现一致
+    （仍收集全文用于失败分类）。stderr 合并进 stdout（docker 进度走 stderr），
+    `classify_pull_error` 对混合文本不敏感，分类语义不变。
     """
     if image_present(image):
         logger.info(f"镜像已就位，跳过拉取：{image}")
         return True
     attempts = attempts or PULL_ATTEMPTS
+    parser = PullParser(image)
     tail = ""
+    err_all = ""
     for i in range(1, attempts + 1):
         logger.info(f"拉取镜像（第 {i}/{attempts} 次）：{image}")
+        parser.reset()
+        err_lines: list[str] = []
         try:
-            proc = subprocess.run(["docker", "pull", image], capture_output=True, text=True)
+            proc = subprocess.Popen(
+                ["docker", "pull", image],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, errors="replace",
+            )
         except (OSError, subprocess.SubprocessError) as exc:
             logger.error(f"docker pull 无法执行：{exc}")
             return False
+        try:
+            # Popen.__iter__ 委托 stdout 逐行；stderr 已合并进 stdout
+            for line in proc:
+                err_lines.append(line)
+                upd = parser.feed(line)
+                if upd and on_progress:
+                    try:
+                        on_progress(f"{upd.label}（第 {i}/{attempts} 次）"
+                                    if attempts > 1 else upd.label, upd.pct)
+                    except Exception as exc:  # noqa: BLE001 —— 进度回调异常绝不炸拉取主流程
+                        logger.debug(f"on_progress 回调异常（忽略）：{exc}")
+        finally:
+            # 无论读取是否异常都回收子进程，防僵尸/句柄泄漏
+            proc.wait()
         if proc.returncode == 0:
             logger.info(f"镜像拉取完成：{image}")
             return True
-        err = (proc.stderr or proc.stdout or "").strip()
-        tail = err.splitlines()[-1] if err else ""
-        kind = classify_pull_error(err)
+        err_all = "".join(err_lines).strip()
+        tail = err_all.splitlines()[-1] if err_all else ""
+        kind = classify_pull_error(err_all)
         if kind == "dead-mirror":
             logger.error(f"registry-mirror 域名解析失败，重试无意义：{tail}")
             logger.error(f"执行 `modelctl env setup docker --run` 清理停服源（{DAEMON_JSON}）")
