@@ -14,6 +14,11 @@ llamacpp:
   # model：本地 GGUF 模型路径（可选，留空即可）。
   # 为空/不存在时按 download 段下载到 $MODEL_ROOT/<仓库名> 后直接使用；
   # 落地路径由 MODEL_ROOT + modelscope_id 确定，本文件不会被改写（保持 git 干净）
+  # bind_host：服务绑定地址（安全加固，2026-09-08，所有引擎统一默认）
+  # 默认 127.0.0.1 仅回环监听：外部（含 AI Agent / 其他内网主机）无法直连引擎端口，
+  # 从而堵住绕过网关鉴权/账号/多 Key/token 限速/审计的“第二入口”。
+  # 确需对外暴露时改为 0.0.0.0，并配合防火墙/白名单限制来源（非默认，风险自担）。
+  bind_host: 127.0.0.1
   model: ""
   # download：模型不存在时的自动下载配置（ModelScope，GGUF 格式）
   download:

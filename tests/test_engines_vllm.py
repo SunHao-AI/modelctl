@@ -499,7 +499,7 @@ def test_build_command_docker_template(tmp_path, monkeypatch):
     assert cmd[idx + 1] == '"device=0,1,2,3,4,5,6,7"'
     assert "-p" in cmd
     idx = cmd.index("-p")
-    assert cmd[idx + 1] == "8110:8000"
+    assert cmd[idx + 1] == "127.0.0.1:8110:8000"
     assert "-v" in cmd
     idx = cmd.index("-v")
     expected_mount = f"{model_dir.parent.as_posix()}:/models:ro"
@@ -526,6 +526,72 @@ def test_build_command_docker_template(tmp_path, monkeypatch):
     assert "--reasoning-parser" in cmd and "qwen3" in cmd
     # env 不注入 VIRTUAL_ENV（容器自管）
     assert "VIRTUAL_ENV" not in env
+
+
+# ---- 引擎回环绑定加固（2026-09-08）：bind_host 安全默认 + extra_args 覆盖保护 ----
+
+
+def test_build_command_venv_default_binds_loopback(tmp_path, monkeypatch):
+    """未配置 bind_host → 引擎默认仅绑 127.0.0.1（回环），杜绝外部直连引擎端口。"""
+    monkeypatch.setenv("HF_HOME", "/raid5/sh/model/huggingface")
+    _stub_venv(tmp_path, monkeypatch, "vllm")
+    p = _write(
+        tmp_path,
+        "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: Qwen/Qwen3-32B\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    cmd, _ = a.build_command()
+    # --host 置于命令末尾，是权威绑定值
+    assert cmd[-2:] == ["--host", "127.0.0.1"]
+
+
+def test_build_command_venv_bind_host_authoritative_over_extra_args(tmp_path, monkeypatch):
+    """extra_args 塞 --host 0.0.0.0 也不能覆盖 bind_host（权威），防安全值被静默回退。"""
+    monkeypatch.setenv("HF_HOME", "/raid5/sh/model/huggingface")
+    _stub_venv(tmp_path, monkeypatch, "vllm")
+    p = _write(
+        tmp_path,
+        "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: Qwen/Qwen3-32B\n"
+        '  extra_args: "--host 0.0.0.0"\n',
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    cmd, _ = a.build_command()
+    # extra_args 里的 --host 0.0.0.0 仍在（保留用户参数），但权威 --host 置于末尾，
+    # argparse 后值覆盖前值 → 生效绑定仍是 bind_host（127.0.0.1），安全值未被静默回退。
+    assert "0.0.0.0" in cmd
+    assert cmd[-2:] == ["--host", "127.0.0.1"]
+
+
+def test_build_command_venv_explicit_bind_host_override(tmp_path, monkeypatch):
+    """显式 bind_host: 0.0.0.0 → 引擎对外暴露（风险自担），命令 --host 取配置值。"""
+    monkeypatch.setenv("HF_HOME", "/raid5/sh/model/huggingface")
+    _stub_venv(tmp_path, monkeypatch, "vllm")
+    p = _write(
+        tmp_path,
+        "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: Qwen/Qwen3-32B\n"
+        "  bind_host: 0.0.0.0\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    cmd, _ = a.build_command()
+    assert cmd[-2:] == ["--host", "0.0.0.0"]
+
+
+def test_build_command_docker_explicit_bind_host_override(tmp_path, monkeypatch):
+    """显式 bind_host: 0.0.0.0 的 docker 分支 → 宿主机 -p 绑定 0.0.0.0。"""
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    model_dir = tmp_path / "m" / "Qwen3.8"
+    model_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: vllm\nport: 8110\nvllm:\n"
+        f"  model: {model_dir}\n"
+        "  docker_image: vllm/vllm-openai:qwen38-flash-next\n"
+        "  bind_host: 0.0.0.0\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    cmd, _ = a.build_command()
+    idx = cmd.index("-p")
+    assert cmd[idx + 1] == "0.0.0.0:8110:8000"
 
 
 def test_build_command_docker_env(tmp_path, monkeypatch):

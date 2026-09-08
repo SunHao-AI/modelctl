@@ -16,6 +16,11 @@ api_key: ${API_KEY}
 aphrodite:
   # model：HuggingFace 模型 ID（check_requirements 要求必填；pre_start 在本地目录
   # 不存在时按 download 段下载并改写为 $MODEL_ROOT 下的落地路径）
+  # bind_host：服务绑定地址（安全加固，2026-09-08，所有引擎统一默认）
+  # 默认 127.0.0.1 仅回环监听：外部（含 AI Agent / 其他内网主机）无法直连引擎端口，
+  # 从而堵住绕过网关鉴权/账号/多 Key/token 限速/审计的“第二入口”。
+  # 确需对外暴露时改为 0.0.0.0，并配合防火墙/白名单限制来源（非默认，风险自担）。
+  bind_host: 127.0.0.1
   model: Qwen/Qwen2.5-1.5B-Instruct
   # download：ModelScope HF 格式仓库（官方仓库，BF16 全量约 3.09GB）
   download:

@@ -90,7 +90,7 @@ def test_unsloth_build_command(tmp_path):
     cmd, _env = a.build_command()
     # studio 是命令组，run 子命令承载模型/网络 flag；不传 --api-key（运行时自动生成）
     assert cmd[:4] == ["unsloth", "studio", "run", "--api-only"]
-    assert cmd[cmd.index("-H") + 1] == "0.0.0.0"
+    assert cmd[cmd.index("-H") + 1] == "127.0.0.1"
     assert cmd[cmd.index("-p") + 1] == "30000"
     assert cmd[cmd.index("--model") + 1] == "unsloth/Test-GGUF:UD-Q4_K_XL"
     assert cmd[cmd.index("--context-length") + 1] == "32768"
@@ -391,3 +391,42 @@ def test_unsloth_vram_gate_uses_selected_gpus_only(tmp_path, monkeypatch):
     a = get_adapter("unsloth")(p, caps)
     with pytest.raises(RequirementError):  # 选中 GPU 0 仅 20MB 空闲 < 所需(~33MB)；旧的全量口径会放行
         a.check_requirements()
+
+
+# ---- 安全加固：bind_host 默认仅回环绑定（2026-09-08，所有引擎统一）----
+
+
+def test_unsloth_default_binds_loopback(tmp_path):
+    """默认 bind_host=127.0.0.1：build_command 末尾权威 -H 为回环地址。"""
+    p = _write(
+        tmp_path,
+        "name: u\nengine: unsloth\nport: 30000\nunsloth:\n  model: m\n",
+    )
+    a = get_adapter("unsloth")(p, CAPS8)
+    cmd, _env = a.build_command()
+    assert cmd[-2:] == ["-H", "127.0.0.1"]
+
+
+def test_unsloth_bind_host_authoritative_over_extra_args(tmp_path):
+    """extra_args 塞 -H 0.0.0.0 也不能覆盖 bind_host：权威 -H 必须位于末尾。"""
+    p = _write(
+        tmp_path,
+        "name: u\nengine: unsloth\nport: 30000\nunsloth:\n"
+        "  model: m\n  extra_args: '-H 0.0.0.0'\n",
+    )
+    a = get_adapter("unsloth")(p, CAPS8)
+    cmd, _env = a.build_command()
+    assert cmd[-2:] == ["-H", "127.0.0.1"]
+    assert "0.0.0.0" not in cmd[-2:]
+
+
+def test_unsloth_explicit_bind_host_override(tmp_path):
+    """显式 bind_host: 0.0.0.0 时取配置值（对外暴露，风险自担）。"""
+    p = _write(
+        tmp_path,
+        "name: u\nengine: unsloth\nport: 30000\nunsloth:\n"
+        "  model: m\n  bind_host: 0.0.0.0\n",
+    )
+    a = get_adapter("unsloth")(p, CAPS8)
+    cmd, _env = a.build_command()
+    assert cmd[-2:] == ["-H", "0.0.0.0"]

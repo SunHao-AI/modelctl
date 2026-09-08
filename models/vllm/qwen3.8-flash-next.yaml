@@ -48,6 +48,11 @@ vllm:
   #   - 仅此一个镜像支持本模型；`vllm serve` 在 PyPI vLLM 0.27/0.28 上跑不通本架构
   #   - 镜像内含 Qwen4ExpForConditionalGeneration 注册、QSA attention kernel、FlashQLA 等
   docker_image: vllm/vllm-openai:qwen38-flash-next
+  # bind_host：服务绑定地址（安全加固，2026-09-08）
+  # 默认 127.0.0.1 仅回环监听：外部（含 AI Agent / 其他内网主机）无法直连引擎端口，
+  # 从而堵住绕过网关（5003）鉴权/账号/多 Key/token 限速/审计的"第二入口"。
+  # 确需对外暴露时改为 0.0.0.0，并配合防火墙/白名单限制来源（非默认，风险自担）。
+  bind_host: 127.0.0.1
   # download：模型不存在时的自动下载配置（ModelScope，HF 格式仓库）
   download:
     # modelscope_id：ModelScope 仓库 ID（HF 格式，FP8 块量化）
