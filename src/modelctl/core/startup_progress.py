@@ -382,3 +382,123 @@ class StartupTracker:
             os.replace(tmp, self._snapshot_path)
         except OSError as exc:
             logger.debug(f"startup 快照落盘失败（忽略）：{exc}")
+
+
+# ---------------------------------------------------------------------------
+# 引擎日志模式表 + loading 段 tail 监视（launch log → 阶段子进度）
+# ---------------------------------------------------------------------------
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+# engine -> 有序 [(compiled_regex, label 模板, base, scale)]；pct = base + scale*捕获的 0-100 值/100
+# 捕获组为百分数（0-100）。无捕获组的固定行 scale=0。
+PATTERNS: dict[str, list[tuple[re.Pattern, str, float, float]]] = {
+    "vllm": [
+        (re.compile(r"vLLM API server"), "引擎进程初始化", 0.05, 0.0),
+        (re.compile(r"Downloading shards:.*?(\d+)%"), "下载模型权重", 0.05, 0.45),
+        (re.compile(r"Loading safetensors checkpoint shards:.*?(\d+)%"), "加载模型权重", 0.5, 0.3),
+        (re.compile(r"Capturing CUDA graph shapes:.*?(\d+)%"), "捕获 CUDA graph", 0.8, 0.15),
+        (re.compile(r"Starting API server|Application startup complete"), "启动 HTTP 服务", 0.97, 0.0),
+    ],
+    # docker-capable 但 vLLM 之外引擎：首版仅 banner（其余整段兜底文案由 watcher 处理）
+    "tokenspeed": [(re.compile(r"tokenspeed|API server", re.IGNORECASE), "引擎初始化中", 0.05, 0.0)],
+    "tensorrt_llm": [(re.compile(r"TensorRT-LLM|API server", re.IGNORECASE), "引擎初始化中", 0.05, 0.0)],
+}
+
+# 每 tick 读取的日志尾部窗口行数
+_TAIL_WINDOW = 400
+# 无命中且 loading 已持续超过该秒数 → 兜底文案（本次事故缺失的那句）
+_LOADING_FALLBACK_SEC = 120
+_LOADING_FALLBACK_LABEL = "引擎初始化中（首次冷启动在 docker/WSL2 上可达 15 分钟）"
+
+
+def match_progress(engine: str, line: str) -> tuple[str, float] | None:
+    """按引擎模式表匹配日志行，返回 (label, pct)；无命中返回 None。
+
+    docker logs 非 TTY 无颜色码；venv 路径可能含 ANSI，先剥离再匹配。
+    """
+    pats = PATTERNS.get(engine)
+    if not pats:
+        return None
+    line = _ANSI.sub("", line or "")
+    for rx, label, base, scale in pats:
+        m = rx.search(line)
+        if not m:
+            continue
+        if scale == 0.0 or not m.groups():
+            return label, base
+        val = float(m.group(1)) / 100.0
+        return label, round(base + scale * val, 4)
+    return None
+
+
+class LoadingWatcher:
+    """loading 段：daemon 线程 tail launch log，按模式表推进 tracker。
+
+    只做进度，不做失败判定（死亡判定交 wait_ready/backend_dead）。
+    pct 单调不减由本类的 `_last_pct` 保证（Tail 窗口内可能出现重复/回退行）。
+    """
+
+    def __init__(self, tracker, engine: str, log_path, interval: float = 2.0,
+                 fallback_sec: float | None = None) -> None:
+        self._tr = tracker
+        self._engine = engine
+        self._log = log_path
+        self._interval = interval
+        # 兜底阈值可注入：生产用 120s，单测无需真等两分钟
+        self._fallback_sec = _LOADING_FALLBACK_SEC if fallback_sec is None else fallback_sec
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._seen = 0            # 已消费的 tail 窗口行数
+        self._last_pct = 0.0
+        self._fallback_sent = False
+
+    def start(self) -> None:
+        if self._thread is not None:  # 幂等：重复 start 不起第二个线程
+            return
+        self._thread = threading.Thread(target=self._run, name="loading-watcher", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=3)
+
+    def _run(self) -> None:
+        from modelctl.core.process import tail_file  # 延迟导入：本模块不与 process 循环依赖
+
+        t0 = time.monotonic()
+        while not self._stop.wait(self._interval):
+            try:
+                self._tick(tail_file, t0)
+            except Exception as exc:  # noqa: BLE001 —— watcher 异常只失进度不断启动
+                logger.debug(f"LoadingWatcher tick 异常（忽略）：{exc}")
+                return
+
+    def _tick(self, tail_file, t0: float) -> None:
+        if not Path(self._log).is_file():
+            return  # 日志尚未生成/被外力清掉：下个 tick 再看，不终止线程
+        text = tail_file(self._log, _TAIL_WINDOW)
+        if not text:
+            return  # 读取失败（如 Windows 文件占用）返回空串，不能当 1 行空行推进位点
+        # 只处理新增尾部：tail_file 无字节位点，退化为按已见行数增量。
+        # 行数减少（截断/轮转）或窗口打满（后续滑动会使行号增量恒为空而漏新行）
+        # → 整体重扫；重复行无害（pct 单调不减已过滤）。
+        lines = text.split("\n")
+        if self._seen > len(lines) or len(lines) >= _TAIL_WINDOW:
+            new = lines
+        else:
+            new = lines[self._seen:]
+        self._seen = len(lines)
+        advanced = False
+        for line in new:
+            hit = match_progress(self._engine, line)
+            if hit and hit[1] > self._last_pct:
+                self._last_pct = hit[1]
+                self._tr.progress("loading", hit[0], pct=hit[1])
+                advanced = True
+        # 无进展且超阈值 → 兜底文案（pct=None，前端条纹动画），只发一次避免每 tick 刷事件
+        if (not advanced and self._last_pct == 0.0 and not self._fallback_sent
+                and (time.monotonic() - t0) > self._fallback_sec):
+            self._fallback_sent = True
+            self._tr.progress("loading", _LOADING_FALLBACK_LABEL, pct=None)

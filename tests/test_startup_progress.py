@@ -274,3 +274,151 @@ def test_snapshot_tmp_name_unique_per_thread(tmp_path, monkeypatch):
     assert used[1] != main_tmp  # 同 PID 不同线程 → 不同 tmp
     assert list(tmp_path.glob("*.tmp")) == []  # tmp 均已被 replace 消费
     json.loads(snap.read_text(encoding="utf-8"))  # 快照仍是完整 JSON
+
+
+# ---------------------------------------------------------------------------
+# Task 4：引擎日志模式表 + LoadingWatcher
+# ---------------------------------------------------------------------------
+
+def test_match_progress_vllm_shards_monotonic():
+    from modelctl.core.startup_progress import match_progress
+
+    # banner
+    assert match_progress("vllm", "INFO vLLM API server version 0.28.0")[1] == 0.05
+    # shard 加载 50% → 0.5+0.3*0.5=0.65
+    lab, pct = match_progress("vllm", "(APIServer) Loading safetensors checkpoint shards:  50% Completed | 3/6")
+    assert abs(pct - 0.65) < 1e-6
+    # CUDA graph 捕获 100% → 0.8+0.15=0.95
+    assert abs(match_progress("vllm", "Capturing CUDA graph shapes: 100%")[1] - 0.95) < 1e-6
+    # 无关行
+    assert match_progress("vllm", "GET /metrics HTTP/1.1 200 OK") is None
+
+
+def test_match_progress_unknown_engine_banner_only():
+    from modelctl.core.startup_progress import match_progress
+
+    # tokenspeed 无 shard 模式 → 只有 banner，其它 None
+    assert match_progress("tokenspeed", "Loading safetensors checkpoint shards: 50%") is None
+
+
+def test_loading_watcher_advances_tracker(tmp_path):
+    import time
+    from modelctl.core.startup_progress import LoadingWatcher, StartupTracker, StartupTiming
+
+    log = tmp_path / "launch-q.log"
+    log.write_text("(APIServer) vLLM API server version 0.28.0\n", encoding="utf-8")
+    events = []
+    tr = StartupTracker("q", "vllm", "docker", on_progress=events.append,
+                        timing=StartupTiming(path=tmp_path / "t.json"),
+                        snapshot_path=tmp_path / "s.json")
+    tr.begin("loading", "加载模型")
+    w = LoadingWatcher(tr, "vllm", log, interval=0.05)
+    w.start()
+    # 追加一行 shard 加载
+    with log.open("a", encoding="utf-8") as f:
+        f.write("(APIServer) Loading safetensors checkpoint shards: 100% Completed\n")
+    deadline = time.time() + 2
+    while time.time() < deadline and not any(e.pct == 0.8 for e in events):
+        time.sleep(0.05)
+    w.stop()
+    assert any(e.pct == 0.8 for e in events)  # 0.5+0.3*1.0
+
+
+def test_loading_watcher_pct_monotonic(tmp_path):
+    # 评审裁决：pct 单调不减由 watcher 自己保证（_last_pct 只升不降）——
+    # tail 窗口内出现更小 pct 的行（重复/交错输出）不得回报给 tracker
+    import time
+    from modelctl.core.startup_progress import LoadingWatcher, StartupTiming, StartupTracker
+
+    log = tmp_path / "launch-q.log"
+    # 首 tick 基线化（seen=2），第二 tick 处理追加行
+    log.write_text("(APIServer) vLLM API server version 0.28.0\nsome noise\n", encoding="utf-8")
+    events = []
+    tr = StartupTracker("q", "vllm", "docker", on_progress=events.append,
+                        timing=StartupTiming(path=tmp_path / "t.json"),
+                        snapshot_path=tmp_path / "s.json")
+    tr.begin("loading", "加载模型")
+    w = LoadingWatcher(tr, "vllm", log, interval=0.05)
+    w.start()
+    with log.open("a", encoding="utf-8") as f:
+        f.write("Loading safetensors checkpoint shards: 100% Completed\n")
+        f.write("Loading safetensors checkpoint shards: 60% Completed\n")  # 回退行：必须忽略
+    deadline = time.time() + 2
+    while time.time() < deadline and not any(e.pct == 0.8 for e in events):
+        time.sleep(0.05)
+    w.stop()
+    pcts = [e.pct for e in events if e.pct is not None]
+    assert any(e.pct == 0.8 for e in events)
+    assert all(a <= b for a, b in zip(pcts, pcts[1:], strict=False)), pcts
+    assert 0.68 not in pcts  # 0.5+0.3*0.6 的回退帧绝不能出现在事件流里
+
+
+def test_loading_watcher_fallback_label_after_stall(tmp_path):
+    # spec §4.2：loading 持续超阈值且零命中 → 兜底文案 + pct=None（条纹动画）。
+    # 阈值注入（fallback_sec）系对简报参考实现的最小偏离：否则单测需真等 120s。
+    import time
+    from modelctl.core.startup_progress import LoadingWatcher, StartupTiming, StartupTracker
+
+    log = tmp_path / "launch-q.log"
+    log.write_text("some unrelated engine output with no pattern hit\n", encoding="utf-8")
+    events = []
+    tr = StartupTracker("q", "vllm", "docker", on_progress=events.append,
+                        timing=StartupTiming(path=tmp_path / "t.json"),
+                        snapshot_path=tmp_path / "s.json")
+    tr.begin("loading", "加载模型")
+    w = LoadingWatcher(tr, "vllm", log, interval=0.05, fallback_sec=0.1)
+    w.start()
+    deadline = time.time() + 2
+    while time.time() < deadline and not any(e.pct is None and "15 分钟" in e.label for e in events):
+        time.sleep(0.05)
+    w.stop()
+    hits = [e for e in events if e.pct is None and "引擎初始化中" in e.label]
+    assert hits and "冷启动" in hits[0].label and hits[0].stage == "loading"
+
+
+def test_loading_watcher_full_window_rescan(tmp_path):
+    # tail 窗口（400 行）打满后窗口滑动：按行号增量会恒为空而漏掉新行，
+    # 必须退化为整体重扫（重复行由 _last_pct 单调过滤，无害）。
+    import time
+    from modelctl.core.startup_progress import LoadingWatcher, StartupTiming, StartupTracker
+
+    log = tmp_path / "launch-q.log"
+    noise = "\n".join(f"noise line {i}" for i in range(400))
+    log.write_text(noise + "\n", encoding="utf-8")
+    events = []
+    tr = StartupTracker("q", "vllm", "docker", on_progress=events.append,
+                        timing=StartupTiming(path=tmp_path / "t.json"),
+                        snapshot_path=tmp_path / "s.json")
+    tr.begin("loading", "加载模型")
+    w = LoadingWatcher(tr, "vllm", log, interval=0.05)
+    w.start()
+    time.sleep(0.15)  # 首 tick 消费满窗口（seen=400）
+    with log.open("a", encoding="utf-8") as f:
+        f.write("Capturing CUDA graph shapes: 100%\n")  # 落在滑动后窗口内
+    deadline = time.time() + 2
+    while time.time() < deadline and not any(e.pct == 0.95 for e in events):
+        time.sleep(0.05)
+    w.stop()
+    assert any(e.pct == 0.95 for e in events)
+
+
+def test_loading_watcher_survives_missing_log_and_stop_idempotent(tmp_path):
+    # 容错：日志尚未生成不得终止 watcher；stop() 幂等且 join 有超时，stop 后不再产生事件
+    import time
+    from modelctl.core.startup_progress import LoadingWatcher, StartupTiming, StartupTracker
+
+    log = tmp_path / "not-yet.log"  # 故意不存在
+    events = []
+    tr = StartupTracker("q", "vllm", "docker", on_progress=events.append,
+                        timing=StartupTiming(path=tmp_path / "t.json"),
+                        snapshot_path=tmp_path / "s.json")
+    tr.begin("loading", "加载模型")
+    w = LoadingWatcher(tr, "vllm", log, interval=0.05)
+    w.start()
+    time.sleep(0.2)  # 至少 4 个 tick 全部落在文件缺失分支
+    log.write_text("(APIServer) vLLM API server version 0.28.0\n", encoding="utf-8")
+    w.stop()
+    w.stop()  # 幂等：二次 stop 不得抛
+    n = len(events)
+    time.sleep(0.2)  # 线程若未死，banner(0.05) 会追加进来
+    assert len(events) == n
