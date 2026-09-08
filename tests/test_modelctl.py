@@ -196,7 +196,8 @@ def test_nginx_snippet_output(tmp_path, monkeypatch, capsys):
     assert rc == 0
     assert "~^/240/llm/v1/  http://9.9.9.90:5003;" in out
     assert "~^/240/llm/v1$  http://9.9.9.90:5003;" in out
-    assert "~^/240/llm/qwen3.8/  http://9.9.9.90:7000;" in out
+    # 787f4a8 引擎回环绑定加固后不再为 profile 生成模型直连条目，/llm/* 统一走网关
+    assert "~^/240/llm/qwen3.8/" not in out
 
 
 def test_gateway_start_detaches(tmp_path, monkeypatch):
