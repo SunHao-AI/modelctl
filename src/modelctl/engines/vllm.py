@@ -415,6 +415,12 @@ class VllmAdapter(EngineAdapter):
             return None
         return ["docker", "logs", "-f", "--tail", "all", self._container_name]
 
+    def log_fallback_cmd(self) -> list[str] | None:
+        """docker 分支：`docker logs --tail 50 <container>`，启动失败摘录兜底（设计 §4.4）。"""
+        if self._resolve_runtime()[0] != "docker":
+            return None
+        return ["docker", "logs", "--tail", "50", self._container_name]
+
     def stop_backend(self) -> None:
         """docker 分支：docker rm -f <container>（清 PID 防御 venv/docker 环境切换残留）；
         venv 分支：基类 stop_instance（pkill 兜底）。"""

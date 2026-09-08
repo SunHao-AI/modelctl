@@ -20,6 +20,8 @@ cli.py 负责把结果转成退出码与打印，本模块不依赖 cli。
 from __future__ import annotations
 
 import os
+import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -81,6 +83,7 @@ START_TIMEOUT_DOCKER = 1800.0
 #: fail 事件的阶段标签（与 startup_progress.STAGE_LABELS 口径一致，避免字面量散落）
 STAGE_LABELS_PREFLIGHT = "依赖检查"
 STAGE_LABELS_PREPARE_ENV = "准备环境"
+STAGE_LABELS_LAUNCH = "拉起进程"
 
 
 def default_start_timeout(profile: Profile, caps: Capabilities) -> float:
@@ -97,6 +100,34 @@ def default_start_timeout(profile: Profile, caps: Capabilities) -> float:
     except Exception as exc:  # noqa: BLE001 —— 运行时判定失败退回保守默认
         logger.debug(f"is_docker_runtime 判定异常，用默认超时：{exc}")
     return START_TIMEOUT_DEFAULT
+
+
+#: 容器 ID / 短 hash 行样式（docker 路径 tee 缺席时 launch log 只有这种行）
+_CONTAINER_ID_LINE = re.compile(r"^[0-9a-f]{12,64}$")
+
+
+def docker_logs_fallback(adapter: Any, excerpt: str) -> str | None:
+    """设计 §4.4 兜底：摘录为空或仅容器 ID 行时，直接 `docker logs --tail 50` 取内容。
+
+    仅当引擎适配器提供 log_fallback_cmd（docker 三引擎）时生效；任何异常退回 None
+    （调用方保留原摘录），绝不影响主流程。
+    """
+    text = (excerpt or "").strip()
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    # 空摘录，或全部是短 hash/容器 ID 行（≤2 行启发式）→ 视为 tee 未产出有效日志
+    if lines and not (len(lines) <= 2 and all(_CONTAINER_ID_LINE.match(ln.strip()) for ln in lines)):
+        return None
+    try:
+        cmd = adapter.log_fallback_cmd()
+        if not cmd:
+            return None
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
+                              encoding="utf-8", errors="replace")
+        content = ((proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")).strip()
+        return content or None
+    except Exception as exc:  # noqa: BLE001 —— 兜底失败退回原摘录
+        logger.debug(f"docker logs 兜底失败（忽略）：{exc}")
+        return None
 
 
 def start_profile(profile: Profile, caps: Capabilities, timeout: float,
@@ -116,18 +147,8 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float,
         return ComponentResult(tag, "skipped", "已在运行")
     # 残留 tee 清理：上一次 start 未走完 / 容器被外力杀时 tee 可能仍在跟随旧容器
     kill_log_tee(profile.name)
-    # 端口占用预检：走到这里端口仍被占 ⇒ 占用者不是本 profile，引擎启动后 bind 必然
-    # EADDRINUSE 秒退；提前拦截并点名占用者，替代"空等健康检查 + 事后翻日志"。
-    # RequirementError → cli exit 2，与配置/环境错误语义一致。
-    # ollama 豁免：多个 ollama profile 共享同一 11434 serve 是设计语义（见 stop_profile
-    # 同族特判）——第二个 profile 启动时 is_running_any 探 /health 得 404 不会 skip，
-    # 靠"新 serve bind 失败但健康检查命中已有 serve"就绪，端口被占是正常状态。
-    if profile.engine != "ollama" and port_in_use(profile.port):
-        who = describe_port_listener(profile.port)
-        raise RequirementError(
-            f"端口 {profile.port} 已被占用（{who or '占用者未知'}），无法启动 {profile.name}。"
-            f"请先释放该端口，或修改 profile 的 port 后重试"
-        )
+    # adapter/tracker 先于端口预检创建（adapter 构造无副作用）：预检失败也要有
+    # preflight running→failed 事件与快照，否则前端进度卡片看不到失败原因。
     adapter = get_adapter(profile.engine)(profile, caps)
     is_docker = adapter.is_docker_runtime()
     tracker = StartupTracker(profile.name, profile.engine, "docker" if is_docker else "venv",
@@ -141,6 +162,18 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float,
     # ---- preflight：依赖检查 / 端口 / 兼容预检 ----
     tracker.begin("preflight")
     try:
+        # 端口占用预检：走到这里端口仍被占 ⇒ 占用者不是本 profile，引擎启动后 bind 必然
+        # EADDRINUSE 秒退；提前拦截并点名占用者，替代"空等健康检查 + 事后翻日志"。
+        # RequirementError → cli exit 2，与配置/环境错误语义一致。
+        # ollama 豁免：多个 ollama profile 共享同一 11434 serve 是设计语义（见 stop_profile
+        # 同族特判）——第二个 profile 启动时 is_running_any 探 /health 得 404 不会 skip，
+        # 靠"新 serve bind 失败但健康检查命中已有 serve"就绪，端口被占是正常状态。
+        if profile.engine != "ollama" and port_in_use(profile.port):
+            who = describe_port_listener(profile.port)
+            raise RequirementError(
+                f"端口 {profile.port} 已被占用（{who or '占用者未知'}），无法启动 {profile.name}。"
+                f"请先释放该端口，或修改 profile 的 port 后重试"
+            )
         adapter.check_requirements()  # RequirementError 向上抛
     except RequirementError as exc:
         tracker.fail("preflight", STAGE_LABELS_PREFLIGHT, str(exc))
@@ -162,23 +195,28 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float,
 
     # ---- launch：build_command + start_detached（docker 路径随后挂日志 tee） ----
     tracker.begin("launch")
-    cmd, env = adapter.build_command()
-    # docker runtime（is_docker_runtime True）走 `docker run --detach`：容器在 daemon 后台续
-    # 不会随 client 早退，PID 文件不写（write_pid=False）；venv runtime 维持默认 write_pid=True。
-    pid, proc = start_detached(profile.name, cmd, env, write_pid=not is_docker)
-    adapter.spawned_proc = proc  # 供 wait_ready 在进程早退时 fail-fast
-    if is_docker:
-        tee_cmd = adapter.log_tee_cmd()
-        if tee_cmd:
-            spawn_log_tee(profile.name, tee_cmd)
     try:
-        from modelctl.core.gpu_lock import update_gpu_lock_owner
+        cmd, env = adapter.build_command()
+        # docker runtime（is_docker_runtime True）走 `docker run --detach`：容器在 daemon 后台续
+        # 不会随 client 早退，PID 文件不写（write_pid=False）；venv runtime 维持默认 write_pid=True。
+        pid, proc = start_detached(profile.name, cmd, env, write_pid=not is_docker)
+        adapter.spawned_proc = proc  # 供 wait_ready 在进程早退时 fail-fast
+        if is_docker:
+            tee_cmd = adapter.log_tee_cmd()
+            if tee_cmd:
+                spawn_log_tee(profile.name, tee_cmd)
+        try:
+            from modelctl.core.gpu_lock import update_gpu_lock_owner
 
-        if adapter.selected_gpus():
-            update_gpu_lock_owner(profile.name, pid)
-    except Exception:
-        pass
-    tracker.done("launch")
+            if adapter.selected_gpus():
+                update_gpu_lock_owner(profile.name, pid)
+        except Exception:
+            pass
+        tracker.done("launch")
+    except Exception as exc:  # noqa: BLE001 —— 拉起段任何异常都要落 fail 事件，快照不能永停 running
+        kill_log_tee(profile.name)  # tee 若已挂上则回收
+        tracker.fail("launch", STAGE_LABELS_LAUNCH, str(exc))
+        raise
 
     # ---- loading：等待窗口内 tail 引擎日志按模式表推进 ----
     logger.info(f"已启动 {profile.name}（PID {pid}），等待健康检查（超时 {timeout:g}s）...")
@@ -209,7 +247,6 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float,
             logger.info("提示：用量统计可通过 `modelctl stats start` 启动")
         return ComponentResult(tag, "ok", f"http://127.0.0.1:{profile.port}")
 
-    kill_log_tee(profile.name)
     # 死亡判定交给引擎适配器：docker 分支以容器状态衡量（客户端进程早退≠容器死亡），
     # venv 分支维持"本工具拉起的进程早退即死亡"的语义
     died = adapter.backend_dead()
@@ -219,11 +256,16 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float,
         logger.warning("引擎未在时限内就绪，且未找到启动日志")
     elif died:
         # 进程早退：真实异常通常在日志中部，按错误标记截取上下文；无标记时退回尾部 50 行
+        excerpt = log_excerpt(log) or tail_file(log, 50)
+        # 设计 §4.4：docker 路径 tee 没挂上/被杀时 launch log 只有容器 ID 行 → docker logs 兜底
+        excerpt = docker_logs_fallback(adapter, excerpt) or excerpt
         logger.warning(f"引擎进程提前退出（PID {pid}），未能就绪。相关日志摘录（{log}）：")
-        logger.warning(log_excerpt(log) or tail_file(log, 50))
+        logger.warning(excerpt)
     else:
         logger.warning(f"健康检查超时，日志尾部 50 行（{log}）：")
         logger.warning(tail_file(log, 50))
+    # tee 是日志写入方：摘录输出后再回收，先杀会丢未 flush 的尾部行
+    kill_log_tee(profile.name)
     return ComponentResult(tag, "error", detail)
 
 

@@ -77,7 +77,9 @@ function open() {
   state.value = 'connecting';
   handle = openModelLogStream(props.url, {
     onOpen: () => {
-      if (state.value === 'connecting') state.value = 'open';
+      // EventSource 内部自动重试成功后会再触发 open：只要不是用户主动 close（closed），
+      // 一律恢复为 open，否则断线重连后状态灯永显「已断开」
+      if (state.value !== 'open') state.value = 'open';
     },
     onLine: push,
     onError: () => {

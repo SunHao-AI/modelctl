@@ -493,6 +493,43 @@ def test_loading_watcher_fallback_again_after_new_progress(tmp_path):
         w.stop()
 
 
+def test_loading_watcher_survives_tick_exception(tmp_path, monkeypatch):
+    """评审 F2：单次 tick 抛异常只失该轮子进度，watcher 循环必须继续——
+    后续 pattern 行仍能产生事件（旧实现 return 会永久终止监视）。"""
+    import time
+
+    from modelctl.core import process as core_process
+    from modelctl.core.startup_progress import LoadingWatcher, StartupTiming, StartupTracker
+
+    log = tmp_path / "launch-q.log"
+    log.write_text("(APIServer) vLLM API server version 0.28.0\n", encoding="utf-8")
+    real_tail = core_process.tail_file
+    calls = [0]
+
+    def flaky_tail(path, lines):
+        calls[0] += 1
+        if calls[0] == 1:
+            raise RuntimeError("模拟 tick 内异常（如瞬时 IO 故障）")
+        return real_tail(path, lines)
+
+    monkeypatch.setattr(core_process, "tail_file", flaky_tail)
+    events = []
+    tr = StartupTracker("q", "vllm", "docker", on_progress=events.append,
+                        timing=StartupTiming(path=tmp_path / "t.json"),
+                        snapshot_path=tmp_path / "s.json")
+    tr.begin("loading", "加载模型")
+    w = LoadingWatcher(tr, "vllm", log, interval=0.05)
+    w.start()
+    try:
+        deadline = time.time() + 2
+        while time.time() < deadline and not any(e.pct == 0.05 for e in events):
+            time.sleep(0.02)
+    finally:
+        w.stop()
+    assert calls[0] >= 2, "首 tick 异常后循环未继续（watcher 已永久终止）"
+    assert any(e.pct == 0.05 for e in events), "异常后 banner 行应仍能命中并推进"
+
+
 def test_loading_watcher_no_fallback_while_advancing(tmp_path):
     # 负向：持续有*新增*进展时不得发兜底（阈值从上次进展起算，而非 begin）。
     # 每 0.08s 前进一个 shard 档位，均 < fallback_sec=0.2。

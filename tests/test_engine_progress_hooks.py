@@ -55,6 +55,23 @@ def test_docker_log_tee_cmd_tokenspeed_and_trtllm():
         assert trt.log_tee_cmd() is None
 
 
+def test_log_fallback_cmd_docker_and_venv():
+    """F8：docker 三引擎 log_fallback_cmd = `docker logs --tail 50 <container>`；venv 一律 None。"""
+    a = VllmAdapter(_profile(), CAPS)
+    with mock.patch.object(a, "_resolve_runtime", return_value=("docker", "img:tag", None)):
+        assert a.log_fallback_cmd() == ["docker", "logs", "--tail", "50", "q-vllm"]
+    with mock.patch.object(a, "_resolve_runtime", return_value=("venv", None, None)):
+        assert a.log_fallback_cmd() is None
+    ts = TokenSpeedAdapter(_profile(name="q", engine="tokenspeed"), CAPS)
+    with mock.patch.object(ts, "_resolve_runtime", return_value=("docker", "img:tag", None)):
+        assert ts.log_fallback_cmd() == ["docker", "logs", "--tail", "50", "q-tokenspeed"]
+    trt = TensorRtLlmAdapter(_profile(name="q", engine="tensorrt_llm"), CAPS)
+    with mock.patch.object(trt, "_resolve_runtime", return_value=("docker", "img:tag")):
+        assert trt.log_fallback_cmd() == ["docker", "logs", "--tail", "50", "q-trtllm"]
+    with mock.patch.object(trt, "_resolve_runtime", return_value=("venv", None)):
+        assert trt.log_fallback_cmd() is None
+
+
 def test_pre_start_forwards_progress_to_ensure_image():
     a = VllmAdapter(_profile(), CAPS)
     seen = []

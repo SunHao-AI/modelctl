@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -498,9 +499,24 @@ async def get_startup_progress(name: str, _: None = Depends(require_auth)):
 
     数据源为 all_service 每次阶段事件覆写的 `cache/<name>.startup.json`（尽力而为，
     写失败则无快照 → 404）。非发起者浏览器 / 页面刷新后据此渲染进度卡片，不依赖 SSE 时序。
+    profile 存在性优先于文件：快照存在但 profile 已删 → 404（设计 §5）；name 先做
+    路径安全校验，拒绝 `..`/分隔符等越目录拼接。
     """
     from modelctl.core.paths import cache_dir
     from modelctl.core.startup_progress import STAGES
+
+    # name 参与文件路径拼接：白名单字符（禁分隔符）+ 拒绝 `..`，防目录穿越（如 ..%2F..%2Fetc）
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", name) or ".." in name:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "not_found", "message": f"模型 {name} 不存在"}},
+        )
+    profile = await asyncio.to_thread(_find_profile, name)
+    if profile is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "not_found", "message": f"模型 {name} 不存在"}},
+        )
 
     path = cache_dir() / f"{name}.startup.json"
     if not path.is_file():

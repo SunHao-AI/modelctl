@@ -116,6 +116,14 @@ class EngineAdapter(ABC):
         """
         return None
 
+    def log_fallback_cmd(self) -> list[str] | None:
+        """启动失败摘录兜底命令（`docker logs --tail 50`）；非 docker runtime 返回 None。
+
+        launch log 只有容器 ID 行（tee 没挂上/被杀）时，all_service 直接跑本命令
+        取容器输出做摘录（设计 §4.4）。
+        """
+        return None
+
     def post_start(self) -> None:
         """启动后钩子（如 ollama 预加载模型）。"""
         return None

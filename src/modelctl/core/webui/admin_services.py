@@ -223,14 +223,15 @@ async def _do_service_action(svc: str, action: str, task) -> None:
 async def all_start(
     request: Request,
     model: str | None = Query(default=None),
-    timeout: float = Query(default=600, ge=1, le=3600),
+    timeout: float | None = Query(default=None, ge=1, le=7200),
     gpus: str | None = Query(default=None),
     _: None = Depends(require_auth),
 ):
     """POST /admin/api/all/start — 一键启动（默认模型 + gateway + stats）。异步。
 
     model 缺省读 GATEWAY_DEFAULT_MODEL；gpus 透传为逗号串（gateway 启动时由
-    adapter 切换 GPU 占用并写回 gpu_lock）；timeout 控制 wait_health。
+    adapter 切换 GPU 占用并写回 gpu_lock）；timeout 控制 wait_health，
+    缺省 None = 按 profile 运行时自适应（start_all 内部 default_start_timeout）。
     start_all/models_dir 允许传 None（项目本地 models/ 由 list_profiles 兜底）。
     """
     from modelctl.core.all_service import start_all
@@ -295,7 +296,7 @@ async def all_stop(_: None = Depends(require_auth)):
 async def all_restart(
     request: Request,
     model: str | None = Query(default=None),
-    timeout: float = Query(default=600, ge=1, le=3600),
+    timeout: float | None = Query(default=None, ge=1, le=7200),
     gpus: str | None = Query(default=None),
     _: None = Depends(require_auth),
 ):
@@ -303,6 +304,7 @@ async def all_restart(
 
     语义 = all/stop + all/start 的并发合并；stop_all 顺序：stats → gateway → 全部运行中模型，
     重启时保留 stop 结果作为前序；start 部分复用 all/start 的异步流。
+    timeout 缺省 None = 按 profile 运行时自适应（restart_all 内部 default_start_timeout）。
     """
     from modelctl.core.all_service import restart_all
     from modelctl.core.envfile import load_env
@@ -354,7 +356,8 @@ async def _do_all(func, thru: dict, task) -> None:
     """Worker 线程：执行一键 start/restart（all_service.start_all / restart_all）。
 
     gpus 透传为逗号串（解析 + env 注入放在 _apply_gpus 里，成功后恢复原值）；
-    model / timeout 直接进 fn 签名（缺省 None → all_service 内部走 env 兜底）。
+    model / timeout 直接进 fn 签名（thru 语义：timeout None = 自适应，
+    透传给 start_all/restart_all，其内部按 default_start_timeout 兜底）。
     结束时按 error 数量分级：== 0 静默、1 个 warning、>= 2 error。
     """
     from modelctl.core.gpu_utils import resolve_gpu_list
@@ -368,7 +371,9 @@ async def _do_all(func, thru: dict, task) -> None:
             os.environ["MODELCTL_GPUS"] = ",".join(str(g) for g in parsed)
     try:
         model = thru.get("model")
-        timeout = float(thru.get("timeout") or 600)
+        raw = thru.get("timeout")
+        # None = 未显式指定 → 原样透传，start_all/restart_all 内部走 default_start_timeout 自适应
+        timeout = float(raw) if raw is not None else None
         results = await asyncio.to_thread(func, None, model, timeout)
 
         task.update_detail(f"{len(results)} 个组件已处理")

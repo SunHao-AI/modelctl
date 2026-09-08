@@ -474,8 +474,10 @@ class LoadingWatcher:
             try:
                 self._tick(tail_file)
             except Exception as exc:  # noqa: BLE001 —— watcher 异常只失进度不断启动
+                # 单次 tick 失败只丢这一轮子进度，循环必须继续（设计 §5）：
+                # return 会让 watcher 永久终止，后续进展/兜底全部失效
                 logger.debug(f"LoadingWatcher tick 异常（忽略）：{exc}")
-                return
+                continue
 
     def _tick(self, tail_file) -> None:
         advanced = False

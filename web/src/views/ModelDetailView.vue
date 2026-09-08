@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { startModel, stopModel, restartModel, startModelUi, stopModelUi, getModel, getModelLog, getModelYaml, getModelLogStreamUrl, getStartup } from '@/api/models';
 import type { ModelDetail, StartupSnapshot, YamlResponse } from '@/api/types';
+import { useTasksStore } from '@/stores/tasks';
 import StatusBadge from '@/components/common/StatusBadge.vue';
 import TaskButton from '@/components/common/TaskButton.vue';
 import SseLogViewer from '@/components/common/SseLogViewer.vue';
@@ -14,6 +15,7 @@ import StartupProgressCard from '@/components/startup/StartupProgressCard.vue';
  */
 const route = useRoute();
 const router = useRouter();
+const tasksStore = useTasksStore();
 /** 模型名（路由参数） */
 const name = computed(() => String(route.params.name ?? ''));
 const detail = ref<ModelDetail | null>(null);
@@ -81,6 +83,11 @@ const showStartup = computed(() => {
   if (detail.value?.state === 'running') return false;
   return s.stages.some((x) => x.status === 'running' || x.status === 'pending');
 });
+/** 启动进行中等价态：本模型有 queued/running 任务（后端无 starting 状态，store 派生） */
+const startupTaskActive = computed(() => {
+  const rec = tasksStore.activityFor(name.value);
+  return !!rec && (rec.status === 'queued' || rec.status === 'running');
+});
 /** SSE 日志流地址（计算属性，供 SseLogViewer 使用） */
 const logStreamUrl = computed(() => getModelLogStreamUrl(name.value));
 /** 是否 unsloth 引擎（可开启 Unsloth Web 控制台） */
@@ -142,7 +149,13 @@ onMounted(() => {
   void refreshLog();
   void refreshStartup();
   timer = window.setInterval(() => void refresh(), 5000);
-  startupTimer = window.setInterval(() => void refreshStartup(), 2000);
+  // 设计 §4.8：仅启动期间 2s 轮询进度。门控：本模型有进行中的 start/restart 任务
+  // （后端无 starting 状态，由 tasks store 派生）或正在展示启动卡片（含最近失败）。
+  // 不满足直接跳过本轮请求，避免常驻轮询；404 清空逻辑在 refreshStartup 内保留。
+  startupTimer = window.setInterval(() => {
+    if (!startupTaskActive.value && !showStartup.value) return;
+    void refreshStartup();
+  }, 2000);
 });
 onBeforeUnmount(() => {
   if (timer !== undefined) clearInterval(timer);
