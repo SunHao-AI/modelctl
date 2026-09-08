@@ -214,9 +214,9 @@ onMounted(async () => {
     </section>
 
     <!-- Docker 旁路：托管 venv 仅支持 Linux，已支持引擎可改用官方 docker 镜像 -->
-    <!-- focus 命中非托管引擎（platform 不支持）或纯 docker 语境 focus 时高亮本区块 -->
+    <!-- focus 命中非托管引擎（platform 不支持）或纯 docker 语境 focus 时高亮本区块； -->
+    <!-- 隐藏 dockerBypass 区块时仍保留诊断按钮供 DockerInstallPanel 拉 platform。 -->
     <section
-      v-if="dockerBypass.length"
       id="docker-bypass"
       class="card space-y-3 transition-shadow"
       :class="focusNeedsBypass() ? 'ring-1 ring-amber-400/60' : ''"
@@ -273,8 +273,12 @@ onMounted(async () => {
         <p v-else class="text-xs text-slate-500">诊断中…</p>
       </div>
 
+      <p v-if="!dockerBypass.length" class="text-xs text-slate-500">
+        当前无可用 Docker 镜像引擎（manifest 未加载或未声明引擎）；诊断按钮仍可用于探测 Docker 环境。
+      </p>
+
       <!-- 逐引擎指引 -->
-      <div class="space-y-2">
+      <div v-if="dockerBypass.length" class="space-y-2">
         <div v-for="b in dockerBypass" :key="b.name" class="space-y-1.5 border-t border-slate-800/40 pt-2.5">
           <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
             <span class="font-mono text-slate-300">{{ b.name }}</span>
