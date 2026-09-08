@@ -132,7 +132,7 @@ CUDA 构建的正确性改由**启动前校验**保证（`compat_rules.torch_cud
 
 ### 衍生陷阱 2：`UV_CACHE_DIR` 落在全盘导致每次重新下载
 
-uv 缓存默认 `~/.cache/uv`。vLLM 引擎 wheel 约 3.7 GB，若 `~` 是空间紧张的系统盘，缓存写不下时 uv **不报错**、静默不缓存，于是每次 `env setup` 重新下载全部 wheel。已在 `.env.example` 固化：
+uv 缓存默认 `~/.cache/uv`。vLLM 引擎 wheel 约 3.7 GB，若 `~` 是空间紧张的系统盘，缓存写不下时 uv **不报错**、静默不缓存，于是每次 `env setup` 重新下载全部 wheel。在 `.env.example` 提供注释示例（取消注释并指向大容量盘即可）：
 
 ```bash
 UV_CACHE_DIR=/raid5/sh/cache/uv
