@@ -57,7 +57,7 @@ def test_tokenspeed_docker_command(tmp_path, monkeypatch):
     assert cmd[0] == "docker"
     assert cmd[1] == "run"
     assert "--gpus" in cmd
-    assert f"{p.port}:8000" in cmd  # 8150:8000
+    assert f"127.0.0.1:{p.port}:8000" in cmd  # 宿主机 -p 回环绑定：127.0.0.1:8150:8000
     assert "lightseekorg/tokenspeed:latest" in cmd
     assert f"/models/{model_dir.name}" in cmd
     assert cmd[cmd.index("--tp") + 1] == "8"
@@ -220,3 +220,71 @@ def test_tokenspeed_is_docker_runtime_flag():
         Profile(name="q2", engine="tokenspeed", port=8112, engine_config={"model": "/m"}), Capabilities())
     assert docker_p.is_docker_runtime() is True
     assert venv_p.is_docker_runtime() is False
+
+
+# ---- 安全加固：bind_host 默认仅回环绑定（2026-09-08，所有引擎统一）----
+
+
+def test_tokenspeed_venv_default_binds_loopback(tmp_path, monkeypatch):
+    """默认 bind_host=127.0.0.1：venv 命令末尾权威 --host 为回环地址。"""
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    _stub_venv(tmp_path, monkeypatch)
+    model_dir = tmp_path / "models" / "Qwen3.5-397B-A17B"
+    model_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: tokenspeed\nport: 8150\ntokenspeed:\n  model: {model_dir}\n",
+    )
+    a = get_adapter("tokenspeed")(p, CAPS8)
+    cmd, _env = a.build_command()
+    assert cmd[-2:] == ["--host", "127.0.0.1"]
+
+
+def test_tokenspeed_venv_bind_host_authoritative_over_extra_args(tmp_path, monkeypatch):
+    """extra_args 塞 --host 0.0.0.0 也不能覆盖 bind_host：权威 --host 必须位于末尾。"""
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    _stub_venv(tmp_path, monkeypatch)
+    model_dir = tmp_path / "models" / "Qwen3.5-397B-A17B"
+    model_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: tokenspeed\nport: 8150\ntokenspeed:\n"
+        f"  model: {model_dir}\n  extra_args: '--host 0.0.0.0'\n",
+    )
+    a = get_adapter("tokenspeed")(p, CAPS8)
+    cmd, _env = a.build_command()
+    assert cmd[-2:] == ["--host", "127.0.0.1"]
+    # extra_args 里的 0.0.0.0 只是"出现即被后者覆盖"，而非最终生效值
+    assert "0.0.0.0" not in cmd[-2:]
+
+
+def test_tokenspeed_venv_explicit_bind_host_override(tmp_path, monkeypatch):
+    """显式 bind_host: 0.0.0.0 时取配置值（对外暴露，风险自担）。"""
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    _stub_venv(tmp_path, monkeypatch)
+    model_dir = tmp_path / "models" / "Qwen3.5-397B-A17B"
+    model_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: tokenspeed\nport: 8150\ntokenspeed:\n"
+        f"  model: {model_dir}\n  bind_host: 0.0.0.0\n",
+    )
+    a = get_adapter("tokenspeed")(p, CAPS8)
+    cmd, _env = a.build_command()
+    assert cmd[-2:] == ["--host", "0.0.0.0"]
+
+
+def test_tokenspeed_docker_bind_host_p_binding(tmp_path, monkeypatch):
+    """docker 分支：宿主机 -p 绑定 {bind_host}:{port}:8000——默认仅 127.0.0.1 监听。"""
+    model_dir = tmp_path / "models" / "Qwen3.5-397B-A17B"
+    model_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: tokenspeed\nport: 8150\ntokenspeed:\n"
+        f"  model: {model_dir}\n  docker_image: lightseekorg/tokenspeed:latest\n",
+    )
+    a = get_adapter("tokenspeed")(p, CAPS8)
+    cmd, _env = a.build_command()
+    assert cmd[cmd.index("-p") + 1] == "127.0.0.1:8150:8000"
+    # 容器内服务仍绑 0.0.0.0（保持容器内部语义），外部可达性由宿主机绑定隔离
+    assert cmd[cmd.index("--host") + 1] == "0.0.0.0"

@@ -25,7 +25,10 @@ from modelctl.engines.base import EngineAdapter, RequirementError
 class OllamaAdapter(EngineAdapter):
     def build_command(self) -> tuple[list[str], dict[str, str]]:
         cfg = self.profile.engine_config
-        env = {"OLLAMA_HOST": f"0.0.0.0:{self.profile.port}"}
+        # 安全加固：默认仅绑定 loopback，杜绝外部直连引擎端口绕过网关鉴权/限额/审计。
+        # 确需对外暴露时显式配置 bind_host: 0.0.0.0（并配合防火墙/白名单限制来源）。
+        bind_host = str(cfg.get("bind_host", "127.0.0.1"))
+        env = {"OLLAMA_HOST": f"{bind_host}:{self.profile.port}"}
         if os.environ.get("OLLAMA_MODELS"):
             env["OLLAMA_MODELS"] = os.environ["OLLAMA_MODELS"]
         env["OLLAMA_NUM_PARALLEL"] = str(cfg.get("num_parallel", 2))

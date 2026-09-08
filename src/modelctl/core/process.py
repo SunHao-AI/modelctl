@@ -60,6 +60,70 @@ def pid_file(name: str) -> Path:
     return cache_dir() / f"{name}.pid"
 
 
+def tee_pid_file(name: str) -> Path:
+    """docker 日志 tee 子进程的 PID 文件（与引擎 PID 分离，docker 路径不写引擎 PID）。"""
+    return cache_dir() / f"{name}.log-tee.pid"
+
+
+def kill_pid_tree(pid: int) -> None:
+    """终止进程及其子进程树（POSIX killpg / Windows taskkill /T /F）；进程已死则静默。"""
+    if not is_pid_alive(pid):
+        return
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+        return
+    try:
+        os.killpg(pid, signal.SIGKILL)  # type: ignore[attr-defined]  # POSIX-only
+    except OSError:
+        try:
+            os.kill(pid, signal.SIGKILL)  # type: ignore[attr-defined]
+        except OSError:
+            pass
+
+
+def spawn_log_tee(name: str, command: list[str]) -> int | None:
+    """后台续写引擎日志到 launch log（append），PID 记 `<name>.log-tee.pid`。
+
+    先清理残留 tee（双 tee 会重复写同一 launch log）。launch log 不存在时退回
+    `launch-<name>.log` 直接建文件（docker 路径下 start_detached 已建，正常不触发）。
+    失败仅告警返回 None —— 日志续写是 nice-to-have，绝不影响启动。
+    """
+    tp = tee_pid_file(name)
+    if tp.is_file():
+        try:
+            old = int(tp.read_text(encoding="utf-8").strip())
+        except ValueError:
+            old = None
+        if old is not None:
+            kill_pid_tree(old)
+        tp.unlink(missing_ok=True)
+    path = launch_log(name) or (log_dir() / f"launch-{name}.log")
+    try:
+        # "ab"：追加，保留 start_detached 写入的容器 ID 首行；二进制避免编码耦合
+        fp = open(path, "ab")
+        proc = subprocess.Popen(command, stdout=fp, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, start_new_session=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning(f"引擎日志 tee 启动失败（工作日志将无 docker 容器输出）：{exc}")
+        return None
+    tp.write_text(str(proc.pid), encoding="utf-8")
+    return proc.pid
+
+
+def kill_log_tee(name: str) -> None:
+    """终止日志 tee 子进程并清 PID（幂等）。"""
+    tp = tee_pid_file(name)
+    if not tp.is_file():
+        return
+    try:
+        pid = int(tp.read_text(encoding="utf-8").strip())
+    except ValueError:
+        pid = None
+    if pid is not None:
+        kill_pid_tree(pid)
+    tp.unlink(missing_ok=True)
+
+
 def launch_log(name: str) -> Path | None:
     """当前实例的启动日志（固定文件名 launch-<name>.log；未启动过则为 None）。
 

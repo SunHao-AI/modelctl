@@ -48,6 +48,11 @@ def isolated_runtime_dirs(tmp_path, monkeypatch):
     # HF_ENDPOINT delenv：unsloth build_command 会真实注入该值到子进程 env（见 engines/unsloth.py），
     # 开发者 .env 里的镜像地址泄漏会让"未配置 HF_ENDPOINT"的用例断言到意外的 env 键。
     monkeypatch.delenv("HF_ENDPOINT", raising=False)
+    # MODELCTL_GPUS delenv：cli.main 的 --gpus 与 admin 端点用 **os.environ[...] = **
+    # 直写（非 monkeypatch），跨用例存活。泄漏后 EngineAdapter.validate_gpu_selection
+    # 会用上例的卡位撞上本例的 caps（多数用例的 Capabilities 默认 gpu_indices=[]），
+    # 全量跑时报"[gpu_list] 配置的 GPU 索引 [0, 1] 超出可用范围"，单跑通过。
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
     monkeypatch.delenv("GATEWAY_DEFAULT_MODEL", raising=False)
     monkeypatch.delenv("GATEWAY_CONTEXT_SWITCH", raising=False)
     # CLUSTER_* delenv：同 GATEWAY_* 口径——开发者 .env 里的 CLUSTER_ROLE 等经 load_env()

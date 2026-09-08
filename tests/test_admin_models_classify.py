@@ -41,7 +41,7 @@ def test_do_start_exception_venv_missing_attaches_code(monkeypatch):
     import modelctl.core.all_service as all_service
     from modelctl.core.envs import EngineEnvError
 
-    def boom(profile, caps, timeout):
+    def boom(profile, caps, timeout, on_progress=None):
         raise EngineEnvError("vllm 的专用环境未创建，请先执行：modelctl env setup vllm")
 
     monkeypatch.setattr(all_service, "start_profile", boom)
@@ -56,7 +56,7 @@ def test_do_start_error_result_unactionable_no_code(monkeypatch):
     import modelctl.core.all_service as all_service
     from modelctl.core.all_service import ComponentResult
 
-    def fail(profile, caps, timeout):
+    def fail(profile, caps, timeout, on_progress=None):
         return ComponentResult("model:x", "error", "引擎进程提前退出")
 
     monkeypatch.setattr(all_service, "start_profile", fail)
@@ -71,7 +71,7 @@ def test_do_start_requirement_error_keeps_exit_code_2(monkeypatch):
     import modelctl.core.all_service as all_service
     from modelctl.engines.base import RequirementError
 
-    def boom(profile, caps, timeout):
+    def boom(profile, caps, timeout, on_progress=None):
         raise RequirementError("端口 8101 已被占用（nginx:80）")
 
     monkeypatch.setattr(all_service, "start_profile", boom)
@@ -85,7 +85,7 @@ def test_do_restart_exception_venv_missing_attaches_code(monkeypatch):
     import modelctl.core.all_service as all_service
     from modelctl.core.envs import EngineEnvError
 
-    def boom(profile, caps, timeout):
+    def boom(profile, caps, timeout, on_progress=None):
         raise EngineEnvError("vllm 的专用环境未创建，请先执行：modelctl env setup vllm")
 
     monkeypatch.setattr(all_service, "restart_profile", boom)

@@ -114,3 +114,38 @@ def test_sglang_command_includes_api_key(tmp_path, monkeypatch):
     cmd, _env = a.build_command()
     assert "--api-key" in cmd
     assert cmd[cmd.index("--api-key") + 1] == "sk-eng-key"
+
+
+# ---- 引擎回环绑定加固（2026-09-08）：bind_host 安全默认 + extra_args 覆盖保护 ----
+
+
+def test_sglang_default_binds_loopback(tmp_path, monkeypatch):
+    _stub_venv(tmp_path, monkeypatch, "sglang")
+    p = _write(tmp_path, "name: s\nengine: sglang\nport: 30000\nsglang:\n  model: Qwen/Qwen3-32B\n")
+    a = get_adapter("sglang")(p, CAPS8)
+    cmd, _ = a.build_command()
+    assert cmd[-2:] == ["--host", "127.0.0.1"]
+
+
+def test_sglang_bind_host_authoritative_over_extra_args(tmp_path, monkeypatch):
+    _stub_venv(tmp_path, monkeypatch, "sglang")
+    p = _write(
+        tmp_path,
+        "name: s\nengine: sglang\nport: 30000\nsglang:\n  model: Qwen/Qwen3-32B\n"
+        '  extra_args: "--host 0.0.0.0"\n',
+    )
+    a = get_adapter("sglang")(p, CAPS8)
+    cmd, _ = a.build_command()
+    assert "0.0.0.0" in cmd
+    assert cmd[-2:] == ["--host", "127.0.0.1"]
+
+
+def test_sglang_explicit_bind_host_override(tmp_path, monkeypatch):
+    _stub_venv(tmp_path, monkeypatch, "sglang")
+    p = _write(
+        tmp_path,
+        "name: s\nengine: sglang\nport: 30000\nsglang:\n  model: Qwen/Qwen3-32B\n  bind_host: 0.0.0.0\n",
+    )
+    a = get_adapter("sglang")(p, CAPS8)
+    cmd, _ = a.build_command()
+    assert cmd[-2:] == ["--host", "0.0.0.0"]

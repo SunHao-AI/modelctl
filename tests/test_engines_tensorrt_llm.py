@@ -59,7 +59,7 @@ def test_tensorrt_llm_venv_command(tmp_path, monkeypatch):
     assert cmd[2] == "tensorrt_llm.serve"
     assert cmd[3] == "/models/Qwen3.8-27B"
     assert cmd[cmd.index("--engine_dir") + 1] == str(engine_dir)
-    assert cmd[cmd.index("--host") + 1] == "0.0.0.0"
+    assert cmd[cmd.index("--host") + 1] == "127.0.0.1"
     assert cmd[cmd.index("--port") + 1] == "8120"
     assert cmd[cmd.index("--tp") + 1] == "4"
     assert cmd[cmd.index("--max_input_len") + 1] == "32768"
@@ -91,7 +91,7 @@ def test_tensorrt_llm_docker_command(tmp_path, monkeypatch):
     assert "--detach" in cmd
     assert "--gpus" in cmd
     assert "nvcr.io/nvidia/tensorrt-llm:latest" in cmd
-    assert f"{p.port}:8000" in cmd
+    assert f"127.0.0.1:{p.port}:8000" in cmd
     assert "--tp" in cmd
     assert cmd[cmd.index("--tp") + 1] == "4"
     assert "--use_fused_mlp" in cmd
@@ -333,3 +333,70 @@ def test_tensorrt_llm_is_docker_runtime_flag():
         Profile(name="q2", engine="tensorrt_llm", port=8113, engine_config={"model": "/m"}), Capabilities())
     assert docker_p.is_docker_runtime() is True
     assert venv_p.is_docker_runtime() is False
+
+
+# ---- 引擎回环绑定加固（2026-09-08）：bind_host 安全默认 + extra_args 覆盖保护 ----
+
+
+def test_tensorrt_llm_venv_default_binds_loopback(tmp_path, monkeypatch):
+    _stub_venv(tmp_path, monkeypatch)
+    engine_dir = tmp_path / "engines" / "e"
+    engine_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: tensorrt_llm\nport: 8120\ntensorrt_llm:\n"
+        f"  model: /models/Qwen3.8-27B\n  engine_dir: {engine_dir}\n",
+    )
+    a = get_adapter("tensorrt_llm")(p, CAPS8)
+    a.check_requirements()
+    cmd, _ = a.build_command()
+    assert cmd[-2:] == ["--host", "127.0.0.1"]
+
+
+def test_tensorrt_llm_venv_bind_host_authoritative_over_extra_args(tmp_path, monkeypatch):
+    _stub_venv(tmp_path, monkeypatch)
+    engine_dir = tmp_path / "engines" / "e"
+    engine_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: tensorrt_llm\nport: 8120\ntensorrt_llm:\n"
+        f"  model: /models/Qwen3.8-27B\n  engine_dir: {engine_dir}\n"
+        f'  extra_args: "--host 0.0.0.0"\n',
+    )
+    a = get_adapter("tensorrt_llm")(p, CAPS8)
+    a.check_requirements()
+    cmd, _ = a.build_command()
+    assert "0.0.0.0" in cmd
+    assert cmd[-2:] == ["--host", "127.0.0.1"]
+
+
+def test_tensorrt_llm_venv_explicit_bind_host_override(tmp_path, monkeypatch):
+    _stub_venv(tmp_path, monkeypatch)
+    engine_dir = tmp_path / "engines" / "e"
+    engine_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: tensorrt_llm\nport: 8120\ntensorrt_llm:\n"
+        f"  model: /models/Qwen3.8-27B\n  engine_dir: {engine_dir}\n  bind_host: 0.0.0.0\n",
+    )
+    a = get_adapter("tensorrt_llm")(p, CAPS8)
+    a.check_requirements()
+    cmd, _ = a.build_command()
+    assert cmd[-2:] == ["--host", "0.0.0.0"]
+
+
+def test_tensorrt_llm_docker_bind_host_p_binding(tmp_path, monkeypatch):
+    engine_dir = tmp_path / "engines" / "e"
+    engine_dir.mkdir(parents=True)
+    model_dir = tmp_path / "models" / "m"
+    model_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: tensorrt_llm\nport: 8120\ntensorrt_llm:\n"
+        f"  model: {model_dir}\n  engine_dir: {engine_dir}\n"
+        f"  docker_image: nvcr.io/nvidia/tensorrt-llm:latest\n  bind_host: 0.0.0.0\n",
+    )
+    a = get_adapter("tensorrt_llm")(p, CAPS8)
+    a.check_requirements()
+    cmd, _ = a.build_command()
+    assert cmd[cmd.index("-p") + 1] == "0.0.0.0:8120:8000"

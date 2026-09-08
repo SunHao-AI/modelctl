@@ -25,11 +25,13 @@ def build_llm_map(profiles: list[Profile], node_id: str, host: str, gateway_port
     """生成 `map $uri $llm_model_target` 片段，供 B 机 nginx include。
 
     node_id 为 URL 数字前缀（如 210），host 为节点 IP（如 192.168.77.210）。
-    每个 profile 的 name 与 alias 都会生成条目，指向同一后端；
-    模型名/别名必须是 nginx 正则安全的标识符（字母数字、点、连字符、下划线）。
+    引擎仅回环绑定（bind_host=127.0.0.1）后，外部（含 AI Agent）无法直连引擎端口，
+    故不再为各 profile 生成指向 `{host}:{port}` 的模型直连条目——所有 /llm/* 统一走
+    网关（唯一鉴权/限额/审计入口）。
 
-    统一网关入口 `/<node>/llm/v1`（按 body.model 分发，见 GATEWAY_PORT）也生成条目，
-    否则该路径会落空并掉入 nginx 兜底规则（如 location /），导致 502。
+    此处仅保留统一网关入口 `/<node>/llm/v1`（按 body.model 分发，见 GATEWAY_PORT），
+    避免该路径落空掉入 nginx 兜底规则（如 location /）导致 502。模型名/别名仍需是
+    nginx 正则安全的标识符（字母数字、点、连字符、下划线）。
     """
     for p in profiles:
         for identifier in [p.name, *p.aliases]:
@@ -41,10 +43,6 @@ def build_llm_map(profiles: list[Profile], node_id: str, host: str, gateway_port
     # 统一网关入口（v1 非模型名，先声明避免歧义；精确匹配无尾斜杠的 /<node>/llm/v1）
     lines.append(f"    ~^/{node_id}/llm/v1/  http://{host}:{gateway_port};")
     lines.append(f"    ~^/{node_id}/llm/v1$  http://{host}:{gateway_port};")
-    for p in sorted(profiles, key=lambda x: x.name):
-        lines.append(f"    ~^/{node_id}/llm/{p.name}/  http://{host}:{p.port};")
-        for alias in p.aliases:
-            lines.append(f"    ~^/{node_id}/llm/{alias}/  http://{host}:{p.port};")
     lines.append("}")
     return "\n".join(lines) + "\n"
 

@@ -107,7 +107,7 @@ class TokenSpeedAdapter(EngineAdapter):
         runtime, image, dual_error = self._resolve_runtime()
         if dual_error:
             raise RequirementError(dual_error)
-        if runtime == "docker" and not docker_setup.ensure_image(image):
+        if runtime == "docker" and not docker_setup.ensure_image(image, on_progress=self._progress_cb):
             raise RequirementError(
                 f"{self.profile.name}：镜像 {image} 未就位，无法启动容器；"
                 "详见日志中的 docker pull 错误分类与对应处置"
@@ -131,6 +131,9 @@ class TokenSpeedAdapter(EngineAdapter):
             raise RequirementError(dual_error)
         extra = shlex.split(str(cfg.get("extra_args") or ""))
         model = str(cfg["model"])
+        # 安全加固：默认仅绑定 loopback，杜绝外部直连引擎端口绕过网关鉴权/限额/审计。
+        # 确需对外暴露时显式配置 bind_host: 0.0.0.0（并配合防火墙/白名单限制来源）。
+        bind_host = str(cfg.get("bind_host", "127.0.0.1"))
 
         if runtime == "docker":
             model_local = Path(model).expanduser().resolve()
@@ -138,7 +141,9 @@ class TokenSpeedAdapter(EngineAdapter):
                 "docker", "run", "--rm", "--detach",
                 "--name", self._container_name,
                 "--gpus", self._gpus_json(gpus, tp),
-                "-p", f"{self.profile.port}:8000",
+                # -p 绑定 {bind_host}:{port}:8000：宿主机 docker-proxy 仅监听 127.0.0.1，
+                # 容器内服务仍绑 0.0.0.0，外部无法连接宿主机该端口，杜绝绕过网关直连。
+                "-p", f"{bind_host}:{self.profile.port}:8000",
                 "-v", f"{model_local.parent.as_posix()}:/models:ro",
                 "--ipc=host",
                 # 容器时区只能靠 -e（start_detached 的 env 进不了容器），否则日志是 UTC
@@ -162,13 +167,14 @@ class TokenSpeedAdapter(EngineAdapter):
             str(envs.engine_bin("tokenspeed", "tokenspeed")),
             "serve",
             model,
-            "--host", "0.0.0.0",
             "--port", str(self.profile.port),
             "--tp", str(tp),
         ]
         if cfg.get("max_model_len"):
             cmd += ["--max-model-len", str(cfg["max_model_len"])]
         cmd += self.api_key_args() + extra
+        # 权威 --host 置于 extra 之后：bind_host 安全值不被 extra_args 里的同名 --host 覆盖回 0.0.0.0
+        cmd += ["--host", bind_host]
         env = {}
         if gpus:
             env.update(self.cuda_visible_devices(gpus))
@@ -228,6 +234,22 @@ class TokenSpeedAdapter(EngineAdapter):
     def is_docker_runtime(self) -> bool:
         """tokenspeed 路径判定：docker_image 字段非空时走 docker runtime。"""
         return self._resolve_runtime()[0] == "docker"
+
+    def log_tee_cmd(self) -> list[str] | None:
+        """docker 分支：`docker logs -f --tail all <container>` 续写容器输出。
+
+        用 `--tail all` 而非 `--tail 0`：`docker run --detach` 秒返回，只跟新行会漏掉
+        tee 挂上前数百毫秒内的 banner 行，伤及 loading 段模式表匹配（理由同 vllm）。
+        """
+        if self._resolve_runtime()[0] != "docker":
+            return None
+        return ["docker", "logs", "-f", "--tail", "all", self._container_name]
+
+    def log_fallback_cmd(self) -> list[str] | None:
+        """docker 分支：`docker logs --tail 50 <container>`，启动失败摘录兜底（设计 §4.4）。"""
+        if self._resolve_runtime()[0] != "docker":
+            return None
+        return ["docker", "logs", "--tail", "50", self._container_name]
 
     def stop_backend(self) -> None:
         """docker 分支：docker rm -f <container>；venv 分支：基类 stop_instance。"""

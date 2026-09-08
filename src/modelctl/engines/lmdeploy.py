@@ -68,11 +68,13 @@ class LmdeployAdapter(EngineAdapter):
         gpus = self.selected_gpus()
         tp = len(gpus) if gpus else int(cfg.get("tensor_parallel_size", 1))
         extra = shlex.split(str(cfg.get("extra_args") or ""))
+        # 安全加固：默认仅绑定 loopback，杜绝外部直连引擎端口绕过网关鉴权/限额/审计。
+        # 确需对外暴露时显式配置 bind_host: 0.0.0.0（并配合防火墙/白名单限制来源）。
+        bind_host = str(cfg.get("bind_host", "127.0.0.1"))
         cmd = [
             str(envs.engine_bin("lmdeploy", "lmdeploy")),
             "serve", "api_server",
             str(cfg["model"]),
-            "--server-name", "0.0.0.0",
             "--server-port", str(self.profile.port),
             "--tp", str(tp),
         ]
@@ -86,6 +88,8 @@ class LmdeployAdapter(EngineAdapter):
             cmd += ["--api-keys", self.profile.api_key]
         cmd += ["--model-name", self.upstream_model_name()]
         cmd += extra
+        # 权威 --server-name 置于 extra 之后：bind_host 安全值不被 extra_args 里的同名参数覆盖回 0.0.0.0
+        cmd += ["--server-name", bind_host]
         env = {}
         if gpus:
             env.update(self.cuda_visible_devices(gpus))

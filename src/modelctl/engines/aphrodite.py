@@ -68,11 +68,13 @@ class AphroditeAdapter(EngineAdapter):
         gpus = self.selected_gpus()
         tp = len(gpus) if gpus else int(cfg.get("tensor_parallel_size", 1))
         extra = shlex.split(str(cfg.get("extra_args") or ""))
+        # 安全加固：默认仅绑定 loopback，杜绝外部直连引擎端口绕过网关鉴权/限额/审计。
+        # 确需对外暴露时显式配置 bind_host: 0.0.0.0（并配合防火墙/白名单限制来源）。
+        bind_host = str(cfg.get("bind_host", "127.0.0.1"))
         cmd = [
             str(envs.engine_bin("aphrodite", "aphrodite")),
             "run",
             str(cfg["model"]),
-            "--host", "0.0.0.0",
             "--port", str(self.profile.port),
             "--tensor-parallel-size", str(tp),
             "--served-model-name", self.upstream_model_name(),
@@ -82,6 +84,8 @@ class AphroditeAdapter(EngineAdapter):
         if cfg.get("max_model_len"):
             cmd += ["--max-model-len", str(cfg["max_model_len"])]
         cmd += self.api_key_args() + extra
+        # 权威 --host 置于 extra 之后：bind_host 安全值不被 extra_args 里的同名 --host 覆盖回 0.0.0.0
+        cmd += ["--host", bind_host]
         env = {"HF_HOME": os.environ["HF_HOME"]} if os.environ.get("HF_HOME") else {}
         if gpus:
             env.update(self.cuda_visible_devices(gpus))

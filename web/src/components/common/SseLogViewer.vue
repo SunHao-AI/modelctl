@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue';
+import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { openModelLogStream } from '@/api/sse';
 import type { LogSseEvent } from '@/api/sse';
 
@@ -7,7 +7,7 @@ import type { LogSseEvent } from '@/api/sse';
  * SSE 日志查看器（暗色终端风）
  *
  * - 通过 url（/admin/api/models/{name}/log/stream）订阅 EventSource
- * - 监听 data: {type: "line"|"tail", line} 事件，写入 lines ref
+ * - 监听命名事件 event: log（data: {line}），写入 lines ref
  * - autoFollow=true 时新行到达自动滚到底
  * - 「复制全部」：navigator.clipboard.writeText(lines 拼接)
  * - 顶部状态：连接中 / 已连接 / 已断开
@@ -47,7 +47,6 @@ let handle: { close(): void } | null = null;
 
 /** 收到一个新行：append 到 lines 末尾（限制长度免爆），跟随则滚到底 */
 function push(evt: LogSseEvent) {
-  if (state.value === 'connecting') state.value = 'open';
   lines.push(evt.line);
   // 限制最多保留 4000 行
   if (lines.length > 4000) {
@@ -77,6 +76,11 @@ function open() {
   if (state.value === 'open') return;
   state.value = 'connecting';
   handle = openModelLogStream(props.url, {
+    onOpen: () => {
+      // EventSource 内部自动重试成功后会再触发 open：只要不是用户主动 close（closed），
+      // 一律恢复为 open，否则断线重连后状态灯永显「已断开」
+      if (state.value !== 'open') state.value = 'open';
+    },
     onLine: push,
     onError: () => {
       // EventSource 内部会自动重试 3 次，不在此主动关
@@ -105,6 +109,9 @@ async function onCopy() {
     console.warn('复制日志失败:', err);
   }
 }
+
+/** 挂载即建流：组件常在 v-if 下挂载，url 恒定不会触发下方 watch，缺此则永停 connecting */
+onMounted(open);
 
 onBeforeUnmount(closeStream);
 

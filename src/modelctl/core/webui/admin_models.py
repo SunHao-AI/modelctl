@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -145,10 +146,49 @@ def _fail_task(task, exit_code: int, message: str, engine: str) -> None:
     task.error(exit_code=exit_code, message=message, code=code, engine=eng)
 
 
+def _stage_event_bridge(task, loop: asyncio.AbstractEventLoop):
+    """构建 stage 事件桥接回调（start/restart 共用），把进度事件安全投递到事件循环线程。
+
+    `on_progress` 由 worker 线程（`asyncio.to_thread`）与 LoadingWatcher daemon 线程调用，
+    而 `Task.event` 依赖当前线程的事件循环——工作线程里没有，直接调用会抛 RuntimeError
+    并被其内部 except 静默吞掉，浏览器永远收不到 `stage` 帧。故此处以调用方在**事件循环
+    线程**捕获的 `loop` 经 `call_soon_threadsafe` 派发；loop 已关闭时降级 debug 日志
+    （进度尽力而为，绝不影响启动）。
+    """
+    def _on_stage(ev) -> None:
+        """阶段事件 → task SSE（与 docker 一键安装同一事件基建，_sse_task_stream 零改动透传）。"""
+        payload = {
+            "stage": ev.stage,
+            "status": ev.status,
+            "label": ev.label,
+            "pct": ev.pct,
+            "etaSeconds": ev.eta_s,
+            "error": ev.error,
+            "task_id": task.id,
+        }
+        pct = "" if ev.pct is None else f" {round(ev.pct * 100)}%"
+        detail = f"{ev.label}{pct}"
+
+        def _dispatch() -> None:
+            task.event("stage", payload)
+            task.update_detail(detail)
+
+        try:
+            loop.call_soon_threadsafe(_dispatch)
+        except (RuntimeError, TypeError) as exc:
+            logger.debug(f"stage 事件投递失败（循环已关闭，忽略）：{exc}")
+
+    return _on_stage
+
+
 async def _do_start(profile, caps, timeout: float, task, gpus: str | None) -> None:
     """在 worker 线程中执行启动，完成后更新 task。"""
     from modelctl.core.all_service import start_profile
     from modelctl.core.gpu_utils import resolve_gpu_list
+
+    # 进入 to_thread 前仍在事件循环线程：此处取到的 loop 才能供跨线程派发
+    loop = asyncio.get_running_loop()
+    _on_stage = _stage_event_bridge(task, loop)
 
     # gpus 逗号字符串 → 环境变量（让 adapter.selected_gpus() 可见）
     prev_gpus = os.environ.get("MODELCTL_GPUS")
@@ -159,7 +199,9 @@ async def _do_start(profile, caps, timeout: float, task, gpus: str | None) -> No
 
     try:
         task.update_status("running")
-        result = await asyncio.to_thread(start_profile, profile, caps, timeout)
+        result = await asyncio.to_thread(
+            lambda: start_profile(profile, caps, timeout, on_progress=_on_stage)
+        )
         task.update_detail(result.detail)
         if result.status == "error":
             _fail_task(task, 1, result.detail, profile.engine)
@@ -190,6 +232,10 @@ async def _do_restart(profile, caps, timeout: float, task, gpus: str | None) -> 
     from modelctl.core.all_service import restart_profile
     from modelctl.core.gpu_utils import resolve_gpu_list
 
+    # 与 _do_start 同构：事件循环线程捕获 loop，restart 复用 start 的阶段序列
+    loop = asyncio.get_running_loop()
+    _on_stage = _stage_event_bridge(task, loop)
+
     prev_gpus = os.environ.get("MODELCTL_GPUS")
     if gpus:
         parsed = resolve_gpu_list(None, None, gpus)
@@ -198,7 +244,9 @@ async def _do_restart(profile, caps, timeout: float, task, gpus: str | None) -> 
 
     try:
         task.update_status("running")
-        result = await asyncio.to_thread(restart_profile, profile, caps, timeout)
+        result = await asyncio.to_thread(
+            lambda: restart_profile(profile, caps, timeout, on_progress=_on_stage)
+        )
         task.update_detail(result.detail)
         if result.status == "error":
             _fail_task(task, 1, result.detail, profile.engine)
@@ -329,7 +377,7 @@ async def get_model(name: str, _: None = Depends(require_auth)):
 async def start_model(
     name: str,
     request: Request,
-    timeout: float = Query(default=600, ge=1, le=3600),
+    timeout: float | None = Query(default=None, ge=1, le=7200),
     gpus: str | None = Query(default=None),
     _: None = Depends(require_auth),
 ):
@@ -356,9 +404,15 @@ async def start_model(
 
     try:
         caps = await asyncio.to_thread(_probe_caps)
+        from modelctl.core.all_service import default_start_timeout
+
+        # timeout 缺省 → 按 profile/运行时自适应（docker 1800s，其余 600s）
+        eff_timeout = timeout if timeout is not None else await asyncio.to_thread(
+            default_start_timeout, profile, caps
+        )
         task = tm.create_task(kind="model_start", action="start", target=name)
         task.update_status("queued")
-        asyncio.ensure_future(_do_start(profile, caps, timeout, task, gpus))
+        asyncio.ensure_future(_do_start(profile, caps, eff_timeout, task, gpus))
         return JSONResponse(
             status_code=202,
             content={"task_id": task.id, "stream_url": f"/admin/api/tasks/{task.id}/stream"},
@@ -396,7 +450,7 @@ async def stop_model(name: str, _: None = Depends(require_auth)):
 async def restart_model(
     name: str,
     request: Request,
-    timeout: float = Query(default=600, ge=1, le=3600),
+    timeout: float | None = Query(default=None, ge=1, le=7200),
     gpus: str | None = Query(default=None),
     _: None = Depends(require_auth),
 ):
@@ -422,15 +476,91 @@ async def restart_model(
 
     try:
         caps = await asyncio.to_thread(_probe_caps)
+        from modelctl.core.all_service import default_start_timeout
+
+        # timeout 缺省 → 按 profile/运行时自适应（docker 1800s，其余 600s）
+        eff_timeout = timeout if timeout is not None else await asyncio.to_thread(
+            default_start_timeout, profile, caps
+        )
         task = tm.create_task(kind="model_restart", action="restart", target=name)
         task.update_status("queued")
-        asyncio.ensure_future(_do_restart(profile, caps, timeout, task, gpus))
+        asyncio.ensure_future(_do_restart(profile, caps, eff_timeout, task, gpus))
         return JSONResponse(
             status_code=202,
             content={"task_id": task.id, "stream_url": f"/admin/api/tasks/{task.id}/stream"},
         )
     finally:
         await tm.release(name, "restart")
+
+
+@router.get("/{name}/startup")
+async def get_startup_progress(name: str, _: None = Depends(require_auth)):
+    """GET /admin/api/models/{name}/startup — 最近一次启动的阶段进度快照。
+
+    数据源为 all_service 每次阶段事件覆写的 `cache/<name>.startup.json`（尽力而为，
+    写失败则无快照 → 404）。非发起者浏览器 / 页面刷新后据此渲染进度卡片，不依赖 SSE 时序。
+    profile 存在性优先于文件：快照存在但 profile 已删 → 404（设计 §5）；name 先做
+    路径安全校验，拒绝 `..`/分隔符等越目录拼接。
+    """
+    from modelctl.core.paths import cache_dir
+    from modelctl.core.startup_progress import STAGES
+
+    # name 参与文件路径拼接：白名单字符（禁分隔符）+ 拒绝 `..`，防目录穿越（如 ..%2F..%2Fetc）
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", name) or ".." in name:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "not_found", "message": f"模型 {name} 不存在"}},
+        )
+    profile = await asyncio.to_thread(_find_profile, name)
+    if profile is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "not_found", "message": f"模型 {name} 不存在"}},
+        )
+
+    path = cache_dir() / f"{name}.startup.json"
+    if not path.is_file():
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "not_found", "message": f"模型 {name} 暂无启动进度记录"}},
+        )
+    try:
+        raw = json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        # ValueError 覆盖 JSONDecodeError 与 UnicodeDecodeError（快照半写/编码异常）
+        logger.warning(f"启动进度快照不可读（{path}）：{exc}")
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "not_found", "message": f"模型 {name} 启动进度快照损坏"}},
+        )
+    if not isinstance(raw, dict):
+        logger.warning(f"启动进度快照结构异常（{path}）：非对象 JSON")
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "not_found", "message": f"模型 {name} 启动进度快照损坏"}},
+        )
+    stages = []
+    for s in raw.get("stages") or []:
+        if not isinstance(s, dict):
+            continue
+        stages.append({
+            "stage": s.get("stage"),
+            "status": s.get("status", "pending"),
+            "label": s.get("label") or "",
+            "pct": s.get("pct"),
+            "etaSeconds": s.get("eta_s"),
+            "error": s.get("error"),
+            "startedAt": s.get("started_at"),
+            "finishedAt": s.get("finished_at"),
+        })
+    return {
+        "profile": raw.get("profile") or name,
+        "engine": raw.get("engine") or "",
+        "runtime": raw.get("runtime") or "",
+        "updatedAt": raw.get("updated_at") or "",
+        "stages": stages,
+        "knownStages": list(STAGES),
+    }
 
 
 @router.get("/{name}/log")

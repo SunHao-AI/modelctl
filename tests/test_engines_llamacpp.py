@@ -580,3 +580,22 @@ def test_llamacpp_vram_gate_uses_selected_gpus_only(tmp_path, monkeypatch):
     a = get_adapter("llamacpp")(load_profile("c", tmp_path), caps)
     with pytest.raises(RequirementError):  # selected GPU 0 has only 20MB free < needed (~33MB)
         a.check_requirements()
+
+
+# ---- 引擎回环绑定加固（2026-09-08）：bind_host 安全默认 + 显式覆盖 ----
+
+
+def test_llamacpp_default_binds_loopback(tmp_path):
+    caps = probe(nvidia_smi_output=SMI)
+    adapter = get_adapter("llamacpp")(_profile(tmp_path), caps)
+    adapter.check_requirements()
+    cmd, _ = adapter.build_command()
+    assert cmd[cmd.index("--host") + 1] == "127.0.0.1"
+
+
+def test_llamacpp_explicit_bind_host_override(tmp_path):
+    caps = probe(nvidia_smi_output=SMI)
+    adapter = get_adapter("llamacpp")(_profile(tmp_path, "  bind_host: 0.0.0.0\n"), caps)
+    adapter.check_requirements()
+    cmd, _ = adapter.build_command()
+    assert cmd[cmd.index("--host") + 1] == "0.0.0.0"

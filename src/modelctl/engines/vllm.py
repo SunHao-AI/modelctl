@@ -122,7 +122,7 @@ class VllmAdapter(EngineAdapter):
             # pre_start 在 check_requirements 之后被调用，正常路径下 dual_error 通常为 None；
             # 兜底以防外部调用链（如 rebuild）绕开 check_requirements 直接进 pre_start。
             raise RequirementError(dual_error)
-        if runtime == "docker" and not docker_setup.ensure_image(image):
+        if runtime == "docker" and not docker_setup.ensure_image(image, on_progress=self._progress_cb):
             raise RequirementError(
                 f"{self.profile.name}：镜像 {image} 未就位，无法启动容器；"
                 "详见日志中的 docker pull 错误分类与对应处置"
@@ -152,13 +152,16 @@ class VllmAdapter(EngineAdapter):
         if dual_error:
             raise RequirementError(dual_error)
 
+        # 安全加固：默认仅绑定 loopback，杜绝外部直连引擎端口绕过网关鉴权/限额/审计。
+        # 确需对外暴露时显式配置 bind_host: 0.0.0.0（并配合防火墙/白名单限制来源）。
+        bind_host = str(cfg.get("bind_host", "127.0.0.1"))
         # 共用：--served-model-name 之后的 model_args
+        # （原 "--host", "0.0.0.0" 已从共享段移除：venv 分支在命令末尾追加权威
+        #   --host {bind_host}，docker 分支容器固定 --host 0.0.0.0、宿主机 -p 绑定 bind_host）
         extra = shlex.split(str(cfg.get("extra_args") or ""))
         model_args = [
             "--served-model-name",
             self.upstream_model_name(),
-            "--host",
-            "0.0.0.0",
             "--tensor-parallel-size",
             str(tp),
             "--gpu-memory-utilization",
@@ -192,6 +195,10 @@ class VllmAdapter(EngineAdapter):
                 "--port",
                 str(self.profile.port),
                 *tail,
+                # --host 置于 extra 之后，保证 bind_host 权威、不被 extra_args 里的
+                # 同名 --host 覆盖回 0.0.0.0（安全值不应被临时参数静默回退）
+                "--host",
+                bind_host,
             ]
             return cmd, self._venv_env(gpus)
 
@@ -209,8 +216,11 @@ class VllmAdapter(EngineAdapter):
                 self._container_name,
                 "--gpus",
                 self._gpus_json(),
+                # -p 绑定 {bind_host}:{port}:8000：宿主机 docker-proxy 仅监听 127.0.0.1，
+                # 容器内 vLLM 仍绑 0.0.0.0（保持 --host 不动，避免转发边界问题），
+                # 外部无法连接宿主机该端口，彻底杜绝绕过网关直连。
                 "-p",
-                f"{self.profile.port}:8000",
+                f"{bind_host}:{self.profile.port}:8000",
                 "-v",
                 f"{model_local.parent.as_posix()}:/models:ro",
                 "--ipc=host",
@@ -223,7 +233,9 @@ class VllmAdapter(EngineAdapter):
             ]
             + model_args
             + tail
-            + ["--port", "8000"]
+            # 容器内 vLLM 固定绑 0.0.0.0（置于 extra 之后，防 extra_args 用 --host 改动）；
+            # 外部可达性由宿主机 -p 绑定 {bind_host}:{port}:8000 隔离（默认仅 127.0.0.1）
+            + ["--port", "8000", "--host", "0.0.0.0"]
         )
         # docker_env：yaml vllm.docker_env（dict）→ 容器内环境变量。
         # ⚠ 必须用 `docker run -e`（而非 build_command 返回的 env dict）才能进入容器：
@@ -391,6 +403,23 @@ class VllmAdapter(EngineAdapter):
     def is_docker_runtime(self) -> bool:
         """vllm 路径判定：docker_image 字段非空时走 docker runtime。"""
         return self._resolve_runtime()[0] == "docker"
+
+    def log_tee_cmd(self) -> list[str] | None:
+        """docker 分支：`docker logs -f --tail all <container>` 续写容器输出。
+
+        用 `--tail all` 而非 `--tail 0`：`docker run --detach` 秒返回，只跟新行会漏掉
+        tee 挂上前数百毫秒内的 banner 行，伤及 loading 段模式表匹配。launch log 此
+        前只有一行容器 ID，全量重放无副作用；重复行由 watcher 的 pct 单调不减兜住。
+        """
+        if self._resolve_runtime()[0] != "docker":
+            return None
+        return ["docker", "logs", "-f", "--tail", "all", self._container_name]
+
+    def log_fallback_cmd(self) -> list[str] | None:
+        """docker 分支：`docker logs --tail 50 <container>`，启动失败摘录兜底（设计 §4.4）。"""
+        if self._resolve_runtime()[0] != "docker":
+            return None
+        return ["docker", "logs", "--tail", "50", self._container_name]
 
     def stop_backend(self) -> None:
         """docker 分支：docker rm -f <container>（清 PID 防御 venv/docker 环境切换残留）；

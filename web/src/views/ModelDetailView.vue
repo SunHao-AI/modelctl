@@ -1,18 +1,21 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { startModel, stopModel, restartModel, startModelUi, stopModelUi, getModel, getModelLog, getModelYaml, getModelLogStreamUrl } from '@/api/models';
-import type { ModelDetail, YamlResponse } from '@/api/types';
+import { startModel, stopModel, restartModel, startModelUi, stopModelUi, getModel, getModelLog, getModelYaml, getModelLogStreamUrl, getStartup } from '@/api/models';
+import type { ModelDetail, StartupSnapshot, YamlResponse } from '@/api/types';
+import { useTasksStore } from '@/stores/tasks';
 import StatusBadge from '@/components/common/StatusBadge.vue';
 import TaskButton from '@/components/common/TaskButton.vue';
 import SseLogViewer from '@/components/common/SseLogViewer.vue';
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue';
+import StartupProgressCard from '@/components/startup/StartupProgressCard.vue';
 
 /**
  * 模型详情：上部分览（状态/引擎/端口/PID/api_key/操作按钮），下部分 tab（工作日志 SSE / YAML / 配置），5s 轮询刷新
  */
 const route = useRoute();
 const router = useRouter();
+const tasksStore = useTasksStore();
 /** 模型名（路由参数） */
 const name = computed(() => String(route.params.name ?? ''));
 const detail = ref<ModelDetail | null>(null);
@@ -30,6 +33,8 @@ const logInitial = ref<string[]>([]);
 const yaml = ref<YamlResponse | null>(null);
 const yamlErr = ref('');
 let timer: number | undefined;
+const startup = ref<StartupSnapshot | null>(null);
+let startupTimer: number | undefined;
 
 /** 拉取模型详情 */
 async function refresh() {
@@ -60,6 +65,29 @@ async function refreshYaml() {
     yamlErr.value = (err as { message?: string })?.message || 'YAML 读取失败';
   }
 }
+/** 拉一次启动进度快照（仅无记录 404 → 清空卡片；其它故障保留上一帧防闪烁） */
+async function refreshStartup() {
+  try {
+    startup.value = await getStartup(name.value);
+  } catch (err) {
+    if ((err as { response?: { status?: number } }).response?.status === 404) {
+      startup.value = null;
+    }
+  }
+}
+/** 卡片可见：启动中/停止态但进度未收尾，或失败收尾 */
+const showStartup = computed(() => {
+  const s = startup.value;
+  if (!s) return false;
+  if (s.stages.some((x) => x.status === 'error')) return true;
+  if (detail.value?.state === 'running') return false;
+  return s.stages.some((x) => x.status === 'running' || x.status === 'pending');
+});
+/** 启动进行中等价态：本模型有 queued/running 任务（后端无 starting 状态，store 派生） */
+const startupTaskActive = computed(() => {
+  const rec = tasksStore.activityFor(name.value);
+  return !!rec && (rec.status === 'queued' || rec.status === 'running');
+});
 /** SSE 日志流地址（计算属性，供 SseLogViewer 使用） */
 const logStreamUrl = computed(() => getModelLogStreamUrl(name.value));
 /** 是否 unsloth 引擎（可开启 Unsloth Web 控制台） */
@@ -119,10 +147,19 @@ function backTo() {
 onMounted(() => {
   void refresh();
   void refreshLog();
+  void refreshStartup();
   timer = window.setInterval(() => void refresh(), 5000);
+  // 设计 §4.8：仅启动期间 2s 轮询进度。门控：本模型有进行中的 start/restart 任务
+  // （后端无 starting 状态，由 tasks store 派生）或正在展示启动卡片（含最近失败）。
+  // 不满足直接跳过本轮请求，避免常驻轮询；404 清空逻辑在 refreshStartup 内保留。
+  startupTimer = window.setInterval(() => {
+    if (!startupTaskActive.value && !showStartup.value) return;
+    void refreshStartup();
+  }, 2000);
 });
 onBeforeUnmount(() => {
   if (timer !== undefined) clearInterval(timer);
+  if (startupTimer !== undefined) clearInterval(startupTimer);
 });
 // 切到 yaml tab 时拉一次
 watch(tab, (t) => {
@@ -167,9 +204,9 @@ function engineConfigEntries(): Array<{ key: string; value: string }> {
         </div>
         <!-- 操作按钮（外部写操作，stop 走 ConfirmDialog 防误触） -->
         <div class="flex flex-wrap items-center gap-3 pt-2" @click.stop>
-          <TaskButton label="启动" variant="primary" :target="name" :task-target="() => startModel(name)" @success="() => refresh()" />
+          <TaskButton label="启动" variant="primary" :target="name" :task-target="() => startModel(name)" @success="() => { refresh(); void refreshStartup(); }" />
           <button class="btn-danger" :disabled="stopBusy || detail.state === 'stopped'" @click.stop="stopConfirm = true">{{ stopBusy ? '停止中…' : '停止' }}</button>
-          <TaskButton label="重启" variant="ghost" :target="name" :task-target="() => restartModel(name)" @success="() => refresh()" />
+          <TaskButton label="重启" variant="ghost" :target="name" :task-target="() => restartModel(name)" @success="() => { refresh(); void refreshStartup(); }" />
           <!-- Unsloth Web 控制台（同步，仅 unsloth 引擎可启动） -->
           <template v-if="isUnsloth">
             <span class="mx-1 h-4 w-px bg-slate-700" />
@@ -184,6 +221,12 @@ function engineConfigEntries(): Array<{ key: string; value: string }> {
       <div v-else class="py-4 text-sm text-slate-500">加载中…</div>
       <p v-if="errMsg" class="pt-2 text-sm text-red-400">{{ errMsg }}</p>
     </section>
+    <!-- 启动进度卡片（启动中 / 启动失败时常驻） -->
+    <StartupProgressCard
+      v-if="showStartup && startup"
+      :snapshot="startup"
+      :to-env-page="() => router.push({ name: 'envs' })"
+    />
     <!-- 中部 tab：工作日志 / YAML / 配置 -->
     <section class="card !p-0">
       <div class="flex items-center gap-1 border-b border-slate-800 px-2">

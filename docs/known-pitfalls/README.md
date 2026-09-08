@@ -79,6 +79,11 @@
 | 2026-09-08 | 后端 / 日志 | loguru 的 Windows `TERM` 特判把 ANSI 色码写进重定向文件 | `should_colorize` 在 TTY 检测与 `NO_COLOR` 之前特判 `TERM`，stderr 重定向到 launch-*.log 仍上色；必须显式 `colorize=color_enabled()`。 | [backend/日志编码与噪声治理.md](backend/日志编码与噪声治理.md) |
 | 2026-09-08 | 后端 / 子进程 | 子进程 stdio 重定向到文件时编码回退 locale（中文 Windows=GBK） | Python stdio 连管道/文件时不用 UTF-8；`start_detached` 须在 env **末位**恒定注入 `PYTHONIOENCODING=utf-8`，否则被 extra_env 覆盖。 | [backend/日志编码与噪声治理.md](backend/日志编码与噪声治理.md) |
 | 2026-09-08 | 后端 / 日志 | 心跳轮询 / `GET /metrics` access 日志刷满 INFO | uvicorn access 记录级别固定 INFO，调 logger level 会连 4xx/5xx 一起丢；在 access handler 挂 `logging.Filter` 实现"等价 DEBUG"，dictConfig 的 `"()"` 须传类对象防 venv 旧副本。 | [backend/日志编码与噪声治理.md](backend/日志编码与噪声治理.md) |
+| 2026-09-08 | 后端 / 日志 | docker 路径 launch log 只有容器 ID，日志全废 | 容器输出在 daemon 侧，`docker run --detach` 客户端只落一行容器 ID；需 `docker logs -f --tail all` tee 到 launch log（append + 独立 PID 文件 + start 前清残留 + stop 时 kill）。 | [backend/启动进度与日志可观测性.md](backend/启动进度与日志可观测性.md) |
+| 2026-09-08 | 后端 / 引擎启动 | 长启动静默导致误杀慢启动（Exit 137） | pull/加载全程零输出（`capture_output=True` 吞进度 + `_do_start` 零事件）+ 600s 默认超时误杀 docker 冷启动；需 5 段阶段机 + PullParser + LoadingWatcher + 120s 兜底文案 + docker 超时 1800s。 | [backend/启动进度与日志可观测性.md](backend/启动进度与日志可观测性.md) |
+| 2026-09-08 | 前端 / SSE | SSE 无首行日志时前端永显「连接中…」 | 状态只在首行日志回调里翻转，需注册 `EventSource` 的 `open` 事件驱动 `state='open'`；v-if 下 url 恒定不触发 watch，还须 `onMounted` 建流。 | [backend/启动进度与日志可观测性.md](backend/启动进度与日志可观测性.md) |
+| 2026-09-08 | 测试 / 隔离 | CLI `--gpus` 直写 `os.environ`，31 个引擎用例"全量红单跑绿" | `os.environ[k]=v` 直写同 setdefault 一样跨用例存活；conftest 补 `delenv MODELCTL_GPUS`；归因三板斧=单跑绿判定污染→最小两例复现→worktree 基线全量比对签名。 | [backend/test-isolation.md](backend/test-isolation.md) |
+| 2026-09-08 | 测试 / 隔离 | 生产函数加带默认值参数，monkeypatch 位置参数桩错红在下游断言 | `boom(profile, caps, timeout)` 收 `on_progress=` kwarg 抛 TypeError 被兜底 except 吞成 exit_code=1；扩签名须 grep 全部桩同步，错红先打全 task error。 | [backend/test-isolation.md](backend/test-isolation.md) |
 
 ## 目录约定
 

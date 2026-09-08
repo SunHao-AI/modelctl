@@ -94,6 +94,14 @@ class _FakeAdapter:
         """mirror base.EngineAdapter：本工具拉起的进程早退即视为死亡（docker 子类覆盖为容器状态探测）。"""
         return self.spawned_proc is not None and self.spawned_proc.poll() is not None
 
+    def set_progress_sink(self, cb) -> None:
+        """Task 7 引入的 start_profile 必填项（prepare_env 子进度桥接）。默认仅记录。"""
+        self._progress_cb = cb
+
+    def log_tee_cmd(self):
+        """Task 7 引入：非 docker 路径返回 None（不 spawn 日志 tee）。"""
+        return None
+
 
 # ---- 默认模型解析 ----
 
@@ -162,6 +170,12 @@ def test_start_profile_check_raises_requirement(monkeypatch):
         def __init__(self, profile, caps):
             pass
 
+        def is_docker_runtime(self) -> bool:
+            return False
+
+        def set_progress_sink(self, cb) -> None:
+            return None
+
         def check_requirements(self):
             raise RequirementError("无法运行")
 
@@ -171,17 +185,22 @@ def test_start_profile_check_raises_requirement(monkeypatch):
 
 
 def test_start_profile_port_in_use_raises(monkeypatch):
-    """端口被外部占用时启动前即抛 RequirementError，且点名占用者。"""
+    """端口被外部占用时启动前即抛 RequirementError，且点名占用者。
+
+    F3 后 adapter/tracker 先于端口预检创建（预检失败也要有 preflight 事件），
+    拦截语义改为：check_requirements 绝不会被执行。
+    """
     from modelctl.core import all_service
 
     monkeypatch.setattr(all_service, "is_running_any", lambda name, p: False)
     monkeypatch.setattr(all_service, "port_in_use", lambda port: True)
     monkeypatch.setattr(all_service, "describe_port_listener", lambda port: "PID 4242")
 
-    def _boom(*a, **kw):  # 走到适配器说明预检没拦住
-        raise AssertionError("端口占用应在 check_requirements 之前被拦截")
+    class _Checked(_FakeAdapter):
+        def check_requirements(self):
+            raise AssertionError("端口占用应在 check_requirements 之前被拦截")
 
-    monkeypatch.setattr(all_service, "get_adapter", _boom)
+    monkeypatch.setattr(all_service, "get_adapter", lambda engine: lambda prof, caps: _Checked(prof, caps))
     with pytest.raises(RequirementError, match="端口 18080 已被占用（PID 4242）"):
         start_profile(_profile(), Capabilities(), 5.0)
 

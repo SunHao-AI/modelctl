@@ -52,7 +52,7 @@ def test_aphrodite_command(tmp_path, monkeypatch):
     assert str(cmd[0]).endswith("aphrodite.exe") or str(cmd[0]).endswith("aphrodite")
     assert cmd[1] == "run"
     assert cmd[2] == "/models/Qwen3.8-27B-Q4_K_M.gguf"
-    assert cmd[cmd.index("--host") + 1] == "0.0.0.0"
+    assert cmd[cmd.index("--host") + 1] == "127.0.0.1"
     assert cmd[cmd.index("--port") + 1] == "8140"
     assert cmd[cmd.index("--tensor-parallel-size") + 1] == "1"
     assert cmd[cmd.index("--quantization") + 1] == "gguf"
@@ -103,3 +103,41 @@ def test_aphrodite_health_url_default(tmp_path):
     p = _write(tmp_path, "name: q\nengine: aphrodite\nport: 8140\naphrodite:\n  model: m\n")
     a = get_adapter("aphrodite")(p, CAPS8)
     assert a.health_url() == "http://127.0.0.1:8140/health"
+
+
+# ---- 引擎回环绑定加固（2026-09-08）：bind_host 安全默认 + extra_args 覆盖保护 ----
+
+
+def test_aphrodite_default_binds_loopback(tmp_path, monkeypatch):
+    _stub_venv(tmp_path, monkeypatch)
+    p = _write(tmp_path, "name: q\nengine: aphrodite\nport: 8140\naphrodite:\n  model: m\n")
+    a = get_adapter("aphrodite")(p, CAPS8)
+    a.check_requirements()
+    cmd, _ = a.build_command()
+    assert cmd[-2:] == ["--host", "127.0.0.1"]
+
+
+def test_aphrodite_bind_host_authoritative_over_extra_args(tmp_path, monkeypatch):
+    _stub_venv(tmp_path, monkeypatch)
+    p = _write(
+        tmp_path,
+        "name: q\nengine: aphrodite\nport: 8140\naphrodite:\n  model: m\n"
+        '  extra_args: "--host 0.0.0.0"\n',
+    )
+    a = get_adapter("aphrodite")(p, CAPS8)
+    a.check_requirements()
+    cmd, _ = a.build_command()
+    assert "0.0.0.0" in cmd
+    assert cmd[-2:] == ["--host", "127.0.0.1"]
+
+
+def test_aphrodite_explicit_bind_host_override(tmp_path, monkeypatch):
+    _stub_venv(tmp_path, monkeypatch)
+    p = _write(
+        tmp_path,
+        "name: q\nengine: aphrodite\nport: 8140\naphrodite:\n  model: m\n  bind_host: 0.0.0.0\n",
+    )
+    a = get_adapter("aphrodite")(p, CAPS8)
+    a.check_requirements()
+    cmd, _ = a.build_command()
+    assert cmd[-2:] == ["--host", "0.0.0.0"]

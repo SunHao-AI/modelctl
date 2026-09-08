@@ -8,6 +8,11 @@ api_key: ${UNSLOTH_API_KEY}
 
 unsloth:
   # model：HF 模型 ID 或本地 GGUF 路径；留空则通过 download 段自动下载
+  # bind_host：服务绑定地址（安全加固，2026-09-08，所有引擎统一默认）
+  # 默认 127.0.0.1 仅回环监听：外部（含 AI Agent / 其他内网主机）无法直连引擎端口，
+  # 从而堵住绕过网关鉴权/账号/多 Key/token 限速/审计的“第二入口”。
+  # 确需对外暴露时改为 0.0.0.0，并配合防火墙/白名单限制来源（非默认，风险自担）。
+  bind_host: 127.0.0.1
   model: unsloth/Qwen3.8-27B-GGUF
   # gguf_variant：Unsloth 动态量化后缀；model 为本地路径时忽略
   gguf_variant: Q4_K_M

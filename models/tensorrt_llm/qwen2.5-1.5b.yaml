@@ -18,6 +18,11 @@ api_key: ${API_KEY}
 
 tensorrt_llm:
   # model：HuggingFace 模型目录（trtllm-build 的 --model_dir 输入）
+  # bind_host：服务绑定地址（安全加固，2026-09-08，所有引擎统一默认）
+  # 默认 127.0.0.1 仅回环监听：外部（含 AI Agent / 其他内网主机）无法直连引擎端口，
+  # 从而堵住绕过网关鉴权/账号/多 Key/token 限速/审计的“第二入口”。
+  # 确需对外暴露时改为 0.0.0.0，并配合防火墙/白名单限制来源（非默认，风险自担）。
+  bind_host: 127.0.0.1
   model: Qwen/Qwen2.5-1.5B-Instruct
   # engine_dir：编译产物缓存目录（必填）。空目录时先跑 `modelctl trtllm build qwen2.5-1.5b-tensorrt_llm`
   engine_dir: /raid5/sh/trt_engines/qwen2.5-1.5b-tp1

@@ -140,7 +140,10 @@ class UnslothAdapter(EngineAdapter):
 
     def build_command(self) -> tuple[list[str], dict[str, str]]:
         cfg = self.profile.engine_config
-        cmd = [UNSLOTH_BIN, *STUDIO_RUN_ARGS, "-H", "0.0.0.0", "-p", str(self.profile.port)]
+        # 安全加固：默认仅绑定 loopback，杜绝外部直连引擎端口绕过网关鉴权/限额/审计。
+        # 确需对外暴露时显式配置 bind_host: 0.0.0.0（并配合防火墙/白名单限制来源）。
+        bind_host = str(cfg.get("bind_host", "127.0.0.1"))
+        cmd = [UNSLOTH_BIN, *STUDIO_RUN_ARGS, "-p", str(self.profile.port)]
         cmd += ["--model", self._model_ref(cfg)]
         if cfg.get("context_length"):
             cmd += ["--context-length", str(cfg["context_length"])]
@@ -155,6 +158,8 @@ class UnslothAdapter(EngineAdapter):
         # 不传 --api-key：run 自管认证，key 自动生成后打印到启动日志。
         if cfg.get("extra_args"):
             cmd += shlex.split(str(cfg["extra_args"]))
+        # 权威 -H 置于 extra 之后：bind_host 安全值不被 extra_args 里的同名 -H 覆盖回 0.0.0.0
+        cmd += ["-H", bind_host]
         # HF_HOME / HF_ENDPOINT 非空才注入：前者是权重缓存根，后者是 HF 镜像端点——
         # pre_start 的报错文案建议"配 HF_ENDPOINT 后从 HF 手动下载"，此处注入才让它真生效。
         env = {k: v for k in ("HF_HOME", "HF_ENDPOINT") if (v := os.environ.get(k))}

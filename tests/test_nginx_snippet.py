@@ -30,8 +30,10 @@ def test_build_llm_map():
     assert '    default "";' in lines
     assert '    ~^/210/llm/v1/  http://192.168.77.210:5003;' in lines
     assert '    ~^/210/llm/v1$  http://192.168.77.210:5003;' in lines
-    assert '    ~^/210/llm/deepseek-v4-flash/  http://192.168.77.210:18888;' in lines
-    assert '    ~^/210/llm/qwen3.8/  http://192.168.77.210:11434;' in lines
+    # 引擎仅回环绑定后不再生成模型直连条目（统一走网关）：直连端口条目必须不存在
+    assert '    ~^/210/llm/deepseek-v4-flash/  http://192.168.77.210:18888;' not in lines
+    assert '    ~^/210/llm/qwen3.8/  http://192.168.77.210:11434;' not in lines
+    assert '    ~^/210/llm/v1/  http://192.168.77.210:18888;' not in lines
     assert lines[-1] == "}"
 
 
@@ -48,13 +50,17 @@ def test_build_llm_map_rejects_unsafe_name():
         build_llm_map([Profile(name="a b", engine="vllm", port=8000)], "210", "x")
 
 
-def test_build_llm_map_includes_aliases():
+def test_build_llm_map_does_not_emit_any_direct_entries():
+    """引擎仅回环绑定后，模型名/别名均不生成指向引擎端口的直连条目，
+    所有 /llm/* 统一走网关（唯一鉴权/限额/审计入口），堵住绕过网关直连的漏洞。"""
     profiles = [
         Profile(name="deepseek-v4-flash-llamacpp", engine="llamacpp", port=18888, aliases=["deepseek-v4-flash"])
     ]
     out = build_llm_map(profiles, "210", "192.168.77.210")
-    assert "    ~^/210/llm/deepseek-v4-flash-llamacpp/  http://192.168.77.210:18888;" in out
-    assert "    ~^/210/llm/deepseek-v4-flash/  http://192.168.77.210:18888;" in out
+    assert "    ~^/210/llm/deepseek-v4-flash-llamacpp/  http://192.168.77.210:18888;" not in out
+    assert "    ~^/210/llm/deepseek-v4-flash/  http://192.168.77.210:18888;" not in out
+    # 仅保留统一网关入口
+    assert '    ~^/210/llm/v1/  http://192.168.77.210:5003;' in out
 
 
 def test_build_llm_map_rejects_unsafe_alias():

@@ -336,12 +336,15 @@ class LlamaCppAdapter(EngineAdapter):
         gpus = self.selected_gpus()
         gpu_count = len(gpus) if gpus else int(cfg.get("gpu_count", 8))
         gpu_split = ",".join(["1"] * gpu_count)
+        # 安全加固：默认仅绑定 loopback，杜绝外部直连引擎端口绕过网关鉴权/限额/审计。
+        # 确需对外暴露时显式配置 bind_host: 0.0.0.0（并配合防火墙/白名单限制来源）。
+        bind_host = str(cfg.get("bind_host", "127.0.0.1"))
         cmd = [
             server,
             "--model",
             str(self._model.resolve()),
             "--host",
-            "0.0.0.0",
+            bind_host,
             "--port",
             str(self.profile.port),
             "--ctx-size",

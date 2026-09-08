@@ -47,7 +47,7 @@ def test_build_command(tmp_path, monkeypatch):
     a = get_adapter("ollama")(_profile(tmp_path), caps)
     cmd, env = a.build_command()
     assert cmd == ["ollama", "serve"]
-    assert env["OLLAMA_HOST"] == "0.0.0.0:11434"
+    assert env["OLLAMA_HOST"] == "127.0.0.1:11434"
     assert env["OLLAMA_MODELS"] == "/raid5/sh/model/ollama-models"
     assert env["OLLAMA_NUM_PARALLEL"] == "2"
     assert env["OLLAMA_CONTEXT_LENGTH"] == "32768"
@@ -146,3 +146,24 @@ def test_ollama_gpu_list_sets_cuda(monkeypatch):
     _, env = a.build_command()
     assert env["CUDA_VISIBLE_DEVICES"] == "6,7"
     assert env["OLLAMA_HOST"].endswith(":11434")
+
+
+# ---- 引擎回环绑定加固（2026-09-08）：bind_host 安全默认 + 显式覆盖 ----
+
+
+def test_ollama_default_binds_loopback(tmp_path):
+    caps = Capabilities(binaries={"ollama": True})
+    a = get_adapter("ollama")(_profile(tmp_path), caps)
+    _, env = a.build_command()
+    assert env["OLLAMA_HOST"] == "127.0.0.1:11434"
+
+
+def test_ollama_explicit_bind_host_override(tmp_path):
+    caps = Capabilities(binaries={"ollama": True})
+    p = _write(
+        tmp_path,
+        "name: o\nengine: ollama\nport: 11434\nollama:\n  model: qwen3:8b\n  bind_host: 0.0.0.0\n",
+    )
+    a = get_adapter("ollama")(p, caps)
+    _, env = a.build_command()
+    assert env["OLLAMA_HOST"] == "0.0.0.0:11434"

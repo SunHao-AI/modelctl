@@ -510,3 +510,30 @@ export interface TaskInfo {
   /** 内存环形日志（后端最多 500 行） */
   logs: string[];
 }
+
+/** 启动阶段名（与后端 STAGES 严格一致） */
+export type StartupStageName = 'preflight' | 'prepare_env' | 'launch' | 'loading' | 'health';
+
+/** 单阶段快照 */
+export interface StartupStage {
+  stage: StartupStageName;
+  status: 'pending' | 'running' | 'done' | 'error';
+  label: string;
+  /** 0–1；null 表示不确定态（条纹动画） */
+  pct: number | null;
+  /** 预估剩余秒；null 表示首次运行无预估 */
+  etaSeconds: number | null;
+  error: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+/** GET /models/{name}/startup 响应 */
+export interface StartupSnapshot {
+  profile: string;
+  engine: string;
+  runtime: 'docker' | 'venv' | string;
+  updatedAt: string;
+  stages: StartupStage[];
+  knownStages: StartupStageName[];
+}

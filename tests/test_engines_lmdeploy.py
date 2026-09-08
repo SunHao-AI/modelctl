@@ -57,7 +57,7 @@ def test_lmdeploy_command(tmp_path, monkeypatch):
     assert cmd[1] == "serve"
     assert cmd[2] == "api_server"
     assert cmd[3] == "/models/Qwen3.8-27B"
-    assert cmd[cmd.index("--server-name") + 1] == "0.0.0.0"
+    assert cmd[cmd.index("--server-name") + 1] == "127.0.0.1"
     assert cmd[cmd.index("--server-port") + 1] == "8130"
     assert cmd[cmd.index("--tp") + 1] == "1"
     assert cmd[cmd.index("--session-len") + 1] == "32768"
@@ -102,3 +102,41 @@ def test_lmdeploy_health_url(tmp_path, monkeypatch):
     )
     a = get_adapter("lmdeploy")(p, CAPS8)
     assert a.health_url() == "http://127.0.0.1:8130/health"
+
+
+# ---- 引擎回环绑定加固（2026-09-08）：bind_host 安全默认 + extra_args 覆盖保护 ----
+
+
+def test_lmdeploy_default_binds_loopback(tmp_path, monkeypatch):
+    _stub_venv(tmp_path, monkeypatch)
+    p = _write(tmp_path, "name: q\nengine: lmdeploy\nport: 8130\nlmdeploy:\n  model: m\n")
+    a = get_adapter("lmdeploy")(p, CAPS8)
+    a.check_requirements()
+    cmd, _ = a.build_command()
+    assert cmd[-2:] == ["--server-name", "127.0.0.1"]
+
+
+def test_lmdeploy_bind_host_authoritative_over_extra_args(tmp_path, monkeypatch):
+    _stub_venv(tmp_path, monkeypatch)
+    p = _write(
+        tmp_path,
+        "name: q\nengine: lmdeploy\nport: 8130\nlmdeploy:\n  model: m\n"
+        '  extra_args: "--server-name 0.0.0.0"\n',
+    )
+    a = get_adapter("lmdeploy")(p, CAPS8)
+    a.check_requirements()
+    cmd, _ = a.build_command()
+    assert "0.0.0.0" in cmd
+    assert cmd[-2:] == ["--server-name", "127.0.0.1"]
+
+
+def test_lmdeploy_explicit_bind_host_override(tmp_path, monkeypatch):
+    _stub_venv(tmp_path, monkeypatch)
+    p = _write(
+        tmp_path,
+        "name: q\nengine: lmdeploy\nport: 8130\nlmdeploy:\n  model: m\n  bind_host: 0.0.0.0\n",
+    )
+    a = get_adapter("lmdeploy")(p, CAPS8)
+    a.check_requirements()
+    cmd, _ = a.build_command()
+    assert cmd[-2:] == ["--server-name", "0.0.0.0"]
