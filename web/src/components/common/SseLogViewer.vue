@@ -7,7 +7,7 @@ import type { LogSseEvent } from '@/api/sse';
  * SSE 日志查看器（暗色终端风）
  *
  * - 通过 url（/admin/api/models/{name}/log/stream）订阅 EventSource
- * - 监听 data: {type: "line"|"tail", line} 事件，写入 lines ref
+ * - 监听命名事件 event: log（data: {line}），写入 lines ref
  * - autoFollow=true 时新行到达自动滚到底
  * - 「复制全部」：navigator.clipboard.writeText(lines 拼接)
  * - 顶部状态：连接中 / 已连接 / 已断开
