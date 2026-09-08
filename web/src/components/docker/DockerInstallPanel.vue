@@ -366,8 +366,10 @@ onBeforeUnmount(closeSse);
             >
               modelctl env setup docker --os=linux --run
             </code>
-            或在下方「Docker 旁路」区块走官方镜像 + daemon.json 合并（参见
-            Task 3 新增的 ``?os=`` 参数）。
+            或在下方「Docker 旁路」区块走官方镜像 + daemon.json 合并（诊断接口
+            可通过 <code
+              class="inline-block rounded bg-[#0b1120] px-1 py-0.5 font-mono text-[11px] text-slate-300"
+            >?os=linux</code> 锁定平台）。
           </p>
         </div>
       </div>
