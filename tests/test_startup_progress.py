@@ -210,3 +210,67 @@ def test_tracker_eta_from_timing(tmp_path):
                         timing=timing, snapshot_path=tmp_path / "s.json")
     tr.begin("loading", "加载模型", pct=0.5)
     assert events[-1].eta_s == 100  # 200*(1-0.5)
+
+
+def test_tracker_fail_then_progress_clears_finished_at(tmp_path):
+    # 矛盾态防护：fail 后迟到的 progress 把阶段拉回 running 时，
+    # 上一轮的 finished_at 必须清空（否则前端同时看到 running + 旧完成时间）。
+    from modelctl.core.startup_progress import STAGES, StartupTiming, StartupTracker
+
+    snap = tmp_path / "s.json"
+    tr = StartupTracker("q", "vllm", "docker",
+                        timing=StartupTiming(path=tmp_path / "t.json"),
+                        snapshot_path=snap)
+
+    def stage_row():
+        data = json.loads(snap.read_text(encoding="utf-8"))
+        return data["stages"][STAGES.index("loading")]
+
+    tr.begin("loading", "加载模型", pct=0.3)
+    tr.fail("loading", "加载模型", "CUDA out of memory")
+    failed = stage_row()
+    assert failed["status"] == "error" and failed["finished_at"]
+    assert failed["error"] == "CUDA out of memory"
+
+    tr.progress("loading", "加载模型", pct=0.4)  # watcher 线程迟到的一帧
+    r = stage_row()
+    assert r["status"] == "running"
+    assert r["finished_at"] is None  # 收尾时间戳不得残留
+    assert r["error"] is None
+
+
+def test_snapshot_tmp_name_unique_per_thread(tmp_path, monkeypatch):
+    # 同进程跨线程（LoadingWatcher daemon + 主线程）共用一个 tmp 名 → 交错写坏文件，
+    # os.replace 可能搬走半写的 JSON 导致快照损坏。tmp 名必须并入线程标识。
+    import os
+    import threading
+    from pathlib import Path
+
+    from modelctl.core import startup_progress as sp
+
+    snap = tmp_path / "s.json"
+    tr = sp.StartupTracker("q", "vllm", "docker",
+                           timing=sp.StartupTiming(path=tmp_path / "t.json"),
+                           snapshot_path=snap)
+
+    used: list[str] = []
+    real_replace = os.replace
+
+    def spy(src, dst, *a, **kw):
+        used.append(Path(src).name)
+        return real_replace(src, dst, *a, **kw)
+
+    monkeypatch.setattr(sp.os, "replace", spy)
+
+    tr._write_snapshot()  # 主线程
+    main_tmp = used[-1]
+    assert str(os.getpid()) in main_tmp
+    assert str(threading.get_ident()) in main_tmp
+
+    worker = threading.Thread(target=tr._write_snapshot)
+    worker.start()
+    worker.join(timeout=5)
+    assert len(used) == 2
+    assert used[1] != main_tmp  # 同 PID 不同线程 → 不同 tmp
+    assert list(tmp_path.glob("*.tmp")) == []  # tmp 均已被 replace 消费
+    json.loads(snap.read_text(encoding="utf-8"))  # 快照仍是完整 JSON

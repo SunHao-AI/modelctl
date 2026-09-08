@@ -20,6 +20,7 @@ import json
 import math
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -312,6 +313,9 @@ class StartupTracker:
         st.label = label or STAGE_LABELS[stage]
         st.pct = pct
         st.error = None
+        # 重开阶段必须清掉上一轮收尾时间戳：done/fail 后迟到的 progress 会走到这里，
+        # 残留 finished_at 会让快照同时出现 status=running + 旧完成时间（前端矛盾态）。
+        st.finished_at = None
         st.started_at = _now_str()
         st._t0 = time.monotonic()
         st.eta_s = self._timing.eta(self.engine, stage, pct)
@@ -369,8 +373,11 @@ class StartupTracker:
         }
         try:
             self._snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-            # tmp 带 PID：并发启动（多 profile 共享 cache 目录）互不覆写对方的中间文件
-            tmp = self._snapshot_path.with_name(f"{self._snapshot_path.name}.{os.getpid()}.tmp")
+            # tmp 带 PID + 线程 ID：跨进程（多 profile 共享 cache 目录）与同进程跨线程
+            # （LoadingWatcher daemon 与主线程并发 _emit）各写各的中间文件，
+            # 否则两个 writer 交替写同一 tmp，os.replace 可能搬走半写文件 → 快照 JSON 损坏。
+            tmp = self._snapshot_path.with_name(
+                f"{self._snapshot_path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
             tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             os.replace(tmp, self._snapshot_path)
         except OSError as exc:
