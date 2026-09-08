@@ -40,6 +40,8 @@ class EngineAdapter(ABC):
         # 本次 start_detached 拉起的进程句柄（由 all_service.start_profile 注入）；
         # None 表示非本工具拉起或尚未启动，健康检查不做早退探测
         self.spawned_proc: subprocess.Popen | None = None
+        # 启动进度回调（set_progress_sink 注入）：签名 (label: str, pct: float|None) -> None
+        self._progress_cb: "Callable[[str, float | None], None] | None" = None
 
     @abstractmethod
     def build_command(self) -> tuple[list[str], dict[str, str]]:
@@ -94,6 +96,23 @@ class EngineAdapter(ABC):
 
     def pre_start(self) -> None:
         """启动前钩子（下载/编译/pull）。"""
+        return None
+
+    def set_progress_sink(self, cb: "Callable[[str, float | None], None] | None") -> None:
+        """注入启动进度回调 (label, pct)；None 清除。docker 拉镜像子进度经此上报。"""
+        self._progress_cb = cb
+
+    @property
+    def progress_cb(self) -> "Callable[[str, float | None], None] | None":
+        """当前进度回调（all_service 据此判定是否有 sink 可喂进度）。"""
+        return self._progress_cb
+
+    def log_tee_cmd(self) -> "list[str] | None":
+        """docker 日志续写命令（`docker logs -f`）；非 docker runtime 返回 None。
+
+        all_service 在容器启动后 spawn 本命令，stdout 追加进 launch log，
+        使 SSE / CLI logs / 早退摘录对 docker 运行时也能看到真实引擎输出。
+        """
         return None
 
     def post_start(self) -> None:

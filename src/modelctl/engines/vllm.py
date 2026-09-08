@@ -122,7 +122,7 @@ class VllmAdapter(EngineAdapter):
             # pre_start 在 check_requirements 之后被调用，正常路径下 dual_error 通常为 None；
             # 兜底以防外部调用链（如 rebuild）绕开 check_requirements 直接进 pre_start。
             raise RequirementError(dual_error)
-        if runtime == "docker" and not docker_setup.ensure_image(image):
+        if runtime == "docker" and not docker_setup.ensure_image(image, on_progress=self._progress_cb):
             raise RequirementError(
                 f"{self.profile.name}：镜像 {image} 未就位，无法启动容器；"
                 "详见日志中的 docker pull 错误分类与对应处置"
@@ -403,6 +403,17 @@ class VllmAdapter(EngineAdapter):
     def is_docker_runtime(self) -> bool:
         """vllm 路径判定：docker_image 字段非空时走 docker runtime。"""
         return self._resolve_runtime()[0] == "docker"
+
+    def log_tee_cmd(self) -> list[str] | None:
+        """docker 分支：`docker logs -f --tail all <container>` 续写容器输出。
+
+        用 `--tail all` 而非 `--tail 0`：`docker run --detach` 秒返回，只跟新行会漏掉
+        tee 挂上前数百毫秒内的 banner 行，伤及 loading 段模式表匹配。launch log 此
+        前只有一行容器 ID，全量重放无副作用；重复行由 watcher 的 pct 单调不减兜住。
+        """
+        if self._resolve_runtime()[0] != "docker":
+            return None
+        return ["docker", "logs", "-f", "--tail", "all", self._container_name]
 
     def stop_backend(self) -> None:
         """docker 分支：docker rm -f <container>（清 PID 防御 venv/docker 环境切换残留）；
