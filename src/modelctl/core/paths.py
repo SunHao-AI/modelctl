@@ -79,3 +79,20 @@ def audit_dir() -> Path:
     `modelctl audit stats` / webui 审计列表在目录不存在时应返回空结果，不该有建目录副作用。
     """
     return resolve_data_dir(os.environ.get("AUDIT_DIR"), "audit")
+
+
+def accounts_db_path() -> Path:
+    """账号体系 SQLite 库路径（默认 `data/modelctl_accounts.db`）。
+
+    与 `*_dir()` 的区别：这里是**单文件**而非目录，故不复用 `resolve_data_dir`
+    （那函数返回 `DATA_ROOT / subdir` 语义是目录）。同样遵守"每次重读 os.environ +
+    相对值按 PROJECT_ROOT 解析"两条约束。
+
+    故意不建父目录也不建库：只读方（`modelctl accounts list` 之类）不该有建文件副作用，
+    建库/建表由 `AccountsStore.init_db()` 在启用账号体系时幂等完成。
+    """
+    raw = (os.environ.get("ACCOUNTS_DB_PATH") or "").strip()
+    if not raw:
+        return DATA_ROOT / "modelctl_accounts.db"
+    p = Path(raw).expanduser()
+    return p if p.is_absolute() else PROJECT_ROOT / p

@@ -12,6 +12,11 @@ dependencies = [
     "uvicorn>=0.29",
     "httpx>=0.27",
     "websockets>=12",
+    # 账号体系（core/accounts）专用：bcrypt 做账号密码哈希，PyJWT 给 webui 账号面板签发 JWT。
+    # 只落在这里、不落主包 pyproject：accounts 代码只在 gateway/webui 进程内跑（同一 venv），
+    # 主包 CLI 只在包入口读开关，故 core/accounts/* 对二者一律延迟导入。
+    "bcrypt>=4.0",
+    "PyJWT>=2.8",
 ]
 
 [tool.uv.sources]
