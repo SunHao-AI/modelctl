@@ -422,3 +422,100 @@ def test_loading_watcher_survives_missing_log_and_stop_idempotent(tmp_path):
     n = len(events)
     time.sleep(0.2)  # 线程若未死，banner(0.05) 会追加进来
     assert len(events) == n
+
+
+# ---------------------------------------------------------------------------
+# Task 4 评审修复：兜底 = 「无新增进展」语义，且覆盖日志未生成窗口
+# ---------------------------------------------------------------------------
+
+def _fallback_events(events):
+    return [e for e in events if e.pct is None and "引擎初始化中" in e.label]
+
+
+def test_loading_watcher_fallback_when_log_never_created(tmp_path):
+    # 评审 finding①：watcher 早于 launch log 首行输出启动（docker 容器创建→首行），
+    # 这段「日志始终不存在」的窗口正是最该显示兜底文案的场景——
+    # 阈值判定不能被 is_file() 提前 return 挡住。
+    import time
+
+    from modelctl.core.startup_progress import LoadingWatcher, StartupTiming, StartupTracker
+
+    log = tmp_path / "never-created.log"  # 全程不创建
+    events = []
+    tr = StartupTracker("q", "vllm", "docker", on_progress=events.append,
+                        timing=StartupTiming(path=tmp_path / "t.json"),
+                        snapshot_path=tmp_path / "s.json")
+    tr.begin("loading", "加载模型")
+    w = LoadingWatcher(tr, "vllm", log, interval=0.05, fallback_sec=0.1)
+    w.start()
+    deadline = time.time() + 2
+    while time.time() < deadline and not _fallback_events(events):
+        time.sleep(0.02)
+    w.stop()
+    hits = _fallback_events(events)
+    assert hits and "冷启动" in hits[0].label and hits[0].stage == "loading"
+
+
+def test_loading_watcher_fallback_again_after_new_progress(tmp_path):
+    # 评审 finding②：「120s 无进展」= 无*新增*进展。vLLM 典型形态是 banner 秒出
+    # （命中一次 0.05）后 shard 加载静默十几分钟——兜底不能被一次性 _last_pct==0
+    # 永久关掉；且同一段静默只发一次，出现新命中后重置、可再发第二段。
+    import time
+
+    from modelctl.core.startup_progress import LoadingWatcher, StartupTiming, StartupTracker
+
+    log = tmp_path / "launch-q.log"
+    log.write_text("(APIServer) vLLM API server version 0.28.0\n", encoding="utf-8")
+    events = []
+    tr = StartupTracker("q", "vllm", "docker", on_progress=events.append,
+                        timing=StartupTiming(path=tmp_path / "t.json"),
+                        snapshot_path=tmp_path / "s.json")
+    tr.begin("loading", "加载模型")
+    w = LoadingWatcher(tr, "vllm", log, interval=0.05, fallback_sec=0.15)
+    w.start()
+
+    def wait_for(pred, timeout=2.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline and not pred():
+            time.sleep(0.02)
+        return pred()
+
+    try:
+        assert wait_for(lambda: any(e.pct == 0.05 for e in events))  # banner 命中
+        assert wait_for(lambda: len(_fallback_events(events)) == 1)  # banner 后静默 → 兜底
+        time.sleep(0.25)  # 同一段静默约 1.6 个阈值周期：不得重复发
+        assert len(_fallback_events(events)) == 1
+        with log.open("a", encoding="utf-8") as f:
+            f.write("Loading safetensors checkpoint shards: 100% Completed\n")
+        assert wait_for(lambda: any(e.pct == 0.8 for e in events))   # 新进展恢复
+        assert wait_for(lambda: len(_fallback_events(events)) == 2)  # 第二段静默 → 再兜底
+    finally:
+        w.stop()
+
+
+def test_loading_watcher_no_fallback_while_advancing(tmp_path):
+    # 负向：持续有*新增*进展时不得发兜底（阈值从上次进展起算，而非 begin）。
+    # 每 0.08s 前进一个 shard 档位，均 < fallback_sec=0.2。
+    import time
+
+    from modelctl.core.startup_progress import LoadingWatcher, StartupTiming, StartupTracker
+
+    log = tmp_path / "launch-q.log"
+    log.write_text("engine warmup, no pattern yet\n", encoding="utf-8")
+    events = []
+    tr = StartupTracker("q", "vllm", "docker", on_progress=events.append,
+                        timing=StartupTiming(path=tmp_path / "t.json"),
+                        snapshot_path=tmp_path / "s.json")
+    tr.begin("loading", "加载模型")
+    w = LoadingWatcher(tr, "vllm", log, interval=0.05, fallback_sec=0.2)
+    w.start()
+    try:
+        for pct in (10, 30, 50, 70, 90):
+            time.sleep(0.08)
+            with log.open("a", encoding="utf-8") as f:
+                f.write(f"Loading safetensors checkpoint shards: {pct}% Completed\n")
+        time.sleep(0.1)  # 等末行被消费（仍 < 阈值）
+    finally:
+        w.stop()
+    assert any(abs(e.pct - 0.77) < 1e-9 for e in events if e.pct is not None)  # 末档 0.5+0.3*0.9
+    assert not _fallback_events(events)

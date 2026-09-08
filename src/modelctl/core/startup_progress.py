@@ -407,7 +407,7 @@ PATTERNS: dict[str, list[tuple[re.Pattern, str, float, float]]] = {
 
 # 每 tick 读取的日志尾部窗口行数
 _TAIL_WINDOW = 400
-# 无命中且 loading 已持续超过该秒数 → 兜底文案（本次事故缺失的那句）
+# loading 段静默（无*新增*进展，含日志尚未生成）超过该秒数 → 兜底文案（本次事故缺失的那句）
 _LOADING_FALLBACK_SEC = 120
 _LOADING_FALLBACK_LABEL = "引擎初始化中（首次冷启动在 docker/WSL2 上可达 15 分钟）"
 
@@ -451,11 +451,14 @@ class LoadingWatcher:
         self._thread: threading.Thread | None = None
         self._seen = 0            # 已消费的 tail 窗口行数
         self._last_pct = 0.0
-        self._fallback_sent = False
+        # 兜底语义「无*新增*进展」的计时基准：start/每次有效进展时刷新
+        self._last_advance_ts = 0.0
+        self._fallback_sent = False  # 同一段静默只发一次；新进展后重置、可再发
 
     def start(self) -> None:
         if self._thread is not None:  # 幂等：重复 start 不起第二个线程
             return
+        self._last_advance_ts = time.monotonic()  # 兜底计时起点 = 监视开始（begin）
         self._thread = threading.Thread(target=self._run, name="loading-watcher", daemon=True)
         self._thread.start()
 
@@ -467,38 +470,41 @@ class LoadingWatcher:
     def _run(self) -> None:
         from modelctl.core.process import tail_file  # 延迟导入：本模块不与 process 循环依赖
 
-        t0 = time.monotonic()
         while not self._stop.wait(self._interval):
             try:
-                self._tick(tail_file, t0)
+                self._tick(tail_file)
             except Exception as exc:  # noqa: BLE001 —— watcher 异常只失进度不断启动
                 logger.debug(f"LoadingWatcher tick 异常（忽略）：{exc}")
                 return
 
-    def _tick(self, tail_file, t0: float) -> None:
-        if not Path(self._log).is_file():
-            return  # 日志尚未生成/被外力清掉：下个 tick 再看，不终止线程
-        text = tail_file(self._log, _TAIL_WINDOW)
-        if not text:
-            return  # 读取失败（如 Windows 文件占用）返回空串，不能当 1 行空行推进位点
-        # 只处理新增尾部：tail_file 无字节位点，退化为按已见行数增量。
-        # 行数减少（截断/轮转）或窗口打满（后续滑动会使行号增量恒为空而漏新行）
-        # → 整体重扫；重复行无害（pct 单调不减已过滤）。
-        lines = text.split("\n")
-        if self._seen > len(lines) or len(lines) >= _TAIL_WINDOW:
-            new = lines
-        else:
-            new = lines[self._seen:]
-        self._seen = len(lines)
+    def _tick(self, tail_file) -> None:
         advanced = False
-        for line in new:
-            hit = match_progress(self._engine, line)
-            if hit and hit[1] > self._last_pct:
-                self._last_pct = hit[1]
-                self._tr.progress("loading", hit[0], pct=hit[1])
-                advanced = True
-        # 无进展且超阈值 → 兜底文案（pct=None，前端条纹动画），只发一次避免每 tick 刷事件
-        if (not advanced and self._last_pct == 0.0 and not self._fallback_sent
-                and (time.monotonic() - t0) > self._fallback_sec):
+        # 日志缺失/读取失败按「无进展」继续走兜底判定：watcher 早于 launch log
+        # 首行输出启动（docker 容器创建→首行），这段窗口正该显示兜底文案
+        if Path(self._log).is_file():
+            text = tail_file(self._log, _TAIL_WINDOW)
+            if text:  # 读取失败（如 Windows 文件占用）返回空串，不能当 1 行空行推进位点
+                # 只处理新增尾部：tail_file 无字节位点，退化为按已见行数增量。
+                # 行数减少（截断/轮转）或窗口打满（后续滑动会使行号增量恒为空而漏新行）
+                # → 整体重扫；重复行无害（pct 单调不减已过滤）。
+                lines = text.split("\n")
+                if self._seen > len(lines) or len(lines) >= _TAIL_WINDOW:
+                    new = lines
+                else:
+                    new = lines[self._seen:]
+                self._seen = len(lines)
+                for line in new:
+                    hit = match_progress(self._engine, line)
+                    if hit and hit[1] > self._last_pct:
+                        self._last_pct = hit[1]
+                        self._tr.progress("loading", hit[0], pct=hit[1])
+                        advanced = True
+        # spec §4.2「超阈值无进展」= 无*新增*进展：静默（含日志未生成）超 fallback_sec
+        # → 兜底文案（pct=None，前端条纹动画）。同一段静默只发一次，出现新进展后重置可再发。
+        now = time.monotonic()
+        if advanced:
+            self._last_advance_ts = now
+            self._fallback_sent = False
+        elif not self._fallback_sent and (now - self._last_advance_ts) > self._fallback_sec:
             self._fallback_sent = True
             self._tr.progress("loading", _LOADING_FALLBACK_LABEL, pct=None)
