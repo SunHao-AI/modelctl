@@ -196,7 +196,7 @@ def ensure_image(image: str, attempts: int | None = None,
             proc = subprocess.Popen(
                 ["docker", "pull", image],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, errors="replace",
+                text=True, encoding="utf-8", errors="replace",
             )
         except (OSError, subprocess.SubprocessError) as exc:
             logger.error(f"docker pull 无法执行：{exc}")
@@ -212,8 +212,14 @@ def ensure_image(image: str, attempts: int | None = None,
                                     if attempts > 1 else upd.label, upd.pct)
                     except Exception as exc:  # noqa: BLE001 —— 进度回调异常绝不炸拉取主流程
                         logger.debug(f"on_progress 回调异常（忽略）：{exc}")
+        except BaseException:
+            # 与旧 subprocess.run 语义等价：Ctrl+C / 读循环异常时先杀子进程再上抛，
+            # 否则 docker CLI 会挂着大镜像 pull 自然结束或沦为孤儿进程
+            if proc.returncode is None:
+                proc.kill()
+            raise
         finally:
-            # 无论读取是否异常都回收子进程，防僵尸/句柄泄漏
+            # 无论正常/中断都回收子进程（kill 后 wait 收尸），防僵尸/句柄泄漏
             proc.wait()
         if proc.returncode == 0:
             logger.info(f"镜像拉取完成：{image}")

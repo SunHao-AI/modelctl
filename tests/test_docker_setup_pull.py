@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from unittest import mock
 
+import pytest
+
 from modelctl.core import docker_setup
 
 
@@ -48,3 +50,43 @@ def test_ensure_image_failure_no_callback_still_works():
          mock.patch.object(docker_setup.subprocess, "Popen", return_value=proc), \
          mock.patch.object(docker_setup.time, "sleep"):
         assert docker_setup.ensure_image("img:tag", attempts=1) is False
+
+
+def test_ensure_image_kills_proc_on_keyboard_interrupt():
+    """中断路径与旧 subprocess.run 语义等价：kill 子进程再上抛，且回收不留僵尸。"""
+    class _InterruptProc:
+        def __init__(self):
+            self.returncode = None  # 读循环被打断时子进程仍在运行
+            self.killed = False
+            self.waited = False
+
+        def __iter__(self):
+            yield "aaa: Pulling fs layer"
+            raise KeyboardInterrupt
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+        def wait(self):
+            self.waited = True
+            return self.returncode
+
+    proc = _InterruptProc()
+    with mock.patch.object(docker_setup, "image_present", return_value=False), \
+         mock.patch.object(docker_setup.subprocess, "Popen", return_value=proc):
+        with pytest.raises(KeyboardInterrupt):
+            docker_setup.ensure_image("img:tag")
+    assert proc.killed is True
+    assert proc.waited is True
+
+
+def test_ensure_image_pull_uses_utf8_stream():
+    """显式 UTF-8：docker CLI 输出为 UTF-8，Windows GBK 环境不设 encoding 会乱码。"""
+    proc = _FakeProc(["Status: Downloaded newer image"])
+    with mock.patch.object(docker_setup, "image_present", return_value=False), \
+         mock.patch.object(docker_setup.subprocess, "Popen", return_value=proc) as popened:
+        assert docker_setup.ensure_image("img:tag") is True
+    kwargs = popened.call_args.kwargs
+    assert kwargs.get("encoding") == "utf-8"
+    assert kwargs.get("errors") == "replace"
