@@ -23,7 +23,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Callable, Literal
 
 from loguru import logger
 
@@ -35,10 +35,12 @@ from modelctl.core.process import (
     describe_port_listener,
     is_running,
     is_running_any,
+    kill_log_tee,
     launch_log,
     log_excerpt,
     pid_file,
     port_in_use,
+    spawn_log_tee,
     start_detached,
     stop_instance,
     tail_file,
@@ -71,15 +73,49 @@ def resolve_default_profile(models_dir: Path | None, model_id: str | None) -> Pr
     return None
 
 
-def start_profile(profile: Profile, caps: Capabilities, timeout: float) -> ComponentResult:
+#: 健康检查默认超时：docker 运行时（容器内引擎冷启动含 import torch + 权重加载，
+#: WSL2 上实测单 import 就 800s+）放宽到 1800s，避免慢而正常的启动被误判失败。
+START_TIMEOUT_DEFAULT = 600.0
+START_TIMEOUT_DOCKER = 1800.0
+
+#: fail 事件的阶段标签（与 startup_progress.STAGE_LABELS 口径一致，避免字面量散落）
+STAGE_LABELS_PREFLIGHT = "依赖检查"
+STAGE_LABELS_PREPARE_ENV = "准备环境"
+
+
+def default_start_timeout(profile: Profile, caps: Capabilities) -> float:
+    """健康检查超时缺省值：MODELCTL_START_TIMEOUT > docker 1800 > 其它 600。"""
+    raw = (os.environ.get("MODELCTL_START_TIMEOUT") or "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            logger.warning(f"MODELCTL_START_TIMEOUT 非数字，忽略：{raw!r}")
+    try:
+        if get_adapter(profile.engine)(profile, caps).is_docker_runtime():
+            return START_TIMEOUT_DOCKER
+    except Exception as exc:  # noqa: BLE001 —— 运行时判定失败退回保守默认
+        logger.debug(f"is_docker_runtime 判定异常，用默认超时：{exc}")
+    return START_TIMEOUT_DEFAULT
+
+
+def start_profile(profile: Profile, caps: Capabilities, timeout: float,
+                  on_progress: "Callable[[Any], None] | None" = None) -> ComponentResult:
     """启动单个模型 profile（幂等：已运行返回 skipped）。
 
     check_requirements 失败时抛 RequirementError（配置错误语义，交给调用方/编排处理）。
     逻辑迁移自 cli._cmd_start。
+
+    on_progress：可选 `StageEvent` 回调（core.startup_progress.StageEvent）。WebUI 绑
+    task SSE、CLI 打日志；缺省 None 时除多写一份快照文件外行为与旧实现一致。
     """
+    from modelctl.core.startup_progress import LoadingWatcher, StartupTracker
+
     tag = f"model:{profile.name}"
     if is_running_any(profile.name, profile):
         return ComponentResult(tag, "skipped", "已在运行")
+    # 残留 tee 清理：上一次 start 未走完 / 容器被外力杀时 tee 可能仍在跟随旧容器
+    kill_log_tee(profile.name)
     # 端口占用预检：走到这里端口仍被占 ⇒ 占用者不是本 profile，引擎启动后 bind 必然
     # EADDRINUSE 秒退；提前拦截并点名占用者，替代"空等健康检查 + 事后翻日志"。
     # RequirementError → cli exit 2，与配置/环境错误语义一致。
@@ -93,18 +129,48 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float) -> Compo
             f"请先释放该端口，或修改 profile 的 port 后重试"
         )
     adapter = get_adapter(profile.engine)(profile, caps)
-    adapter.check_requirements()  # RequirementError 向上抛
+    is_docker = adapter.is_docker_runtime()
+    tracker = StartupTracker(profile.name, profile.engine, "docker" if is_docker else "venv",
+                             on_progress=on_progress)
+
+    def _env_sink(label: str, pct: float | None) -> None:
+        tracker.progress("prepare_env", label, pct=pct)
+
+    adapter.set_progress_sink(_env_sink if on_progress is not None else None)
+
+    # ---- preflight：依赖检查 / 端口 / 兼容预检 ----
+    tracker.begin("preflight")
+    try:
+        adapter.check_requirements()  # RequirementError 向上抛
+    except RequirementError as exc:
+        tracker.fail("preflight", STAGE_LABELS_PREFLIGHT, str(exc))
+        raise
     for warning in adapter.warnings:
         logger.warning(warning)
     for warning in kv_estimate_warnings(profile):  # 附录 B.4：KV 显存预检（仅告警，不拦截）
         logger.warning(warning)
-    adapter.pre_start()
+    tracker.done("preflight")
+
+    # ---- prepare_env：pre_start（docker 拉镜像子进度 / 模型下载 / 编译） ----
+    tracker.begin("prepare_env")
+    try:
+        adapter.pre_start()
+    except RequirementError as exc:
+        tracker.fail("prepare_env", STAGE_LABELS_PREPARE_ENV, str(exc))
+        raise
+    tracker.done("prepare_env")
+
+    # ---- launch：build_command + start_detached（docker 路径随后挂日志 tee） ----
+    tracker.begin("launch")
     cmd, env = adapter.build_command()
     # docker runtime（is_docker_runtime True）走 `docker run --detach`：容器在 daemon 后台续
     # 不会随 client 早退，PID 文件不写（write_pid=False）；venv runtime 维持默认 write_pid=True。
-    pid, proc = start_detached(profile.name, cmd, env,
-                               write_pid=not adapter.is_docker_runtime())
+    pid, proc = start_detached(profile.name, cmd, env, write_pid=not is_docker)
     adapter.spawned_proc = proc  # 供 wait_ready 在进程早退时 fail-fast
+    if is_docker:
+        tee_cmd = adapter.log_tee_cmd()
+        if tee_cmd:
+            spawn_log_tee(profile.name, tee_cmd)
     try:
         from modelctl.core.gpu_lock import update_gpu_lock_owner
 
@@ -112,8 +178,25 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float) -> Compo
             update_gpu_lock_owner(profile.name, pid)
     except Exception:
         pass
+    tracker.done("launch")
+
+    # ---- loading：等待窗口内 tail 引擎日志按模式表推进 ----
     logger.info(f"已启动 {profile.name}（PID {pid}），等待健康检查（超时 {timeout:g}s）...")
-    if adapter.wait_ready(timeout):
+    tracker.begin("loading", "等待引擎初始化")
+    watcher: LoadingWatcher | None = None
+    log = launch_log(profile.name)
+    if log is not None:
+        watcher = LoadingWatcher(tracker, profile.engine, log)
+        watcher.start()
+    try:
+        ready = adapter.wait_ready(timeout)
+    finally:
+        if watcher is not None:
+            watcher.stop()
+
+    if ready:
+        tracker.done("loading", "引擎初始化完成")
+        tracker.done("health", f"就绪：http://127.0.0.1:{profile.port}")
         upstream_key = adapter.upstream_api_key()
         if upstream_key and upstream_key != profile.api_key:
             logger.info(f"上游 API Key（本次启动自动生成）：{upstream_key}")
@@ -125,10 +208,13 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float) -> Compo
         if profile.usage or adapter.metrics_mapping() is not None:
             logger.info("提示：用量统计可通过 `modelctl stats start` 启动")
         return ComponentResult(tag, "ok", f"http://127.0.0.1:{profile.port}")
-    log = launch_log(profile.name)
+
+    kill_log_tee(profile.name)
     # 死亡判定交给引擎适配器：docker 分支以容器状态衡量（客户端进程早退≠容器死亡），
     # venv 分支维持"本工具拉起的进程早退即死亡"的语义
     died = adapter.backend_dead()
+    detail = "引擎进程提前退出" if died else "健康检查超时"
+    tracker.fail("loading", detail, detail)
     if log is None:
         logger.warning("引擎未在时限内就绪，且未找到启动日志")
     elif died:
@@ -138,7 +224,7 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float) -> Compo
     else:
         logger.warning(f"健康检查超时，日志尾部 50 行（{log}）：")
         logger.warning(tail_file(log, 50))
-    return ComponentResult(tag, "error", "引擎进程提前退出" if died else "健康检查超时")
+    return ComponentResult(tag, "error", detail)
 
 
 def stop_profile(profile: Profile, caps: Capabilities, models_dir: Path | None) -> ComponentResult:
@@ -158,11 +244,14 @@ def stop_profile(profile: Profile, caps: Capabilities, models_dir: Path | None) 
             pid_file(profile.name).unlink(missing_ok=True)
     else:
         adapter.stop_backend()
+    # docker 容器被删后 `docker logs -f` 会自行退出，但主动 kill 保证 PID 文件与句柄即时释放
+    kill_log_tee(profile.name)
     logger.info(f"已停止：{profile.name}")
     return ComponentResult(tag, "ok", "已停止")
 
 
-def restart_profile(profile: Profile, caps: Capabilities, timeout: float) -> ComponentResult:
+def restart_profile(profile: Profile, caps: Capabilities, timeout: float,
+                    on_progress: "Callable[[Any], None] | None" = None) -> ComponentResult:
     """重启单个模型 profile：运行中先停后启，未运行直接启。
 
     运行态判定改走 `is_running_any(name, profile)`（端口 /health 2xx 优先 + PID 文件机器
@@ -170,7 +259,7 @@ def restart_profile(profile: Profile, caps: Capabilities, timeout: float) -> Com
     """
     if is_running_any(profile.name, profile):
         stop_profile(profile, caps, None)
-    return start_profile(profile, caps, timeout)
+    return start_profile(profile, caps, timeout, on_progress=on_progress)
 
 
 def _detached_script(module: str, interpreter: str | None = None) -> tuple[list[str], dict[str, str]]:

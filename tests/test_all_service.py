@@ -94,6 +94,14 @@ class _FakeAdapter:
         """mirror base.EngineAdapter：本工具拉起的进程早退即视为死亡（docker 子类覆盖为容器状态探测）。"""
         return self.spawned_proc is not None and self.spawned_proc.poll() is not None
 
+    def set_progress_sink(self, cb) -> None:
+        """Task 7 引入的 start_profile 必填项（prepare_env 子进度桥接）。默认仅记录。"""
+        self._progress_cb = cb
+
+    def log_tee_cmd(self):
+        """Task 7 引入：非 docker 路径返回 None（不 spawn 日志 tee）。"""
+        return None
+
 
 # ---- 默认模型解析 ----
 
@@ -161,6 +169,12 @@ def test_start_profile_check_raises_requirement(monkeypatch):
     class _FailingAdapter:
         def __init__(self, profile, caps):
             pass
+
+        def is_docker_runtime(self) -> bool:
+            return False
+
+        def set_progress_sink(self, cb) -> None:
+            return None
 
         def check_requirements(self):
             raise RequirementError("无法运行")
