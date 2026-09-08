@@ -55,6 +55,19 @@ def platform_supports(target: str) -> bool:
     return False
 
 
+def engine_native_usable(target: str) -> bool:
+    """托管引擎「可直接运行」判定：venv 已建 且 解释器文件真实存在（用于 runtime 分流优先分支）。
+
+    语义 = 强化的 ``has_engine(target)`` —— 与 ``has_env`` 检测同一件事，此处单独封装是因为
+    runtime 分流（``_resolve_runtime``）在 vllm/tokenspeed 两个引擎里都会读，独立函数
+    语义更清晰、测试可 monkeypatch（如 ``monkeypatch.setattr('envs.engine_native_usable',
+    lambda t: True)`` 一键开启优先 native 的锚点）。
+    """
+    if target not in MANAGED_ENGINES:
+        return False
+    return has_env(target)
+
+
 def platform_limitation_message(target: str) -> str | None:
     """返回当前平台不支持 target 的友好提示；支持时返回 None。"""
     if platform_supports(target):

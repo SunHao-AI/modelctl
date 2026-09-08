@@ -168,6 +168,7 @@ def test_vllm_requirements_allow_download_only(tmp_path, monkeypatch):
 
 
 def test_vllm_pre_start_downloads_without_persist(tmp_path, monkeypatch):
+    _stub_venv(tmp_path, monkeypatch, "vllm")
     p = _write(
         tmp_path,
         "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: ''\n  download:\n    modelscope_id: Qwen/Qwen3-32B\n",
@@ -187,6 +188,7 @@ def test_vllm_pre_start_downloads_without_persist(tmp_path, monkeypatch):
 
 
 def test_vllm_pre_start_skips_when_model_exists(tmp_path, monkeypatch):
+    _stub_venv(tmp_path, monkeypatch, "vllm")
     p = _write(
         tmp_path,
         f"name: q\nengine: vllm\nport: 8000\nvllm:\n  model: {tmp_path}/model-hf/Qwen3-32B\n",
@@ -212,6 +214,7 @@ def _vllm_caps(n):
 
 def test_vllm_gpu_list_sets_cuda(tmp_path, monkeypatch):
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    _stub_venv(tmp_path, monkeypatch, "vllm")
     p = _write(
         tmp_path,
         "name: q\nengine: vllm\nport: 8000\nvllm:\n"
@@ -222,8 +225,9 @@ def test_vllm_gpu_list_sets_cuda(tmp_path, monkeypatch):
     assert env["CUDA_VISIBLE_DEVICES"] == "2,3"
 
 
-def test_vllm_env_used_when_no_profile_gpus(monkeypatch):
+def test_vllm_env_used_when_no_profile_gpus(tmp_path, monkeypatch):
     monkeypatch.setenv("MODELCTL_GPUS", "4,5")
+    _stub_venv(tmp_path, monkeypatch, "vllm")
     from modelctl.core.profile import Profile
 
     profile = Profile(name="q", engine="vllm", port=8000, engine_config={"model": "Qwen/Qwen3-32B"})
@@ -234,6 +238,7 @@ def test_vllm_env_used_when_no_profile_gpus(monkeypatch):
 
 def test_vllm_tp_derived_from_gpu_list(tmp_path, monkeypatch):
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    _stub_venv(tmp_path, monkeypatch, "vllm")
     p = _write(tmp_path, "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: Qwen/Qwen3-32B\n  gpu_list: '1,2'\n")
     a = get_adapter("vllm")(p, _vllm_caps(4))
     cmd, _ = a.build_command()
@@ -335,29 +340,53 @@ def test_sglang_warns_when_weights_exceed_cap(tmp_path, monkeypatch):
 
 
 def test_resolve_runtime_default(tmp_path, monkeypatch):
-    """未配 docker_image → ('venv', None)，与改造前等价。"""
+    """无 venv 且未配 docker_image → dual_error 非空（两条路径都不可用），
+    文案按当前平台分支：Windows 引导 docker_image；Linux 引导 modelctl env setup vllm。"""
     p = _write(tmp_path, "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: Qwen/X\n")
     a = get_adapter("vllm")(p, CAPS8)
-    assert a._resolve_runtime() == ("venv", None)
+    runtime, image, dual_error = a._resolve_runtime()
+    assert runtime == "venv" and image is None
+    assert dual_error is not None and "docker_image" in dual_error
+    # 平台差异：Windows 分支强调 "仅支持 Linux"；Linux 分支引导 modelctl env setup
+    if os.name == "nt":
+        assert "Linux" in dual_error
+    else:
+        assert "modelctl env setup vllm" in dual_error
 
 
-def test_resolve_runtime_docker(tmp_path, monkeypatch):
-    """配 docker_image → ('docker', image)。"""
+def test_resolve_runtime_venv_ignored_when_native_not_available(tmp_path, monkeypatch):
+    """venv 未 stub（engine_native_usable=False）且未配 docker_image 时，
+    yaml 即使写着 docker_image 也不生效 —— 准确说是 native 优先（venv 装不上就轮到 yaml）。
+    覆盖分流规则第 2 步"""
     p = _write(
         tmp_path,
         "name: q\nengine: vllm\nport: 8000\nvllm:\n"
         "  model: Qwen/X\n  docker_image: vllm/vllm-openai:qwen38-flash-next\n",
     )
     a = get_adapter("vllm")(p, CAPS8)
-    assert a._resolve_runtime() == ("docker", "vllm/vllm-openai:qwen38-flash-next")
+    assert a._resolve_runtime() == ("docker", "vllm/vllm-openai:qwen38-flash-next", None)
+
+
+def test_resolve_runtime_venv_preferred_when_stub_present(tmp_path, monkeypatch):
+    """venv stub 存在时优先 native，即使 yaml 配了 docker_image 也走 venv —— 避免
+    已装 venv 的部署机被强制切容器。"""
+    _stub_venv(tmp_path, monkeypatch, "vllm")
+    p = _write(
+        tmp_path,
+        "name: q\nengine: vllm\nport: 8000\nvllm:\n"
+        "  model: Qwen/X\n  docker_image: vllm/vllm-openai:qwen38-flash-next\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    assert a._resolve_runtime() == ("venv", None, None)
 
 
 # ---- Task 2: check_requirements docker 分支 ----
 
 
 def test_check_requirements_venv_unchanged(tmp_path, monkeypatch):
-    """venv 路径：现状语义不变——ensure_env 还是被调用。"""
+    """venv 路径：stub 存在时 ensure_env 仍被调用（native 优先分支），断言行为与改造前一致。"""
     import modelctl.core.envs as envs_mod
+    _stub_venv(tmp_path, monkeypatch, "vllm")
     called = []
     monkeypatch.setattr(envs_mod, "ensure_env", lambda t: called.append(t) or tmp_path)
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
@@ -581,8 +610,9 @@ def test_build_command_docker_gpus_from_gpu_list(tmp_path, monkeypatch):
 
 
 def test_stop_patterns_venv_unchanged(tmp_path, monkeypatch):
-    """venv 路径 stop_patterns 不变。"""
+    """venv 路径 stop_patterns 不变（stub venv 激活 native 优先分支）。"""
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    _stub_venv(tmp_path, monkeypatch, "vllm")
     p = _write(tmp_path, "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: /x/Y\n")
     a = get_adapter("vllm")(p, CAPS8)
     assert a.stop_patterns() == ["vllm serve"]
@@ -781,7 +811,13 @@ def test_build_command_docker_with_per_request_metrics_flag(tmp_path, monkeypatc
 
 
 def test_full_vllm_suite_no_regression(tmp_path, monkeypatch):
-    """总结算：所有未配 docker_image 的 vllm yaml，build_command 走托管 venv 路径。"""
+    """总结算：所有未配 docker_image 的 vllm yaml，build_command 走托管 venv 路径。
+
+    双移动态验证 dual_error 语义：stub venv 环境下 build_command 不应报 docker 类异常；
+    未 stub 环境下 build_command 会抛 dual_error（含 "docker_image" 关键词），但依然
+    不属于 "运行时选择了 docker" 这一类别。
+    """
+    _stub_venv(tmp_path, monkeypatch, "vllm")  # 强制 .venvs/vllm 存在 → engine_native_usable=True
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
     monkeypatch.setenv("API_KEY", "test")
     from pathlib import Path

@@ -28,14 +28,46 @@ from modelctl.engines.base import EngineAdapter, RequirementError
 
 
 class TokenSpeedAdapter(EngineAdapter):
-    def _resolve_runtime(self) -> tuple[str, str | None]:
+    def _resolve_runtime(self) -> tuple[str, str | None, str | None]:
+        """runtime 分流：优先 native（venv+平台支持）→ 否则 yaml docker_image 兜底 → 均不可用报错。
+
+        返回三元组 ``(runtime, image, dual_error)``；dual_error 非空时调用方（尤其是
+        ``check_requirements``）应直接 `raise RequirementError(dual_error)`，避免落入 venv
+        分支后由 ``ensure_env`` 抛出"环境未创建"这种只暴露 venv 缺口、丢失 docker 兜底
+        缺失信息的误导性错误。
+
+        分流规则（与 vllm 一致）：
+        1. ``envs.engine_native_usable('tokenspeed')`` 为 True → ``('venv', None, None)``
+        2. 否则 yaml ``docker_image`` 非空 → ``('docker', image, None)``
+        3. 否则 → ``('venv', None, <friendly_msg>)``，文案按 platform_supports 分支
+        """
         cfg = self.profile.engine_config
+        if envs.engine_native_usable("tokenspeed"):
+            return ("venv", None, None)
         image = str(cfg.get("docker_image") or "").strip()
-        return ("docker", image) if image else ("venv", None)
+        if image:
+            return ("docker", image, None)
+        if envs.platform_supports("tokenspeed"):
+            dual = (
+                f"{self.profile.name}：TokenSpeed 的托管 venv 未创建（当前平台 Linux 支持 venv），"
+                "且 yaml tokenspeed.docker_image 未配置（docker 兜底也未启用）。请先执行 "
+                "`modelctl env setup tokenspeed` 建立 venv，或在 yaml 的 tokenspeed: 块下配置 "
+                "`docker_image: lightseekorg/tokenspeed:latest` 走 docker 运行时"
+            )
+        else:
+            dual = (
+                f"{self.profile.name}：TokenSpeed 的托管 venv 仅支持 Linux 部署机，当前平台不支持；"
+                "且 yaml tokenspeed.docker_image 未配置（docker 兜底也未启用）。请在 yaml 的 "
+                "tokenspeed: 块下配置 `docker_image: lightseekorg/tokenspeed:latest` 走 docker 运行时"
+                "（镜像需已 pull；model 必须是本地目录）"
+            )
+        return ("venv", None, dual)
 
     def check_requirements(self) -> None:
         cfg = self.profile.engine_config
-        runtime, image = self._resolve_runtime()
+        runtime, image, dual_error = self._resolve_runtime()
+        if dual_error:
+            raise RequirementError(dual_error)
         if runtime == "docker":
             missing = docker_setup.path_level_missing()
             if missing:
@@ -72,7 +104,9 @@ class TokenSpeedAdapter(EngineAdapter):
     def pre_start(self) -> None:
         cfg = self.profile.engine_config
         # docker 路径先确保镜像就位（大镜像跨境拉取易中途 EOF，需显式 pull + 重试）
-        runtime, image = self._resolve_runtime()
+        runtime, image, dual_error = self._resolve_runtime()
+        if dual_error:
+            raise RequirementError(dual_error)
         if runtime == "docker" and not docker_setup.ensure_image(image):
             raise RequirementError(
                 f"{self.profile.name}：镜像 {image} 未就位，无法启动容器；"
@@ -92,7 +126,9 @@ class TokenSpeedAdapter(EngineAdapter):
         cfg = self.profile.engine_config
         gpus = self.selected_gpus()
         tp = len(gpus) if gpus else int(cfg.get("tensor_parallel_size", 1))
-        runtime, image = self._resolve_runtime()
+        runtime, image, dual_error = self._resolve_runtime()
+        if dual_error:
+            raise RequirementError(dual_error)
         extra = shlex.split(str(cfg.get("extra_args") or ""))
         model = str(cfg["model"])
 

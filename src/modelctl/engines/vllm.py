@@ -35,7 +35,9 @@ MIN_VLLM_PER_REQUEST = (0, 13, 0)
 class VllmAdapter(EngineAdapter):
     def check_requirements(self) -> None:
         cfg = self.profile.engine_config
-        runtime, _image = self._resolve_runtime()
+        runtime, _image, dual_error = self._resolve_runtime()
+        if dual_error:
+            raise RequirementError(dual_error)
         if runtime == "docker":
             container_name = f"{self.profile.name}-vllm"
             # docker / nvidia-smi 都在 PATH；硬拦截不降级（检查与指引统一在 core.docker_setup）
@@ -115,7 +117,11 @@ class VllmAdapter(EngineAdapter):
         cfg = self.profile.engine_config
         # docker 路径先确保镜像就位：21.8GB 级 Day-0 镜像跨境拉取极易中途 EOF，
         # 交给 `docker run` 隐式 pull 会让失败原因消失在 launch 日志里。
-        runtime, image = self._resolve_runtime()
+        runtime, image, dual_error = self._resolve_runtime()
+        if dual_error:
+            # pre_start 在 check_requirements 之后被调用，正常路径下 dual_error 通常为 None；
+            # 兜底以防外部调用链（如 rebuild）绕开 check_requirements 直接进 pre_start。
+            raise RequirementError(dual_error)
         if runtime == "docker" and not docker_setup.ensure_image(image):
             raise RequirementError(
                 f"{self.profile.name}：镜像 {image} 未就位，无法启动容器；"
@@ -142,7 +148,9 @@ class VllmAdapter(EngineAdapter):
         cfg = self.profile.engine_config
         gpus = self.selected_gpus()
         tp = len(gpus) if gpus else int(cfg.get("tensor_parallel_size", 1))
-        runtime, image = self._resolve_runtime()
+        runtime, image, dual_error = self._resolve_runtime()
+        if dual_error:
+            raise RequirementError(dual_error)
 
         # 共用：--served-model-name 之后的 model_args
         extra = shlex.split(str(cfg.get("extra_args") or ""))
@@ -272,15 +280,51 @@ class VllmAdapter(EngineAdapter):
         """
         return self.profile.name
 
-    def _resolve_runtime(self) -> tuple[str, str | None]:
-        """yaml 字段 vllm.docker_image 非空→('docker', image)；其余回退 ('venv', None)。
+    def _resolve_runtime(self) -> tuple[str, str | None, str | None]:
+        """runtime 分流：优先 native（venv+平台支持）→ 否则 yaml docker_image 兜底 → 均不可用报错。
 
-        留空时与改造前完全等价（仍走 `envs.engine_bin("vllm", "vllm")`），
-        已部署的 7 个 models/vllm/*.yaml 行为零变化。
+        返回三元组 ``(runtime, image, dual_error)``：
+        - ``runtime``：``'venv' | 'docker'``；dual_error 非空时为 ``'venv'``（占位，调用方应先抛错）
+        - ``image``：docker 分支填镜像名，venv 分支填 None；dual_error 非空时为 None
+        - ``dual_error``：仅 "两条路径都不可用" 时非空；调用方 ``check_requirements`` 里
+          应直接 `raise RequirementError(dual_error)`，避免静默落入 venv 分支后由
+          ``ensure_env`` 抛出"环境未创建"这种**只暴露 venv 缺口**、丢失"docker 兜底
+          也没配"信息的误导性错误。
+
+        分流规则：
+        1. ``envs.engine_native_usable('vllm')`` 为 True（Linux 上 .venvs/vllm 已建）
+           → ``('venv', None, None)`` —— **native 优先**，即使 yaml 配了 docker_image
+           也走 venv，避免已装好 venv 的部署机被强制切容器
+        2. 上述不成立 且 yaml ``docker_image`` 非空（docker-capable 引擎）
+           → ``('docker', image, None)``
+        3. 上述不成立 且 yaml ``docker_image`` 空 → ``('venv', None, <friendly_msg>)``
+           文案区分 Windows（venv 仅 Linux，可配 docker_image）与非 Windows 无 venv
+           （引导 ``modelctl env setup vllm``）
         """
         cfg = self.profile.engine_config
+        if envs.engine_native_usable("vllm"):
+            return ("venv", None, None)
         image = str(cfg.get("docker_image") or "").strip()
-        return ("docker", image) if image else ("venv", None)
+        if image:
+            return ("docker", image, None)
+        # 两条路径都不可用 —— 文案按 platform_supports 区分
+        if envs.platform_supports("vllm"):
+            # Linux 但 venv 没建
+            dual = (
+                f"{self.profile.name}：vLLM 的托管 venv 未创建（当前平台 Linux 支持 venv），"
+                "且 yaml vllm.docker_image 未配置（docker 兜底也未启用）。请先执行 "
+                "`modelctl env setup vllm` 建立 venv，或在 yaml 的 vllm: 块下配置 "
+                "`docker_image: vllm/vllm-openai:<tag>` 走 docker 运行时"
+            )
+        else:
+            # 非 Linux（Windows 等）
+            dual = (
+                f"{self.profile.name}：vLLM 的托管 venv 仅支持 Linux 部署机，当前平台不支持；"
+                "且 yaml vllm.docker_image 未配置（docker 兜底也未启用）。请在 yaml 的 "
+                "vllm: 块下配置 `docker_image: vllm/vllm-openai:<tag>` 走 docker 运行时"
+                "（镜像需已 pull；model 必须是本地目录）"
+            )
+        return ("venv", None, dual)
 
     @property
     def _container_name(self) -> str:

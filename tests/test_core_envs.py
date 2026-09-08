@@ -497,13 +497,14 @@ def test_run_probe_ignores_stderr_and_nonzero_exit():
         envs_mod.subprocess.run = original
 
 
-def test_docker_capable_engines_matches_adapters(tmp_path):
+def test_docker_capable_engines_matches_adapters(tmp_path, monkeypatch):
     """DOCKER_CAPABLE_ENGINES 必须与适配器 _resolve_runtime 实现一致（防漂移锚点）。
 
-    已支持三者：docker_image 非空 → ('docker', image)；
+    已支持三者：venv 未建时 docker_image 非空 → ('docker', image, None)；
     未支持引擎：适配器类不得定义 _resolve_runtime（即无 docker 分支）。
     """
     import modelctl.core.compat_rules  # noqa: F401 —— 导入即注册
+    import modelctl.core.envs as envs_mod
     from modelctl.core.capabilities import Capabilities
     from modelctl.core.envs import DOCKER_CAPABLE_ENGINES, MANAGED_ENGINES
     from modelctl.core.profile import load_profile
@@ -511,6 +512,11 @@ def test_docker_capable_engines_matches_adapters(tmp_path):
 
     assert set(DOCKER_CAPABLE_ENGINES) == {"vllm", "tokenspeed", "tensorrt_llm"}
     assert set(DOCKER_CAPABLE_ENGINES) <= set(MANAGED_ENGINES)
+
+    # 强制 native 不可用（.venvs 不存在）—— 让 vllm / tokenspeed 的 _resolve_runtime
+    # 走 yaml docker_image 分支（tensorrt_llm 因为独立 build 逻辑未同步三元组契约，
+    # 此处仍返回二元组）。
+    monkeypatch.setattr(envs_mod, "engine_native_usable", lambda t: False)
 
     caps = Capabilities(gpu_count=1, compute_capability="8.9", binaries={})
     for i, engine in enumerate(DOCKER_CAPABLE_ENGINES):
@@ -521,7 +527,11 @@ def test_docker_capable_engines_matches_adapters(tmp_path):
             encoding="utf-8",
         )
         adapter = get_adapter(engine)(load_profile(f"m{i}", tmp_path), caps)
-        assert adapter._resolve_runtime() == ("docker", "img:tag"), engine
+        if engine == "tensorrt_llm":
+            # tensorrt_llm 独立 build 子命令走另一逻辑，_resolve_runtime 保持二元组
+            assert adapter._resolve_runtime() == ("docker", "img:tag"), engine
+        else:
+            assert adapter._resolve_runtime() == ("docker", "img:tag", None), engine
 
     # 未支持引擎：注册表里的适配器类不应定义 _resolve_runtime（当前仅三适配器定义）
     for engine in set(MANAGED_ENGINES) - set(DOCKER_CAPABLE_ENGINES):
