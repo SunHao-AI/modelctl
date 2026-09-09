@@ -28,7 +28,7 @@ from pathlib import Path
 from loguru import logger
 
 from modelctl.core.paths import cache_dir, log_dir
-from modelctl.core.timezone import subprocess_timezone
+from modelctl.core.timezone import apply_subprocess_timezone
 
 if typing.TYPE_CHECKING:
     from modelctl.core.profile import Profile
@@ -142,10 +142,12 @@ def start_detached(name: str, command: list[str], extra_env: dict[str, str],
     故 docker 路径调用方传 False 不写 PID 文件，改用容器名作为身份标识。
     返回签名不变：pid 仍为本机 Popen.pid，仅作日志显示用。"""
     log_path = log_dir() / f"launch-{name}.log"
-    # TZ 显式兜底：正常已由 os.environ 继承，此处防止日后改成"只传白名单 env"的
-    # 重构静默丢掉时区（引擎日志会退回 UTC）。Windows 下返回空 dict，绝不注入
-    # IANA 名——UCRT 会把 "Asia/Shanghai" 解析成 +0100，反而污染子进程。
-    env = {**os.environ, **subprocess_timezone(), **extra_env, "PYTHONIOENCODING": "utf-8"}
+    # 时区口径由 apply_subprocess_timezone 统一钉：POSIX 显式注入 TZ（防止日后改成
+    # "只传白名单 env"的重构静默丢掉时区，引擎日志会退回 UTC）；Windows 下**删除**
+    # 继承来的 TZ——UCRT 会把 .env 的 IANA 名 "Asia/Shanghai" 解析成 +0100，子进程
+    # 日志时间比真实时间早 7 小时，且只在进程启动前读一次，事后再改撤不回。
+    env = apply_subprocess_timezone({**os.environ, **extra_env})
+    env["PYTHONIOENCODING"] = "utf-8"
     # PYTHONIOENCODING：Python 子进程 stdout/stderr 被重定向到文件时，编码回退
     # locale（中文 Windows = GBK；Linux C locale = ASCII），中文日志直接乱码或抛
     # UnicodeEncodeError。显式钉死 UTF-8，与日志文件统一编码口径。
@@ -224,15 +226,7 @@ def stop_docker_instance(name: str, container_name: str) -> bool:
     docker rm -f 幂等（容器不存在亦退出码 0；非零退出码仅警告、不阻断）；本地 PID
     文件（venv 路径才有）一并清理以防环境切换残留（docker→venv 反复切换场景）。
     """
-    try:
-        result = subprocess.run(["docker", "rm", "-f", container_name],
-                                capture_output=True, timeout=10)
-        if result.returncode != 0:
-            logger.warning(
-                f"docker rm -f {container_name} 返回码 {result.returncode}："
-                f"{(result.stderr or b'').decode(errors='replace').strip()}")
-    except (OSError, subprocess.SubprocessError) as exc:
-        logger.warning(f"docker rm -f {container_name} 执行失败：{exc}")
+    _run_docker_rm_force(container_name)
     pf = pid_file(name)
     if pf.is_file():
         pf.unlink(missing_ok=True)
@@ -242,6 +236,42 @@ def stop_docker_instance(name: str, container_name: str) -> bool:
     except Exception:  # noqa: BLE001
         pass
     return True
+
+
+def clear_stale_docker_container(name: str, container_name: str) -> bool:
+    """启动前清同名残留容器（check_requirements 防御自愈，幂等）。
+
+    docker rm -f 幂等（不存在退出码 0，可反复调用）；失败仅 warning，不阻断 start ——
+    失败场景留到 docker run 时报错 + ensure_engine_healthy 兜底杀掉重建（stop_backend）。
+    相比进程启动期旧实现，本函数让失败**不再静默吞**，给日志/排查留下一条线索，
+    且把 docker rm -f 的报错格式化（stderr 解码 + 校验 exit code）从散落三引擎
+    （vllm/tokenspeed/tensorrt_llm 的 check_requirements 各有一份）收敛到 process.py。
+
+    预期调用点：docker 分支的 check_requirements 在 path_level_missing 校验之后；
+    预期时间 <10s（docker daemon 已有 dead/container 清理机制）。
+    """
+    return _run_docker_rm_force(container_name, profile_name=name)
+
+
+def _run_docker_rm_force(container_name: str, profile_name: str | None = None) -> bool:
+    """通用封装：`docker rm -f <container>`，幂等 + stderr 解码 + warning。
+
+    返回 rm 是否执行成功（包括容器本就不存在的"成功"）；失败时仅 warning（不阻断
+    调用方），失败信息写到 stderr 字段 + logger.warning 而非静默吞。
+    `profile_name` 仅用于日志，便于肉眼定位是哪个 profile 的 rm 失败。
+    """
+    tag = f"{profile_name} · " if profile_name else ""
+    try:
+        result = subprocess.run(["docker", "rm", "-f", container_name],
+                                capture_output=True, timeout=10)
+        if result.returncode != 0:
+            stderr = (result.stderr or b"").decode(errors="replace").strip()
+            logger.warning(f"{tag}docker rm -f {container_name} 返回码 {result.returncode}：{stderr}")
+            return False
+        return True
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning(f"{tag}docker rm -f {container_name} 执行失败：{exc}")
+        return False
 
 
 def stop_instance(name: str, port: int, patterns: list[str]) -> bool:

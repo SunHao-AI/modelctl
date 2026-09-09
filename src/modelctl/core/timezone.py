@@ -18,16 +18,18 @@
 
 1. **本进程**：`apply_timezone()` → `time.tzset()`，各处隐式时间随之对齐。
 2. **venv 引擎子进程**（vllm/sglang/llamacpp/ollama/…、stats 服务）：
-   `start_detached` 的 `env = {**os.environ, **extra_env}` 天然继承 `TZ`，glibc
-   在子进程启动时读取。`subprocess_timezone()` 供其显式兜底，避免这份继承被
-   日后改成"只传白名单 env"的重构静默破坏。
+   `start_detached` 用 `apply_subprocess_timezone()` 处理 env——POSIX 显式注入 `TZ`
+   （glibc 在子进程启动时读取，且防止这份继承被日后"只传白名单 env"的重构静默破坏）；
+   Windows 下反向**删除** `TZ`（见下方警告）。
 3. **docker 容器**（vllm/tokenspeed/tensorrt_llm 的 docker runtime）：
    `docker run` 的环境**只认 `-e`**，`start_detached` 注入的 env 只进 docker CLI
    宿主进程、进不了容器。故必须用 `container_timezone_args()` 生成 `-e TZ=`。
 
-⚠ Windows 绝不可写 `os.environ["TZ"]`：UCRT 按 POSIX 语法解析 `TZ`，IANA 名
+⚠ Windows 绝不可让 `TZ` 进入子进程环境：UCRT 按 POSIX 语法解析 `TZ`，IANA 名
 `Asia/Shanghai` 被切成 STD 名 `Asia` + DST 名 `Shanghai`，DST 段缺省偏移按
 +1h 处理，于是所有子进程夏令时期间显示 +0100（实测，比 UTC 更难排查）。
+污染源不止本模块写 `os.environ["TZ"]`——`.env` 里的 `TZ` 经 `load_env()` 落进
+`os.environ` 后会被 `{**os.environ}` 继承，故 Windows 必须在 spawn 前删除它。
 Windows 无 `time.tzset()`，改 TZ 也无法影响本进程，唯一正确做法是改系统时区。
 """
 
@@ -61,16 +63,19 @@ def apply_timezone() -> str:
     from loguru import logger
 
     raw = (os.environ.get("TZ") or "").strip()
-    effective = resolve_timezone()
-    if not effective:
-        logger.warning(f"时区库不可用（缺 tzdata 且系统无 tz 库），日志沿用系统时区（期望 {raw or TZ_DEFAULT}）")
-        return ""
-
-    if not hasattr(time, "tzset"):
+    if not tzset_available():
         # Windows：见模块文档——写 TZ 会把子进程时间弄成 +0100，宁可不生效也不写。
         # 用 debug 而非 warning：Windows 只作开发机（部署目标是 Linux），且本机一般
         # 已是 +08，每次 CLI 调用都告警只会变成噪音。
-        logger.debug(f"当前平台无 tzset（Windows），TZ={effective} 不生效；如需对齐请改系统时区")
+        # 平台判定必须先于 tz 库判定——Windows 上即便 tzdata 齐备也改不了时区，
+        # 此时"缺 tzdata"的告警是误导（子进程时间污染另有出口，见
+        # apply_subprocess_timezone）。
+        logger.debug(f"当前平台无 tzset（Windows），TZ={raw or TZ_DEFAULT} 不生效；如需对齐请改系统时区")
+        return ""
+
+    effective = resolve_timezone()
+    if not effective:
+        logger.warning(f"时区库不可用（缺 tzdata 且系统无 tz 库），日志沿用系统时区（期望 {raw or TZ_DEFAULT}）")
         return ""
 
     os.environ["TZ"] = effective
@@ -80,10 +85,28 @@ def apply_timezone() -> str:
     return effective
 
 
-def subprocess_timezone() -> dict[str, str]:
-    """引擎/服务子进程应显式携带的时区环境变量（Windows 返回空 dict）。"""
+def apply_subprocess_timezone(env: dict[str, str]) -> dict[str, str]:
+    """就地把子进程环境的时区口径钉对：POSIX 注入 TZ，无 tzset 平台**删除** TZ。
+
+    只"不注入"是不够的：`.env` 的 TZ 已由 CLI 的 `load_env()` 落进 `os.environ`，
+    经 `{**os.environ}` 原样继承进子进程。Windows 的 UCRT 按 POSIX 语法解析 TZ，
+    IANA 名 `Asia/Shanghai` 被切成 STD 名 `Asia` + DST 名 `Shanghai`，DST 段缺省
+    偏移按 +1h 处理，于是子进程日志时间比真实时间早 7 小时（实测 02:24 vs 09:24）。
+    UCRT 又只在**进程启动前**读一次 TZ，运行期改 `os.environ` 撤销不了，唯一有效
+    做法是在 spawn 前把它从 env 里剔掉。
+    """
     tz = resolve_timezone()
-    return {"TZ": tz} if tz and hasattr(time, "tzset") else {}
+    if tzset_available():
+        if tz:
+            env["TZ"] = tz
+    else:
+        env.pop("TZ", None)
+    return env
+
+
+def tzset_available() -> bool:
+    """当前平台能否用 TZ + tzset 改本地时区（False = Windows，TZ 反而有害）。"""
+    return hasattr(time, "tzset")
 
 
 def container_timezone_args(tz: str | None = None) -> list[str]:

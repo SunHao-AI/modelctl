@@ -19,6 +19,7 @@ POSIX 上 tzset() 改的是进程级 C 时区状态，monkeypatch 只还原 os.e
 
 from __future__ import annotations
 
+import io
 import os
 import time
 
@@ -127,22 +128,64 @@ def test_apply_without_tzset_returns_empty_and_keeps_env(no_tzset, monkeypatch):
     assert os.environ["TZ"] == "Asia/Shanghai"  # 用户原值不动，但未被当作生效值
 
 
+def test_apply_without_tzset_ignores_missing_tzdb(no_tzset, monkeypatch):
+    """Windows 上即便 tzdata 齐备也改不了时区 → 缺 tz 库只走 debug，绝不报"缺 tzdata"。"""
+    from loguru import logger
+
+    monkeypatch.setattr(tz, "_valid", lambda name: False)
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    sink = io.StringIO()
+    handler_id = logger.add(sink, level="DEBUG", format="{message}")
+    try:
+        assert tz.apply_timezone() == ""
+    finally:
+        logger.remove(handler_id)
+    assert "时区库不可用" not in sink.getvalue()
+    assert "无 tzset" in sink.getvalue()
+
+
+# ---------- apply_subprocess_timezone：子进程 env 的 TZ 口径 ----------
+
+
 def test_subprocess_env_empty_without_tzset(no_tzset, monkeypatch):
     monkeypatch.setenv("TZ", "Asia/Shanghai")
-    assert tz.subprocess_timezone() == {}
+    assert tz.apply_subprocess_timezone({}) == {}
 
 
-# ---------- subprocess_timezone：子进程显式兜底 ----------
+def test_subprocess_scrubs_inherited_tz_without_tzset(no_tzset, monkeypatch):
+    """.env 的 TZ 经 load_env 落进 os.environ 再被 {**os.environ} 继承 → spawn 前必须删掉。
+
+    这是"launch-*.log 时间戳比真实时间早 7 小时"的根因钉子：UCRT 只在进程启动前读
+    一次 TZ，运行期撤不回，故只能在 env 构造阶段剔除。
+    """
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    env = tz.apply_subprocess_timezone({"TZ": "Asia/Shanghai", "PATH": "x"})
+    assert "TZ" not in env
+    assert env["PATH"] == "x"  # 其余键一概不动
+
+
+def test_subprocess_scrubs_tz_even_without_tzdb(no_tzset, monkeypatch):
+    """删除 TZ 不能依赖 tz 库可用——Windows 子 venv 常缺 tzdata，此时更得删。"""
+    monkeypatch.setattr(tz, "_valid", lambda name: False)
+    assert tz.apply_subprocess_timezone({"TZ": "Asia/Shanghai"}) == {}
+
+
+# ---------- apply_subprocess_timezone：POSIX 显式兜底 ----------
 
 
 def test_subprocess_tz_defaults_to_shanghai(fake_tzset, monkeypatch):
     monkeypatch.delenv("TZ", raising=False)
-    assert tz.subprocess_timezone() == {"TZ": "Asia/Shanghai"}
+    assert tz.apply_subprocess_timezone({}) == {"TZ": "Asia/Shanghai"}
 
 
 def test_subprocess_tz_respects_env(fake_tzset, monkeypatch):
     monkeypatch.setenv("TZ", "UTC")
-    assert tz.subprocess_timezone() == {"TZ": "UTC"}
+    assert tz.apply_subprocess_timezone({}) == {"TZ": "UTC"}
+
+
+def test_subprocess_tz_skipped_without_tzdb(fake_tzset, monkeypatch):
+    monkeypatch.setattr(tz, "_valid", lambda name: False)
+    assert tz.apply_subprocess_timezone({}) == {}
 
 
 # ---------- container_timezone_args：容器只认 -e，与宿主平台无关 ----------
