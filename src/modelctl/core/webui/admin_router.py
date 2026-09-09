@@ -45,6 +45,10 @@ _SUBROUTER_MODULES: tuple[tuple[str, str], ...] = (
     ("modelctl.core.webui.admin_audit", "/audit"),
     ("modelctl.core.webui.admin_config", ""),
     ("modelctl.core.webui.admin_cluster", ""),
+    # 账号 / Key / 用量管理面板（Task 7）：使用完整路径 `/accounts*`，
+    # 前缀空串；与数据面 accounts 无关——本路由的 Bearer 走 API_KEY，
+    # 空 store 时内部 503 accounts_disabled 兜底。
+    ("modelctl.core.webui.admin_accounts", ""),
 )
 
 

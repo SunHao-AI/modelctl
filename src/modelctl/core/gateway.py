@@ -1700,6 +1700,19 @@ def create_app(
         admin_router = create_admin_router()
         app.include_router(admin_router, prefix="/admin/api")
         app.state.task_manager = admin_router.task_manager
+
+        # Task 7：账号自助面板（`/api/account/*`）—— 登录/密钥/用量/会话。
+        # 走 Bearer JWT（require_account），非管理面 API_KEY；与 /admin/api 语义独立，
+        # 故不走 `create_admin_router` 聚合。
+        # **无条件注册**：accounts 未启用时端点内部也会读 `app.state.accounts`
+        # → None → 503 accounts_disabled；路由不挂则 login 404，前端无法清晰
+        # 区分"未部署 accounts"与"权限不足"，503 + code 是给部署者的显性诊断。
+        from modelctl.core.webui.account_self import (
+            create_account_self_router,
+        )
+
+        app.include_router(create_account_self_router(), prefix="/api/account")
+
         mount_static(app)
 
     return app
