@@ -1,0 +1,42 @@
+# lmdeploy/qwen2.5-0.5b.yaml —— Qwen2.5-0.5B-Instruct（LMDeploy 引擎，最小显存冒烟测试用）
+# 定位：qwen2.5-0.5b 家族在 LMDeploy 上的基线，为 qwen2.5-1.5b-lmdeploy 的显存兜底方案
+#       （1.5B 在本机 6GB 卡上 OOM 后改用更小模型验证启停/健康检查/网关链路）。
+#       与 llamacpp/qwen2.5-0.5b.yaml 同参数口径（tp=1、ctx 8192、无量化加速）。
+# 平台限制：lmdeploy 属托管引擎（MANAGED_ENGINES），venv 仅 Linux 可建 —— Windows 开发机
+#       上 check_requirements 会直接报 EngineEnvError，本文件需在有 .venvs/lmdeploy 的部署机上使用。
+# 显存估算：BF16 权重约 1.02GB + KV（8192 ctx ≈ 100MB）+ 激活，cache_max_entry_count
+#       0.8 即预留 80% 剩余显存给 KV 池；6GB 单卡余量充足。
+group: qwen2.5-0.5b
+# 注意：不写 alias（家族短名 qwen2.5-0.5b 已被 llamacpp 成员占用；写与 name 同名的
+# alias 会触发 ProfileError 导致整条被 list_profiles 跳过）。name 自动推导为 qwen2.5-0.5b-lmdeploy。
+# port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）；8130/8131 已被同引擎占用，用 8132
+port: 8132
+# api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值
+api_key: ${API_KEY}
+
+lmdeploy:
+  # model：HuggingFace 模型 ID。本地 $MODEL_ROOT 下不存在时按 download 段自动下载
+  # bind_host：服务绑定地址（安全加固，2026-09-08，所有引擎统一默认）
+  # 默认 127.0.0.1 仅回环监听：外部（含 AI Agent / 其他内网主机）无法直连引擎端口，
+  # 从而堵住绕过网关鉴权/账号/多 Key/token 限速/审计的“第二入口”。
+  # 确需对外暴露时改为 0.0.0.0，并配合防火墙/白名单限制来源（非默认，风险自担）。
+  bind_host: 127.0.0.1
+  model: Qwen/Qwen2.5-0.5B-Instruct
+  # download：ModelScope HF 格式仓库（官方仓库，BF16 全量约 1.02GB）
+  download:
+    modelscope_id: Qwen/Qwen2.5-0.5B-Instruct
+  # tensor_parallel_size：单卡机器必须为 1
+  tensor_parallel_size: 1
+  # session_len：与家族其他成员对齐压到 8192（模型原生支持 32K，小卡没必要开满）
+  session_len: 8192
+  # cache_max_entry_count：KV cache 显存占比；6GB 卡取 0.8 留余量
+  cache_max_entry_count: 0.8
+  # quant_policy：0 = 不量化（CC 7.5 保守选择）。想验证 4bit KV cache 省显存可改 4
+  quant_policy: 0
+  # extra_args：前缀缓存对测试链路无副作用，保留与 qwen3.8 一致的开关
+  extra_args: "--enable-prefix-caching"
+
+usage:
+  # price_in / price_out：每千 token 计价（元），供 cc-switch 用量统计
+  price_in: 0.5
+  price_out: 1.0

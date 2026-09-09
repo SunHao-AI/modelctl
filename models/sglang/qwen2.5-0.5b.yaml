@@ -1,0 +1,43 @@
+# sglang/qwen2.5-0.5b.yaml —— Qwen2.5-0.5B-Instruct（SGLang 引擎，最小显存冒烟测试用）
+# 定位：qwen2.5-0.5b 家族在 SGLang 上的基线，为 qwen2.5-1.5b-sglang 的显存兜底方案
+#       （1.5B 在本机 6GB 卡上 OOM 后改用更小模型验证启停/健康检查/网关链路）。
+#       与 llamacpp/qwen2.5-0.5b.yaml 同参数口径（tp=1、ctx 8192、无量化加速）。
+# 平台限制：sglang 属托管引擎（MANAGED_ENGINES），venv 仅 Linux 可建 —— Windows 开发机
+#       上 check_requirements 会直接报 EngineEnvError，本文件需在有 .venvs/sglang 的部署机上使用。
+# 显存估算：BF16 权重约 1.02GB + KV（8192 ctx ≈ 100MB）+ RadixAttention 池，
+#       mem_fraction_static 0.85×6144MB ≈ 5.2GB，6GB 单卡余量充足。
+# CC 提示：本机 CC 7.5（Turing）不满足 FP8 规则（fp8_quant_cc 要求 ≥ 8.9），
+#       故 extra_args 里绝不带 --quantization fp8 / --kv-cache-dtype fp8_e4m3
+#       —— 与 sglang/qwen3.8.yaml 的写法相反，这是小卡与 Ada 卡 profile 的关键差异。
+group: qwen2.5-0.5b
+# 注意：不写 alias（家族短名 qwen2.5-0.5b 已被 llamacpp 成员占用；写与 name 同名的
+# alias 会触发 ProfileError 导致整条被 list_profiles 跳过）。name 自动推导为 qwen2.5-0.5b-sglang。
+# port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）；8200-8203/8210 已被占用，用 8204
+port: 8204
+# api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值
+api_key: ${API_KEY}
+
+sglang:
+  # model：HuggingFace 模型 ID。本地 $MODEL_ROOT 下不存在时按 download 段自动下载
+  # bind_host：服务绑定地址（安全加固，2026-09-08，所有引擎统一默认）
+  # 默认 127.0.0.1 仅回环监听：外部（含 AI Agent / 其他内网主机）无法直连引擎端口，
+  # 从而堵住绕过网关鉴权/账号/多 Key/token 限速/审计的“第二入口”。
+  # 确需对外暴露时改为 0.0.0.0，并配合防火墙/白名单限制来源（非默认，风险自担）。
+  bind_host: 127.0.0.1
+  model: Qwen/Qwen2.5-0.5B-Instruct
+  # download：ModelScope HF 格式仓库（官方仓库，BF16 全量约 1.02GB）
+  download:
+    modelscope_id: Qwen/Qwen2.5-0.5B-Instruct
+  # tensor_parallel_size：单卡机器必须为 1
+  tensor_parallel_size: 1
+  # context_length：与家族其他成员对齐压到 8192（模型原生支持 32K，小卡没必要开满）
+  context_length: 8192
+  # mem_fraction_static：静态显存分配比例；6GB 卡若启动报 KV pool OOM 可降到 0.8
+  mem_fraction_static: 0.85
+  # extra_args：留空。Qwen2.5 无 MTP 头，不能抄 qwen3.8 的 --speculative-algorithm mtp
+  extra_args: ""
+
+usage:
+  # price_in / price_out：每千 token 计价（元），供 cc-switch 用量统计
+  price_in: 0.5
+  price_out: 1.0
