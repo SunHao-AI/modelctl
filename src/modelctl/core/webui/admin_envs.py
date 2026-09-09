@@ -131,9 +131,14 @@ async def list_envs(_: None = Depends(require_auth)):
     modelctl 托管 venv（原生二进制或官方安装器），故不在 targets 中，仅在 UI 说明。
     """
     from modelctl.core import envs
+    from modelctl.core.capabilities import docker_ready
 
     status = await asyncio.to_thread(envs.status)
     targets = await asyncio.to_thread(envs.known_targets)
+
+    # dready 先算（与 admin_probe._gather_overview 同源：capabilities.docker_ready），
+    # 既要渲染 targets[].runtime_docker_ready 又要填 docker_env.runtime_ready。
+    dready = docker_ready()
 
     out = []
     for t in targets:
@@ -161,6 +166,11 @@ async def list_envs(_: None = Depends(require_auth)):
                 "detail": detail,
                 "platform_supported": envs.platform_supports(t),
                 "docker_supported": t in envs.DOCKER_CAPABLE_ENGINES,
+                # runtime_docker_ready：docker 主路径是否就绪（capabilities.docker_ready）。
+                # 为 true 时 yaml 写 docker_image 即可绕过 venv；为 false 但 docker_supported
+                # 为 true 时，UI 可用 docker_env.runtime_ready / docker_bypass.steps[0] 补
+                # "先去部署机建 docker" 指引。gateway 无 docker 运行时，恒为 False。
+                "runtime_docker_ready": (t in envs.DOCKER_CAPABLE_ENGINES) and dready,
             }
         )
 
@@ -170,7 +180,8 @@ async def list_envs(_: None = Depends(require_auth)):
     from modelctl.core import docker_setup
 
     missing = docker_setup.path_level_missing()
-    docker_env = {"ready": not missing, "missing": missing, "guide": docker_setup.MSG_GUIDE}
+    docker_env = {"ready": not missing, "missing": missing, "guide": docker_setup.MSG_GUIDE,
+                  "runtime_ready": dready}
 
     # Docker 旁路指引：已支持引擎给镜像事实 + 三步；其余仅 note（gateway 不适用旁路，天然排除）
     bypass: list[dict] = []

@@ -54,18 +54,45 @@ def _get(client: TestClient, path: str):
 
 
 def test_list_envs_extended_fields_non_linux(admin_client, monkeypatch):
-    """非 Linux 态：托管引擎 platform_supported=False，gateway 恒 True。"""
+    """非 Linux 态：托管引擎 platform_supported=False，gateway 恒 True；
+    runtime_docker_ready 字段必须随 docker_ready() 同步（Win 默认 False）。"""
     monkeypatch.setattr("modelctl.core.envs._is_linux", lambda: False)
+    import modelctl.core.capabilities as caps_mod
+    monkeypatch.setattr(caps_mod, "docker_ready", lambda: False, raising=False)
     r = _get(admin_client, "/admin/api/envs")
     assert r.status_code == 200
     by_name = {t["name"]: t for t in r.json()["targets"]}
     assert {"vllm", "sglang", "gateway"} <= set(by_name)
     for name, t in by_name.items():
-        assert {"name", "installed", "detail", "platform_supported", "docker_supported"} <= set(t)
+        assert {"name", "installed", "detail", "platform_supported", "docker_supported",
+                "runtime_docker_ready"} <= set(t)
         assert t["platform_supported"] is (name == "gateway"), name
     assert by_name["vllm"]["docker_supported"] is True
     assert by_name["sglang"]["docker_supported"] is False
     assert by_name["gateway"]["docker_supported"] is False
+    # docker_ready() 假：所有 docker 支持引擎的 runtime_docker_ready 为 False
+    assert by_name["vllm"]["runtime_docker_ready"] is False
+    assert by_name["tokenspeed"]["runtime_docker_ready"] is False
+    assert by_name["tensorrt_llm"]["runtime_docker_ready"] is False
+    # docker 不支持的引擎恒 False（短路掉 docker_supported 分支）
+    assert by_name["sglang"]["runtime_docker_ready"] is False
+    assert by_name["gateway"]["runtime_docker_ready"] is False
+
+
+def test_list_envs_docker_ready_true_marks_runtime_docker_ready(admin_client, monkeypatch):
+    """docker_ready() 真时，所有 docker_supported 引擎 runtime_docker_ready 为 True；
+    gateway / sglang 等无 docker 分支的恒 False。"""
+    import modelctl.core.capabilities as caps_mod
+    monkeypatch.setattr("modelctl.core.envs._is_linux", lambda: True)
+    monkeypatch.setattr(caps_mod, "docker_ready", lambda: True, raising=False)
+    by_name = {t["name"]: t for t in _get(admin_client, "/admin/api/envs").json()["targets"]}
+    assert by_name["vllm"]["runtime_docker_ready"] is True
+    assert by_name["tokenspeed"]["runtime_docker_ready"] is True
+    assert by_name["tensorrt_llm"]["runtime_docker_ready"] is True
+    assert by_name["sglang"]["runtime_docker_ready"] is False
+    assert by_name["aphrodite"]["runtime_docker_ready"] is False
+    assert by_name["lmdeploy"]["runtime_docker_ready"] is False
+    assert by_name["gateway"]["runtime_docker_ready"] is False
 
 
 def test_list_envs_platform_linux(admin_client, monkeypatch):

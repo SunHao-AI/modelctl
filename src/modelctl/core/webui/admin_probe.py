@@ -62,17 +62,37 @@ def _serialize_gpu_locks(locks: dict[int, str]) -> list[dict]:
     ]
 
 
+def _engine_binary_entry(name: str, available: bool, path: str | None) -> dict:
+    """单个引擎可达性条目（docker ∨ venv）。
+
+    available（venv）按 caps.binaries 原值；reachable 加 docker 主路径维度——
+    与 _resolve_runtime 的 docker_image > venv 规则对齐：docker_ready() 为真且
+    引擎在 DOCKER_CAPABLE_ENGINES 中即可达标，避免 yaml 配 docker_image 的
+    模型被 UI 误报 "需先 modelctl env setup <engine>"。
+    """
+    from modelctl.core.capabilities import docker_ready
+    from modelctl.core.envs import DOCKER_CAPABLE_ENGINES
+
+    venv_ok = bool(available)
+    docker_capable = name in DOCKER_CAPABLE_ENGINES
+    dready = docker_ready()
+    reachable = venv_ok or (docker_capable and dready)
+    return {
+        "name": name,
+        "available": venv_ok,           # venv 可执行性（保持现状，向后兼容）
+        "path": path,
+        "reachable": reachable,         # docker ∨ venv：真实可达性
+        "runtime": "docker" if (reachable and not venv_ok) else ("venv" if venv_ok else None),
+    }
+
+
 def _serialize_engine_binaries(caps) -> list[dict]:
     """Capabilities.binaries（bool）+ binary_paths（str|None）→ 统一列表。"""
     binaries = getattr(caps, "binaries", None) or {}
     paths = getattr(caps, "binary_paths", None) or {}
     out = []
     for name, available in binaries.items():
-        out.append({
-            "name": name,
-            "available": bool(available),
-            "path": paths.get(name),
-        })
+        out.append(_engine_binary_entry(name, available, paths.get(name)))
     return out
 
 
@@ -177,14 +197,23 @@ def _gather_overview() -> dict:
     else:
         total_vram_gb = _vram_gb(getattr(caps, "vram_total_mb", 0))
 
+    # 引擎可达性按 docker ∨ venv（与 _resolve_runtime 的 docker_image 优先规则一致）
+    from modelctl.core.capabilities import docker_ready
+    from modelctl.core.envs import DOCKER_CAPABLE_ENGINES
+
+    dready = docker_ready()
+    engine_binaries = {}
+    for name, path in (getattr(caps, "binary_paths", None) or {}).items():
+        venv_ok = bool(path)
+        reachable = venv_ok or (name in DOCKER_CAPABLE_ENGINES and dready)
+        engine_binaries[name] = "available" if reachable else "missing"
+
     hardware = {
         "gpu_count": gpu_count,
         "gpu_name": gpu_name,
         "total_vram_gb": total_vram_gb,
-        "engine_binaries": {
-            name: "available" if path else "missing"
-            for name, path in (getattr(caps, "binary_paths", None) or {}).items()
-        },
+        "docker_ready": dready,
+        "engine_binaries": engine_binaries,
     }
 
     # 服务状态（用 is_running 而非 status_*：本端点 3s 轮询，免每 3s 各做 3s 健康探测）
