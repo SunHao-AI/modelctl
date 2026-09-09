@@ -21,7 +21,9 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
 import modelctl.engines._download as dl
+from modelctl.engines._download import ModelDownloadError
 
 
 def test_download_repo_uses_modelscope(tmp_path, monkeypatch):
@@ -67,6 +69,87 @@ def test_repo_local_dir_is_deterministic(tmp_path):
     a = dl.repo_local_dir("unsloth/Qwen3.8-27B-GGUF", tmp_path)
     b = dl.repo_local_dir("unsloth/Qwen3.8-27B-GGUF", tmp_path)
     assert a == b == tmp_path / "Qwen3.8-27B-GGUF"
+
+
+# ---- 404 / 限流 / 网络包装为中文 ModelDownloadError ----
+
+def _make_fake_fail(raise_exc):
+    """测试辅助：构造一个会抛 raise_exc 的 fake modelscope 模块。"""
+    fake = types.ModuleType("modelscope")
+    fake.snapshot_download = lambda *a, **k: (_ for _ in ()).throw(raise_exc)
+    return fake
+
+
+def test_download_repo_404_wraps_to_friendly_error(tmp_path, monkeypatch):
+    """上游 404 → 包装为 ModelDownloadError，message 含中文提示 + 仓库 ID，cause 保留原始错。"""
+    monkeypatch.setitem(sys.modules, "modelscope", _make_fake_fail(
+        RuntimeError("404 Client Error: record not found (request_id=abc-123)")
+    ))
+    monkeypatch.setattr(dl, "ensure_packages", lambda _c: True)
+    monkeypatch.setattr(dl, "snapshot_download", None, raising=False)
+
+    with pytest.raises(ModelDownloadError) as exc_info:
+        dl.download_repo("ModelCloud/Qwen2.5-0.5B-Instruct-GPTQ", tmp_path)
+    msg = str(exc_info.value)
+    assert "不存在" in msg or "已改名" in msg
+    assert "ModelCloud/Qwen2.5-0.5B-Instruct-GPTQ" in msg
+    assert "ModelScope" in msg  # 中文“ModelScope 仓库不存在…”
+    assert exc_info.value.cause_message
+    assert "404" in exc_info.value.cause_message
+
+
+def test_download_repo_rate_limit_wraps_to_friendly_error(tmp_path, monkeypatch):
+    """上游 429 限流 → 中文提示含重试/HF_ENDPOINT 镜像。"""
+    monkeypatch.setitem(sys.modules, "modelscope", _make_fake_fail(
+        RuntimeError("429 Too Many Requests: rate limit")
+    ))
+    monkeypatch.setattr(dl, "ensure_packages", lambda _c: True)
+    monkeypatch.setattr(dl, "snapshot_download", None, raising=False)
+
+    with pytest.raises(ModelDownloadError) as exc_info:
+        dl.download_repo("org/model", tmp_path)
+    assert "429" in str(exc_info.value)
+    assert "HF_ENDPOINT" in str(exc_info.value)
+
+
+def test_download_repo_network_error_wraps_to_friendly_error(tmp_path, monkeypatch):
+    """上游 connection/timeout → 通用中文提示（代理 / HF_ENDPOINT）。"""
+    monkeypatch.setitem(sys.modules, "modelscope", _make_fake_fail(
+        RuntimeError("proxy connect timeout after 30s")
+    ))
+    monkeypatch.setattr(dl, "ensure_packages", lambda _c: True)
+    monkeypatch.setattr(dl, "snapshot_download", None, raising=False)
+
+    with pytest.raises(ModelDownloadError) as exc_info:
+        dl.download_repo("org/model", tmp_path)
+    msg = str(exc_info.value)
+    assert "代理" in msg or "HF_ENDPOINT" in msg
+
+
+def test_download_repo_failure_cleans_partial_dir(tmp_path, monkeypatch):
+    """下载中途失败 → 清掉已 mkdir 的 destination，避免污染下次 _is_populated。"""
+    calls: list = []
+
+    def fake_fail(model_id, local_dir, **_kw):
+        calls.append(local_dir)
+        # 模拟已写部分权重
+        Path(local_dir).mkdir(parents=True, exist_ok=True)
+        (Path(local_dir) / "partial.safetensors").write_bytes(b"x" * 1024)
+        raise RuntimeError("network interrupted")
+
+    fake = types.ModuleType("modelscope")
+    fake.snapshot_download = fake_fail
+    monkeypatch.setitem(sys.modules, "modelscope", fake)
+    monkeypatch.setattr(dl, "ensure_packages", lambda _c: True)
+    monkeypatch.setattr(dl, "snapshot_download", None, raising=False)
+
+    with pytest.raises(ModelDownloadError):
+        dl.download_repo("org/model", tmp_path)
+
+    # 测试三段：(1) 触发了下载  (2) partial 目录已清理  (3) 再 download 时不会复用
+    assert len(calls) == 1
+    assert not (tmp_path / "model").exists()
+    assert not dl._is_populated(tmp_path / "model")
 
 
 # ---- §2.2：aphrodite / lmdeploy 下载 pre_start 路径 ----

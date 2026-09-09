@@ -1,0 +1,62 @@
+# vllm/qwen2.5-0.5b.yaml —— Qwen2.5-0.5B-Instruct（vLLM 引擎，**最低配置冒烟测试专用**）
+# 定位：qwen2.5-0.5b 家族在 vLLM 上的基线，仅验证启停/健康检查/网关链路，**速度/吞吐不做要求**。
+#       ctx 压到 512、禁用 CUDA graph capture，确保 6GB GTX 1660 Ti（CC 7.5）上启动稳，
+#       让真·业务模型（1.5b/3b）的执行环境不被浪费。
+# 平台限制：同 qwen2.5-1.5b-vllm —— Windows 开发机无 .venvs/vllm 会报 EngineEnvError，
+#       本文件配置了 docker_image 走容器旁路（镜像需已 pull；model 须为 $MODEL_ROOT 下
+#       的本地目录，HF id 在 docker 路径下会被当相对路径挂载，通常会报路径不存在）。
+# 显存估算：BF16 权重 ~1.02GB + KV（512 ctx，fp16 约 6KB）+ CUDA context/激活约 0.7GB
+#       → 稳态常驻 ~1.8GB；gpu_memory_utilization 0.5（3.0GB 上限）留 1.0GB 余量。
+# 量化策略：v0.1 用 BF16 原权（`Qwen/Qwen2.5-0.5B-Instruct`，ModelScope 官方源稳定）；
+#   2026-09-09 从 GPTQ-4bit（`ModelCloud/Qwen2.5-0.5B-Instruct`）回退 BF16：
+#   - 该量化地在 ModelScope 404（已下载失败，见 launch log 06:50）；
+#   - ModelCloud 是小社区仓库，可靠性低于官方 `Qwen/`，不再依赖；
+#   - 备份：若未来需要 4bit，仍可在 .env 设 HF_ENDPOINT=https://hf-mirror.com 走 HF 镜像
+#     拉 quantized 版本（如 ModelCloud/Qwen2.5-0.5B-Instruct-Int4）。
+# 注：0.5B 模型 BF16 在 6GB 卡上显存峰值 < 2GB，不需要 4bit 量化，冒烟测试目的没变。
+group: qwen2.5-0.5b
+# 注意：本家族暂仅本 vllm 成员（其余引擎尚未建立），一律不写 alias。
+# name 自动推导为 qwen2.5-0.5b-vllm；若再写同名 alias 会触发 ProfileError 导致整条被跳过。
+# port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
+port: 8108
+# api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值
+api_key: ${API_KEY}
+
+vllm:
+  # model：本地 BF16 源。docker 路径下会被当作相对路径挂载，
+  # 下载后实际位置：$MODEL_ROOT/Qwen2.5-0.5B-Instruct/
+  # ModelScope 源：`Qwen/Qwen2.5-0.5B-Instruct`（官方源 BF16，~1.02GB）
+  # bind_host：服务绑定地址（安全加固，2026-09-08，所有引擎统一默认）
+  # 默认 127.0.0.1 仅回环监听：外部（含 AI Agent / 其他内网主机）无法直连引擎端口，
+  # 从而堵住绕过网关鉴权/账号/多 Key/token 限速/审计的"第二入口"。
+  # 确需对外暴露时改为 0.0.0.0，并配合防火墙/白名单限制来源（非默认，风险自担）。
+  bind_host: 127.0.0.1
+  model: Qwen/Qwen2.5-0.5B-Instruct
+  # download：ModelScope BF16 仓库（官方源稳定，~1.02GB）
+  download:
+    modelscope_id: Qwen/Qwen2.5-0.5B-Instruct
+  # tensor_parallel_size：单卡机器必须为 1
+  tensor_parallel_size: 1
+  # max_model_len：测试用途，不要求吞吐，512 token 足够冒烟 + 小规模 chat
+  # 模型原生 32K 但 KV 显存 ∝ ctx，0.5B BF16 512 ctx 占 < 10MB
+  max_model_len: 512
+  # gpu_memory_utilization：BF16 权重 1.02GB + KV + CUDA ctx ≈ 1.8GB，6GB 卡
+  # 0.5×6=3.0GB 留 1.2GB 余量（其它 vLLM 进程/容器残留/Windows host GPU pool）
+  gpu_memory_utilization: 0.5
+  # quantization：BF16 原权，CC 7.5（Turing）原生支持；不再用 GPTQ（见文件头量化策略）。
+  # 留空即不传 --quantization 参数
+  quantization: ""
+  # extra_args：--enforce-eager 禁用 CUDA graph capture（1660 Ti 的 GraphPool 不长，
+  # graph capture 反占 0.3-0.5GB，且冒烟不需要 inspection/eager 之外的吞吐提升）。
+  # Qwen2.5 非思考模型，不需要 --reasoning-parser；保持干净便于观察启动日志
+  extra_args: "--enforce-eager"
+  # docker_image：Windows 试跑的唯一途径 —— 配置后 _resolve_runtime 走 docker 分支，
+  # 跳过 .venvs/vllm 的 venv 校验。前置：镜像已 pull；model 必须是本地目录（HF id 会
+  # 在 docker 路径下被当作相对路径挂载，通常报路径不存在），需先在 $MODEL_ROOT 下
+  # 放置该目录（可复用 1.5b 容器运行后的模型产物，或另行下载）。
+  docker_image: vllm/vllm-openai:latest
+
+usage:
+  # price_in / price_out：每千 token 计价（元），供 cc-switch 用量统计
+  price_in: 0.5
+  price_out: 1.0
