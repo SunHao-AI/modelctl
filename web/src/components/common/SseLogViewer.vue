@@ -82,6 +82,18 @@ function open() {
       if (state.value !== 'open') state.value = 'open';
     },
     onLine: push,
+    onStopped: (reason) => {
+      // docker runtime 容器删 / json.log 文件消失时后端主动结束流。
+      // 这里**主动 close** EventSource：浏览器对 SSE 流被对端 close 会 emit
+      // `error` 事件并打 `net::ERR_ABORTED` 到 console,但上游 sse.ts 区分
+      // "主动关" vs "被动断"——主动关后的 error 会被抑制,避免 console 误报。
+      // 不清空 lines(已 fetch 的前 200 行保留,避免误溃);状态置 closed。
+      if (reason) {
+        push({ line: `(日志流已停止：${reason})` });
+      }
+      state.value = 'closed';
+      closeStream();
+    },
     onError: () => {
       // EventSource 内部会自动重试 3 次，不在此主动关
       if (state.value !== 'closed') state.value = 'closed';
@@ -143,7 +155,7 @@ watch(
           ]"
         />
         <span class="text-slate-300">
-          {{ state === 'connecting' ? '连接中…' : state === 'open' ? '已连接' : '已断开' }}
+          {{ state === 'connecting' ? '连接中…' : state === 'open' ? '已连接' : '已结束' }}
         </span>
       </div>
       <div class="flex items-center gap-2">

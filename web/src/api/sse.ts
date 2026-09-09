@@ -31,6 +31,8 @@ export interface LogStreamHooks {
   onOpen?: () => void;
   /** 收到 event: log 帧 */
   onLine?: (evt: LogSseEvent) => void;
+  /** 收到 event: stopped 帧（docker runtime 容器删 / json.log 文件消失，后端主动结束流） */
+  onStopped?: (reason: string) => void;
   /** done 时关闭流（后端日志流通常没有 done，这里仅为对称 API） */
   onDone?: () => void;
   /** EventSource 错误（401 会被 401 拦截，这里处理其它） */
@@ -40,14 +42,27 @@ export interface LogStreamHooks {
 /**
  * 打开模型日志 SSE 流。
  *
- * @param url   完整 SSE 路径（如 getModelLogStreamUrl 生成的 /admin/api/models/{name}/log/stream）
+ * @param url   完整 SSE 路径(如 getModelLogStreamUrl 生成的 /admin/api/models/{name}/log/stream)
  * @param hooks 回调
- * @returns 句柄（{ close() }），必须在 onBeforeUnmount 调用 close()。
+ * @returns 句柄({ close() }),必须在 onBeforeUnmount 调用 close()。
+ *
+ * **主动关闭语义**:调用 close() 后底层 EventSource 会收到 `error` 事件
+ * (浏览器对"连接被另一端关闭"的统一报错,通常表现为控制台
+ * `net::ERR_ABORTED`)。本封装内部维护 `closed` 标记:
+ *   - 调用方主动 close 后的后续 `error` 事件**不再**触发 `hooks.onError`,
+ *     避免浏览器 console 误报;
+ *   - `stopped` 帧到达后**主动 close** EventSource,同样抑制浏览器 error。
+ *
+ * 实际 UX (SseLogViewer):
+ *   - 后端发送 `event: stopped` → 提示 "日志流已停止" → close (suppresses ERR_ABORTED)
+ *   - 后端硬断、网络故障、401 → 仍触发 onError,前端可显示"网络异常"
  */
 export function openModelLogStream(url: string, hooks: LogStreamHooks = {}): LogStreamHandle {
-  // url 已是调用方生成的完整路径，这里不再包裹，只追加 ?key= 鉴权参数
+  // url 已是调用方生成的完整路径,这里不再包裹,只追加 ?key= 鉴权参数
   const token = useAuthStore().token;
   const es = new EventSource(`${url}?key=${encodeURIComponent(token)}`);
+  /** 主动 close 后的 error 不再上抛(浏览器对 close() 也会 emit error,需要抑制) */
+  let suppressedByClose = false;
 
   /** log 事件的 data 已是纯 JSON 字符串，直接解析；解析异常走 onError */
   const onLog: EventListener = (e) => {
@@ -63,12 +78,30 @@ export function openModelLogStream(url: string, hooks: LogStreamHooks = {}): Log
   const onOpen: EventListener = () => hooks.onOpen?.();
   // heartbeat 仅保活，显式注册避免落入默认 message 之外的未处理路径
   const onHeartbeat: EventListener = () => undefined;
-  const onErr: EventListener = (e) => hooks.onError?.(e);
+  const onStopped: EventListener = (e) => {
+    const raw = (e as MessageEvent).data as string | undefined;
+    let reason = '';
+    if (typeof raw === 'string' && raw) {
+      try {
+        const obj = JSON.parse(raw) as { reason?: string };
+        reason = obj.reason ?? '';
+      } catch {
+        reason = raw;
+      }
+    }
+    hooks.onStopped?.(reason);
+  };
+  const onErr: EventListener = (e) => {
+    // 主动 close 后的 error (浏览器 net::ERR_ABORTED): 抑制不向上抛
+    if (suppressedByClose) return;
+    hooks.onError?.(e);
+  };
 
   const listeners: Array<[string, EventListener]> = [
     ['open', onOpen],
     ['log', onLog],
     ['heartbeat', onHeartbeat],
+    ['stopped', onStopped],
     ['error', onErr],
   ];
   for (const [name, fn] of listeners) es.addEventListener(name, fn);
@@ -76,10 +109,11 @@ export function openModelLogStream(url: string, hooks: LogStreamHooks = {}): Log
   return {
     close() {
       try {
+        suppressedByClose = true;
         for (const [name, fn] of listeners) es.removeEventListener(name, fn);
         es.close();
       } catch {
-        // 已 close，忽略
+        // 已 close,忽略
       }
     },
   };

@@ -92,3 +92,53 @@ def test_do_restart_exception_venv_missing_attaches_code(monkeypatch):
     task = Task(id="task-s4", kind="model_restart", action="restart", target="qwen-vllm")
     asyncio.run(am._do_restart(_profile(), None, 1.0, task, None))
     assert task.code == "venv_missing" and task.engine == "vllm"
+
+
+# ---------------------------------------------------------------------------
+# docker runtime 日志 fallback 工具函数单测（不依赖 docker daemon）
+# ---------------------------------------------------------------------------
+
+def test_launch_log_effective_container_id_only():
+    """launch log 仅含容器 ID 行 + 'vllm' 短词时，应判为无效（fallback docker logs）。"""
+    assert am._launch_log_effective([]) is False
+    assert am._launch_log_effective(
+        ["ac1cea1c5d440f54d7b294f54438fa56fda7299dcc7704309957bcc01fdb354e", "vllm"]
+    ) is False
+    assert am._launch_log_effective(["ac1cea1c5d440f54", ""]) is False
+
+
+def test_launch_log_effective_with_real_line():
+    """存在 1 行真实日志（非容器 ID、非 'vllm'）时，应判为有效。"""
+    assert am._launch_log_effective(
+        ["ac1cea1c5d440f54d7b294f54438fa56fda7299dcc7704309957bcc01fdb354e", "INFO: Loaded model"]
+    ) is True
+    assert am._launch_log_effective(["vllm", "ERROR: port 8101 in use"]) is True
+
+
+def test_docker_json_line_text_stdout():
+    """<id>-json.log 行（stdout）提取 log 字段并 strip 结尾换行。"""
+    import json as _json
+
+    entry = _json.dumps({"log": "INFO: vLLM starting\n", "stream": "stdout", "time": "2026-01-01T00:00:00Z"})
+    assert am._docker_json_line_text(entry) == "INFO: vLLM starting"
+
+
+def test_docker_json_line_text_stderr():
+    """stderr 同理，提取 log。"""
+    import json as _json
+
+    entry = _json.dumps({"log": "WARNING: deprecated flag\n", "stream": "stderr", "time": "2026-01-01T00:00:01Z"})
+    assert am._docker_json_line_text(entry) == "WARNING: deprecated flag"
+
+
+def test_docker_json_line_text_malformed_passthrough():
+    """JSON 解析失败（docker 写半行），整行透传更可读。"""
+    assert am._docker_json_line_text('{"log": "ba') == '{"log": "ba'
+
+
+def test_docker_json_line_text_empty():
+    """空 / 缺 log 字段返回 None。"""
+    import json as _json
+
+    assert am._docker_json_line_text("") is None
+    assert am._docker_json_line_text(_json.dumps({"stream": "stderr"})) is None

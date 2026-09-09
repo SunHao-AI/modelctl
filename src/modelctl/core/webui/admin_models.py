@@ -24,6 +24,7 @@ import asyncio
 import json
 import os
 import re
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -379,9 +380,16 @@ async def start_model(
     request: Request,
     timeout: float | None = Query(default=None, ge=1, le=7200),
     gpus: str | None = Query(default=None),
+    yaml_override: str | None = Query(default=None, max_length=1_000_000),
     _: None = Depends(require_auth),
 ):
-    """POST /admin/api/models/{name}/start — 异步启动模型，返回 202 + task_id。"""
+    """POST /admin/api/models/{name}/start — 异步启动模型，返回 202 + task_id。
+
+    `yaml_override`：可选查询参数，YAML 文本（URL-encoder 后由 `client.post` 的 params 注入）。
+    指定时用**临时** profile（内存构造，源 yaml 文件不改）执行启动——WebUI "个性化
+    启动" 入口。校验失败（YAML 语法 / 字段缺失）→ 400；成功 → 202 + task_id，与默认
+    启动同一套任务流 / SSE / 进度卡片。
+    """
     profile = await asyncio.to_thread(_find_profile, name)
     if profile is None:
         return JSONResponse(
@@ -393,6 +401,13 @@ async def start_model(
     from modelctl.core.envfile import load_env
 
     load_env()
+
+    # 个性化启动：override 文本 → 临时 profile（源文件不变）
+    if yaml_override is not None and yaml_override.strip():
+        tmp_profile = await asyncio.to_thread(_build_profile_from_override, name, profile, yaml_override)
+        if isinstance(tmp_profile, JSONResponse):
+            return tmp_profile
+        profile = tmp_profile
 
     tm: object = request.app.state.task_manager
     lock = await tm.acquire(name, "start")
@@ -419,6 +434,59 @@ async def start_model(
         )
     finally:
         await tm.release(name, "start")
+
+
+def _build_profile_from_override(name: str, base_profile, yaml_text: str):
+    """override 文本 → 临时 Profile（源文件不改）。
+
+    返回新 Profile；解析 / 校验失败时返回 400 JSONResponse（调用方短路返回）。
+    强制约束：
+      - ``engine`` 必须与 ``base_profile.engine`` 一致（防 override 改写引擎逃逸适配路径）
+      - ``port`` 必须与 ``base_profile.port`` 一致（防同 profile 多端口并存造成路由歧义）
+    """
+    from modelctl.core.profile import ProfileError, load_profile_from_text
+
+    if base_profile.path is None:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "bad_request", "message": "模型源文件未定位，无法执行 override 启动"}},
+        )
+    try:
+        tmp = load_profile_from_text(yaml_text, base_profile.path)
+    except ProfileError as exc:
+        logger.warning(f"override 启动解析失败（{name}）：{exc}")
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "bad_request", "message": f"YAML 校验失败：{exc}"}},
+        )
+
+    if tmp.engine != base_profile.engine:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "code": "bad_request",
+                    "message": f"engine 不可改（override={tmp.engine!r}，源={base_profile.engine!r}）",
+                },
+            },
+        )
+    if tmp.port != base_profile.port:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "code": "bad_request",
+                    "message": f"port 不可改（override={tmp.port}，源={base_profile.port}）",
+                },
+            },
+        )
+    # name 强制对齐：override 里手写 name 与路由 name 不一致时按路由 name 锚定，
+    # 否则 PID / gpu lock / 日志 / 网关路由都会分叉
+    tmp.name = base_profile.name
+    # path 保留源路径，仅供 _resolve_engine 兜底 / yaml GET 端点使用；profile 是临时态，
+    # 后续 start_profile 链只看 name/engine/port/engine_config 等运行时字段
+    tmp.path = base_profile.path
+    return tmp
 
 
 def _probe_caps():
@@ -565,14 +633,32 @@ async def get_startup_progress(name: str, _: None = Depends(require_auth)):
 
 @router.get("/{name}/log")
 async def get_model_log(name: str, _: None = Depends(require_auth), lines: int = Query(default=200, ge=1)):
-    """GET /admin/api/models/{name}/log — 读取启动日志尾部。"""
-    from modelctl.core.process import launch_log, tail_file
+    """GET /admin/api/models/{name}/log — 读取启动日志尾部；docker runtime 回退容器内日志。
 
-    log_path = launch_log(name)
-    if log_path is None:
-        return {"lines": []}
-    tail = await asyncio.to_thread(tail_file, log_path, lines)
-    return {"lines": tail.strip().split("\n") if tail else []}
+    docker runtime 下 launch log 只有一行容器 ID + 镜像名（``docker run --detach`` 客户端
+    stdout），真正的 vLLM 内部日志在容器内；本端点在 launch log 缺失 / 仅为容器 ID 行时
+    fallback 到 ``docker logs --tail <lines> <container>``，让前端 ``<pre>`` 看到真实日志。
+    """
+    launch = await asyncio.to_thread(_tail_from_launch_log, name, lines)
+    if _launch_log_effective(launch):
+        return {"lines": launch[:lines]}
+    docker = await asyncio.to_thread(_read_docker_logs, name, lines)
+    if docker:
+        return {"lines": docker[:lines]}
+    return {"lines": launch[:lines]}
+
+
+def _launch_log_effective(lines: list[str]) -> bool:
+    """判断 launch log 行是否"有效内容"（容器 ID 行 / "vllm" 短词不算）。
+
+    与 all_service.docker_logs_fallback 同样的判定：仅当存在 ≥1 行非容器 ID 短词时，
+    才认为 launch log 含有效引擎日志；否则回退 ``docker logs``。
+    """
+    from modelctl.core.all_service import _CONTAINER_ID_LINE
+
+    real = [ln.strip() for ln in lines
+            if ln.strip() and not _CONTAINER_ID_LINE.match(ln.strip()) and ln.strip() != "vllm"]
+    return len(real) >= 1
 
 
 @router.get("/{name}/log/stream")
@@ -600,35 +686,91 @@ async def stream_model_log(
 
 
 async def _sse_log_stream(name: str):
-    """SSE 日志 async 流：先推送已有行，之后每 2s 轮询新行，每 10s 心跳。"""
-    from modelctl.core.process import launch_log, tail_file
+    """SSE 日志 async 流：先推送已有行，之后每 2s 轮询新行，每 10s 心跳。
+
+    - venv runtime：``launch-<name>.log`` 持续写，按文件 offset 推送新增行。
+    - docker runtime：``launch-<name>.log`` 只有一行 ``docker run --detach`` 客户端容器
+      ID + 镜像名（无有效引擎日志），改用 ``/var/lib/docker/containers/<id>/<id>-json.log``
+      的 in-container json.line 日志路径按字节 offset 增量推。这种 docker 日志格式每行
+      JSON 一行，``split('\\n')`` 解析安全；容器删 / docker daemon 重启时文件消失，
+      回退到 ``docker logs --tail 1`` 识别容器是否还在打日志（容器已死则不再重拉，
+      下次手动 refresh 再走 ``GET /log`` fallback）。
+    """
+    from modelctl.core.all_service import _CONTAINER_ID_LINE
+    from modelctl.core.process import launch_log
 
     log_path = launch_log(name)
-    if log_path is None:
-        yield f"event: log\ndata: {json.dumps({'line': '（日志文件不存在）'}, ensure_ascii=False)}\n\n"
-        return
+    initial = await asyncio.to_thread(_tail_from_launch_log, name, 200)
+    use_docker_fallback = not _launch_log_effective(initial)
 
-    # 初始行
-    initial = await asyncio.to_thread(tail_file, log_path, 200)
-    if initial:
-        for line in initial.strip().split("\n"):
+    if use_docker_fallback:
+        # docker runtime 首次连接：dump 一次容器内日志
+        docker_lines = await asyncio.to_thread(_read_docker_logs, name, 200)
+        used_json_log = False
+        json_log_path: Path | None = None
+        json_log_pos = 0
+        if docker_lines:
+            json_log_path = await asyncio.to_thread(docker_core_log_path, name)
+            used_json_log = json_log_path is not None
+            json_log_pos = (await asyncio.to_thread(json_log_path.stat)).st_size
+
+        for line in docker_lines:
             yield f"event: log\ndata: {json.dumps({'line': line}, ensure_ascii=False)}\n\n"
-        pos = (await asyncio.to_thread(log_path.stat)).st_size
+        if not docker_lines and not initial:
+            yield f"event: log\ndata: {json.dumps({'line': '（容器无日志，docker logs 不可用）'}, ensure_ascii=False)}\n\n"
     else:
-        pos = 0
+        for line in initial:
+            yield f"event: log\ndata: {json.dumps({'line': line}, ensure_ascii=False)}\n\n"
+        pos = (await asyncio.to_thread(log_path.stat)).st_size if log_path else 0
+        used_json_log = False
+        json_log_path = None
+        json_log_pos = 0
 
     last_activity = time.monotonic()
     while True:
         await asyncio.sleep(2)
 
-        # 文件被删除/轮转？
-        if not log_path.is_file():
-            yield f"event: log\ndata: {json.dumps({'line': '（日志文件已删除，等待重建）'}, ensure_ascii=False)}\n\n"
-            pos = 0
-            last_activity = time.monotonic()
+        if use_docker_fallback:
+            # docker runtime：按容器 in-container json log 的字节 offset 推增量（容器存活时新行即推）
+            if used_json_log and json_log_path is not None:
+                try:
+                    if json_log_path.is_file():
+                        cur = await asyncio.to_thread(json_log_path.stat).st_size
+                        if cur > json_log_pos:
+                            raw = await asyncio.to_thread(_read_file_range, json_log_path, json_log_pos, cur)
+                            for entry in raw.split("\n"):
+                                entry = entry.rstrip("\x00").strip()
+                                if not entry:
+                                    continue
+                                line = _docker_json_line_text(entry)
+                                if line:
+                                    yield f"event: log\ndata: {json.dumps({'line': line}, ensure_ascii=False)}\n\n"
+                            if raw.strip():
+                                json_log_pos = cur
+                                last_activity = time.monotonic()
+                        # 容器没新输出但 daemon 重启 / 容器重建导致文件消失时，
+                        # 下次重链接重读头尾 200 避免丢前文
+                    else:
+                        # 文件被 daemon 清掉 / 容器删了：标记本次轮询已经结束，
+                        # 前端会收到 heartbeat 感知到 "无新日志"
+                        yield f"event: stopped\ndata: {{\"reason\": \"jsonlog-gone\"}}\n\n"
+                        return
+                except OSError:
+                    pass
+            else:
+                # 容器首次没有 json log（docker logs 可用但 json 路径不可访问，
+                # 例如 docker-in-docker 或不同挂载点）：仅发心跳，前端下次 refresh 会拉全 200
+                pass
+
+            if time.monotonic() - last_activity >= 10:
+                yield "event: heartbeat\ndata: {}\n\n"
+                last_activity = time.monotonic()
             continue
 
-        # 读取新增内容
+        # venv runtime（launch log 持续写）：原有 inotify 风格轮询
+        if log_path is None or not log_path.is_file():
+            yield f"event: log\ndata: {json.dumps({'line': '（日志文件已删除，等待重建）'}, ensure_ascii=False)}\n\n"
+            continue
         try:
             current_size = (await asyncio.to_thread(log_path.stat)).st_size
             if current_size > pos:
@@ -650,6 +792,59 @@ async def _sse_log_stream(name: str):
             last_activity = time.monotonic()
 
 
+def docker_core_log_path(name: str) -> Path | None:
+    """查找 docker-capable 模型对应的 in-container json log 文件路径。
+
+    通过 ``docker inspect <container>`` 拿日志文件绝对路径（dockerd 持久写的
+    ``/var/lib/docker/containers/<id>/<id>-json.log``），按字节 offset 增量推 SSE 容器内日志行。
+    容器名取引擎的 ``_container_name``，与 ``docker run --detach`` 启动时的命名一致；
+    不支持 docker / daemon 不在 / 容器不存在时返回 None。
+    """
+    profile = _find_profile(name)
+    if profile is None or profile.engine not in {"vllm", "tokenspeed", "tensorrt_llm"}:
+        return None
+    if not (profile.engine_config or {}).get("docker_image"):
+        return None
+    try:
+        from modelctl.capabilities import probe
+        from modelctl.engines import get_adapter
+
+        adapter = get_adapter(profile.engine)(profile, probe())
+        container = getattr(adapter, "_container_name", None)
+        if not container:
+            return None
+        proc = subprocess.run(
+            ["docker", "inspect", "--format", "{{.LogPath}}", container],
+            capture_output=True, text=True, timeout=10, encoding="utf-8", errors="replace"
+        )
+        if proc.returncode != 0 or not (proc.stdout or "").strip():
+            return None
+        p = Path(proc.stdout.strip())
+        return p if p.is_file() else None
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[webui] docker inspect LogPath 失败（{name}）：{exc}")
+        return None
+
+
+def _docker_json_line_text(entry: str) -> str | None:
+    """单个 ``<id>-json.log`` 行（{"log":"<text>\\n","stream":"stdout","time":"..."}）提取 ``log``。
+
+    每行 JSON 独立对应 docker 一次 write syscall 的完整内容，``log`` 字段以 ``\\n`` 结尾
+    （标准输出行为），这里直接 strip 后即为前端 ``<pre>`` 显示用的行文本。
+    解析失败（docker 偶尔写半行）整行透传更可读。
+    """
+    if not entry:
+        return None
+    try:
+        obj = json.loads(entry)
+    except (json.JSONDecodeError, ValueError):
+        return entry
+    text = obj.get("log") if isinstance(obj, dict) else None
+    if not isinstance(text, str) or not text:
+        return None
+    return text.rstrip("\n")
+
+
 def _read_file_range(path: Path, start: int, end: int) -> str:
     """读取文件的 [start, end) 字节区间（在线程中调用）。"""
     with open(path, "rb") as f:
@@ -658,26 +853,77 @@ def _read_file_range(path: Path, start: int, end: int) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def _docker_log_cmd(name: str, tail: int = 200) -> list[str] | None:
+    """模型走 docker runtime 时返回 ``[docker, logs, --tail, N, <container>]`` 命令；否则 None。
+
+    容器名 = 引擎适配器的 ``_container_name``（与 start_detached 写入 launch log
+    首行 docker run 客户端 stdout 中的 ID 同行出现）。仅在 vllm/tokenspeed/tensorrt_llm
+    三个 docker-capable 引擎 + docker_image 已配时返回；venv 分支返 None。
+    """
+    profile = _find_profile(name)
+    if profile is None or profile.engine not in {"vllm", "tokenspeed", "tensorrt_llm"}:
+        return None
+    if not (profile.engine_config or {}).get("docker_image"):
+        return None
+    try:
+        from modelctl.capabilities import probe
+        from modelctl.engines import get_adapter
+
+        adapter = get_adapter(profile.engine)(profile, probe())
+        container = getattr(adapter, "_container_name", None)
+        if not container:
+            return None
+        return ["docker", "logs", "--tail", str(tail), container]
+    except Exception as exc:  # noqa: BLE001 —— 构造命令失败不回退，记 debug 即可
+        logger.debug(f"[webui] 构造 docker logs 命令失败（{name}）：{exc}")
+        return None
+
+
+def _read_docker_logs(name: str, tail: int = 200) -> list[str]:
+    """按需 ``docker logs --tail <N> <container>``；任何异常 / 命令不可用返回 []。"""
+    cmd = _docker_log_cmd(name, tail)
+    if not cmd:
+        return []
+    try:
+        import subprocess
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=30, encoding="utf-8", errors="replace")
+        merged = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")
+        return merged.strip().split("\n") if merged.strip() else []
+    except Exception as exc:  # noqa: BLE001 —— 读取失败静默（fallback 口）
+        logger.debug(f"[webui] docker logs 读取失败（忽略）：{exc}")
+        return []
+
+
+def _tail_from_launch_log(name: str, lines: int = 200) -> list[str]:
+    """读 launch log 尾部；文件不存在或内容空返回 []。"""
+    from modelctl.core.process import launch_log, tail_file
+
+    lp = launch_log(name)
+    if lp is None:
+        return []
+    text = tail_file(lp, lines)
+    if not text.strip():
+        return []
+    return text.strip().split("\n")
+
+
 @router.get("/{name}/yaml")
 async def get_model_yaml(name: str, _: None = Depends(require_auth)):
-    """GET /admin/api/models/{name}/yaml — 读取原始 YAML 文本。"""
-    from modelctl.core.envfile import PROJECT_ROOT
+    """GET /admin/api/models/{name}/yaml — 读取原始 YAML 文本。
 
-    models_dir = PROJECT_ROOT / "models"
-    # 优先根目录，其次递归
-    candidates = [
-        models_dir / f"{name}.yaml",
-        *[p for p in sorted(models_dir.rglob(f"{name}.yaml"))],
-    ]
-    for path in candidates:
-        if path.is_file():
-            content = await asyncio.to_thread(path.read_text, encoding="utf-8")
-            return {"content": content, "path": str(path)}
-
-    return JSONResponse(
-        status_code=404,
-        content={"error": {"code": "not_found", "message": f"模型 {name} 的 YAML 文件未找到"}},
-    )
+    不能用 ``{name}.yaml`` 直接拼路径：YAML 内 name 常自动推导为 ``{group}-{engine}``
+    （如 qwen2.5-0.5b-vllm），与磁盘文件 stem（qwen2.5-0.5b）分叉，rglob 匹配不到会 404。
+    统一走 _find_profile 拿到 Profile.path 再读，与其它 /models 端点口径一致。
+    """
+    profile = await asyncio.to_thread(_find_profile, name)
+    if profile is None or profile.path is None or not profile.path.is_file():
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "not_found", "message": f"模型 {name} 的 YAML 文件未找到"}},
+        )
+    content = await asyncio.to_thread(profile.path.read_text, encoding="utf-8")
+    return {"content": content, "path": str(profile.path)}
 
 
 @router.post("/{name}/ui/start")
