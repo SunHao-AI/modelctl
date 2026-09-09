@@ -329,6 +329,12 @@ class LimitGuard:
         固定 60s 窗口与 RPM 相同（见 `check_rpm` 说明），但独立计数器。
         预占后再调 `add_tpm_actual(user_id, est, actual, now, request_id)`
         结算。
+
+        **est=0 也登记 pending**：即使预占量为 0，`request_id` 仍要登记到
+        `_tpm_pending`，让结算阶段的 `add_tpm_actual` 能命中并移除——否则
+        单请求窗口不会被"结算"，后续请求的溢出检查（`used + est > limit`）
+        会**永远读到 0 而误放行**。历史 bug 场景：tpm_limit=N 的小额度账号
+        对短 prompt（est 四舍五入到 0）连发多次本应限流，实际全部通过。
         """
         now = self._mono() if now is None else float(now)
         if is_unlimited(limit):
@@ -353,6 +359,8 @@ class LimitGuard:
                     retry_after=retry,
                 )
             self._tpm_used[user_id] = (window_start, used + int(est_total))
+            # est=0 也登记 pending：让 add_tpm_actual 能完成"预占→实际"配对，
+            # 及时清掉 pending，避免后续请求窗口 slot 泄漏（见 docstring）
             self._tpm_pending[(user_id, request_id)] = int(est_total)
 
     def add_tpm_actual(
