@@ -159,6 +159,21 @@ def classify_pull_error(text: str) -> str:
     return "unknown"
 
 
+def daemon_is_wsl2() -> bool:
+    """docker daemon 是否跑在 WSL2 内核（Docker Desktop WSL2 backend）。
+
+    判定口径与 vLLM 自身 `in_wsl()` 一致：`docker info` 的 KernelVersion 含 microsoft
+    （典型 `6.18.33.2-microsoft-standard-WSL2`）。探测失败（daemon 未起 / 无 docker）
+    返回 False，调用方据此按非 WSL2 处理。
+    """
+    try:
+        out = subprocess.run(["docker", "info", "--format", "{{.KernelVersion}}"],
+                             capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return out.returncode == 0 and "microsoft" in (out.stdout or "").lower()
+
+
 def image_present(image: str) -> bool:
     """本地是否已有该镜像（不联网，`docker image inspect` 纯查本地元数据）。"""
     try:

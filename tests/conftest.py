@@ -65,6 +65,19 @@ def isolated_runtime_dirs(tmp_path, monkeypatch):
             monkeypatch.delenv(key, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _default_non_wsl2_daemon(monkeypatch):
+    """默认把 docker daemon 判定为**非 WSL2**，使 build_command 结果与本机环境无关。
+
+    vllm docker 分支会调 `docker_setup.daemon_is_wsl2()` 决定是否注入
+    `VLLM_WSL2_ENABLE_PIN_MEMORY=1`。不打桩的话，测试会真跑 `docker info`，在装了
+    Docker Desktop（WSL2 backend）的开发机上得到 True、在 CI（Linux 无 docker）得到
+    False——同一断言两种结果。需要 WSL2 分支的用例在自己的用例内 monkeypatch 覆盖
+    （autouse fixture 先于用例执行）。
+    """
+    monkeypatch.setattr("modelctl.core.docker_setup.daemon_is_wsl2", lambda: False)
+
+
 @pytest.fixture()
 def dead_pid() -> int:
     """一个确定已死的 PID：派生短命子进程、退出后释放本端全部句柄，并轮询确认探测为死。

@@ -407,9 +407,19 @@ PATTERNS: dict[str, list[tuple[re.Pattern, str, float, float]]] = {
 
 # 每 tick 读取的日志尾部窗口行数
 _TAIL_WINDOW = 400
-# loading 段静默（无*新增*进展，含日志尚未生成）超过该秒数 → 兜底文案（本次事故缺失的那句）
+# loading 段静默兜底阈值（一级 = 该秒数；二级/三级按倍率递进）。测试注入 fallback_sec
+# 时按同一倍率整体缩放，避免单测真等数分钟。
 _LOADING_FALLBACK_SEC = 120
-_LOADING_FALLBACK_LABEL = "引擎初始化中（首次冷启动在 docker/WSL2 上可达 15 分钟）"
+# 分级兜底文案（(相对一级阈值的倍率, 文案)，按倍率升序）：静默时长跨到更高一级即发
+# 更深的提示，同级不重发。docker 判活上限 1800s，故最高一级（10×=1200s）在超时前给出
+# "异常缓慢、疑似卡死、请查日志"的终态提示，而非让用户对着静止条纹干等。
+_LOADING_FALLBACK_STEPS: tuple[tuple[float, str], ...] = (
+    (1.0, "引擎初始化中（首次冷启动在 docker/WSL2 上可达 15 分钟）"),
+    (5.0, "仍在初始化（GPU 上下文/内核预热较慢，已超 10 分钟）——请留意容器日志是否报错"),
+    (10.0, "初始化异常缓慢（已超 20 分钟）：疑似显存不足或 CUDA 初始化卡死，请查看容器日志排错"),
+)
+# 一级文案（向后兼容：部分测试/引用按此常量断言）
+_LOADING_FALLBACK_LABEL = _LOADING_FALLBACK_STEPS[0][1]
 
 
 def match_progress(engine: str, line: str) -> tuple[str, float] | None:
@@ -445,15 +455,18 @@ class LoadingWatcher:
         self._engine = engine
         self._log = log_path
         self._interval = interval
-        # 兜底阈值可注入：生产用 120s，单测无需真等两分钟
+        # 兜底阈值可注入：生产用 120s（一级），单测无需真等两分钟。分级文案按同一
+        # 注入值整体缩放（各级 = 注入值 × 倍率），保证单测也能验到递进语义。
         self._fallback_sec = _LOADING_FALLBACK_SEC if fallback_sec is None else fallback_sec
+        self._steps = [(mult * self._fallback_sec, label) for mult, label in _LOADING_FALLBACK_STEPS]
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._seen = 0            # 已消费的 tail 窗口行数
         self._last_pct = 0.0
         # 兜底语义「无*新增*进展」的计时基准：start/每次有效进展时刷新
         self._last_advance_ts = 0.0
-        self._fallback_sent = False  # 同一段静默只发一次；新进展后重置、可再发
+        # 已发兜底文案的级别下标（-1 = 未发）；新进展后重置为 -1，可重新逐级递进
+        self._fallback_level = -1
 
     def start(self) -> None:
         if self._thread is not None:  # 幂等：重复 start 不起第二个线程
@@ -501,12 +514,19 @@ class LoadingWatcher:
                         self._last_pct = hit[1]
                         self._tr.progress("loading", hit[0], pct=hit[1])
                         advanced = True
-        # spec §4.2「超阈值无进展」= 无*新增*进展：静默（含日志未生成）超 fallback_sec
-        # → 兜底文案（pct=None，前端条纹动画）。同一段静默只发一次，出现新进展后重置可再发。
+        # spec §4.2「超阈值无进展」= 无*新增*进展：静默（含日志未生成）超一级阈值
+        # → 兜底文案（pct=None，前端条纹动画）。分级递进：静默时长跨到更高一级即发
+        # 更深提示，同级不重发；出现新进展后重置级别，可再次逐级递进。
         now = time.monotonic()
         if advanced:
             self._last_advance_ts = now
-            self._fallback_sent = False
-        elif not self._fallback_sent and (now - self._last_advance_ts) > self._fallback_sec:
-            self._fallback_sent = True
-            self._tr.progress("loading", _LOADING_FALLBACK_LABEL, pct=None)
+            self._fallback_level = -1
+        else:
+            stalled = now - self._last_advance_ts
+            target = -1
+            for idx, (threshold, _label) in enumerate(self._steps):
+                if stalled > threshold:
+                    target = idx
+            if target > self._fallback_level:
+                self._fallback_level = target
+                self._tr.progress("loading", self._steps[target][1], pct=None)

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 from pathlib import Path
 
@@ -29,6 +30,28 @@ from modelctl.engines.base import EngineAdapter, RequirementError
 
 # per-request metrics flag 所需最低 vLLM 版本（2026-08 实测值；>= 该版本 --enable-per-request-metrics 可用）
 MIN_VLLM_PER_REQUEST = (0, 13, 0)
+
+#: docker 缓存卷：volume 名后缀 → 容器内目录（`vllm/vllm-openai` 以 root 运行，HOME=/root）。
+#: cache 卷覆盖 torch.compile 产物（`VLLM_CACHE_ROOT/torch_compile_cache`）与 HF assets
+#: （`VLLM_ASSETS_CACHE` 不随 `VLLM_CACHE_ROOT` 联动，故必须挂父目录而非靠 env 重定向）；
+#: triton 卷覆盖内核编译缓存（默认 `~/.triton/cache`）——这两项是本环境最慢的一段。
+_ENGINE_CACHE_DIRS: dict[str, str] = {
+    "cache": "/root/.cache/vllm",
+    "triton": "/root/.triton",
+}
+
+#: docker named volume 名字符集（Docker 要求 `[a-zA-Z0-9][a-zA-Z0-9_.-]*`）。
+_VOL_NAME_BAD = re.compile(r"[^a-zA-Z0-9_.-]")
+
+
+def _cache_volume_name(profile_name: str) -> str:
+    """profile.name → 合法 volume 名片段（非法字符转 `-`，去首尾连接符）。
+
+    volume 名不允许以 `.`/`-` 开头，而 profile.name 理论上可含奇异字符；不 sanitize 会让
+    `docker run` 以 "volume name is invalid" 直接失败，容器根本起不来。
+    """
+    cleaned = _VOL_NAME_BAD.sub("-", (profile_name or "").strip())
+    return cleaned.strip("-.") or "default"
 
 
 class VllmAdapter(EngineAdapter):
@@ -239,11 +262,16 @@ class VllmAdapter(EngineAdapter):
         #   start_detached 只把 env 注入 docker CLI 宿主进程（Popen），不会透传进容器。
         # TZ 同理，必须显式带上，否则容器内 vLLM 日志是 UTC。
         env_args = self.docker_timezone_args()
+        wsl_pin = self._wsl2_pin_memory_args()
+        if wsl_pin:
+            env_args += wsl_pin
         for k, v in (cfg.get("docker_env") or {}).items():
             env_args += ["-e", f"{k}={v}"]
-        if env_args:
-            ipc_idx = cmd.index("--ipc=host")
-            cmd[ipc_idx:ipc_idx] = env_args
+        # 缓存卷（named volume）持久化编译/assets 缓存，加速二次启动。与 env_args 同段插在
+        # --ipc=host 之前（docker 要求所有选项先于镜像名）。
+        insert = env_args + self._cache_volume_args()
+        ipc_idx = cmd.index("--ipc=host")
+        cmd[ipc_idx:ipc_idx] = insert
         env = {"HF_HOME": os.environ["HF_HOME"]} if os.environ.get("HF_HOME") else {}
         if gpus:
             env.update(self.cuda_visible_devices(gpus))
@@ -360,6 +388,46 @@ class VllmAdapter(EngineAdapter):
             tp = int(self.profile.engine_config.get("tensor_parallel_size", 1))
             seq = list(range(int(self.caps.gpu_count or tp)))
         return '"device=' + ",".join(str(g) for g in seq) + '"'
+
+    def _wsl2_pin_memory_args(self) -> list[str]:
+        """WSL2 上的 vLLM 必须开 pinned memory，否则 v1 引擎硬失败退出。
+
+        vLLM 在 WSL2 默认 `VLLM_WSL2_ENABLE_PIN_MEMORY=0`，使 `is_uva_available()`
+        返回 False，而 v1 引擎 `RequestState` 用 UVA 张量存 all_token_ids，直接抛
+        `RuntimeError: UVA is not available` → EngineCore 起不来、容器 exit 1
+        （实测 vllm/vllm-openai:latest + WSL2 内核 6.18 复现）。
+
+        因此探测到 daemon 跑在 WSL2 内核时自动注入 `-e VLLM_WSL2_ENABLE_PIN_MEMORY=1`。
+        放在 yaml docker_env 之前，用户仍可显式覆盖。探测结果在 `docker_setup` 内缓存，
+        避免每次构建命令都多跑一次 `docker info`。
+        """
+        return ["-e", "VLLM_WSL2_ENABLE_PIN_MEMORY=1"] if docker_setup.daemon_is_wsl2() else []
+
+    def _cache_volume_args(self) -> list[str]:
+        """docker 分支的引擎缓存卷挂载参数（named volume，加速二次启动）。
+
+        vLLM 启动会往 `~/.cache/vllm`（编译产物、assets）、`~/.config/vllm`（config/
+        tokenizer）、`~/.triton`（Triton 内核缓存）写缓存。`stop` 走 `docker rm -f`
+        销毁容器可写层，这些缓存每次全丢，下次启动重新生成（torch/Triton 编译可达分钟级）。
+        把三个目录挂成 **named volume**（存于 Docker Desktop 的 WSL2 ext4 虚拟磁盘），
+        跨容器生命周期持久化，二次启动直接复用。
+
+        为什么 named volume 而非 bind mount：Windows 宿主路径 bind 进 Linux 容器走
+        9p/virtiofs，编译缓存这种小文件随机读写会慢到可能反超"不挂缓存"；named volume
+        落在 ext4 里 IO 接近原生。volume 名带容器名（引擎后缀，与 `docker ps` 一致），
+        多 profile / 多引擎互不串台。
+
+        直接挂镜像内真实默认目录（`vllm/vllm-openai` 以 root 运行，HOME=/root），不用
+        env 改路径：实测 `VLLM_ASSETS_CACHE` 不随 `VLLM_CACHE_ROOT` 联动（仍写
+        `/root/.cache/vllm/assets`），靠 env 重定向会漏掉 assets 子目录；直接挂父目录
+        `/root/.cache/vllm` 则天然覆盖 assets，也更少出错的环节。空 named volume 首次
+        挂载时 Docker 会把镜像内该目录既有内容拷进卷，不丢镜像预置文件。
+        """
+        vol = _cache_volume_name(self._container_name)
+        args: list[str] = []
+        for sub, container_dir in _ENGINE_CACHE_DIRS.items():
+            args += ["-v", f"modelctl-{vol}-{sub}:{container_dir}"]
+        return args
 
     def _venv_env(self, gpus: list[int] | None) -> dict[str, str]:
         """现状 env 注入段（HF_HOME / VIRTUAL_ENV / PATH）抽取为独立方法。"""

@@ -648,6 +648,101 @@ def test_build_command_docker_always_carries_tz(tmp_path, monkeypatch):
     assert cmd[cmd.index("-e") + 1] == "TZ=Asia/Shanghai"
 
 
+def test_build_command_docker_wsl2_daemon_injects_pin_memory(tmp_path, monkeypatch):
+    """daemon 跑在 WSL2 内核 → 自动注入 VLLM_WSL2_ENABLE_PIN_MEMORY=1。
+
+    否则 vLLM v1 引擎 `RequestState` 建 UVA 张量时抛 `RuntimeError: UVA is not
+    available`，EngineCore 起不来、容器 exit 1（实测 vllm/vllm-openai:latest）。
+    """
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    monkeypatch.setattr("modelctl.core.docker_setup.daemon_is_wsl2", lambda: True)
+    model_dir = tmp_path / "m" / "Qwen2.5-0.5B-Instruct"
+    model_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: vllm\nport: 8107\nvllm:\n"
+        f"  model: {model_dir}\n  docker_image: vllm/vllm-openai:latest\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    cmd, _env = a.build_command()
+    env_pairs = [cmd[i + 1] for i, v in enumerate(cmd) if v == "-e"]
+    assert "VLLM_WSL2_ENABLE_PIN_MEMORY=1" in env_pairs
+    # 只进容器，不进 docker CLI 宿主进程 env
+    assert "VLLM_WSL2_ENABLE_PIN_MEMORY" not in _env
+
+
+def test_build_command_docker_non_wsl2_no_pin_memory(tmp_path, monkeypatch):
+    """非 WSL2 daemon（conftest 默认打桩）→ 不注入该变量，避免污染 Linux 部署机。"""
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    model_dir = tmp_path / "m" / "Qwen2.5-0.5B-Instruct"
+    model_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: vllm\nport: 8107\nvllm:\n"
+        f"  model: {model_dir}\n  docker_image: vllm/vllm-openai:latest\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    cmd, _env = a.build_command()
+    assert not any(p2.startswith("VLLM_WSL2_ENABLE_PIN_MEMORY")
+                   for p2 in [cmd[i + 1] for i, v in enumerate(cmd) if v == "-e"])
+
+
+def test_build_command_docker_wsl2_pin_memory_before_yaml_docker_env(tmp_path, monkeypatch):
+    """自动注入排在 yaml docker_env 之前：用户显式配置能覆盖（docker 后出现的 -e 生效）。"""
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    monkeypatch.setattr("modelctl.core.docker_setup.daemon_is_wsl2", lambda: True)
+    model_dir = tmp_path / "m" / "Qwen2.5-0.5B-Instruct"
+    model_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: vllm\nport: 8107\nvllm:\n"
+        f"  model: {model_dir}\n"
+        "  docker_image: vllm/vllm-openai:latest\n"
+        "  docker_env:\n"
+        '    VLLM_WSL2_ENABLE_PIN_MEMORY: "0"\n',
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    cmd, _env = a.build_command()
+    env_pairs = [cmd[i + 1] for i, v in enumerate(cmd) if v == "-e"]
+    hits = [i for i, kv in enumerate(env_pairs) if kv.startswith("VLLM_WSL2_ENABLE_PIN_MEMORY")]
+    assert len(hits) == 2 and env_pairs[hits[-1]] == "VLLM_WSL2_ENABLE_PIN_MEMORY=0"
+
+
+def test_build_command_docker_mounts_cache_volumes(tmp_path, monkeypatch):
+    """docker 分支默认挂 named volume 到 vLLM/Triton 缓存目录，加速二次启动。
+
+    stop 走 `docker rm -f` 销毁可写层，不挂卷则 torch/Triton 编译缓存每次全丢。
+    volume 名带 profile 名（sanitize 后），多 profile 互不串台。
+    """
+    monkeypatch.delenv("MODELCTL_GPUS", raising=False)
+    model_dir = tmp_path / "m" / "Qwen2.5-0.5B-Instruct"
+    model_dir.mkdir(parents=True)
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: vllm\nport: 8107\nvllm:\n"
+        f"  model: {model_dir}\n  docker_image: vllm/vllm-openai:latest\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    cmd, _env = a.build_command()
+    mounts = [cmd[i + 1] for i, v in enumerate(cmd) if v == "-v"]
+    # 模型挂载仍在（只读），且是第一个 -v
+    assert mounts[0] == f"{model_dir.parent.as_posix()}:/models:ro"
+    # 两个缓存卷：named volume（源不以 / 或 . 开头）挂到镜像内默认缓存目录
+    # volume 名用容器名（profile.name + -vllm 后缀）
+    assert "modelctl-q-vllm-cache:/root/.cache/vllm" in mounts
+    assert "modelctl-q-vllm-triton:/root/.triton" in mounts
+
+
+def test_cache_volume_name_sanitizes_illegal_chars():
+    """profile.name 含非法字符时 volume 名仍合法（Docker 只允许 [a-zA-Z0-9_.-]）。"""
+    from modelctl.engines.vllm import _cache_volume_name
+
+    assert _cache_volume_name("qwen2.5-0.5b-vllm") == "qwen2.5-0.5b-vllm"
+    assert _cache_volume_name("bad name/中文") == "bad-name"
+    assert _cache_volume_name("") == "default"
+    assert _cache_volume_name("...") == "default"
+
+
 def test_build_command_docker_relative_model_rejected(tmp_path, monkeypatch):
     """docker 路径 + HF repo id（相对路径且非目录）→ RequirementError。"""
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)

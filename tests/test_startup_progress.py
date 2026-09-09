@@ -456,6 +456,38 @@ def test_loading_watcher_fallback_when_log_never_created(tmp_path):
     assert hits and "冷启动" in hits[0].label and hits[0].stage == "loading"
 
 
+def test_loading_watcher_fallback_escalates_tiers(tmp_path):
+    """静默持续跨越各级阈值 → 兜底文案逐级加深，且同级不重发。
+
+    fallback_sec=0.1 时三级阈值分别 0.1 / 0.5 / 1.0s（倍率 1×/5×/10×）。
+    """
+    import time
+
+    from modelctl.core.startup_progress import LoadingWatcher, StartupTiming, StartupTracker
+
+    log = tmp_path / "launch-q.log"
+    log.write_text("no pattern hit here\n", encoding="utf-8")
+    events = []
+    tr = StartupTracker("q", "vllm", "docker", on_progress=events.append,
+                        timing=StartupTiming(path=tmp_path / "t.json"),
+                        snapshot_path=tmp_path / "s.json")
+    tr.begin("loading", "加载模型")
+    w = LoadingWatcher(tr, "vllm", log, interval=0.05, fallback_sec=0.1)
+    w.start()
+    try:
+        deadline = time.time() + 3
+        while time.time() < deadline and not any("异常缓慢" in e.label for e in events):
+            time.sleep(0.05)
+    finally:
+        w.stop()
+
+    labels = [e.label for e in events if e.pct is None]
+    assert any("冷启动" in x for x in labels), labels           # 一级
+    assert any("仍在初始化" in x for x in labels), labels        # 二级
+    assert any("异常缓慢" in x for x in labels), labels          # 三级
+    assert len(labels) == len(set(labels)), labels              # 同级不重发
+
+
 def test_loading_watcher_fallback_again_after_new_progress(tmp_path):
     # 评审 finding②：「120s 无进展」= 无*新增*进展。vLLM 典型形态是 banner 秒出
     # （命中一次 0.05）后 shard 加载静默十几分钟——兜底不能被一次性 _last_pct==0
