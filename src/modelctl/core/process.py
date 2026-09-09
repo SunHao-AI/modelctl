@@ -82,7 +82,13 @@ def kill_pid_tree(pid: int) -> None:
 
 
 def spawn_log_tee(name: str, command: list[str]) -> int | None:
-    """后台续写引擎日志到 launch log（append），PID 记 `<name>.log-tee.pid`。
+    """后台启动**日志 tee 保活 supervisor**，把容器输出续写（append）到 launch log；
+    PID 记 `<name>.log-tee.pid`。
+
+    相比一次性 `docker logs -f` 子进程，supervisor 在 docker logs 异常退出（daemon 短暂
+    不可达 / CLI 崩溃）且**容器仍存活**时，自动以 `--tail 0` 重连续尾——保证
+    LoadingWatcher 的引擎模式表进度、WebUI 日志 `<pre>`、早退摘录始终读到真实容器输出，
+    否则进度会永远卡在"加载模型"（webui 只剩 120s 兜底文案，尾部日志也断流）。
 
     先清理残留 tee（双 tee 会重复写同一 launch log）。launch log 不存在时退回
     `launch-<name>.log` 直接建文件（docker 路径下 start_detached 已建，正常不触发）。
@@ -98,16 +104,113 @@ def spawn_log_tee(name: str, command: list[str]) -> int | None:
             kill_pid_tree(old)
         tp.unlink(missing_ok=True)
     path = launch_log(name) or (log_dir() / f"launch-{name}.log")
+    # docker logs 命令末尾固定为容器名：["docker","logs","-f","--tail","all",<container>]
+    container = command[-1] if command else ""
+    if not container:
+        logger.warning(f"引擎日志 tee 命令不含容器名（{command!r}），跳过")
+        return None
+    cmd, env = _log_tee_supervisor_cmd(container, path)
     try:
-        # "ab"：追加，保留 start_detached 写入的容器 ID 首行；二进制避免编码耦合
-        fp = open(path, "ab")
-        proc = subprocess.Popen(command, stdout=fp, stderr=subprocess.STDOUT,
-                                stdin=subprocess.DEVNULL, start_new_session=True)
+        # supervisor 自身 stdout/stderr 进 devnull：容器日志由其内部 docker logs 续写，
+        # supervisor 只在重连时往 launch log 写一行可观测痕迹。
+        proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                                start_new_session=True)
     except (OSError, subprocess.SubprocessError) as exc:
         logger.warning(f"引擎日志 tee 启动失败（工作日志将无 docker 容器输出）：{exc}")
         return None
     tp.write_text(str(proc.pid), encoding="utf-8")
     return proc.pid
+
+
+def _log_tee_supervisor_cmd(container: str, launch_log_path: Path) -> tuple[list[str], dict[str, str]]:
+    """构造日志 tee 保活 supervisor 子进程的命令与环境。
+
+    以 `python -m modelctl.core.process --log-tee <container> <launch-log>` 运行，让
+    supervisor 循环重连；PYTHONPATH 注入主项目 src/，保证子进程能 import modelctl.core.*
+    （与 all_service._detached_script 同款口径）。
+    """
+    src = str(Path(__file__).resolve().parents[2])
+    env = os.environ.copy()
+    env["PYTHONPATH"] = src + os.pathsep + env.get("PYTHONPATH", "")
+    cmd = [sys.executable, "-m", "modelctl.core.process",
+           "--log-tee", container, str(launch_log_path)]
+    return cmd, env
+
+
+# docker logs -f 断裂后的重连退避：固定 3s 起步、指数退避、上限 30s，避免 daemon 长时间
+# 不可达时在 launch log 里高频刷断连痕迹。
+_LOG_TEE_RETRY_SEC = 3.0
+_LOG_TEE_RETRY_MAX = 30.0
+
+
+def _log_tee_supervisor(container: str, log_path: str,
+                        retry_sec: float = _LOG_TEE_RETRY_SEC) -> None:
+    """日志 tee 保活主循环（供 `-m modelctl.core.process --log-tee` 子进程运行）。
+
+    循环执行 `docker logs -f --tail <all|0> <container>` 续写 launch log（append）：
+
+    - **首轮 `--tail all`**：重放容器已有全部历史（含 tee 挂上前数百毫秒的 banner 行，
+      否则 loading 模式表锚点丢失）；
+    - **重连轮 `--tail 0`**：docker logs 意外退出且容器仍存活时续写，只跟新行——全量
+      重放会让 launch log 无限膨胀、并让 LoadingWatcher 的 tail 窗口被历史行占满漏掉
+      后续真实进度行；
+    - **退出条件**：`docker_container_alive` 返回 False（容器已删/已退出，引擎结束无需
+      续写），或被 `kill_log_tee` 经 `kill_pid_tree` 终止（stop / 换容器场景）——后者由
+      kill 投递信号、循环自然消亡，本函数无需感知。
+
+    本函数只做续写与重连，绝不把失败抛给上层：单轮失败退避后继续，容器死透则静默退出。
+    """
+    tail = "all"
+    delay = retry_sec
+    reconnect = 0
+    while docker_container_alive(container):
+        cmd = ["docker", "logs", "-f", "--tail", tail, container]
+        try:
+            with open(log_path, "ab") as fp:
+                spawn = subprocess.Popen(cmd, stdout=fp, stderr=subprocess.STDOUT,
+                                         stdin=subprocess.DEVNULL, start_new_session=True)
+                spawn.wait()  # `-f` 阻塞：容器删/退出或 CLI 异常时才返回
+        except (OSError, subprocess.SubprocessError):
+            # docker CLI 不可用 / 超时等；若容器仍活着则退避重连，否则静默退出
+            if not docker_container_alive(container):
+                return
+            reconnect += 1
+            _write_tee_reconnect(log_path, reconnect)
+            time.sleep(min(delay, _LOG_TEE_RETRY_MAX))
+            delay = min(delay * 2, _LOG_TEE_RETRY_MAX)
+            continue
+        # docker logs 正常退出（容器被删 / 引擎进程退出）——容器死透则无需再续写
+        if not docker_container_alive(container):
+            return
+        reconnect += 1
+        _write_tee_reconnect(log_path, reconnect)
+        time.sleep(min(delay, _LOG_TEE_RETRY_MAX))
+        delay = min(delay * 2, _LOG_TEE_RETRY_MAX)
+        tail = "0"  # 已重放全量历史，此后只跟新行，避免重连反复重放膨胀 launch log
+
+
+def _write_tee_reconnect(log_path: str, count: int) -> None:
+    """在 launch log 里追加一行重连痕迹，方便肉眼/日志排查 tee 断流次数。"""
+    try:
+        with open(log_path, "ab") as fp:
+            fp.write(f"\n[docker-log-tee] docker logs 断裂，自动重连第 {count} 次...\n".encode("utf-8", errors="replace"))
+    except OSError:
+        pass
+
+
+def _main(argv: list[str] | None = None) -> int:
+    """`python -m modelctl.core.process` 子进程入口：仅支持 --log-tee 保活模式。"""
+    args = list(sys.argv[1:] if argv is None else argv)
+    if len(args) == 3 and args[0] == "--log-tee":
+        _log_tee_supervisor(args[1], args[2])
+        return 0
+    logger.warning(f"process.__main__ 未知参数：{args!r}（仅支持 --log-tee <container> <launch-log>）")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
 
 
 def kill_log_tee(name: str) -> None:
