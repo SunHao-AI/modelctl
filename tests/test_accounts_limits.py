@@ -436,8 +436,8 @@ def test_reset_budget_if_needed_persists_to_store(guard, clock) -> None:
     calls: list[tuple] = []
 
     class _FakeStore:
-        def reset_budget(self, user_id: int, now: float) -> None:
-            calls.append((user_id, now))
+        def reset_budget(self, user_id: int, *, next_reset_at: float, now: float) -> None:
+            calls.append((user_id, next_reset_at, now))
 
     store = _FakeStore()
 
@@ -455,17 +455,17 @@ def test_reset_budget_if_needed_persists_to_store(guard, clock) -> None:
 
     # 到期：内存消费归零、时钟推进 period、store 写一次
     guard.reset_budget_if_needed(p, now=2000.0, store=store, user_id=7)
-    assert calls == [(7, 2000.0)]
+    assert calls == [(7, 2600.0, 2000.0)]
     assert p.budget_consumed == 0
     assert p.budget_reset_at == pytest.approx(2600.0)
 
     # 同一 period 内未到期（`reset_at` 已推进到 2600）：不重复触发
     guard.reset_budget_if_needed(p, now=2599.0, store=store, user_id=7)
-    assert calls == [(7, 2000.0)]
+    assert calls == [(7, 2600.0, 2000.0)]
 
     # 下一个重置时（now>=2600）又触发一次
     guard.reset_budget_if_needed(p, now=2600.0, store=store, user_id=7)
-    assert calls == [(7, 2000.0), (7, 2600.0)]
+    assert calls == [(7, 2600.0, 2000.0), (7, 3200.0, 2600.0)]
     assert p.budget_reset_at == pytest.approx(3200.0)
 
 

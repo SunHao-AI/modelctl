@@ -228,12 +228,13 @@ class LimitGuard:
         if now < policy.budget_reset_at:
             return
         # 到期 → 消费清零 + 重置点推进一个 period
+        new_reset_at = float(policy.budget_reset_at) + float(policy.budget_period)
         policy.budget_consumed = 0
-        policy.budget_reset_at = float(policy.budget_reset_at) + float(policy.budget_period)
-        if store is not None:
-            # 持久化（`user_id` 若无则落库时侧回）
-            if user_id is not None:
-                store.reset_budget(user_id, now=now)
+        policy.budget_reset_at = new_reset_at
+        if store is not None and user_id is not None:
+            # store.reset_budget(user_id, *, next_reset_at, now) — 持久化口径
+            # 由 limits 决定（本模块已知道 period），store 不再重复推导。
+            store.reset_budget(user_id, next_reset_at=new_reset_at, now=now)
 
     # ------------------------------------------------------------------
     # 并发

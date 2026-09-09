@@ -519,12 +519,21 @@ class AccountsStore:
             return self._row_to_session(conn.execute(
                 _SESSION_SELECT + " WHERE id=?", (int(cur.lastrowid),)).fetchone())
 
-    def bump_session(self, session_id: int, *, now: float) -> None:
-        """消息落库后递增计数并刷新活跃时刻（与 add_message 成对调用）。"""
+    def bump_session(self, session_id: int, *, count: int = 1, now: float) -> None:
+        """消息落库后递增计数并刷新活跃时刻（与 add_message 成对调用）。
+
+        `count` 允许一次批量（例如 settle 同时落 user+assistant 两行消息时
+        调 `bump_session(sid, count=2, ...)`），单条 UPDATE 保持 session
+        `message_count` 与 `messages` 表行数原子一致，避免两次 +1 之间被并发
+        settle 插行造成计数-消息错位。
+        """
+        n = max(0, int(count))
+        if n == 0:
+            return
         with self._lock:
             self._db().execute(
-                "UPDATE sessions SET message_count = message_count + 1, last_active_at=? WHERE id=?",
-                (now, session_id))
+                "UPDATE sessions SET message_count = message_count + ?, last_active_at=? WHERE id=?",
+                (n, now, session_id))
             self._db().commit()
 
     def add_message(self, *, session_id: int, role: str, content: str, now: float,
