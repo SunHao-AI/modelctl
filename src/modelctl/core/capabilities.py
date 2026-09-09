@@ -24,19 +24,46 @@ from modelctl.core.envs import MANAGED_ENGINES, engine_bin, has_env
 ENGINE_BINARIES = ["ollama", "vllm", "sglang", "unsloth", "llamacpp",
                    "aphrodite", "lmdeploy", "tensorrt_llm", "tokenspeed"]
 
+# docker 可达性判定文案（与双 runtime 分流一致）：
+# _resolve_runtime 已把 docker_image 优先级提升到 venv 前（2026-09 反转），
+# probe 的"可用/不可用"列必须按 docker ∨ venv 计算，否则 yaml 配了 docker_image 的
+# 模型（如 qwen3.8-flash-next-vllm）会被误判为"必须先 modelctl env setup <engine>"
+ENGINE_PROBE_HINT_BOTH_SET = (
+    "（yaml docker_image 非空即走容器绕过 venv；"
+    "venv 兜底路径：modelctl env setup <engine>）"
+)
+ENGINE_PROBE_HINT_VENV_ONLY = (
+    "（docker 仅 venv：modelctl env setup <engine>）"
+)
+
 ENGINE_INSTALL_HINTS = {
     "ollama": "，建议执行：curl -fsSL https://ollama.com/install.sh | sh",
-    # 托管引擎统一走 modelctl env setup 创建引擎专用 venv，避免在主环境引入互斥依赖
-    "vllm": "，建议执行：modelctl env setup vllm",
+    # 托管引擎统一走 modelctl env setup 创建引擎专用 venv，避免在主环境引入互斥依赖；
+    # 装饰分隔——dashboard 真正要看的"可达性"由 _cmd_probe 按 docker ∨ venv 计算
+    "vllm": "，venv 兜底路径：modelctl env setup vllm",
     "sglang": "，建议执行：modelctl env setup sglang（与 vllm 依赖互斥，需独立 venv）",
     # 无头推理（studio run）依赖官方安装器搭建的运行时，仅 pip install 不够
     "unsloth": "，建议执行：curl -fsSL https://unsloth.ai/install.sh | sh",
     "aphrodite": "，建议执行：modelctl env setup aphrodite",
     "lmdeploy": "，建议执行：modelctl env setup lmdeploy",
-    "tensorrt_llm": "，建议执行：modelctl env setup tensorrt_llm",
-    "tokenspeed": "，建议执行：modelctl env setup tokenspeed",
+    "tensorrt_llm": "，venv 兜底路径：modelctl env setup tensorrt_llm",
+    "tokenspeed": "，venv 兜底路径：modelctl env setup tokenspeed",
     # llamacpp 提示较长（源码下载 + 编译命令），由 cli._cmd_probe 单独多行输出
 }
+
+
+def docker_ready() -> bool:
+    """docker runtime 是否就绪（path-level 探针，绝不落子进程）。
+
+    判定 = `shutil.which("docker")` 与 `shutil.which("nvidia-smi")` 均在 PATH。
+    语义与 `docker_setup.path_level_missing()` 互为补；调用方（`probe` 的
+    `_cmd_probe` 可达性列、`admin_envs` 的 `runtime_docker_ready` 字段）用它
+    决定"有 docker_image 的 yaml 是否需要先 `modelctl env setup <engine>`"。
+
+    daemon 是否真启动、nvidia runtime 是否注册等更细的诊断走
+    `docker_setup.diagnose()`（含子进程，仅 CLI 展示用，不放进可达性判定）。
+    """
+    return shutil.which("docker") is not None and shutil.which("nvidia-smi") is not None
 
 
 @dataclass

@@ -167,7 +167,44 @@ def test_tokenspeed_metrics(tmp_path):
     assert mapping["predicted_total"] == ["tokenspeed:generation_tokens_total"]
 
 
-# ---- Task 3: stop_backend + is_docker_runtime 分流（docker/venv）----
+# ---- Task 2: _resolve_runtime 路由（2026-09 反转后 docker 优先） ----
+
+
+def test_tokenspeed_resolve_runtime_docker_preferred_when_image_set(tmp_path, monkeypatch):
+    """yaml 显式 docker_image → 走 docker（即使本机没有可用 venv 也优先容器）。"""
+    p = _write(
+        tmp_path,
+        "name: q\nengine: tokenspeed\nport: 8150\ntokenspeed:\n"
+        "  model: /m\n  docker_image: lightseekorg/tokenspeed:latest\n",
+    )
+    a = get_adapter("tokenspeed")(p, CAPS8)
+    assert a._resolve_runtime() == ("docker", "lightseekorg/tokenspeed:latest", None)
+
+
+def test_tokenspeed_resolve_runtime_docker_preferred_even_when_venv_available(tmp_path, monkeypatch):
+    """venv stub 存在且 yaml 配了 docker_image → 仍走 docker（不再被 venv 静默抢走）。"""
+    _stub_venv(tmp_path, monkeypatch)
+    p = _write(
+        tmp_path,
+        "name: q\nengine: tokenspeed\nport: 8150\ntokenspeed:\n"
+        "  model: /m\n  docker_image: lightseekorg/tokenspeed:latest\n",
+    )
+    a = get_adapter("tokenspeed")(p, CAPS8)
+    assert a._resolve_runtime() == ("docker", "lightseekorg/tokenspeed:latest", None)
+
+
+def test_tokenspeed_resolve_runtime_venv_fallback_when_no_image(tmp_path, monkeypatch):
+    """yaml 未声明 docker_image 且 venv 可用 → 走 venv 兜底。"""
+    _stub_venv(tmp_path, monkeypatch)
+    p = _write(
+        tmp_path,
+        "name: q\nengine: tokenspeed\nport: 8150\ntokenspeed:\n  model: /m\n",
+    )
+    a = get_adapter("tokenspeed")(p, CAPS8)
+    assert a._resolve_runtime() == ("venv", None, None)
+
+
+# ---- Task 3: stop_backend + is_docker_runtime 分流（docker/venv） ----
 
 
 def _fake_docker_runtime_profile():

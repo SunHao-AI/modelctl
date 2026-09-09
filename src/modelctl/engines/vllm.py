@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import os
 import shlex
-import subprocess
 from pathlib import Path
 
 from loguru import logger
@@ -39,16 +38,14 @@ class VllmAdapter(EngineAdapter):
         if dual_error:
             raise RequirementError(dual_error)
         if runtime == "docker":
-            container_name = f"{self.profile.name}-vllm"
+            container_name = self._container_name
             # docker / nvidia-smi 都在 PATH；硬拦截不降级（检查与指引统一在 core.docker_setup）
             missing = docker_setup.path_level_missing()
             if missing:
                 raise RequirementError(f"docker_image 已配置但 Docker 环境未就绪：{'；'.join(missing)}——{docker_setup.MSG_GUIDE}")
-            # 清冲突残留容器（幂等）
-            try:
-                subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=10)
-            except (OSError, subprocess.SubprocessError):
-                pass
+            # 清冲突残留容器（幂等；失败仅 warning + 解码 stderr，不再静默吞）
+            from modelctl.core.process import clear_stale_docker_container
+            clear_stale_docker_container(self.profile.name, container_name)
             # model 必填
             if not cfg.get("model") and not cfg.get("download"):
                 raise RequirementError(f"{self.profile.name}：vllm.model 必填（或配置 download 段自动下载）")
@@ -293,7 +290,9 @@ class VllmAdapter(EngineAdapter):
         return self.profile.name
 
     def _resolve_runtime(self) -> tuple[str, str | None, str | None]:
-        """runtime 分流：优先 native（venv+平台支持）→ 否则 yaml docker_image 兜底 → 均不可用报错。
+        """runtime 分流：yaml 显式声明 docker_image 时容器优先（尊重用户意图），
+        venv 仅作为未声明镜像时的兜底路径，避免已装好 venv 的部署机把 yaml
+        作者期望"必须容器"的模型（如 Day-0 架构镜像）静默切到 PyPI 版本再炸。
 
         返回三元组 ``(runtime, image, dual_error)``：
         - ``runtime``：``'venv' | 'docker'``；dual_error 非空时为 ``'venv'``（占位，调用方应先抛错）
@@ -303,28 +302,29 @@ class VllmAdapter(EngineAdapter):
           ``ensure_env`` 抛出"环境未创建"这种**只暴露 venv 缺口**、丢失"docker 兜底
           也没配"信息的误导性错误。
 
-        分流规则：
-        1. ``envs.engine_native_usable('vllm')`` 为 True（Linux 上 .venvs/vllm 已建）
-           → ``('venv', None, None)`` —— **native 优先**，即使 yaml 配了 docker_image
-           也走 venv，避免已装好 venv 的部署机被强制切容器
-        2. 上述不成立 且 yaml ``docker_image`` 非空（docker-capable 引擎）
-           → ``('docker', image, None)``
-        3. 上述不成立 且 yaml ``docker_image`` 空 → ``('venv', None, <friendly_msg>)``
-           文案区分 Windows（venv 仅 Linux，可配 docker_image）与非 Windows 无 venv
-           （引导 ``modelctl env setup vllm``）
+        分流规则（2026-09 反转：docker 优先）：
+        1. yaml ``docker_image`` 非空 → ``('docker', image, None)``
+           —— 容器是模型作者的权威声明（如 Day-0 架构、官方 FP8 镜像），
+           即使本机有可用 venv（``engine_native_usable`` 返回 True）仍走 docker，
+           不静默用 PyPI 版本去 load 一个架构不支持的模型
+        2. 上述不成立 且 ``envs.engine_native_usable('vllm')`` 为 True（Linux + .venvs/vllm 已建）
+           → ``('venv', None, None)`` —— venv 兜底，普通标准架构模型走此路径
+        3. 两条路径都不可用 → ``('venv', None, <friendly_msg>)``，文案按 platform_supports 区分：
+           Windows / macOS 等非 Linux 平台 → 引导 docker_image（venv 不可用）
+           Linux → 引导 `modelctl env setup vllm`，或配 docker_image 走容器
         """
         cfg = self.profile.engine_config
-        if envs.engine_native_usable("vllm"):
-            return ("venv", None, None)
         image = str(cfg.get("docker_image") or "").strip()
         if image:
             return ("docker", image, None)
+        if envs.engine_native_usable("vllm"):
+            return ("venv", None, None)
         # 两条路径都不可用 —— 文案按 platform_supports 区分
         if envs.platform_supports("vllm"):
             # Linux 但 venv 没建
             dual = (
                 f"{self.profile.name}：vLLM 的托管 venv 未创建（当前平台 Linux 支持 venv），"
-                "且 yaml vllm.docker_image 未配置（docker 兜底也未启用）。请先执行 "
+                "且 yaml vllm.docker_image 未配置（docker 主路径也未启用）。请先执行 "
                 "`modelctl env setup vllm` 建立 venv，或在 yaml 的 vllm: 块下配置 "
                 "`docker_image: vllm/vllm-openai:<tag>` 走 docker 运行时"
             )
@@ -332,7 +332,7 @@ class VllmAdapter(EngineAdapter):
             # 非 Linux（Windows 等）
             dual = (
                 f"{self.profile.name}：vLLM 的托管 venv 仅支持 Linux 部署机，当前平台不支持；"
-                "且 yaml vllm.docker_image 未配置（docker 兜底也未启用）。请在 yaml 的 "
+                "且 yaml vllm.docker_image 未配置（docker 主路径也未启用）。请在 yaml 的 "
                 "vllm: 块下配置 `docker_image: vllm/vllm-openai:<tag>` 走 docker 运行时"
                 "（镜像需已 pull；model 必须是本地目录）"
             )
@@ -340,6 +340,15 @@ class VllmAdapter(EngineAdapter):
 
     @property
     def _container_name(self) -> str:
+        """docker 容器名：profile.name 已以 ``-vllm`` 结尾时不再追加（避免双后缀）。
+
+        典型 profile.name（{group}-{engine} 推导）如 ``qwen2.5-0.5b-vllm`` 已含 engine
+        短名，旧实现 ``f"{profile.name}-vllm"`` 会拼出 ``qwen2.5-0.5b-vllm-vllm``——
+        与 CLI/CLI 日志/nginx 路由里的 profile.name 不一致。本实现幂等：以
+        ``-vllm`` 结尾时直接用 profile.name，否则追加 ``-vllm``。
+        """
+        if self.profile.name.endswith("-vllm"):
+            return self.profile.name
         return f"{self.profile.name}-vllm"
 
     def _gpus_json(self) -> str:

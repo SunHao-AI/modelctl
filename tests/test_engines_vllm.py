@@ -347,17 +347,17 @@ def test_resolve_runtime_default(tmp_path, monkeypatch):
     runtime, image, dual_error = a._resolve_runtime()
     assert runtime == "venv" and image is None
     assert dual_error is not None and "docker_image" in dual_error
-    # 平台差异：Windows 分支强调 "仅支持 Linux"；Linux 分支引导 modelctl env setup
+    # 2026-09 反转后 docker 是主路径，文案应强调 docker 主路径未启用
+    assert "主路径" in dual_error
+    # 平台差异：Windows 分支强调 venv "仅支持 Linux"；Linux 分支引导 modelctl env setup
     if os.name == "nt":
         assert "Linux" in dual_error
     else:
         assert "modelctl env setup vllm" in dual_error
 
 
-def test_resolve_runtime_venv_ignored_when_native_not_available(tmp_path, monkeypatch):
-    """venv 未 stub（engine_native_usable=False）且未配 docker_image 时，
-    yaml 即使写着 docker_image 也不生效 —— 准确说是 native 优先（venv 装不上就轮到 yaml）。
-    覆盖分流规则第 2 步"""
+def test_resolve_runtime_docker_preferred_when_image_set(tmp_path, monkeypatch):
+    """yaml 显式 docker_image → 容器是权威，即使本机没有可用 venv 也走 docker（覆盖分流规则第 1 步）。"""
     p = _write(
         tmp_path,
         "name: q\nengine: vllm\nport: 8000\nvllm:\n"
@@ -367,15 +367,23 @@ def test_resolve_runtime_venv_ignored_when_native_not_available(tmp_path, monkey
     assert a._resolve_runtime() == ("docker", "vllm/vllm-openai:qwen38-flash-next", None)
 
 
-def test_resolve_runtime_venv_preferred_when_stub_present(tmp_path, monkeypatch):
-    """venv stub 存在时优先 native，即使 yaml 配了 docker_image 也走 venv —— 避免
-    已装 venv 的部署机被强制切容器。"""
+def test_resolve_runtime_docker_preferred_even_when_venv_available(tmp_path, monkeypatch):
+    """核心解 bug：venv stub 存在（engine_native_usable=True）且 yaml 配了 docker_image
+    → 仍然走 docker，尊重模型作者的"必须容器"声明，不再静默用 PyPI venv load 另一个架构。"""
     _stub_venv(tmp_path, monkeypatch, "vllm")
     p = _write(
         tmp_path,
         "name: q\nengine: vllm\nport: 8000\nvllm:\n"
         "  model: Qwen/X\n  docker_image: vllm/vllm-openai:qwen38-flash-next\n",
     )
+    a = get_adapter("vllm")(p, CAPS8)
+    assert a._resolve_runtime() == ("docker", "vllm/vllm-openai:qwen38-flash-next", None)
+
+
+def test_resolve_runtime_venv_fallback_when_no_image(tmp_path, monkeypatch):
+    """yaml 未声明 docker_image 且 venv 可用 → 走 venv 兜底（普通标准架构路径）。"""
+    _stub_venv(tmp_path, monkeypatch, "vllm")
+    p = _write(tmp_path, "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: Qwen/X\n")
     a = get_adapter("vllm")(p, CAPS8)
     assert a._resolve_runtime() == ("venv", None, None)
 
@@ -1062,3 +1070,19 @@ def test_vllm_is_docker_runtime_flag():
         Profile(name="q2", engine="vllm", port=8111, engine_config={"model": "/m"}), Capabilities())
     assert docker_p.is_docker_runtime() is True
     assert venv_p.is_docker_runtime() is False
+
+
+def test_vllm_container_name_no_double_suffix():
+    """profile.name 已以 -vllm 结尾时不再追加 -vllm（避免 qwen2.5-0.5b-vllm-vllm）。"""
+    from modelctl.core.capabilities import Capabilities
+    from modelctl.engines import get_adapter
+    from modelctl.core.profile import Profile
+    a = get_adapter("vllm")(
+        Profile(name="qwen2.5-0.5b-vllm", engine="vllm", port=8000,
+                engine_config={"docker_image": "x", "model": "/m"}), Capabilities())
+    assert a._container_name == "qwen2.5-0.5b-vllm"  # 不带双后缀
+    # 没尾 -vllm 时（如 variant=high 同名推导）仍追加，保持幂等
+    b = get_adapter("vllm")(
+        Profile(name="qwen2.5-0.5b", engine="vllm", port=8001,
+                engine_config={"docker_image": "x", "model": "/m"}), Capabilities())
+    assert b._container_name == "qwen2.5-0.5b-vllm"

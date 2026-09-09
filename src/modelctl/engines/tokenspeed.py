@@ -13,9 +13,10 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shlex
-import subprocess
 from pathlib import Path
 
 from modelctl.core import docker_setup, envs
@@ -29,7 +30,8 @@ from modelctl.engines.base import EngineAdapter, RequirementError
 
 class TokenSpeedAdapter(EngineAdapter):
     def _resolve_runtime(self) -> tuple[str, str | None, str | None]:
-        """runtime 分流：优先 native（venv+平台支持）→ 否则 yaml docker_image 兜底 → 均不可用报错。
+        """runtime 分流：yaml 显式声明 docker_image 时容器优先（与 vllm 一致，2026-09 反转），
+        venv 作为未声明镜像时的兜底路径。
 
         返回三元组 ``(runtime, image, dual_error)``；dual_error 非空时调用方（尤其是
         ``check_requirements``）应直接 `raise RequirementError(dual_error)`，避免落入 venv
@@ -37,16 +39,17 @@ class TokenSpeedAdapter(EngineAdapter):
         缺失信息的误导性错误。
 
         分流规则（与 vllm 一致）：
-        1. ``envs.engine_native_usable('tokenspeed')`` 为 True → ``('venv', None, None)``
-        2. 否则 yaml ``docker_image`` 非空 → ``('docker', image, None)``
+        1. yaml ``docker_image`` 非空 → ``('docker', image, None)``
+           —— 容器是模型作者的权威声明，即使本机有可用 venv 仍走 docker
+        2. 否则 ``envs.engine_native_usable('tokenspeed')`` 为 True → ``('venv', None, None)``
         3. 否则 → ``('venv', None, <friendly_msg>)``，文案按 platform_supports 分支
         """
         cfg = self.profile.engine_config
-        if envs.engine_native_usable("tokenspeed"):
-            return ("venv", None, None)
         image = str(cfg.get("docker_image") or "").strip()
         if image:
             return ("docker", image, None)
+        if envs.engine_native_usable("tokenspeed"):
+            return ("venv", None, None)
         if envs.platform_supports("tokenspeed"):
             dual = (
                 f"{self.profile.name}：TokenSpeed 的托管 venv 未创建（当前平台 Linux 支持 venv），"
@@ -72,12 +75,9 @@ class TokenSpeedAdapter(EngineAdapter):
             missing = docker_setup.path_level_missing()
             if missing:
                 raise RequirementError(f"docker_image 已配置但 Docker 环境未就绪：{'；'.join(missing)}——{docker_setup.MSG_GUIDE}")
-            # 清冲突残留容器（幂等）
-            try:
-                subprocess.run(["docker", "rm", "-f", f"{self.profile.name}-tokenspeed"],
-                               capture_output=True, timeout=10)
-            except (OSError, subprocess.SubprocessError):
-                pass
+            # 清冲突残留容器（幂等；失败仅 warning + 解码 stderr，不再静默吞）
+            from modelctl.core.process import clear_stale_docker_container
+            clear_stale_docker_container(self.profile.name, self._container_name)
         else:
             envs.ensure_env("tokenspeed")
         if not cfg.get("model") and not cfg.get("download"):
@@ -207,6 +207,15 @@ class TokenSpeedAdapter(EngineAdapter):
 
     @property
     def _container_name(self) -> str:
+        """docker 容器名：profile.name 已以 ``-tokenspeed`` 结尾时不再追加（避免双后缀）。
+
+        典型 profile.name（{group}-{engine} 推导）如 ``qwen2.5-0.5b-tokenspeed`` 已含
+        engine 短名，旧实现 ``f"{profile.name}-tokenspeed"`` 会拼出
+        ``qwen2.5-0.5b-tokenspeed-tokenspeed``。本实现幂等：以 ``-tokenspeed`` 结尾时
+        直接用 profile.name，否则追加 ``-tokenspeed``。
+        """
+        if self.profile.name.endswith("-tokenspeed"):
+            return self.profile.name
         return f"{self.profile.name}-tokenspeed"
 
     def wait_ready(self, timeout: float) -> bool:

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import os
 import shlex
-import subprocess
 from pathlib import Path
 
 from modelctl.core import docker_setup, envs
@@ -38,12 +37,9 @@ class TensorRtLlmAdapter(EngineAdapter):
             missing = docker_setup.path_level_missing()
             if missing:
                 raise RequirementError(f"docker_image 已配置但 Docker 环境未就绪：{'；'.join(missing)}——{docker_setup.MSG_GUIDE}")
-            # 清冲突残留容器（幂等）
-            try:
-                subprocess.run(["docker", "rm", "-f", f"{self.profile.name}-trtllm"],
-                               capture_output=True, timeout=10)
-            except (OSError, subprocess.SubprocessError):
-                pass
+            # 清冲突残留容器（幂等；失败仅 warning + 解码 stderr，不再静默吞）
+            from modelctl.core.process import clear_stale_docker_container
+            clear_stale_docker_container(self.profile.name, self._container_name)
         else:
             envs.ensure_env("tensorrt_llm")
         if not cfg.get("model"):
@@ -233,6 +229,15 @@ class TensorRtLlmAdapter(EngineAdapter):
 
     @property
     def _container_name(self) -> str:
+        """docker 容器名：profile.name 已以 ``-trtllm`` 结尾时不再追加（避免双后缀）。
+
+        TRT-LLM 的 engine 短名约定是 ``trtllm``（区别于 ``tensorrt_llm`` 目录名）；
+        若用户 yaml 显式 ``name: qwen2.5-0.5b-trtllm`` 旧实现会拼出
+        ``qwen2.5-0.5b-trtllm-trtllm``。本实现幂等：以 ``-trtllm`` 结尾时直接用
+        profile.name，否则追加 ``-trtllm``（保证 ``{profile.name}-trtllm`` 恒不双后缀）。
+        """
+        if self.profile.name.endswith("-trtllm"):
+            return self.profile.name
         return f"{self.profile.name}-trtllm"
 
     def wait_ready(self, timeout: float) -> bool:

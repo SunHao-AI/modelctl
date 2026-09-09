@@ -21,7 +21,10 @@ import modelctl.core.envs as envs_mod
 from modelctl.core.capabilities import (
     ENGINE_BINARIES,
     ENGINE_INSTALL_HINTS,
+    ENGINE_PROBE_HINT_BOTH_SET,
+    ENGINE_PROBE_HINT_VENV_ONLY,
     binary_paths,
+    docker_ready,
     probe,
     which_binaries,
 )
@@ -119,15 +122,60 @@ def test_which_binaries_unmanaged_which_none(tmp_path, monkeypatch):
     assert result == {"ollama": False}
 
 
-def test_engine_install_hints_vllm_sglang():
-    """vllm / sglang 提示语包含 modelctl env setup。"""
-    assert "modelctl env setup" in ENGINE_INSTALL_HINTS["vllm"]
-    assert "modelctl env setup" in ENGINE_INSTALL_HINTS["sglang"]
+def test_engine_install_hints_contains_env_setup():
+    """所有 MANAGED 提示语必须含 `modelctl env setup <engine>` 子串。
+
+    2026-09 反转后 token 微调过前缀（如 "，venv 兜底路径："），但**安装动词 + 引擎名**
+    子串必须保留——UI/CLI 多处用 startswith / 子串匹配该 hint 作为锚点，
+    不能因措辞优化破坏。
+    """
+    for name in ("vllm", "sglang", "aphrodite", "lmdeploy", "tokenspeed", "tensorrt_llm"):
+        hint = ENGINE_INSTALL_HINTS.get(name, "")
+        assert "modelctl env setup" in hint, f"{name} 提示语缺少 env setup：{hint!r}"
+        assert name in hint, f"{name} 提示语缺少引擎名：{hint!r}"
+    # 非托管引擎（ollama / unsloth）保留原始 hint（curl 安装器），不被误判
+    assert "curl -fsSL" in ENGINE_INSTALL_HINTS["ollama"]
+    assert "curl -fsSL" in ENGINE_INSTALL_HINTS["unsloth"]
 
 
-def test_engine_install_hints_tensorrt_llm():
-    """tensorrt_llm 提示语指向 modelctl env setup tensorrt_llm。"""
-    assert "modelctl env setup tensorrt_llm" in ENGINE_INSTALL_HINTS["tensorrt_llm"]
+def test_engine_install_hints_tensorrt_llm_tokenspeed_venv_fallback_touches_docker_main_path():
+    """docker-capable 引擎（vllm/tokenspeed/tensorrt_llm）的 hint 必须明示 docker 主路径。
+
+    2026-09 反转后这些引擎 yaml 写 docker_image 即走容器，venv 是兜底；
+    hint 文案须含 "docker 主路径" 字样（或等价表述）告知用户"即使 venv 缺位也可用"。
+    """
+    for name in ("vllm", "tokenspeed", "tensorrt_llm"):
+        hint = ENGINE_INSTALL_HINTS[name]
+        assert "venv 兜底" in hint, f"{name} 提示语未说明 venv 兜底语义：{hint!r}"
+
+
+def test_engine_probe_hints_both_set_and_venv_only():
+    """ENGINE_PROBE_HINT_* 必须含 docker 主路径 / venv fallback 关键引用。"""
+    # BOTH_SET 用于 venv 缺位但 docker 主路径就绪的场景
+    assert "docker_image" in ENGINE_PROBE_HINT_BOTH_SET
+    assert "modelctl env setup" in ENGINE_PROBE_HINT_BOTH_SET
+    # VENV_ONLY 用于 venv-only 引擎可达性标注
+    assert "modelctl env setup" in ENGINE_PROBE_HINT_VENV_ONLY
+
+
+def test_docker_ready_requires_both_docker_and_nvidia_smi(tmp_path, monkeypatch):
+    """docker_ready() = shutil.which(docker) 且 shutil.which(nvidia-smi) 真。"""
+    _redirect(tmp_path, monkeypatch)
+    # docker ✓ 若 nvidia-smi 缺 → False
+    monkeypatch.setattr("modelctl.core.capabilities.shutil.which",
+                        lambda n: "/fake/bin/docker" if n == "docker" else None)
+    assert docker_ready() is False
+    # nvidia-smi ✓ 若 docker 缺 → False
+    monkeypatch.setattr("modelctl.core.capabilities.shutil.which",
+                        lambda n: "/fake/bin/nvidia-smi" if n == "nvidia-smi" else None)
+    assert docker_ready() is False
+    # 都在 → True
+    monkeypatch.setattr("modelctl.core.capabilities.shutil.which",
+                        lambda n: f"/fake/bin/{n}")
+    assert docker_ready() is True
+    # 都缺 → False
+    monkeypatch.setattr("modelctl.core.capabilities.shutil.which", lambda n: None)
+    assert docker_ready() is False
 
 
 def test_probe_managed_engines_absent_by_default(tmp_path, monkeypatch):

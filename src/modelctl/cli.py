@@ -43,7 +43,14 @@ from loguru import logger
 
 import modelctl.core.compat_rules  # noqa: F401 —— 导入即注册内置规则
 from modelctl.core import all_service, docker_setup
-from modelctl.core.capabilities import ENGINE_BINARIES, ENGINE_INSTALL_HINTS, probe
+from modelctl.core.capabilities import (
+    ENGINE_BINARIES,
+    ENGINE_INSTALL_HINTS,
+    ENGINE_PROBE_HINT_BOTH_SET,
+    ENGINE_PROBE_HINT_VENV_ONLY,
+    docker_ready,
+    probe,
+)
 from modelctl.core.colors import _apply, color_enabled, display_width, format_status, pad_width
 from modelctl.core.deps import ensure_packages
 from modelctl.core.envfile import load_env
@@ -852,17 +859,38 @@ def _cmd_probe(args, models_dir: Path | None, caps) -> int:
     kv("计算能力", caps.compute_capability or unknown(), KEY_W)
 
     # ── 区域二：引擎二进制 ──
+    # 双 runtime 分流（2026-09 反转后）：可达性 = docker ∨ venv（venv 按 has_env，
+    # docker 按 capabilities.docker_ready()，纯 shutil.which，无子进程）。
+    # 与 _resolve_runtime 的 docker_image > venv 规则对齐：docker 主路径就绪即视为可用，
+    # 不再误报 "需要先 modelctl env setup <engine>" 给"其实走 docker 就够"的模型。
     print()
     section("引擎二进制")
     name_w = max(display_width(n) for n in ENGINE_BINARIES)
+    from modelctl.core.envs import DOCKER_CAPABLE_ENGINES
+    dready = docker_ready()
+    d_ready_txt = _table_paint("就绪", "SUCCESS") if dready else _table_paint("缺失", "ERROR")
+    if not dready:
+        d_ready_txt += " " + _table_paint("(docker ∨ nvidia-smi)", "DIM")
+    print(f"  {_table_paint('docker', 'SECTION')}  {d_ready_txt}")
+    print()
+    reachable_count = 0
     for name in ENGINE_BINARIES:
         path = caps.binary_paths.get(name)
+        docker_capable = name in DOCKER_CAPABLE_ENGINES
+        reachable = bool(path) or (docker_capable and dready)
+        if reachable:
+            reachable_count += 1
         if path:
             status = _table_paint("可用", "SUCCESS") + "   "
             suffix = _table_paint(path, "DIM")
         elif name == "llamacpp":
             status = _table_paint("不可用", "ERROR")
             suffix = _table_paint("(未找到编译产物 llama-server)", "DIM")
+        elif reachable:
+            # venv 未建但 docker 主路径就绪（docker_image 非空即可绕过 venv）
+            hint = ENGINE_PROBE_HINT_BOTH_SET if docker_capable else ENGINE_PROBE_HINT_VENV_ONLY
+            status = _table_paint("可用", "SUCCESS") + "   "
+            suffix = _table_paint(f"(docker 主路径；{name} venv 缺位{hint})", "DIM")
         else:
             status = _table_paint("不可用", "ERROR")
             hint = ENGINE_INSTALL_HINTS.get(name, "") or ""
@@ -873,10 +901,11 @@ def _cmd_probe(args, models_dir: Path | None, caps) -> int:
             pad2 = " " * (2 + name_w + 2)
             print(f"{pad2}{_table_paint('源码:  ', 'DIM')}git clone https://github.com/ggml-org/llama.cpp.git")
             print(f"{pad2}{_table_paint('编译:  ', 'DIM')}cmake -B build -DGGML_CUDA=ON && cmake --build build -j 4")
-    available_count = sum(1 for n in ENGINE_BINARIES if caps.binaries.get(n))
     total = len(ENGINE_BINARIES)
     print()
-    print(_table_paint(f"  共 {total} 项，可用 {available_count} 项，缺失 {total - available_count} 项", "DIM"))
+    print(_table_paint(
+        f"  共 {total} 项，可用 {reachable_count} 项（docker ∨ venv），"
+        f"缺失 {total - reachable_count} 项", "DIM"))
 
     # ── 区域三：软件环境 ──
     print()
