@@ -159,6 +159,44 @@ monkeypatch.delenv("MODELCTL_GPUS", raising=False)
   与本次失败清单逐条比对签名——基线同样红的 31 条直接排除在本次变更之外，
   避免把历史欠账误记到新代码头上。
 
+## fixture 里 `ef.PROJECT_ROOT = tmp_path` 直写模块属性，永久劫持"读仓库真实文件"的用例
+
+**日期**：2026-09-08
+**症状**：`tests/test_cluster_gate.py::test_declared_gpu_count_reads_real_multicard_profiles`
+单跑 47 passed，全量跑必红，报错很迷惑：
+
+```
+profile 'qwen3.5-397b' 不存在（…\pytest-of-28654\pytest-2591\test_center_404_exit20\models 目录缺失）
+```
+
+一个"读仓库真实 YAML"的用例，models 根竟然指向**另一个测试文件的某个用例**的 tmp 目录。
+
+**根因**：`tests/test_cluster_agg_cli.py` 的 autouse fixture 用**直接赋值**劫持模块全局：
+
+```python
+ef.PROJECT_ROOT = tmp_path          # ❌ teardown 不恢复，永久生效
+monkeypatch.setattr("modelctl.core.profile.PROJECT_ROOT", tmp_path)  # 同文件里这行是对的
+```
+
+`envfile.PROJECT_ROOT` 是模块级常量，直写后整个 pytest 进程后续所有用例看到的仓库根
+都是 `test_center_404_exit20` 那次调用的 tmp_path（autouse 每用例都写，最后一次赢定
+目录名）。同文件另一行明明用了 `monkeypatch.setattr`，对比即可看出漏网。
+
+**解决方案**：统一改 `monkeypatch.setattr(ef, "PROJECT_ROOT", tmp_path)`（teardown 自动
+恢复）。全仓 grep `PROJECT_ROOT\s*=` 确认其余 6 处均已是 setattr 写法，唯此一处漏网。
+
+**教训**：
+
+- 劫持模块级常量**只允许 `monkeypatch.setattr`**，`mod.CONST = x` 直写与
+  `os.environ[k]=v`（见本篇上一例）同属"绕过 teardown 的全局态写入"，是同一类缺陷的
+  两个变体。审计命令：`grep -E '\.(PROJECT_ROOT|[A-Z_]+)\s*=' tests/` 与
+  `grep 'os.environ\[' tests/ src/`。
+- 报错里出现**别人的 tmp 目录名**（`test_xxx0/`）是跨用例污染的确定性指纹，比
+  "单跑绿全量红"更强的信号——直接顺着目录名 grep 测试函数名就能定位污染源。
+- 这类用例（"必须读仓库真实文件"）与"劫持根目录"的用例天然共存于一个进程，污染
+  永远静默：tmp 目录恰好存在时读到的是错内容而非报错，只有恰好不存在才炸出
+  "目录缺失"。别等它炸，写 fixture 时就自查。
+
 ## 生产函数新增带默认值参数，monkeypatch 的位置参数桩立刻"错红"
 
 **日期**：2026-09-08

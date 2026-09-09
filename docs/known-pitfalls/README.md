@@ -84,6 +84,7 @@
 | 2026-09-08 | 前端 / SSE | SSE 无首行日志时前端永显「连接中…」 | 状态只在首行日志回调里翻转，需注册 `EventSource` 的 `open` 事件驱动 `state='open'`；v-if 下 url 恒定不触发 watch，还须 `onMounted` 建流。 | [backend/启动进度与日志可观测性.md](backend/启动进度与日志可观测性.md) |
 | 2026-09-08 | 测试 / 隔离 | CLI `--gpus` 直写 `os.environ`，31 个引擎用例"全量红单跑绿" | `os.environ[k]=v` 直写同 setdefault 一样跨用例存活；conftest 补 `delenv MODELCTL_GPUS`；归因三板斧=单跑绿判定污染→最小两例复现→worktree 基线全量比对签名。 | [backend/test-isolation.md](backend/test-isolation.md) |
 | 2026-09-08 | 测试 / 隔离 | 生产函数加带默认值参数，monkeypatch 位置参数桩错红在下游断言 | `boom(profile, caps, timeout)` 收 `on_progress=` kwarg 抛 TypeError 被兜底 except 吞成 exit_code=1；扩签名须 grep 全部桩同步，错红先打全 task error。 | [backend/test-isolation.md](backend/test-isolation.md) |
+| 2026-09-08 | 测试 / 隔离 | fixture 直写 `ef.PROJECT_ROOT = tmp_path`，"读仓库真实 YAML"的用例被劫持到别人的 tmp 目录 | 模块常量劫持只许 `monkeypatch.setattr`；报错里出现他人 tmp 目录名（`test_xxx0/`）是污染确定性指纹，顺目录名 grep 函数名即定位源头。 | [backend/test-isolation.md](backend/test-isolation.md) |
 
 ## 目录约定
 
