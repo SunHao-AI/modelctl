@@ -793,3 +793,34 @@
     都是同族：**对外可寻址名 ≠ 内部物理名，去向内部体系时必须显式归一**。
   - 修复后不能再回头用 `PROJECT_ROOT / "models"` 手拼候选，否则下次新增子目录成员
     又 404（旧的"首个命中可保留"结论随之失效）。
+
+## worker 每次心跳都刷 100+ 条"stem 冲突"WARNING 刷屏
+
+- **日期**：2026-09-09
+- **症状**：`launch-modelctl-webui.log` 里 `models/ 下 stem 冲突：...` 反复刷屏：每 30 秒
+  （reconciler 循环）一轮，每轮 ~39 条（10+ 个 stem × 多个引擎），一小时内累积数千条
+  同语义 WARNING；dashboard 与日志均被淹没，真实告警被噪声压到不可见。
+- **根因**：`local_profile_paths` 在每个被忽略的候选文件上逐条 `logger.warning`，
+  而 `Reconciler._collect`（826 行）每拍都调用它，全仓库 `models/` 下 9 个引擎目录
+  各持 `qwen3.8.yaml`、`qwen2.5-0.5b.yaml` 等，是 M1 常态配置而非"病态"——
+  "该告警一次"的告警器叠加 reconcile 的每拍节奏，把单条 WARNING 放大成"每 30s 打 39 次"。
+- **解决**：
+  1. 单条汇总 WARNING：`f"models/ 下 {n} 处 stem 冲突：{pair1}；{pair2}；……"`，
+     列出全部冲突对（替代逐文件告警）。
+  2. 进程级缓存：`_PROFILE_PATHS_CACHE[str(models_dir)] = (fp, {stem: Path})`，
+     `fp` 是双层"目录树指纹"（顶层条目名 + 每个引擎目录内条目名，仅名称不含 mtime/size）。
+  3. 目录未变动 → `dict(hit[1])` 直接返回，不重扫、不告警；目录变动 → 失效重扫，
+     仅打一条 WARNING 并更新缓存。
+  4. TDD：`_WarnCollector` 替身 `setattr(reconcile, "logger", ...)` 捕获 WARNING 次数；
+     RED = 两个新用例（单条 + 缓存）失败，GREEN = 64/64（模块）+ 172/172（6 文件）。
+- **要点**：
+  - "每拍都调用"的循环契约，叠加"每命中都告警"的策略，会把"该告警一次"的商品
+    放大成持续刷屏——告警频率 ≪ 业务频率才合理；高频调用路径上的告警必须有
+    "已报告"去重窗口或进程级缓存。
+  - 指纹用**名称**不用 mtime/size：Windows mtime 不可靠，原子重命名
+    （`.tmp`→rename）可能改 size 但内容不变；名称是唯一稳定的"目录内容变化"信号，
+    且对 reconcile 高频路径零额外 IO。
+  - 同 stem 跨多引擎在此仓库是**合法常态**（9 个引擎目录 × 10+ 模型），不应视为
+    病态；但告警仍保留（运维应能感知"哪些 stem 被忽略"），只是不再刷屏。
+  - 监控功能轮询函数时用 per-call 例模式（`_WarnCollector` + `setattr`），避开
+    loguru sink 配置与等级过滤差异，断言只数"调用次数 + 传入文本"。

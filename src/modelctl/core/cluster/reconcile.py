@@ -274,7 +274,7 @@ def local_profile_paths(models_dir: Path) -> dict[str, Path]:
     if hit is not None and hit[0] == fp:
         return dict(hit[1])
     out: dict[str, Path] = {}
-    # 每元素 (winner, loser)：winner 为扫描序先到的（保留），loser 为后来者
+    # 每元素 (stem, winner, loser)：winner 为扫描序先到的（保留），loser 为后来者
     conflicts: list[tuple[str, Path, Path]] = []
     for engine_dir in sorted(p for p in root.iterdir() if p.is_dir()):
         for f in sorted(engine_dir.glob("*.yaml")):

@@ -88,6 +88,7 @@
 | 2026-09-08 | 测试 / 隔离 | fixture 直写 `ef.PROJECT_ROOT = tmp_path`，"读仓库真实 YAML"的用例被劫持到别人的 tmp 目录 | 模块常量劫持只许 `monkeypatch.setattr`；报错里出现他人 tmp 目录名（`test_xxx0/`）是污染确定性指纹，顺目录名 grep 函数名即定位源头。 | [backend/test-isolation.md](backend/test-isolation.md) |
 | 2026-09-09 | 后端 / 配置管理 | webui 读模型 YAML 按 name 拼路径，自动推导 name 与文件 stem 分叉必 404 | `GET /admin/api/models/{name}/yaml` 用 `{name}.yaml` 拼接，而 YAML 内 name 常自动推导为 `{group}-{engine}`（如 qwen2.5-0.5b-vllm），与磁盘 stem（qwen2.5-0.5b）不一致 → rglob 恒匹配不到 404；改走 `_find_profile` 复用 `profile.path`，与其它 /models 端点同口径。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 | 2026-09-09 | 后端 / 前端 / 日志 | docker runtime 下 WebUI `<pre>` 只显示容器 ID + 「vllm」镜像名 | `launch-<name>.log` 只有一行容器 ID + 镜像名，dockerd 持久写容器内真实日志在 `<id>-json.log`；SSE / GET /log 在 launch log 无效时自动 fallback `docker logs --tail`，SSE 进一步按 json.log 字节 offset 增量推（容器存/死都工作），新增 `stopped` 命名事件应对容器删 / daemon 重启。 | [backend/启动进度与日志可观测性.md](backend/启动进度与日志可观测性.md) |
+| 2026-09-09 | 后端 / 日志 / 集群治理 | worker 每次心跳都刷 100+ 条"stem 冲突"WARNING 刷屏 | `local_profile_paths` 每候选符重扫并逐个文件 `logger.warning`，而 reconciler 循环契约每拍调用它 → 同语义 WARNING 高频重复；同 stem 跨多引擎在此仓库是**常态**（models/ 下 9 个引擎目录各持 qwen3.8.yaml）。修复：汇总一条 WARNING 列出全部冲突对 + 进程级目录树签名缓存，目录未变动直接返缓存。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
 
 ## 目录约定
 
