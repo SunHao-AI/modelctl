@@ -765,3 +765,31 @@
   - 同类需要注释的隐式下界：等"至少 2 拍"的心跳轮数、验证"顺序稳定"所需的 ≥2 个
     反序元素、验证"去重生效"的重复次数 ≥2。单个元素/单轮循环证明不了任何
     "关系类"不变量。
+
+## webui 读模型 YAML 按 name 拼路径，自动推导 name 与文件 stem 分叉必 404
+
+- **日期**：2026-09-09
+- **症状**：WebUI 模型详情页点「YAML」tab 显示 `Request failed with status code 404`。
+  前端 `getModelYaml(name)` 打 `GET /admin/api/models/{name}/yaml`，后端点
+  `get_model_yaml` 用 `models_dir / f"{name}.yaml"` + `rglob(f"{name}.yaml")` 找文件。
+- **根因**：前端传的 `name` 是 **profile 自动推导名** `{group}-{engine}[-{variant}]`
+  （如 `qwen2.5-0.5b-vllm`），而磁盘文件名是 **stem**（`qwen2.5-0.5b`）。二者分叉，
+  `rglob("qwen2.5-0.5b-vllm.yaml")` 恒匹配不到任何文件 → 404。vllm/llamacpp 等
+  非根目录成员（qwen3.8、deepseek-v4-flash 等）全部命中此坑；只有文件名恰好等于
+  推导名的成员（如根目录 `models/xxx.yaml` 且 name==stem）才幸免。
+- **根因（更深层）**：同一个 `/models` 路由组里，其它端点（详情/日志/状态）走
+  `_find_profile(name)` → `profile.path`，而 yaml 端点却**手写了一套按 name 拼文件的
+  glob**，等于同一资源两套定位逻辑——正是本文件"同名 profile 散落在多引擎子目录"
+  那条警告的"写回显文本"半套逻辑。
+- **解决**：`get_model_yaml` 也走 `_find_profile(name)` 拿 `profile.path`，直接
+  `profile.path.read_text()`；`profile is None` 或 `path` 缺失才 404。与同组其它端点
+  同口径，不再依赖"文件名 == 推导名"这个不成立的假设。
+- **要点**：
+  - 一个路由组内的同一资源，**定位逻辑必须单点复用**（`_find_profile` + `Profile.path`），
+    不因"只是读个文本"就另写一份 glob——那份 glob 迟早与真实命名规则分叉。
+  - "自动推导 name"与"文件 stem"是**两个体系**：推导名是 YAML 派生值（可含
+    `-{engine}`），stem 是物理路径成分。凡拿一个去匹配另一个，都要先确认二者是否
+    恒等；本文件的"cluster 寻址只认文件名""展示名归一只做在读侧"与本次 yaml 端点
+    都是同族：**对外可寻址名 ≠ 内部物理名，去向内部体系时必须显式归一**。
+  - 修复后不能再回头用 `PROJECT_ROOT / "models"` 手拼候选，否则下次新增子目录成员
+    又 404（旧的"首个命中可保留"结论随之失效）。
