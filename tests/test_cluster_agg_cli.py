@@ -34,7 +34,7 @@ def _env(monkeypatch, tmp_path):
     # 聚合视图零 models/ 依赖：根指向空目录，误走本机路径立刻能被形状断言抓住
     import modelctl.core.envfile as ef
 
-    ef.PROJECT_ROOT = tmp_path
+    monkeypatch.setattr(ef, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr("modelctl.core.profile.PROJECT_ROOT", tmp_path, raising=False)
     monkeypatch.chdir(tmp_path)
 
