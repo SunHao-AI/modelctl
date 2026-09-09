@@ -156,6 +156,99 @@ def test_local_profile_paths_stem_collision_is_deterministic(tmp_path):
     assert local_profile_paths(tmp_path)["dup"] == tmp_path / "ollama" / "dup.yaml"
 
 
+class _WarnCollector:
+    """捕获 reconcile.logger.warning 的最小替身（与 mock yaml.safe_load 同口径）。
+
+    `logger` 是模块顶层 `from loguru import logger` 绑定的对象，必须 `setattr`
+    到 reconcile 命名空间；用替身替掉而非 loguru sink，避开 WARNING 等级过滤
+    与 sink 配置差异，断言只数"被调用了几次、传了什么文本"。
+    """
+
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def warning(self, msg: str) -> None:
+        self.messages.append(msg)
+
+
+def _make_collisions_dir(tmp_path, stems):
+    """建两个引擎目录，每个 stem 在每个引擎下各放一份 YAML → 每 stem 必冲突。"""
+    for engine in ("ollama", "vllm"):
+        d = tmp_path / engine
+        d.mkdir()
+        for stem in stems:
+            (d / f"{stem}.yaml").write_text(YAML_A, encoding="utf-8")
+
+
+def test_local_profile_paths_conflict_logs_single_summary(tmp_path, monkeypatch):
+    """同 stem 跨多引擎是常态（vllm/llamacpp/ollama… 同一模型多引擎共存）：
+    每次 scan 必须只打**一条**汇总 WARNING（含全部冲突对清单），不再逐文件刷屏，
+    这是 reconcile 循环每拍调用 local_profile_paths 不重复告警的前提。"""
+    monkeypatch.setattr(reconcile, "logger", _WarnCollector())
+    _make_collisions_dir(tmp_path, ["qwen2.5-0.5b", "qwen3.8"])
+    local_profile_paths(tmp_path)
+    warnings = reconcile.logger.messages
+    assert len(warnings) == 1, f"期望 1 条汇总告警，实得 {len(warnings)} 条：{warnings}"
+
+
+def test_local_profile_paths_no_conflict_no_warning(tmp_path, monkeypatch):
+    """无 stem 冲突时静默：不增加任何 WARNING。"""
+    monkeypatch.setattr(reconcile, "logger", _WarnCollector())
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm" / "qwen.yaml").write_text(YAML_A, encoding="utf-8")
+    local_profile_paths(tmp_path)
+    assert reconcile.logger.messages == []
+
+
+def test_local_profile_paths_caches_across_repeated_scans(tmp_path, monkeypatch):
+    """同一份目录多次 scan（reconcile 循环每拍都调）：第二次起命中缓存，
+    不再重扫、不再重复告警；返回值与首扫一致。"""
+    monkeypatch.setattr(reconcile, "logger", _WarnCollector())
+    _make_collisions_dir(tmp_path, ["qwen2.5-0.5b", "qwen3.8", "deepseek-v4-flash"])
+    first = local_profile_paths(tmp_path)
+    count_after_first = len(reconcile.logger.messages)
+    second = local_profile_paths(tmp_path)
+    third = local_profile_paths(tmp_path)
+    assert second == first and third == first
+    assert len(reconcile.logger.messages) == count_after_first, (
+        f"重复 scan 不应再产生告警：首次 {count_after_first} 条，现在 "
+        f"{len(reconcile.logger.messages)} 条"
+    )
+
+
+def test_local_profile_paths_change_in_engine_dir_triggers_rescan(tmp_path, monkeypatch):
+    """目录变动（引擎目录下文件增/删）必须让缓存失效：下一次 scan 重扫并据实
+    产出；若一整套隐藏文件没变动，则维持缓存命中。"""
+    monkeypatch.setattr(reconcile, "logger", _WarnCollector())
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm" / "qwen.yaml").write_text(YAML_A, encoding="utf-8")
+    first = local_profile_paths(tmp_path)
+    assert first == {"qwen": tmp_path / "vllm" / "qwen.yaml"}
+    # 在另一引擎目录加一个冲突 stem → 目录变动 → 必重扫
+    (tmp_path / "ollama").mkdir()
+    (tmp_path / "ollama" / "qwen.yaml").write_text(YAML_B, encoding="utf-8")
+    second = local_profile_paths(tmp_path)
+    assert second == {"qwen": tmp_path / "ollama" / "qwen.yaml"}, (
+        f"目录变动后应重扫，实际 {second}"
+    )
+    assert len(reconcile.logger.messages) >= 1  # 重扫到 qwen 冲突，必须告警
+
+
+def test_local_profile_paths_change_in_toplevel_dir_triggers_rescan(tmp_path, monkeypatch):
+    """顶层目录新增一个引擎子目录同样是"目录变动"：必须失效缓存并重扫。"""
+    monkeypatch.setattr(reconcile, "logger", _WarnCollector())
+    (tmp_path / "vllm").mkdir()
+    (tmp_path / "vllm" / "qwen.yaml").write_text(YAML_A, encoding="utf-8")
+    first = local_profile_paths(tmp_path)
+    assert first == {"qwen": tmp_path / "vllm" / "qwen.yaml"}
+    # 新增一个引擎目录，不冲突、但目录变了
+    (tmp_path / "ollama").mkdir()
+    (tmp_path / "ollama" / "deepseek.yaml").write_text(YAML_B, encoding="utf-8")
+    second = local_profile_paths(tmp_path)
+    assert second == {"qwen": tmp_path / "vllm" / "qwen.yaml",
+                      "deepseek": tmp_path / "ollama" / "deepseek.yaml"}
+
+
 def test_profile_sha_safe_missing_file_returns_empty(tmp_path):
     assert profile_sha_safe(tmp_path / "nope.yaml") == ""
     p = tmp_path / "x.yaml"

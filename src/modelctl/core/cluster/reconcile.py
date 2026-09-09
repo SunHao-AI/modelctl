@@ -225,28 +225,79 @@ def profile_sha_safe(path: Path) -> str:
         return ""
 
 
+def _models_tree_fingerprint(root: Path) -> tuple[tuple[str, str], ...]:
+    """models/ 目录签名：顶层条目名 + 各引擎目录下的条目名，双层。
+
+    只比"名字"不比 mtime/size：mtime 不可靠（Windows 可能合并、sync 工具可能
+    改内容但保留 mtime），size 在原子写替换（.tmp→rename）后可能改变但内容实际
+    相同。名字级签名足够定夺"目录内容是否变化"（无论 mtime 变动与否），且对
+    reconcile 循环的高频调用零额外 IO。顶层条目变动 = 引擎目录增/删；引擎目录内
+    条目变动 = 该引擎下 YAML 文件增/删（含 .master/.tmp/隐藏，因为扫描会被
+    同一套过滤器看到）。文件内容变动不触发失效（YAML 内容差异由 goal.sha /
+    profile_sha 处理，与扫描结果无关）。
+    """
+    try:
+        top = sorted(p.name for p in root.iterdir())
+    except OSError:
+        top = []
+    parts: list[tuple[str, str]] = []
+    for engine in top:
+        subdir = root / engine
+        if not subdir.is_dir():
+            continue
+        try:
+            inner = sorted(p.name for p in subdir.iterdir())
+        except OSError:
+            inner = []
+        parts.append((engine, ",".join(inner)) if inner else (engine, ""))
+    if not parts and not top:
+        return ()
+    return (("", ",".join(top)),) + tuple(parts)
+
+
 def local_profile_paths(models_dir: Path) -> dict[str, Path]:
     """models/ 下所有 profile 文件的 stem → 绝对路径。
 
     跳过三类"看起来像 YAML 但不是 profile"的文件：`.master` 备份（sync 覆盖前
-    留的）、`.tmp`（原子写中间态）、隐藏文件。stem 冲突时按引擎名**字典序取第一**
-    并告警——真实仓库里同 stem 跨引擎属病态配置，但确定性优先于"随机覆盖"，
-    否则同一台机器两次心跳会给出不同结论。
+    留的）、`.tmp`（原子写中间态）、隐藏文件。stem 冲突时按扫描顺序**取第一**
+    （引擎目录名字典序 → 文件名排序，确定性可复现），并打**一条**汇总 WARNING
+    列出全部冲突对——vllm/llamacpp/ollama... 多引擎共存同一模型是常态，逐文件
+    告警会刷屏（6 个引擎 × 10+ 模型 = 100+ 条同语义 WARNING）。reconcile 循环
+    每拍调用本函数，叠加**进程级缓存**：目录树签名一致则直接返回缓存结果，
+    不再重扫、不再重复告警；目录树变动后自动失效重扫。
     """
-    out: dict[str, Path] = {}
     root = Path(models_dir)
     if not root.is_dir():
-        return out
+        return {}
+    fp = _models_tree_fingerprint(root)
+    hit = _PROFILE_PATHS_CACHE.get(str(root))
+    if hit is not None and hit[0] == fp:
+        return dict(hit[1])
+    out: dict[str, Path] = {}
+    # 每元素 (winner, loser)：winner 为扫描序先到的（保留），loser 为后来者
+    conflicts: list[tuple[str, Path, Path]] = []
     for engine_dir in sorted(p for p in root.iterdir() if p.is_dir()):
         for f in sorted(engine_dir.glob("*.yaml")):
             if f.name.startswith(".") or f.name.endswith((".master", ".tmp")):
                 continue
             stem = f.stem
             if stem in out:
-                logger.warning(f"models/ 下 stem 冲突：{stem} 取 {out[stem]}，忽略 {f}")
+                conflicts.append((stem, out[stem], f))
                 continue
             out[stem] = f
+    if conflicts:
+        pairs = "；".join(f"{stem} 取 {winner}，忽略 {loser}"
+                          for stem, winner, loser in conflicts)
+        logger.warning(f"models/ 下 {len(conflicts)} 处 stem 冲突：{pairs}")
+    _PROFILE_PATHS_CACHE[str(root)] = (fp, out)
     return out
+
+
+# 进程级缓存：str(models_dir) → (tree_fingerprint, {stem: Path})。
+# 仅在 local_profile_paths 内裸读裸写（dict 赋值原子性），无需锁；reconcile
+# 循环线程与外部直调（测试/CLI）可能并发，最坏情况是同一份目录被扫两遍后覆盖
+# 缓存，结果正确。
+_PROFILE_PATHS_CACHE: dict[str, tuple[tuple[tuple[str, str], ...], dict[str, Path]]] = {}
 
 
 @dataclass
