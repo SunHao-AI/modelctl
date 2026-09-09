@@ -278,6 +278,24 @@ def _load_profile_from_path(path: Path) -> Profile:
     return _to_profile(_interpolate(raw, path.name), path)
 
 
+def load_profile_from_text(text: str, ref_path: Path) -> Profile:
+    """从内存中的 YAML **文本**加载 profile（不写盘），用于 WebUI 个性化启动。
+
+    `ref_path` 是**原始磁盘文件路径**（实际不会被写，仅用于 engine 目录推断 / 错误
+    文案定位）。文本走标准的 `${VAR}` 插值（`_interpolate`）+ 全套字段校验
+    （`_to_profile`），保证 override 内容与源文件等价语义。
+
+    **不修改** `ref_path` 指向的源文件。
+    """
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        raise ProfileError(f"{ref_path.name}：YAML 语法错误：{e}") from e
+    if not isinstance(raw, dict):
+        raise ProfileError(f"{ref_path.name}：顶层必须是映射")
+    return _to_profile(_interpolate(raw, ref_path.name), ref_path)
+
+
 def load_profile_at(path: Path) -> Profile:
     """按**绝对路径**加载 profile —— 集群下发文件的唯一正确入口。
 

@@ -26,15 +26,19 @@ const stopBusy = ref(false);
 const uiBusy = ref(false);
 const stopConfirm = ref(false);
 type TabKey = 'log' | 'yaml' | 'overview';
-const tab = ref<TabKey>('log');
+const tab = ref<TabKey>('yaml');
 /** 日志预填充行数 */
 const logTail = ref(200);
 const logInitial = ref<string[]>([]);
 const yaml = ref<YamlResponse | null>(null);
 const yamlErr = ref('');
+/** YAML 编辑文本（textarea v-model）。null 表示尚未拉取；非 null 时 isDirty 据此计算。 */
+const yamlEdit = ref<string | null>(null);
 let timer: number | undefined;
 const startup = ref<StartupSnapshot | null>(null);
 let startupTimer: number | undefined;
+/** YAML 编辑是否偏离源文件（isDirty） */
+const yamlDirty = computed(() => !!yamlEdit.value && !!yaml.value && yamlEdit.value !== yaml.value.content);
 
 /** 拉取模型详情 */
 async function refresh() {
@@ -55,15 +59,51 @@ async function refreshLog() {
     console.warn('getModelLog 失败:', err);
   }
 }
-/** 拉取 YAML */
+/** 拉取 YAML（并把编辑态初始化为本源内容；不覆盖用户已编辑的文本） */
 async function refreshYaml() {
   yamlErr.value = '';
   try {
-    yaml.value = await getModelYaml(name.value);
+    const r = await getModelYaml(name.value);
+    yaml.value = r;
+    // 编辑态未动过（null）时按源初始化；用户已编辑时保留原文（不覆盖）
+    if (yamlEdit.value === null) yamlEdit.value = r.content;
+    else if (yaml.value && yaml.value.content === r.content) {
+      // 源文件未变化但 yamlEdit 已被设为"与源一致的副本"——无变更
+    }
   } catch (err) {
     console.warn('getModelYaml 失败:', err);
     yamlErr.value = (err as { message?: string })?.message || 'YAML 读取失败';
   }
+}
+/** 个性化启动：用编辑后的 YAML 文本作为 override 提交（源 yaml 文件不改）。
+ *
+ * 走与"启动"按钮**同一套**任务流 + tasksStore（SSE / 轮询 / 进度卡片 / 终态 toast
+ * 全部复用）。`retryFn` 闭包重放 overrideFn 中的 yamlOverride——重试也保持 override 语义。
+ */
+function applyYamlAndStart() {
+  if (yamlEdit.value === null || !yaml.value || !yamlDirty.value) return;
+  const text = yamlEdit.value;
+  const fn = () => startModel(name.value, { yamlOverride: text });
+  void fn().then(
+    (refVal) => {
+      tasksStore.track(refVal, {
+        target: name.value,
+        retryFn: fn,
+        onSuccess: () => { refresh(); void refreshStartup(); },
+        onError: (msg) => { yamlNotice.value = msg; },
+      });
+    },
+    (err) => {
+      yamlNotice.value = (err as { message?: string })?.message || '个性化启动提交失败';
+    },
+  );
+}
+/** 个性化启动通知（YAML tab 顶部 banner） */
+const yamlNotice = ref('');
+/** 恢复源文件内容（只编辑态，不写盘） */
+function resetYamlEdit() {
+  if (yaml.value) yamlEdit.value = yaml.value.content;
+  yamlNotice.value = '';
 }
 /** 拉一次启动进度快照（仅无记录 404 → 清空卡片；其它故障保留上一帧防闪烁） */
 async function refreshStartup() {
@@ -148,7 +188,15 @@ onMounted(() => {
   void refresh();
   void refreshLog();
   void refreshStartup();
-  timer = window.setInterval(() => void refresh(), 5000);
+  void refreshYaml(); // 进入详情页自动显示 YAML（不切 tab，仅预热数据；未来切换零延迟）
+  // 5s 轮询 detail + 日志预填充（log tab 当前可见时），保证 docker runtime
+  // 即使 SSE 没实时增量（如 docker-in-docker / 容器已删）也能 5s 间隔刷新
+  timer = window.setInterval(() => {
+    void refresh();
+    if (tab.value === 'log') void refreshLog();
+    // yaml tab 当前可见且用户未编辑时，跟源文件同步（避免源被改动的陈旧态）
+    if (tab.value === 'yaml' && !yamlDirty.value) void refreshYaml();
+  }, 5000);
   // 设计 §4.8：仅启动期间 2s 轮询进度。门控：本模型有进行中的 start/restart 任务
   // （后端无 starting 状态，由 tasks store 派生）或正在展示启动卡片（含最近失败）。
   // 不满足直接跳过本轮请求，避免常驻轮询；404 清空逻辑在 refreshStartup 内保留。
@@ -247,13 +295,40 @@ function engineConfigEntries(): Array<{ key: string; value: string }> {
         </div>
         <SseLogViewer :url="logStreamUrl" :tail-lines="logTail" :initial="logInitial" />
       </div>
-      <!-- YAML tab（拉取一次） -->
+      <!-- YAML tab（自动加载 + 可编辑；override 不影响源文件） -->
       <div v-else-if="tab === 'yaml'" class="space-y-3 p-3">
-        <div v-if="yaml" class="flex items-center justify-between text-xs">
-          <span class="font-mono text-slate-500">{{ yaml.path }}</span>
-          <button class="btn-ghost !py-1 !px-2" @click="copyText(yaml.content)">复制</button>
+        <div v-if="yaml" class="flex flex-wrap items-center justify-between gap-2 text-xs">
+          <span class="font-mono text-slate-500">{{ yaml.path }}（源文件，仅展示；编辑不影响源）</span>
+          <div class="flex items-center gap-2">
+            <label class="flex items-center gap-1 text-slate-400">
+              <input
+                type="checkbox"
+                :checked="yamlDirty"
+                class="h-3.5 w-3.5 accent-emerald-500"
+                :title="yamlDirty ? '编辑态偏离源文件' : '与源文件一致'"
+                disabled
+              >
+              {{ yamlDirty ? '已修改' : '与源一致' }}
+            </label>
+            <button class="btn-ghost !py-1 !px-2" :disabled="!yamlDirty" :title="yamlDirty ? '恢复为源文件内容' : '当前与源一致'" @click="resetYamlEdit">重置</button>
+            <button class="btn-ghost !py-1 !px-2" @click="copyText(yamlEdit || yaml.content)">复制</button>
+            <button
+              class="btn-primary !py-1 !px-2"
+              :disabled="!yamlDirty"
+              :title="yamlDirty ? '用上方编辑的 YAML 文本启动（源文件不改）' : '请先编辑 YAML'"
+              @click="applyYamlAndStart"
+            >应用并启动</button>
+          </div>
         </div>
-        <pre v-if="yaml" class="max-h-96 overflow-auto bg-[#0b1120] p-3 font-mono text-xs leading-6 text-slate-300 whitespace-pre-wrap">{{ yaml.content }}</pre>
+        <!-- 个性化启动通知 -->
+        <div v-if="yamlNotice" class="rounded-md bg-amber-600/10 border border-amber-600/40 px-3 py-2 text-xs text-amber-200 whitespace-pre-wrap">{{ yamlNotice }}</div>
+        <!-- 可编辑 YAML（font-mono + 等宽行高；max-h 可控；不自动换行，横向滚动看长行） -->
+        <textarea
+          v-if="yaml && yamlEdit !== null"
+          v-model="yamlEdit"
+          spellcheck="false"
+          class="block w-full min-h-[460px] max-h-[640px] resize-y overflow-auto bg-[#0b1120] p-3 font-mono text-xs leading-6 text-slate-200 whitespace-pre rounded-md border border-slate-700"
+        ></textarea>
         <p v-else-if="yamlErr" class="text-sm text-red-400">{{ yamlErr }}</p>
         <p v-else class="py-4 text-sm text-slate-500">加载中…</p>
       </div>

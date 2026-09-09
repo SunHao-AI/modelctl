@@ -9,12 +9,14 @@ import type {
   YamlResponse,
 } from './types';
 
-/** 异步操作（start / restart）参数：超时秒 + GPU 列表（逗号串） */
+/** 异步操作（start / restart）参数：超时秒 + GPU 列表（逗号串）+ 个性化 YAML override */
 export interface ModelActionOpts {
   /** 等待健康超时秒数；不传则由后端按运行时自适应（docker 1800 / 其它 600） */
   timeout?: number;
   /** GPU 列表（逗号串，例如 "0,1"） */
   gpus?: string;
+  /** 个性化启动：YAML 文本 override（不写源 yaml 文件；engine/port 必须与源一致） */
+  yamlOverride?: string;
 }
 
 /** 列出所有模型（按 group 聚合） + 默认模型名。 */
@@ -32,13 +34,18 @@ export function stopModel(name: string): Promise<ActionResponse> {
   return dataOf<ActionResponse>(client.post(`/models/${encodeURIComponent(name)}/stop`));
 }
 
-/** 启动模型（异步 202 + task_id + stream_url）。 */
+/** 启动模型（异步 202 + task_id + stream_url）。
+ *
+ * 可选 `opts.yamlOverride`：文本 → 临时 profile（源 yaml 不改）。
+ * 后端以 query 参数 `yaml_override` 接收（`encodeURIComponent` 由 axios params 自动处理）。
+ */
 export function startModel(name: string, opts?: ModelActionOpts): Promise<TaskRef> {
-  return dataOf<TaskRef>(
-    client.post(`/models/${encodeURIComponent(name)}/start`, null, {
-      params: { timeout: opts?.timeout, gpus: opts?.gpus },
-    }),
-  );
+  const params: Record<string, string | number | undefined> = {
+    timeout: opts?.timeout,
+    gpus: opts?.gpus,
+  };
+  if (opts?.yamlOverride) params.yaml_override = opts.yamlOverride;
+  return dataOf<TaskRef>(client.post(`/models/${encodeURIComponent(name)}/start`, null, { params }));
 }
 
 /** 重启模型（异步 202 + task_id + stream_url）。 */
