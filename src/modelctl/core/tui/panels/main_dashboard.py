@@ -6,7 +6,7 @@
 # @Author : SunHao
 # @Email  : 2865467769@qq.com
 # @Date   : 2026/9/10 10:00
-# @Desc   : TUI 主仪表盘（GPU 摘要 / profile 表格 / keybar，CJK 对齐守）
+# @Desc   : TUI 主仪表盘（GPU 摘要 / profile 表格 / keybar，CJK 对齐守，含 80 列窄屏适配）
 # ===============================================================================
 
 """TUI 主仪表盘。
@@ -19,6 +19,17 @@
 渲染**不直接调** `list_profiles()` / `probe()` / `launch_log()`——快照已在 data.py
 完成，render 只消费 `ModelsSnapshot.profiles` / `HardwareSnapshot.gpus` /
 `ClusterSnapshot.nodes`。
+
+Task 6 追加 80 列窄屏适配：
+- `full`（width >= 120）：保留全部 7 列（NAME / ENGINE / VARIANT / PORT / STATUS /
+  RATE / VRAM），列表宽 80 单位，剩余空间均分到右侧填充。
+- `medium`（100 <= width < 120）：隐藏 VARIANT 列，列表宽 71 单位，右侧均分填充。
+- `narrow`（80 <= width < 100）：隐藏 VARIANT 列 + RATE 收窄到 7 单位
+  （短速率如 `155/33` 仍可读），列表宽 41 单位，右侧均分填充。
+
+Caps 语义：`_console_size` 已经保证 width 至少 80；本模块不再做"宽度 < 80 强行
+80"的二次校验（会跟 _console_size 重复），表宽固定，超宽靠 `pad_width` 兜底
+到 `width`，不会截断语义内容。
 """
 
 from __future__ import annotations
@@ -38,9 +49,41 @@ COL_ENGINE = 10
 COL_VARIANT = 9
 COL_PORT = 5
 COL_STATUS = 9
-COL_RATE = 13
+COL_RATE_FULL = 13
+COL_RATE_NARROW = 7
 COL_VRAM = 14
-COL_TOTAL = COL_NAME + COL_ENGINE + COL_VARIANT + COL_PORT + COL_STATUS + COL_RATE + COL_VRAM
+COL_TOTAL_FULL = COL_NAME + COL_ENGINE + COL_VARIANT + COL_PORT + COL_STATUS + COL_RATE_FULL + COL_VRAM
+COL_TOTAL_MEDIUM = COL_NAME + COL_ENGINE + COL_PORT + COL_STATUS + COL_RATE_FULL + COL_VRAM
+COL_TOTAL_NARROW = COL_NAME + COL_ENGINE + COL_PORT + COL_STATUS + COL_RATE_NARROW + COL_VRAM
+
+#: 布局模式
+LAYOUT_FULL = "full"
+LAYOUT_MEDIUM = "medium"
+LAYOUT_NARROW = "narrow"
+
+
+def _layout_for_width(width: int) -> str:
+    """按宽度选布局模式。
+
+    - `full`：width >= 120，7 列全显
+    - `medium`：100 <= width < 120，隐藏 VARIANT 列
+    - `narrow`：80 <= width < 100（含 width < 80 的兜底，表宽不变，靠
+      `pad_width` 截断感出现，实际受 _console_size 保护不会走到）
+    """
+    if width >= 120:
+        return LAYOUT_FULL
+    if width >= 100:
+        return LAYOUT_MEDIUM
+    return LAYOUT_NARROW
+
+
+def _layout_total_width(mode: str) -> int:
+    """布局的列表总宽（满分 = 表中列宽之和；右侧剩余 = width - 列表总宽）。"""
+    if mode == LAYOUT_FULL:
+        return COL_TOTAL_FULL
+    if mode == LAYOUT_MEDIUM:
+        return COL_TOTAL_MEDIUM
+    return COL_TOTAL_NARROW
 
 
 def _mb_to_gb(mb: int) -> float:
@@ -94,13 +137,22 @@ def _status_style(status: str, theme: dict) -> str:
     return theme["dim"]
 
 
-def _profile_row(state: TUIState, idx: int, profile: dict, width: int, theme: dict) -> Text:
-    """表格数据行（pad_width 到 COL_TOTAL，剩余空格 pad_width 到 width）。
+def _profile_row(
+    state: TUIState,
+    idx: int,
+    profile: dict,
+    width: int,
+    theme: dict,
+    mode: str,
+) -> Text:
+    """表格数据行（按布局模式列宽取段，末尾 pad_width 到 width）。
 
     - 当前选中（state.active_index == idx in 当前页）整行 bold
-    - 列：NAME / ENGINE / VARIANT / PORT / STATUS / RATE / VRAM（pad 对
-      齐，无竖线分隔，pad 到 width 即可）
-    - 状态：● running / ○ stopped；速率无数据显 "—"
+    - 列按 `mode` 取宽：
+      - `full`：NAME / ENGINE / VARIANT / PORT / STATUS / RATE (13) / VRAM
+      - `medium`：NAME / ENGINE / PORT / STATUS / RATE (13) / VRAM（隐藏 VARIANT）
+      - `narrow`：NAME / ENGINE / PORT / STATUS / RATE (7) / VRAM
+    - 状态：● running / ○ stopped；速率无数据显 "—"（narrow 模式截成 7 单位）
     """
     active = idx == state.active_index
     text = Text()
@@ -112,28 +164,46 @@ def _profile_row(state: TUIState, idx: int, profile: dict, width: int, theme: di
     vram = float(profile.get("vram_gib") or 0.0)
     rate_in = profile.get("rate_in")
     rate_out = profile.get("rate_out")
-    rate_str = (f"{rate_in:.0f}/{rate_out:.0f}" if rate_in is not None and rate_out is not None else "—")
+    rate_str_full = (
+        f"{rate_in:.0f}/{rate_out:.0f}" if rate_in is not None and rate_out is not None else "—"
+    )
+    rate_str = rate_str_full
+    if mode == LAYOUT_NARROW:
+        # 窄屏：列宽固定 7，速率长于 7 显示单位时截断（纯 ASCII 数字串，
+        # display_width 与 len 等值，统一走 display_width 守规则）
+        if display_width(rate_str_full) > COL_RATE_NARROW:
+            rate_str = rate_str_full[:COL_RATE_NARROW]
     vram_str = f"{vram:.0f}G" if vram > 0 else "-"
-    # trailing pad 按实际 vram_str 可见宽补全（vram_str 通常 < COL_VRAM，差额计入 pad 保证整行 == width）
     vram_width = display_width(vram_str)
 
     prefix = "bold " if active else ""
+    rate_col = COL_RATE_NARROW if mode == LAYOUT_NARROW else COL_RATE_FULL
     cells = [
         (pad_width(name, COL_NAME), theme["title"]),
         (pad_width(engine, COL_ENGINE), theme["dim"]),
-        (pad_width(variant, COL_VARIANT), theme["dim"]),
-        (pad_width(port, COL_PORT), theme["dim"]),
-        (_status_glyph(status, theme), _status_style(status, theme)),
-        (pad_width(str(status), 8, align="left"),
-         theme["success"] if status == "running" else theme["dim"]),
-        (pad_width(rate_str, COL_RATE),
-         theme["success"] if rate_in is not None else theme["dim"]),
-        (vram_str, theme["dim"]),
     ]
+    if mode == LAYOUT_FULL:
+        cells.append((pad_width(variant, COL_VARIANT), theme["dim"]))
+    cells.extend(
+        [
+            (pad_width(port, COL_PORT), theme["dim"]),
+            (_status_glyph(status, theme), _status_style(status, theme)),
+            (
+                pad_width(str(status), 8, align="left"),
+                theme["success"] if status == "running" else theme["dim"],
+            ),
+            (
+                pad_width(rate_str, rate_col),
+                theme["success"] if rate_in is not None else theme["dim"],
+            ),
+            (vram_str, theme["dim"]),
+        ]
+    )
     for value, style in cells:
         text.append(value, style=f"{prefix}{style}")
-   # 前 7 段实际宽 = COL_TOTAL - COL_VRAM + 实际 vram_width（即 vram_str visible width）
-    rest = max(0, width - (COL_TOTAL - COL_VRAM + vram_width))
+    # 前段实际宽 = 布局总宽 - VRAM 列宽 + 实际 vram_str 可见宽（pad 到宽度需求弱）
+    list_total = _layout_total_width(mode)
+    rest = max(0, width - (list_total - COL_VRAM + vram_width))
     if rest > 0:
         text.append(" " * rest, style=theme["dim"])
     return text
@@ -172,6 +242,7 @@ def render(
     4. 底部 keybar：brief 指定的快捷键标签串
     """
     theme = get_rich_theme(theme_id)
+    mode = _layout_for_width(width)  # Task 6：按 width 选 full/medium/narrow
     header = _header_text(state, hw, models, cluster, width, theme)
     models_filtered = state.sort_profiles(state.filter_candidates(models.profiles))
     page = state.apply_page(models_filtered, page_size=10)
@@ -183,6 +254,6 @@ def render(
         if state.active_index >= len(page):
             state.active_index = 0
         for i, p in enumerate(page):
-            rows.append(_profile_row(state, i, p, width, theme))
+            rows.append(_profile_row(state, i, p, width, theme, mode))
     keybar = _keybar(width, theme)
     return Group(header, *rows, keybar)

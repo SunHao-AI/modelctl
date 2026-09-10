@@ -5,8 +5,8 @@
 # @IDE    : VSCode
 # @Author : SunHao
 # @Email  : 2865467769@qq.com
-# @Date   : 2026/9/7 10:00
-# @Desc   : TuiApp 主类骨架（主循环 / 渲染入口 / smoke 模式）
+# @Date   : 2026/9/10 10:00
+# @Desc   : TuiApp 主类骨架（主循环 / 渲染入口 / smoke 模式 / 主题持久化 / 80 列窄屏适配）
 # ===============================================================================
 
 """TuiApp 主类（Task 2 起填充：渲染 Dashboard 面板）。
@@ -16,9 +16,16 @@
 - run(smoke=False)：真实主循环（loop_begin → render_once → loop_end），
   Task 2 只接通"快照 revalidate → render → print"骨架；键盘按键派发留给后续 Task
 - KeyboardInterrupt（Ctrl-C）无 traceback：捕获后走 loop_end 并返回 130
+
+Task 6 追加：
+- 主题持久化：__init__ 从 `theme_file`（`Path | None = None` 走 cache_dir()）
+  读 `load_theme()`，loop_end 时 `save_theme()` 回写
+- cycle_theme()：T 键钩子（Task 6 接通；状态机内部不再保留 _theme 字符串硬编码）
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 from rich.console import Console
 
@@ -37,19 +44,34 @@ from modelctl.core.tui.panels.main_dashboard import render as render_dashboard
 from modelctl.core.tui.panels.monitor import render as render_monitor
 from modelctl.core.tui.panels.plan import render as render_plan
 from modelctl.core.tui.state import TUIState
+from modelctl.core.tui.theme import cycle_theme, load_theme, save_theme
 
 SMOKE_KEY_SEQUENCE_LEN = 3  # smoke 模式消费的虚拟 key 事件数
 DEFAULT_MIN_SIZE = (80, 24)  # 最小终端尺寸，console.size 探测失败时回落
 
 
 class TuiApp:
-    """TUI 主应用（持有 5 种快照缓存，按 active_view 派发至 panels）。"""
+    """TUI 主应用（持有 5 种快照缓存，按 active_view 派发至 panels）。
 
-    def __init__(self, state: TUIState, console: Console) -> None:
+    Task 6 起：
+    - `theme_file` 关键字入参可选，None 走 cache_dir()。测试传 tmp Path 隔离。
+    - __init__ 期从 theme_file `load_theme()`（损坏 fallback dark）。
+    - loop_end 期 `save_theme()` 回写；KeyboardInterrupt 路径也走 loop_end，
+      保存时机不漂移。
+    """
+
+    def __init__(
+        self,
+        state: TUIState,
+        console: Console,
+        theme_file: Path | None = None,
+    ) -> None:
         self.state = state
         self.console = console
         self.keyboard = KeyboardInput()
-        self._theme = "dark"
+        self._theme_file: Path | None = theme_file
+        # 主题：从持久化文件读取（损坏回落 "dark"），后续 T 键走 cycle_theme()
+        self._theme = load_theme(theme_file)
         # 快照缓存（先 create-空实例，render 时 revalidate_if_expired 触发 fetch）；
         # T2 起 5 个 Snapshot 全初始化：hw / models / cluster / logs / monitor
         self._snap: dict[str, _SnapshotBase] = {
@@ -86,8 +108,18 @@ class TuiApp:
         """进入主循环前置（Task 1 起做 raw 模式 / size 探测）。"""
 
     def loop_end(self) -> None:
-        """退出主循环后置（Task 1 起 restore_term()）。"""
+        """退出主循环后置（restore_term + save_theme 持久化）。
+
+        Task 6：无论如何退出（正常 / KeyboardInterrupt / 异常路径）都走 loop_end，
+        保证主题持久化与终端状态恢复同步发生；写入失败静默（save_theme 已兜 OSError），
+        不阻塞退出。
+        """
         self.keyboard.restore_term()
+        save_theme(self._theme, self._theme_file)
+
+    def cycle_theme(self) -> None:
+        """切主题到下一个（T 键钩子；Task 6 接通键派发）。"""
+        self._theme = cycle_theme(self._theme)
 
     def realize_render_once(self) -> None:
         """渲染一帧：快照 revalidate → 按 active_view 派发 → console.print。
