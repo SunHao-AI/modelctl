@@ -103,8 +103,10 @@ def _render_to_lines(
 ) -> list[str]:
     """渲染 → 输出文本行。dashboard 部分文本自带 padding 到 width，断言用 display_width。
 
-    `Console(no_wrap=True, soft_wrap=True)`：禁用 rich 的 character-based 宽度换行，
-    避免 CJK 行（含 2 列字符）在 width-1 处被截掉 1 列导致 `display_width != width`。
+    `Console(record=True, width=..., height=..., force_terminal=False, soft_wrap=True)`：
+    `soft_wrap=True` 关闭 rich Console 的 width 换行（不设 `no_wrap`，rich <13 无该参数；
+    rich 的 soft-wrapping 默认会按 width 截断 CJK 双宽行），
+    `record=True` 配合 `export_text()` 收集最终渲染的文本以便严格逐行 `display_width` 断言。
     """
     console = Console(
         record=True, width=width, height=height,
