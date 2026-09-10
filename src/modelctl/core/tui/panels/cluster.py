@@ -12,7 +12,7 @@
 """Cluster 视图渲染（Task 5 交付）。
 
 布局：
-- 摘要条：`-- Cluster | role: {role} | 节点: {total} nodes ({online} 在线/{offline} 离线) | goals: {goal_count} | center: {url_12} --`
+- 摘要条：`-- Cluster | role: {role} | 节点: {total} nodes (...) | goals: {goal_count} | center: {url} --`
 - 未接入 stub（role=solo 或 center_visible="(中心不可达)"）→ 顶部红 Panel + keybar 仅，跳过 3 section
 - 否则渲染 "Tab header + section + keybar"：
   - Tab 0「节点」：node_id / 状态 / LAN / 容量 / goal(start 收敛/声明)
@@ -176,13 +176,6 @@ def _nodes_section(cluster: ClusterSnapshot, width: int, theme: dict) -> Panel:
     body: list[Text] = [Text(pad_width(header, max(20, width - 4)), style=theme["dim"])]
     for r in rows:
         status = r["status"]
-        row = (
-            pad_width(r["nid"], col_node)
-            + pad_width(status, col_status)
-            + pad_width(r["lan"], col_lan)
-            + pad_width(r["capacity"], col_cap)
-            + pad_width(r["goal"], col_goal)
-        )
         # 简单一致：整行取主题 dim，status 单独色（先拼 cell 再上色）
         parts: list[tuple[str, str]] = [
             (pad_width(r["nid"], col_node), theme["title"]),

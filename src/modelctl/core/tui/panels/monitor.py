@@ -38,7 +38,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from modelctl.core.colors import display_width, pad_width
-from modelctl.core.tui.data import HardwareSnapshot, MonitorSnapshot, ModelsSnapshot
+from modelctl.core.tui.data import HardwareSnapshot, ModelsSnapshot, MonitorSnapshot
 from modelctl.core.tui.state import TUIState
 from modelctl.core.tui.theme import get_rich_theme
 

@@ -127,7 +127,8 @@ def test_hardware_snapshot_mark_fresh():
     # 设到过期
     assert snap.is_expired(now=_now() + 61)
     snap.mark_fresh(now=_now())
-    assert not snap.is_expired(now=_now() + 60.5)
+    # T2 起 is_expired 用 `> ttl + 0.5s` 容差，`+60.5` 贴线易 flaky；改为 `+60` 给固定余量
+    assert not snap.is_expired(now=_now() + 60)
 
 
 # ─────────────────────────────────────────────────────────
