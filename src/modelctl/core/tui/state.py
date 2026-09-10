@@ -30,6 +30,8 @@ class TUIState:
     active_index: int = 0
     active_detail_subtab: str = "yaml"  # yaml / agent / log / rate / precheck
     plan_edit: dict = field(default_factory=dict)
+    plan_edit_cursor: int = 0  # Plan 视图当前编辑字段 index（cycle_plan_cursor 维护）
+    plan_dry_run_done: bool = False  # 用户按过 D 键（重绘保留 dry-run 状态，不回滚）
     filter_status: str = "all"
     filter_engine: str = "all"
     sort_key: str = "name"
@@ -79,3 +81,14 @@ class TUIState:
         """切 Detail 子 Tab。key ∈ {'yaml','agent','log','rate','precheck'}；越界 no-op。"""
         if key in _DETAIL_TABS:
             self.active_detail_subtab = key
+
+    def cycle_plan_cursor(self, direction: int, count: int) -> None:
+        """Plan 字段光标 ±1 回绕（不会被调用方向为 0 / count 为 0）。
+
+        `direction` ∈ {-1, 0, +1}；`count` = 字段总数（由调用侧按
+        `len(_profile_fields(profile))` 注入）。`count == 0` ⇒ no-op；
+        越界自动取模回绕，结果始终在 [0, count) 区间。
+        """
+        if count <= 0 or direction == 0:
+            return
+        self.plan_edit_cursor = (self.plan_edit_cursor + direction) % count

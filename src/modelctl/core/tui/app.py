@@ -32,6 +32,7 @@ from modelctl.core.tui.data import (
 from modelctl.core.tui.keyboard import Key, KeyboardInput
 from modelctl.core.tui.panels.detail import render as render_detail
 from modelctl.core.tui.panels.main_dashboard import render as render_dashboard
+from modelctl.core.tui.panels.plan import render as render_plan
 from modelctl.core.tui.state import TUIState
 
 SMOKE_KEY_SEQUENCE_LEN = 3  # smoke 模式消费的虚拟 key 事件数
@@ -108,6 +109,16 @@ class TuiApp:
                 self._snap["hw"],  # type: ignore[arg-type]
                 self._snap["models"],  # type: ignore[arg-type]
                 self._snap["logs"],  # type: ignore[arg-type]
+                width=width,
+                height=height,
+                theme_id=self._theme,
+            )
+        elif view == "plan":
+            # Plan 视图：字段表单 + KV 估算 + 预检三态（T4 交付，T5/T6 接键盘）
+            group = render_plan(
+                self.state,
+                self._snap["hw"],  # type: ignore[arg-type]
+                self._snap["models"],  # type: ignore[arg-type]
                 width=width,
                 height=height,
                 theme_id=self._theme,
