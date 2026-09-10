@@ -843,3 +843,44 @@
   > 时，再把 `_save` / `_usable_overlay` 两处加入"5min 同 message 去重窗口"
   > （类似 `local_profile_paths` 的指纹门控），并附新增测试。在此之前，
   > 维持 monitor 状态即可，**不预防性修**。
+
+## TUI Dashboard 列布局 adapter 只修 `len()` 没修 width 折叠
+
+- **日期**：2026-09-10（T6 任务 2：80 列窄屏适配）
+- **症状**：`main_dashboard.py` 在 80 列终端行末被截断，且不截断时整行右移；
+  旧实现每行各自 `f"{x:<13}"` 按 ASCII 列宽补齐，CJK 双宽字符
+  （如 profile 中文名 `Qwen3.5-397B-中文`）让列起始位置逐行漂移，
+  叠加列宽常量未做窄屏折叠后，80 列宽度下 `total` 列直接砍出去。
+- **根因**：两条规则同时缺位——
+  1. **字符数 ≠ 显示宽度**：`f"{x:<13}"`/`ljust`/`len()` 把 CJK 当 1 列补空格，
+     而 `pad_width` 按 2 列补齐——同一个"对齐"在两种算法下结果不一致，
+     正好命中 T5 `gate/CLI 报告按 len() 取列宽，中文 node_id 让整表右移错位`
+     的**同一病灶**在 TUI 行的复现。
+  2. **列宽常量只按 full 档一次性取值**：`COL_RATE=13`、`COL_TOTAL=12`
+     在 80 列下需要进一步压到 7/8（尤其是 VRAM 列动态宽度时，rate/total 再不
+     压窄总宽必爆）。
+- **解决**：单点封装（与 T5 闸宽同口径，集中在 `_layout` 区段）：
+  - 列宽常量分档：`COL_RATE_FULL=13 / COL_RATE_NARROW=7`、
+    `COL_TOTAL_FULL=12 / COL_TOTAL_MEDIUM=11 / COL_TOTAL_NARROW=8`。
+  - 布局常量：`LAYOUT_FULL / MEDIUM / NARROW`（按显示宽锁定各列宽）。
+  - `_layout_for_width(width) -> mode`：单一 adapter 决定用哪套列宽，
+    行渲染侧不再各自 if/elif。
+  - `_profile_row(state, idx, profile, width, theme, mode)`：所有 f-string
+    改为 `pad_width(x, COL_*)`，vram 不 fold（`display_width(vram_str)`
+    取实际长度），末尾 `rest = width - (total - VRAM + vram_width)` 补齐，
+    超宽不截断（仓库规则）。
+  - 测试钉的是**不变量**：`display_width(line) == width` 且 200/120/100/80
+    四档都通过，数据里含 CJK 行（不能让纯 ASCII 假绿）。
+- **要点**：
+  - 与 T5 `gate 按 len() 取列宽` 同主题不同侧：**列宽常量与列宽 adapter 都要分档**，
+    只修一半依然错位。TUI 行的每个 f-string 对齐点都必须走
+    `display_width`/`pad_width`，不允许多处各自取"最优"列宽。
+  - 不变量断言 > 空格数断言：钉 `display_width(line) == width` 等价于钉
+    "每行末列位置一致"，且数据必须含真实双宽字符；数空格会在改文案/
+    改列宽时刻刻得改用例。
+  - 折叠切换点**集中**：`_layout_for_width` 是唯一宽度阈值入口，dashboard
+    行渲染侧不再自定义 mode 阈值——宽度阈值与 theme 切换解耦后可独立
+    加档（如追加 `LAYOUT_ULTRA_NARROW`）而不需动行渲染。
+  - 动态列（vram）不固定宽度：`display_width(vram)` 取实际值参与
+    rest 补齐，让 VRAM 列在数据宽度变化时自适应不被截断；固定列才
+    进 `COL_*` 常量分档。
