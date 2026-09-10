@@ -45,7 +45,7 @@ def test_tui_state_initial_values():
     st = TUIState()
     assert st.active_view == "dashboard"
     assert st.active_index == 0
-    assert st.active_detail_subtab == 0
+    assert st.active_detail_subtab == "yaml"
     assert st.plan_edit == {}
     assert st.filter_status == "all"
     assert st.filter_engine == "all"
@@ -74,6 +74,17 @@ def test_tui_app_run_smoke_exits_cleanly(console, monkeypatch):
     assert rc == 0
     # smoke 路径应消费了全部 3 个 key
     assert next(sequence, None) is None
+
+
+def test_tui_app_run_smoke_with_detail_view(console, monkeypatch):
+    """Detail 视图 smoke 路径必须跑通 render_detail（LogsSnapshot 降级链）。"""
+    st = TUIState()
+    st.active_view = "detail"
+    app = TuiApp(state=st, console=console)
+    sequence = iter([Key.Up, Key.Down, Key.Q])
+    monkeypatch.setattr(KeyboardInput, "read_key_block", lambda self, timeout=0.1: next(sequence))
+    rc = app.run(smoke=True)
+    assert rc == 0
 
 
 def test_tui_snapshots_stubs_have_ttl():

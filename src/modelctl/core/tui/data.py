@@ -71,15 +71,36 @@ class _SnapshotBase:
         self._fetched_at = _mono_now(now)
 
     def revalidate_if_expired(self, now: float | None = None) -> None:
-        """若过期 → 调用自身 `fetch(now=now)`，把新数据回填到 self。"""
+        """若过期 → 调用自身 `fetch(now=now)`，把新数据回填到 self。
+
+        子类可重写 `_fetch_kwargs(now=...)` 注入实例状态（如 LogsSnapshot 的 name/tail），
+        避免 base 仅靠 `now` 一个参数不够。
+        """
         if not self.is_expired(now=now):
             return
-        fresh = type(self).fetch(now=now)
+        from typing import get_type_hints  # 避免使用 type(self) 持有当前类的 typing
+        try:
+            hints: dict = get_type_hints(type(self).fetch)
+            kwargs: dict = {}
+            if "name" in hints:
+                kwargs["name"] = getattr(self, "name", "")
+            if "tail" in hints:
+                kwargs["tail"] = getattr(self, "tail", 2)
+            kwargs["now"] = now
+        except Exception:  # pragma: no cover — 极端类型解析失败时退化为 now-only
+            kwargs = {"now": now}
+        fresh = type(self).fetch(**kwargs)
         for f in self.__dataclass_fields__:
             if f.startswith("_"):
                 continue
+            # name/tail 这类"fetch 输入"不应被子类 fetch 重置（否则 self.name 会丢）
+            if f in ("name", "tail"):
+                continue
             setattr(self, f, getattr(fresh, f))
         self._fetched_at = fresh._fetched_at
+        # 子类专属获取依据刷新：tabs 切换时 model 名称可能改，见 LogsSnapshot
+        if hasattr(self, "_rebind_inputs_from_fresh"):
+            self._rebind_inputs_from_fresh(fresh)  # type: ignore[call-arg]
 
 
 @dataclass
@@ -199,16 +220,33 @@ class ModelsSnapshot(_SnapshotBase):
 
 @dataclass
 class LogsSnapshot(_SnapshotBase):
-    """日志尾部快照（launch-*.log 末 2 行）；TTL=1s。"""
+    """日志尾部快照（launch-*.log 末 N 行）；TTL=1s。
+
+    `tail` 控制截取行数：dashboard 用默认 2（末 2 行），Detail 视图日志 Tab 用 20。
+    `name` 实例名（持 active_index 对应 profile 的 name；空字符串 → 不 fetch 任何文件，
+    供 app 在 models 空 / active_index 越界时安全 fallback）。
+    `revalidate_if_expired` 单帧语义：本快照每次 `fetch()` 不带 name 会自读
+    `self.name`（dataclass 默认 ""）。
+    """
 
     ttl: float = 1.0
+    tail: int = 2
+    name: str = ""
     lines: list[str] = field(default_factory=list)
     truncated: bool = False
 
+    def _fetch_kwargs(self, *, now: float | None) -> dict:
+        return {"name": self.name, "tail": self.tail, "now": now}
+
     @classmethod
-    def fetch(cls, *, name: str, now: float | None = None) -> LogsSnapshot:
-        """按实例名读取 launch_log；文件不存在 → lines=[]/truncated=False。"""
+    def fetch(cls, *, name: str = "", tail: int = 2, now: float | None = None) -> LogsSnapshot:
+        """按实例名读取 launch_log 末 `tail` 行；name 空 / 文件不存在 → lines=[]。"""
         snap = cls()
+        try:
+            snap.tail = max(1, int(tail)) if tail else 2
+        except (TypeError, ValueError):
+            snap.tail = 2
+        snap.name = name or ""
         path: Path | None = None
         try:
             path = launch_log(name) if name else None
@@ -223,9 +261,9 @@ class LogsSnapshot(_SnapshotBase):
             snap.mark_fresh(now=now)
             return snap
         all_lines = text.splitlines()
-        last_two = all_lines[-2:] if len(all_lines) >= 2 else list(all_lines)
-        snap.lines = last_two
-        snap.truncated = len(all_lines) > 2
+        last_n = all_lines[-snap.tail:] if len(all_lines) >= snap.tail else list(all_lines)
+        snap.lines = last_n
+        snap.truncated = len(all_lines) > snap.tail
         snap.mark_fresh(now=now)
         return snap
 

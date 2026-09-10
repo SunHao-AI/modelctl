@@ -13,18 +13,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+# Detail 视图 5 子 Tab（顺序固定：yaml → agent → log → rate → precheck）
+_DETAIL_TABS = ("yaml", "agent", "log", "rate", "precheck")
+
 
 @dataclass
 class TUIState:
     """TUI 全局可变态。
 
-    各字段先定义骨架；过滤/排序/分页等业务方法在 Task 2 追加。
+    各字段先定义骨架；过滤/排序/分页等业务方法在 Task 2 追加，
+    `switch_detail_tab` 在 Task 3 追加（Detail 视图子 Tab 切换）。
     快照缓存（caches）由 app.py / data.py 持有，不放在本状态里。
     """
 
     active_view: str = "dashboard"  # dashboard / detail / plan / cluster / monitor
     active_index: int = 0
-    active_detail_subtab: int = 0
+    active_detail_subtab: str = "yaml"  # yaml / agent / log / rate / precheck
     plan_edit: dict = field(default_factory=dict)
     filter_status: str = "all"
     filter_engine: str = "all"
@@ -70,3 +74,8 @@ class TUIState:
             return profiles
         start = max(0, self.page) * page_size
         return profiles[start:start + page_size]
+
+    def switch_detail_tab(self, key: str) -> None:
+        """切 Detail 子 Tab。key ∈ {'yaml','agent','log','rate','precheck'}；越界 no-op。"""
+        if key in _DETAIL_TABS:
+            self.active_detail_subtab = key

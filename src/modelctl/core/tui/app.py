@@ -25,10 +25,12 @@ from rich.console import Console
 from modelctl.core.tui.data import (
     ClusterSnapshot,
     HardwareSnapshot,
+    LogsSnapshot,
     ModelsSnapshot,
     _SnapshotBase,
 )
 from modelctl.core.tui.keyboard import Key, KeyboardInput
+from modelctl.core.tui.panels.detail import render as render_detail
 from modelctl.core.tui.panels.main_dashboard import render as render_dashboard
 from modelctl.core.tui.state import TUIState
 
@@ -45,12 +47,15 @@ class TuiApp:
         self.keyboard = KeyboardInput()
         self._theme = "dark"
         # 快照缓存（先 create-空实例，render 时 revalidate_if_expired 触发 fetch）；
-        # Task 2 走 3 个核心快照：硬件 / 模型 / 集群；logs/monitor 留给后续 Task 面板
+        # T3 起启用：硬件 / 模型 / 集群 / 日志；monitor 留给 T5 面板
         self._snap: dict[str, _SnapshotBase] = {
             "hw": HardwareSnapshot(),
             "models": ModelsSnapshot(),
             "cluster": ClusterSnapshot(),
+            "logs": LogsSnapshot(),
         }
+        # 跟随 active_profile 重切日志尾行的名称缓存（避免每帧读 models.profiles[idx].name）
+        self._logs_name: str = ""
 
     def run(self, *, smoke: bool = False) -> int:
         """主入口。smoke=True 消费 3 个 key 事件后退出（CI 模式），返回 0。"""
@@ -82,11 +87,32 @@ class TuiApp:
     def realize_render_once(self) -> None:
         """渲染一帧：快照 revalidate → 按 active_view 派发 → console.print。
 
-        Task 2 只接 dashboard 路径；其他 view 回落 dashboard 渲染避免 None 返回。
+        T3 起 4 个 view 分派：
+        - "dashboard"：T2 原逻辑
+        - "detail"：render_detail（snapshot 5 元组 state/hw/models/logs）
+        - 其他 view："plan"/"cluster"/"monitor" 暂走 dashboard 兜底（T5+ 再接具体面板）
         """
         self._revalidate()
         width, height = self._console_size()
-        if self.state.active_view == "dashboard":
+        # 把 LogsSnapshot.name/tail 联动 active_profile 当前帧 ——
+        # 在 revalidate 之前更新，避免缓存陈旧 name 读到错日志
+        self._sync_logs_name()
+        view = self.state.active_view
+        if view == "detail":
+            logs = self._snap["logs"]
+            logs.name = self._logs_name
+            logs.tail = 20  # detail log tab 固定 20 行
+            self._snap["logs"].revalidate_if_expired()
+            group = render_detail(
+                self.state,
+                self._snap["hw"],  # type: ignore[arg-type]
+                self._snap["models"],  # type: ignore[arg-type]
+                self._snap["logs"],  # type: ignore[arg-type]
+                width=width,
+                height=height,
+                theme_id=self._theme,
+            )
+        elif view == "dashboard":
             group = render_dashboard(
                 self.state,
                 self._snap["hw"],  # type: ignore[arg-type]
@@ -97,7 +123,7 @@ class TuiApp:
                 theme_id=self._theme,
             )
         else:
-            # 未实现的 view 先走 dashboard 兜底，Task 3+ 再接具体面板
+            # 未实现的 view 先走 dashboard 兜底，T5+ 再接具体面板
             group = render_dashboard(
                 self.state,
                 self._snap["hw"],  # type: ignore[arg-type]
@@ -109,6 +135,23 @@ class TuiApp:
             )
         self.console.clear()
         self.console.print(group)
+
+    def _sync_logs_name(self) -> None:
+        """从 `models.profiles[active_index]` 更新 LogsSnapshot 的 name（空回 "(null)" → ""）。
+
+        不直接读 self._snap["logs"] 的 name——ModelsSnapshot 帧间可能切换 active_index，
+        旧日志缓存已过期时（revalidate_if_expired）使用新 name；
+        未过期时（TTL=1s 内）保留上次 fetch 结果，避免每帧重读文件。
+        """
+        models = self._snap["models"]  # type: ignore[assignment]
+        profiles = getattr(models, "profiles", None) or []
+        idx = self.state.active_index
+        if idx < 0 or idx >= len(profiles):
+            idx = 0 if profiles else -1
+        if idx >= 0 and idx < len(profiles):
+            item = profiles[idx]
+            name = str(item.get("name", "") or "")
+            self._logs_name = name
 
     def render_once(self) -> None:
         """对外渲染入口（Task 2 起 console.clear/print 组合）。"""
