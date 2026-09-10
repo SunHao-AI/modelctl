@@ -217,8 +217,10 @@ def ensure_image(image: str, attempts: int | None = None,
             logger.error(f"docker pull 无法执行：{exc}")
             return False
         try:
-            # Popen.__iter__ 委托 stdout 逐行；stderr 已合并进 stdout
-            for line in proc:
+            # Popen 不可迭代，需手动从 stdout 逐行读取；stderr 已合并进 stdout
+            stdout = proc.stdout
+            assert stdout is not None
+            for line in stdout:
                 err_lines.append(line)
                 upd = parser.feed(line)
                 if upd and on_progress:
