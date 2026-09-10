@@ -140,24 +140,28 @@ class TuiApp:
             logs.name = self._logs_name
             logs.tail = 20  # detail log tab 固定 20 行
             self._snap["logs"].revalidate_if_expired()
+            hw = self._snap["hw"]  # type: ignore[assignment]
             group = render_detail(
                 self.state,
-                self._snap["hw"],  # type: ignore[arg-type]
+                hw,
                 self._snap["models"],  # type: ignore[arg-type]
                 self._snap["logs"],  # type: ignore[arg-type]
                 width=width,
                 height=height,
                 theme_id=self._theme,
+                caps=hw.caps,  # T5-3：I-1/M-1 收口
             )
         elif view == "plan":
             # Plan 视图：字段表单 + KV 估算 + 预检三态（T4 交付，T5/T6 接键盘）
+            hw = self._snap["hw"]  # type: ignore[assignment]
             group = render_plan(
                 self.state,
-                self._snap["hw"],  # type: ignore[arg-type]
+                hw,
                 self._snap["models"],  # type: ignore[arg-type]
                 width=width,
                 height=height,
                 theme_id=self._theme,
+                caps=hw.caps,  # T5-3：I-1/M-1 收口
             )
         elif view == "cluster":
             # Cluster 视图：3 section + SoloStub（T5 交付，T6 接 Tab 键盘 + 事件流）

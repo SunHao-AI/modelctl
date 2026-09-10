@@ -24,8 +24,10 @@
   → 红线只读异常消息列表；adapter 不存在 → 黄 "(无 adapter)"
 
 渲染**不直接调** subprocess / open('w') / os.kill——`read_text()` 只读，
-`probe()` / `check_requirements()` 仅做前置能力校验，无写副作用。
+`check_requirements()` 仅做前置能力校验，无写副作用。
 含 CJK 的输出逐段 pad_width（字级 CJK 双宽由 `display_width` / `pad_width` 兜）。
+precheck 的 `Caps` 由 host 侧 `HardwareSnapshot.caps` 注入（T5-3）；本模块**不**
+在正文内调 `probe()`。
 """
 
 from __future__ import annotations
@@ -35,7 +37,6 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.text import Text
 
-from modelctl.core.capabilities import probe
 from modelctl.core.colors import pad_width
 from modelctl.core.tui.data import HardwareSnapshot, LogsSnapshot, ModelsSnapshot
 from modelctl.core.tui.panels.common import resolve_profile_from_apps as _resolve_profile_from_apps
@@ -176,7 +177,7 @@ def _render_rate(models: ModelsSnapshot, state: TUIState, width: int, theme: dic
     )
 
 
-def _render_precheck(profile, width: int, theme: dict) -> RenderableType:
+def _render_precheck(profile, width: int, theme: dict, caps: object | None = None) -> RenderableType:
     """健康预检 Tab：调 adapter.check_requirements 捕获 RequirementError。
 
     - 通过（无异常）→ 绿 "precheck passed"
@@ -184,6 +185,10 @@ def _render_precheck(profile, width: int, theme: dict) -> RenderableType:
     - 其他异常 → 黄 "precheck 异常：{type}：{msg}"
     - adapter 不存在（get_adapter 抛异常）→ 黄 "(无 adapter)"
     本函数调用时 profile 必须非 None（无 profile 不触发 precheck）。
+
+    `caps`：`core.capabilities.Capabilities`，由 `render(caps=hw.caps)` 注入；
+    None 时 adapter 走 fallback 路径（如 `Caps().gpu_count == 0`）。**不**
+    在函数体内 `probe()`（T5-3：收敛到帧级每次一致，避免 Tab 切反复触发）。
     """
     inner_w = max(20, width - 4)
     try:
@@ -206,7 +211,6 @@ def _render_precheck(profile, width: int, theme: dict) -> RenderableType:
             title="健康预检", title_align="left",
             width=width, border_style=theme["warning"],
         )
-    caps = probe()
     try:
         adapter = adapter_cls(profile, caps)
         adapter.check_requirements()
@@ -250,7 +254,8 @@ class _ProfileProxy:
 
 def _dispatch_body(state: TUIState, proxy: _ProfileProxy, hw: HardwareSnapshot,
                    models: ModelsSnapshot, logs: LogsSnapshot,
-                   width: int, theme: dict) -> RenderableType:
+                   width: int, theme: dict,
+                   caps: object | None = None) -> RenderableType:
     """按 state.active_detail_subtab 分发到具体 Tab 渲染。"""
     tab = state.active_detail_subtab
     if tab == "yaml":
@@ -262,7 +267,7 @@ def _dispatch_body(state: TUIState, proxy: _ProfileProxy, hw: HardwareSnapshot,
     if tab == "rate":
         return _render_rate(models, state, width, theme)
     if tab == "precheck":
-        return _render_precheck(proxy, width, theme)
+        return _render_precheck(proxy, width, theme, caps=caps)
     # 未识别 fallback 回 yaml（Tab 值域收敛由 switch_detail_tab 守；此处兜底防脏值）
     return _render_yaml(proxy, width, theme)
 
@@ -275,6 +280,8 @@ def render(
     width: int,
     height: int,
     theme_id: str = "dark",
+    *,
+    caps: object | None = None,
 ) -> Group:
     """渲染 Detail 视图，返回 `rich.Group`。
 
@@ -287,6 +294,9 @@ def render(
          按 name 绑真实 Profile（缺失 → 走各 Tab 的"未找到 profile" / "engine_config 未定义"
          降级分支）
     4. 底部 keybar：Detail 视图快捷键
+
+    `caps`：`core.capabilities.Capabilities`，由 host 经 `hw.caps` 注入（T5-3）。
+    仅在 precheck tab 路径使用；None 时 adapter 走 fallback 路径。
 
     **不**向本函数传 `profiles` 参数（T2 dashboard 接口一致性守）。
     """
@@ -330,7 +340,8 @@ def render(
     if proxy is None:
         body = _no_profile_panel(width, theme)
     else:
-        body = _dispatch_body(state, proxy, hw, models, logs, width, theme)
+        body = _dispatch_body(state, proxy, hw, models, logs, width, theme,
+                              caps=caps)
     header = _header(state, width, theme)
     keybar = _keybar_detail(width, theme)
     return Group(header, body, keybar)

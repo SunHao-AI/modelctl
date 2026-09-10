@@ -98,6 +98,9 @@ class _SnapshotBase:
                 continue
             setattr(self, f, getattr(fresh, f))
         self._fetched_at = fresh._fetched_at
+        # 私有字段需要显式同步：base 循环跳过 `_` 前缀字段
+        if hasattr(fresh, "_caps"):
+            self._caps = fresh._caps
         # 子类专属获取依据刷新：tabs 切换时 model 名称可能改，见 LogsSnapshot
         if hasattr(self, "_rebind_inputs_from_fresh"):
             self._rebind_inputs_from_fresh(fresh)  # type: ignore[call-arg]
@@ -110,6 +113,8 @@ class HardwareSnapshot(_SnapshotBase):
     gpus：每个已识别 GPU 的 `{index, name, free_mb, total_mb, util_pct}`；
     binaries：{engine: path}（None 跳过）；cpu_info："CC 8.9" 或 ""；
     probe_errors：probe 内部已安全降级（`_safe_smi`），此处仅记异常兜底。
+    _caps：`probe()` 原始 `Capabilities` 对象（panel 层 precheck 透传 adapter）；
+    None 表示 probe 失败（adapter 侧走 fallback 默认值路径）。
     """
 
     ttl: float = 60.0
@@ -117,14 +122,29 @@ class HardwareSnapshot(_SnapshotBase):
     binaries: dict[str, str] = field(default_factory=dict)
     cpu_info: str = ""
     probe_errors: list[str] = field(default_factory=list)
+    _caps: object | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def caps(self) -> object | None:
+        """`probe()` 原始 `Capabilities` 对象（T5-3：precheck panel 透传 adapter）。
+
+        暴露为 property 避免数据层内部字段的 `_` 前缀约定被 panel 越过。
+        """
+        return self._caps
 
     @classmethod
     def fetch(cls, *, now: float | None = None) -> HardwareSnapshot:
-        """采集：调 `probe()` 填充 gpus/binaries/cpu_info，异常降级返回空快照。"""
+        """采集：调 `probe()` 填充 gpus/binaries/cpu_info，异常降级返回空快照。
+
+        `_caps` 保存 `probe()` 原始 Capabilities 对象：precheck panel（detail/plan）
+        通过 `hw.caps` 直接传入 adapter factory，避免在 render 帧内反复
+        `probe()`（T5-3 收口）。
+        """
         snap = cls()
         errors: list[str] = []
         try:
             caps = probe()
+            snap._caps = caps
             # 逐卡构造 gpus（gpu_name 取首卡，probe 已按单卡名返回）
             for idx in range(caps.gpu_count):
                 total = (

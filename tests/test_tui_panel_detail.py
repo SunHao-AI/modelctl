@@ -316,6 +316,40 @@ def test_detail_precheck_tab_shows_pass_and_no_adapter(console, tmp_path):
     assert "(无 adapter)" in text_na
 
 
+def test_detail_precheck_caps_passed_to_adapter_with_hw_caps(tmp_path):
+    """T5-3 收口：`render_detail(..., caps=hw.caps)` 时 caps 原样透传到 adapter。
+
+    回归点：final-review I-1 + M-1（detail.py 曾在函数体内重复 probe()，绕过
+    host 侧 hw 快照）。修后 `_render_precheck` 只用形参 `caps`，不再 fallback
+    `probe()`；本测试直接注入 `fake_caps`（HardwareSnapshot.fetch mock 后的
+    等价形态），断言 adapter_cls 的第二个位置参数恰为同一对象。
+    """
+    fake_caps = mock.Mock()
+    fake_caps.gpu_count = 2
+    fake_caps.vram_free_mb = [24_000, 24_000]
+    fake_caps.vram_total_mb_per_gpu = [24_576, 24_576]
+    fake_caps.binaries = {"vllm": True}
+    profile = _make_profile(tmp_path, "x-vllm", "name: x-vllm\n", {"ctx_size": "4096"})
+    models = _models_snap(profile)
+    logs = LogsSnapshot()
+    s = TUIState()
+    s.active_index = 0
+    s.active_detail_subtab = "precheck"
+    fake_adapter_cls = mock.Mock(name="FakeAdapterCls")
+    fake_adapter = mock.Mock(name="FakeAdapter")
+    fake_adapter_cls.return_value = fake_adapter
+    fake_adapter.check_requirements.return_value = None
+    with mock.patch("modelctl.core.profile.list_profiles", return_value=[profile]), \
+         mock.patch("modelctl.engines.get_adapter", return_value=fake_adapter_cls):
+        render_detail(s, HardwareSnapshot(), models, logs,
+                      width=100, height=24, caps=fake_caps)
+    fake_adapter_cls.assert_called_once()
+    args, kwargs = fake_adapter_cls.call_args
+    # `adapter_cls(profile, caps)` → 两个位置参数；caps 是第二个
+    assert len(args) == 2, f"adapter_cls(profile, caps) 应为 2 位置参数，得 {args!r}"
+    assert args[1] is fake_caps, "caps 未按 T5-3 收口透传到 adapter（I-1/M-1 回归）"
+
+
 # ─────────────────────────────────────────────────────────
 # 6. CJK 对齐
 # ─────────────────────────────────────────────────────────

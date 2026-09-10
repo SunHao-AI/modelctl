@@ -35,7 +35,9 @@ dry-run 3 子 Panel（按 brief 顺序）：
    无 adapter → 黄 "(无 adapter)"
 
 本函数**不直接**调 `subprocess` / `open('w')` / `os.kill` / `engine_config.launch`。
-probe() 在 precheck 块内 lazy import（与 T3 detail.py 同 pattern；T5 接力项会抽出）。
+precheck 的 `caps` 参数由 host 侧 `HardwareSnapshot.caps` 注入（T5-3 收口，
+与 T3 detail.py 经 `render(caps=hw.caps)` 注入同 pattern）；None 时 adapter 走
+fallback 默认值路径，仍**不**在 panel 内 `probe()`。
 含 CJK 的输出全部 `pad_width` 到 width（`display_width` 双宽打包兜）。
 """
 
@@ -254,8 +256,9 @@ def _render_precheck(profile, width: int, theme: dict, caps: object | None = Non
     - adapter 不存在 / import 失败 → 黄 `(无 adapter)`
     - 无异常 → 绿 `precheck passed`
 
-    T5 接力项 T5-3：`probe()` 调用从函数体内移除，改用形参 `caps`（键入 host 时由
-    app.py 注入；保持 None 时 check_requirements 走 fallback）。
+    T5-3 收口：本函数**不** `probe()`；`caps` 由 `render(... caps=hw.caps)` 透传，
+    None 时（数据层 hw 来自 mock / probe 失败）adapter 走 fallback 路径（如
+    `Caps().gpu_count == 0` 触发 llamacpp RequirementError）。
     """
     inner_w = max(20, width - 4)
     try:
@@ -317,6 +320,8 @@ def render(
     width: int,
     height: int,
     theme_id: str = "dark",
+    *,
+    caps: object | None = None,
 ) -> Group:
     """渲染 Plan 视图，返回 `rich.Group`。
 
@@ -326,6 +331,11 @@ def render(
     3. 通过 `_resolve_profile_from_apps` 绑真实 Profile（缺失 → 各 Panel 自降级）
     4. 中部 4 Panel：字段表单 / 硬件 / KV 估算 / 预检
     5. header / keybar
+
+    `caps`：`core.capabilities.Capabilities` 对象，由 host 经 `hw.caps` 注入；
+    None 时 `_render_precheck` 不传 `Caps` 给 adapter（与 detail.py 一致：
+    adapter 侧按 `Caps().gpu_count == 0` 走 fallback 路径）。
+    precheck 块内**不** `probe()`（收敛到帧级每次一致）。
 
     **不**调 subprocess / open('w') / os.kill / engine_config.launch。
     """
@@ -362,7 +372,7 @@ def render(
     form = _render_form(state, profile, width, theme)
     hw_p = _render_hw_preview(hw, width, theme)
     kv = _render_kv_estimate(profile, width, theme)
-    pre = _render_precheck(profile, width, theme)
+    pre = _render_precheck(profile, width, theme, caps=caps)
     header = _header(state, profile_name, width, theme)
     keybar = _keybar_plan(width, theme)
     return Group(header, form, hw_p, kv, pre, keybar)

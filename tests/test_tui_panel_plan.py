@@ -275,6 +275,43 @@ def test_plan_precheck_pass_green():
     assert "precheck passed" in text
 
 
+def test_plan_precheck_caps_passed_to_adapter_with_hw_caps():
+    """T5-3 收口：`render_plan(..., caps=hw.caps)` 时 caps 原样透传到 adapter。
+
+    回归点：final-review I-1（plan._render_precheck `caps` 形参未接线）——
+    修前 `render_plan` 不接 `caps` 形参、`_render_precheck` 内 fallback `probe()`；
+    修后 app.py 透传 `hw.caps`，adapter_cls 第二位置参数恰为该对象。
+    注意：不能用 `_render_text` helper（其 patch 的 `capabilities.probe` 恒返回新
+    Mock，非 fake_caps）——直接调 `render_plan` 以 mock 控制。
+    """
+    fake_caps = mock.Mock()
+    fake_caps.gpu_count = 2
+    fake_caps.vram_free_mb = [24_000, 24_000]
+    fake_caps.vram_total_mb_per_gpu = [24_576, 24_576]
+    fake_caps.binaries = {"vllm": True}
+    profile = _fake_profile("x-vllm", "vllm", {"max_model_len": 4096})
+    fake_adapter_cls = mock.Mock(name="FakeAdapterCls")
+    fake_adapter = mock.Mock(name="FakeAdapter")
+    fake_adapter_cls.return_value = fake_adapter
+    fake_adapter.check_requirements.return_value = None
+    st = TUIState()
+    st.active_view = "plan"
+    st.active_index = 0
+    hw = _hw_snap(2)
+    models = _models_snap(profile)
+    with mock.patch("modelctl.core.profile.list_profiles", return_value=[profile]), \
+         mock.patch("modelctl.engines.get_adapter", return_value=fake_adapter_cls), \
+         mock.patch("modelctl.core.vram_estimator.kv_estimate_for_profile",
+                    return_value=None):  # 避免真实估算引入变数
+        render_plan(st, hw, models, width=100, height=24,
+                    theme_id="dark", caps=fake_caps)
+    fake_adapter_cls.assert_called_once()
+    args, kwargs = fake_adapter_cls.call_args
+    # `adapter_cls(profile, caps)` → 两个位置参数；caps 是第二个
+    assert len(args) == 2, f"adapter_cls(profile, caps) 应为 2 位置参数，得 {args!r}"
+    assert args[1] is fake_caps, "caps 未按 T5-3 收口透传到 adapter（I-1 回归）"
+
+
 # ─────────────────────────────────────────────────────────
 # 4. 光标 / cycle_plan_cursor
 # ─────────────────────────────────────────────────────────
@@ -413,6 +450,7 @@ __all__ = [
     "test_plan_precheck_requirement_error_red",
     "test_plan_precheck_no_adapter",
     "test_plan_precheck_pass_green",
+    "test_plan_precheck_caps_passed_to_adapter_with_hw_caps",
     "test_plan_field_cursor_cycle_wraps",
     "test_plan_field_cursor_count_zero_noop",
     "test_plan_cjk_strict_alignment",
