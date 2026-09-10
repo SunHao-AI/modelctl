@@ -29,7 +29,7 @@ from modelctl.core.tui.data import (
     ModelsSnapshot,
     MonitorSnapshot,
 )
-from modelctl.core.tui.keyboard import KeyboardInput, Key
+from modelctl.core.tui.keyboard import Key, KeyboardInput
 from modelctl.core.tui.theme import DEFAULT_THEME, THEME_IDS, cycle_theme, get_rich_theme, theme_id_for
 
 
@@ -84,10 +84,11 @@ def test_tui_snapshots_stubs_have_ttl():
         assert snap._fetched_at is None
 
 
-def test_keyboard_placeholder_returns_q():
-    """Task 0 占位：read_key_block 直接返回 Key.Q。"""
+def test_keyboard_read_key_block_returns_key_or_none():
+    """Task 1：read_key_block(timeout=0.0) 返回 Key 或 None（真实实现，非 Task 0 占位 Key.Q 断言）。"""
     kb = KeyboardInput()
-    assert kb.read_key_block(timeout=0.0) is Key.Q
+    result = kb.read_key_block(timeout=0.0)
+    assert result is None or isinstance(result, Key)
 
 
 def test_theme_cycle_covers_all_three():
