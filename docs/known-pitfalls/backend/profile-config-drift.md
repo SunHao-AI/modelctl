@@ -861,7 +861,7 @@
      压窄总宽必爆）。
 - **解决**：单点封装（与 T5 闸宽同口径，集中在 `_layout` 区段）：
   - 列宽常量分档：`COL_RATE_FULL=13 / COL_RATE_NARROW=7`、
-    `COL_TOTAL_FULL=12 / COL_TOTAL_MEDIUM=11 / COL_TOTAL_NARROW=8`。
+    `COL_TOTAL_FULL=80 / COL_TOTAL_MEDIUM=71 / COL_TOTAL_NARROW=65`。
   - 布局常量：`LAYOUT_FULL / MEDIUM / NARROW`（按显示宽锁定各列宽）。
   - `_layout_for_width(width) -> mode`：单一 adapter 决定用哪套列宽，
     行渲染侧不再各自 if/elif。
@@ -870,7 +870,7 @@
     取实际长度），末尾 `rest = width - (total - VRAM + vram_width)` 补齐，
     超宽不截断（仓库规则）。
   - 测试钉的是**不变量**：`display_width(line) == width` 且 200/120/100/80
-    四档都通过，数据里含 CJK 行（不能让纯 ASCII 假绿）。
+    四档都通过（80 档 fix 后也升级为 `==`），数据里含 CJK 行（不能让纯 ASCII 假绿）。
 - **要点**：
   - 与 T5 `gate 按 len() 取列宽` 同主题不同侧：**列宽常量与列宽 adapter 都要分档**，
     只修一半依然错位。TUI 行的每个 f-string 对齐点都必须走

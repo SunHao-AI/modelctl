@@ -245,8 +245,12 @@ def test_tui_app_theme_cycle_t_key_writes_through(console, tmp_path):
 # ─────────────────────────────────────────────────────────
 
 
-def _render_dashboard_lines(width: int, height: int = 24) -> list[str]:
-    """渲染 dashboard（空 models，避免 profile 干扰列）→ 行列表。"""
+def _render_dashboard_lines(width: int, height: int = 24, with_profiles: bool = False) -> list[str]:
+    """渲染 dashboard → 行列表。
+
+    `with_profiles=True` 时注入含 CJK name 的 profile，让 `_profile_row`
+    的 CJK 对齐路径被实际执行（四档宽度不变量测试依赖此参数）。
+    """
     from rich.console import Console
 
     from modelctl.core.tui.panels.main_dashboard import render as r
@@ -260,7 +264,28 @@ def _render_dashboard_lines(width: int, height: int = 24) -> list[str]:
     )
     state = TUIState()
     hw = HardwareSnapshot(gpus=[], binaries={}, cpu_info="", probe_errors=[])
-    models = ModelsSnapshot(profiles=[])
+    if with_profiles:
+        models = ModelsSnapshot(profiles=[{
+            "name": "中文测试-模型",
+            "engine": "vllm",
+            "variant": "7b",
+            "port": "8080",
+            "status": "running",
+            "vram_gib": 12.0,
+            "rate_in": 155.0,
+            "rate_out": 33.0,
+        }, {
+            "name": "qwen3.5-397b-flash",
+            "engine": "llamacpp",
+            "variant": "-",
+            "port": "8081",
+            "status": "stopped",
+            "vram_gib": 0.0,
+            "rate_in": None,
+            "rate_out": None,
+        }])
+    else:
+        models = ModelsSnapshot(profiles=[])
     cluster = ClusterSnapshot(nodes=[], goals=[])
     # 给个 time 戳，避免 revalidate 再触发 fetch（render 内部不会再调 fetch）
     import time
@@ -274,11 +299,11 @@ def _render_dashboard_lines(width: int, height: int = 24) -> list[str]:
 
 
 def test_dashboard_full_layout_at_width_200():
-    """宽度 200 → full 布局（所有 7 列），非空行 display_width == width。"""
+    """宽度 200 → full 布局（所有 7 列），含 CJK profile 行，display_width == width。"""
     from modelctl.core.colors import display_width
 
     width = 200
-    lines = _render_dashboard_lines(width=width, height=24)
+    lines = _render_dashboard_lines(width=width, height=24, with_profiles=True)
     non_blank = [ln for ln in lines if ln.strip()]
     assert non_blank, "渲染产出为空（fail fast）"
     for ln in non_blank:
@@ -316,14 +341,14 @@ def test_dashboard_narrow_layout_at_width_100():
 
 
 def test_dashboard_minimum_width_80():
-    """宽度 80 → narrow 布局（已经到最小值），非空行不超过 width。"""
+    """宽度 80 → narrow 布局（最小值），含 CJK profile 行，display_width == width。"""
     from modelctl.core.colors import display_width
 
     width = 80
-    lines = _render_dashboard_lines(width=width, height=24)
+    lines = _render_dashboard_lines(width=width, height=24, with_profiles=True)
     non_blank = [ln for ln in lines if ln.strip()]
     assert non_blank
     for ln in non_blank:
-        assert display_width(ln) <= width, (
-            f"超宽: {ln!r} 当前 {display_width(ln)} > {width}"
+        assert display_width(ln) == width, (
+            f"未对齐: {ln!r} 当前 {display_width(ln)} 期望 {width}"
         )
