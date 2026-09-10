@@ -131,6 +131,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("list", help="列出所有 profile").add_argument(
         "--cluster", action="store_true", help="中心聚合视图：按 profile 分组展示各节点托管状态")
     sub.add_parser("probe", help="探测硬件与引擎二进制")
+    tu = sub.add_parser("tui", help="交互式富文本 TUI（Dashboard/Detail/Plan/Cluster/Monitor 5 视图，首版只读）")
+    tu.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="冒烟模式：消费 3 个虚拟 key 事件后干净退出（CI 验证用，不进入真实键盘循环）",
+    )
     sp = sub.add_parser("stats", help="用量统计服务控制")
     sp.add_argument("action", choices=["start", "stop", "restart", "status"])
     gp = sub.add_parser("gateway", help="统一网关（model 参数路由）控制")
@@ -937,6 +943,21 @@ def _cmd_probe(args, models_dir: Path | None, caps) -> int:
         else:
             kv(key, _table_paint("(未设置)", "DIM"), KEY_W)
     return 0
+
+
+def _cmd_tui(args) -> int:
+    """启动交互式富文本 TUI（core/tui，底层 rich；首版只读）。
+
+    入口顺序与 _cmd_status 一致：load_env（main 已执行）→ probe（main 已执行）
+    → TuiApp.run()。--smoke-test 走 CI 冒烟模式：消费 3 个虚拟 key 后干净退出。
+    """
+    from rich.console import Console
+
+    from modelctl.core.tui import TUIState, TuiApp
+
+    console = Console()
+    app = TuiApp(state=TUIState(), console=console)
+    return app.run(smoke=getattr(args, "smoke_test", False))
 
 
 def _cmd_stats_start() -> int:
@@ -2080,6 +2101,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_list(args, models_dir, caps)
         if args.command == "probe":
             return _cmd_probe(args, models_dir, caps)
+        if args.command == "tui":
+            return _cmd_tui(args)
         if args.command == "stats":
             if args.action == "start":
                 return _cmd_stats_start()
