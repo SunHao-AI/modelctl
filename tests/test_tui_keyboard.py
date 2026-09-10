@@ -206,7 +206,12 @@ def test_read_unix_ansi_timeout_returns_none(monkeypatch):
 
 @pytest.fixture
 def mock_msvcrt(monkeypatch):
-    """模拟 getwch/getch/kbhit（msvcrt 模块全局共享，以实例注入 mock 方法）。"""
+    """模拟 getwch/getch/kbhit（msvcrt 注入 kbd.msvcrt，跨平台测试可稳定执行）。
+
+    Windows 本机：kbd.msvcrt 即真实 msvcrt 模块，sys.modules 改对象属性即可；
+    Linux CI：kbd.msvcrt 在模块加载时即凝固为 None，必须显式重绑定；
+    此外 monkeypatch _is_windows() 返 True，使 _read_windows 在生产 non-windie 路径也达 mock。
+    """
     # 兜底：非 win32 也保证 msvcrt 模块存在（模块加载时已存在则无需创建）
     if "msvcrt" not in sys.modules:
         monkeypatch.setitem(sys.modules, "msvcrt", types.ModuleType("msvcrt"))
@@ -217,6 +222,10 @@ def mock_msvcrt(monkeypatch):
         monkeypatch.setattr(mod, "getch", mock.Mock())
     if not hasattr(mod, "kbhit"):
         monkeypatch.setattr(mod, "kbhit", mock.Mock())
+    # 关键：重绑定到 kbd.msvcrt，覆盖 Linux 下 kbd.msvcrt is None 凝固状态
+    monkeypatch.setattr(kbd, "msvcrt", mod)
+    # 关键：让 _is_windows() 返 True，否则 _read_windows 进 `if not _is_windows(): return None`
+    monkeypatch.setattr("modelctl.core.tui.keyboard._is_windows", lambda: True)
     yield mod
 
 
