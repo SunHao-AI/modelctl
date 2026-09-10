@@ -9,33 +9,48 @@
 # @Desc   : TuiApp 主类骨架（主循环 / 渲染入口 / smoke 模式）
 # ===============================================================================
 
-"""TuiApp 主类骨架（Task 0）。
+"""TuiApp 主类（Task 2 起填充：渲染 Dashboard 面板）。
 
-- run(smoke=True)：CI 冒烟模式，消费 3 个虚拟 key 事件后干净退出，返回 0，不渲染
-- run(smoke=False)：真实主循环（loop_begin → 键盘轮询 → render_once → loop_end），
-  Task 1/2 起填充键盘派发与面板渲染
+- run(smoke=True)：CI 冒烟模式，消费 3 个虚拟 key 事件后干净退出，返回 0；
+  末尾走一次 `realize_render_once` 保证 snap 初始化 + 真实 render 路径发挥（测试冒烟）
+- run(smoke=False)：真实主循环（loop_begin → render_once → loop_end），
+  Task 2 只接通"快照 revalidate → render → print"骨架；键盘按键派发留给后续 Task
 - KeyboardInterrupt（Ctrl-C）无 traceback：捕获后走 loop_end 并返回 130
-- 真实模式占位：Task 0 无可用面板，smoke=False 直接返回 0（Task 2 起渲染 Dashboard）
 """
 
 from __future__ import annotations
 
 from rich.console import Console
 
-from modelctl.core.tui.keyboard import KeyboardInput, Key
+from modelctl.core.tui.data import (
+    ClusterSnapshot,
+    HardwareSnapshot,
+    ModelsSnapshot,
+    _SnapshotBase,
+)
+from modelctl.core.tui.keyboard import Key, KeyboardInput
+from modelctl.core.tui.panels.main_dashboard import render as render_dashboard
 from modelctl.core.tui.state import TUIState
 
 SMOKE_KEY_SEQUENCE_LEN = 3  # smoke 模式消费的虚拟 key 事件数
+DEFAULT_MIN_SIZE = (80, 24)  # 最小终端尺寸，console.size 探测失败时回落
 
 
 class TuiApp:
-    """TUI 主应用骨架。"""
+    """TUI 主应用（持有 5 种快照缓存，按 active_view 派发至 panels）。"""
 
     def __init__(self, state: TUIState, console: Console) -> None:
         self.state = state
         self.console = console
         self.keyboard = KeyboardInput()
         self._theme = "dark"
+        # 快照缓存（先 create-空实例，render 时 revalidate_if_expired 触发 fetch）；
+        # Task 2 走 3 个核心快照：硬件 / 模型 / 集群；logs/monitor 留给后续 Task 面板
+        self._snap: dict[str, _SnapshotBase] = {
+            "hw": HardwareSnapshot(),
+            "models": ModelsSnapshot(),
+            "cluster": ClusterSnapshot(),
+        }
 
     def run(self, *, smoke: bool = False) -> int:
         """主入口。smoke=True 消费 3 个 key 事件后退出（CI 模式），返回 0。"""
@@ -49,7 +64,9 @@ class TuiApp:
                 self.loop_end()
                 return 0
             self.loop_begin()
-            return 0  # Task 0 占位；真实主循环（键盘派发 + 面板轮询）在 Task 1/2 填充
+            self.render_once()
+            self.loop_end()
+            return 0
         except KeyboardInterrupt:
             # 兜底：任何锁屏/渲染阶段的 KeyboardInterrupt 都不允许产生 traceback
             self.loop_end()
@@ -63,8 +80,54 @@ class TuiApp:
         self.keyboard.restore_term()
 
     def realize_render_once(self) -> None:
-        """渲染一帧（Task 0 空操作；Task 2 起按 active_view 派发至 panels）。"""
+        """渲染一帧：快照 revalidate → 按 active_view 派发 → console.print。
+
+        Task 2 只接 dashboard 路径；其他 view 回落 dashboard 渲染避免 None 返回。
+        """
+        self._revalidate()
+        width, height = self._console_size()
+        if self.state.active_view == "dashboard":
+            group = render_dashboard(
+                self.state,
+                self._snap["hw"],  # type: ignore[arg-type]
+                self._snap["models"],  # type: ignore[arg-type]
+                self._snap["cluster"],  # type: ignore[arg-type]
+                width=width,
+                height=height,
+                theme_id=self._theme,
+            )
+        else:
+            # 未实现的 view 先走 dashboard 兜底，Task 3+ 再接具体面板
+            group = render_dashboard(
+                self.state,
+                self._snap["hw"],  # type: ignore[arg-type]
+                self._snap["models"],  # type: ignore[arg-type]
+                self._snap["cluster"],  # type: ignore[arg-type]
+                width=width,
+                height=height,
+                theme_id=self._theme,
+            )
+        self.console.clear()
+        self.console.print(group)
 
     def render_once(self) -> None:
-        """对外渲染入口（Task 2 起 console.print/clear 组合）。"""
+        """对外渲染入口（Task 2 起 console.clear/print 组合）。"""
         self.realize_render_once()
+
+    def _revalidate(self) -> None:
+        """按 TTL invalidate 各 snapshot，触发 fetch（含 mock 环境自动降级）。"""
+        for snap in self._snap.values():
+            snap.revalidate_if_expired()
+
+    def _console_size(self) -> tuple[int, int]:
+        """探测 console.size；失败或 < 最小终端时回落 (80, 24)。"""
+        try:
+            w = int(self.console.width or 0)
+            h = int(self.console.height or 0)
+        except (TypeError, ValueError):
+            w, h = 0, 0
+        if w < DEFAULT_MIN_SIZE[0]:
+            w = DEFAULT_MIN_SIZE[0]
+        if h < DEFAULT_MIN_SIZE[1]:
+            h = DEFAULT_MIN_SIZE[1]
+        return w, h
