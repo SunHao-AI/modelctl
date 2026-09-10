@@ -27,12 +27,14 @@ from modelctl.core.tui.data import (
     HardwareSnapshot,
     LogsSnapshot,
     ModelsSnapshot,
+    MonitorSnapshot,
     _SnapshotBase,
 )
 from modelctl.core.tui.keyboard import Key, KeyboardInput
 from modelctl.core.tui.panels.cluster import render as render_cluster
 from modelctl.core.tui.panels.detail import render as render_detail
 from modelctl.core.tui.panels.main_dashboard import render as render_dashboard
+from modelctl.core.tui.panels.monitor import render as render_monitor
 from modelctl.core.tui.panels.plan import render as render_plan
 from modelctl.core.tui.state import TUIState
 
@@ -49,12 +51,13 @@ class TuiApp:
         self.keyboard = KeyboardInput()
         self._theme = "dark"
         # 快照缓存（先 create-空实例，render 时 revalidate_if_expired 触发 fetch）；
-        # T3 起启用：硬件 / 模型 / 集群 / 日志；monitor 留给 T5 面板
+        # T2 起 5 个 Snapshot 全初始化：hw / models / cluster / logs / monitor
         self._snap: dict[str, _SnapshotBase] = {
             "hw": HardwareSnapshot(),
             "models": ModelsSnapshot(),
             "cluster": ClusterSnapshot(),
             "logs": LogsSnapshot(),
+            "monitor": MonitorSnapshot(),
         }
         # 跟随 active_profile 重切日志尾行的名称缓存（避免每帧读 models.profiles[idx].name）
         self._logs_name: str = ""
@@ -129,6 +132,17 @@ class TuiApp:
             group = render_cluster(
                 self.state,
                 self._snap["cluster"],  # type: ignore[arg-type]
+                width=width,
+                height=height,
+                theme_id=self._theme,
+            )
+        elif view == "monitor":
+            # Monitor 视图：速率表 + GPU 卡片（T5 交付，T6 接键盘 + pynvml）
+            group = render_monitor(
+                self.state,
+                self._snap["models"],  # type: ignore[arg-type]
+                self._snap["hw"],  # type: ignore[arg-type]
+                self._snap["monitor"],  # type: ignore[arg-type]
                 width=width,
                 height=height,
                 theme_id=self._theme,
