@@ -236,8 +236,8 @@ def render(
         for i in range(n):
             a = l1_lines[i] if i < len(l1_lines) else ""
             b = l2_lines[i] if i < len(l2_lines) else ""
-            a_pad = a.ljust(half) if display_width(a) < half else a
-            # 右半补到 width
+            # 左右对称：both 用 pad_width 按 display_width 补齐（CJK 双宽，禁止 ljust）
+            a_pad = pad_width(a, half)
             right = Text(pad_width(b, width - half), style=theme["dim"])
             left = Text(a_pad, style=theme["dim"])
             merged = Text()
