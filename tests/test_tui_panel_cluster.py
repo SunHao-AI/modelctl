@@ -34,7 +34,6 @@ from modelctl.core.tui.data import ClusterSnapshot
 from modelctl.core.tui.panels.cluster import render as render_cluster
 from modelctl.core.tui.state import TUIState
 
-
 # ─────────────────────────────────────────────────────────
 # helpers
 # ─────────────────────────────────────────────────────────

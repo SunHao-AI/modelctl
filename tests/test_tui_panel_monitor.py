@@ -27,10 +27,9 @@ import time
 from rich.console import Console
 
 from modelctl.core.colors import display_width
-from modelctl.core.tui.data import HardwareSnapshot, MonitorSnapshot, ModelsSnapshot
+from modelctl.core.tui.data import HardwareSnapshot, ModelsSnapshot, MonitorSnapshot
 from modelctl.core.tui.panels.monitor import render as render_monitor
 from modelctl.core.tui.state import TUIState
-
 
 # ─────────────────────────────────────────────────────────
 # helpers

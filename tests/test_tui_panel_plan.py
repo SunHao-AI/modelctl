@@ -28,16 +28,15 @@ from __future__ import annotations
 import time
 from unittest import mock
 
-import pytest
-
 from modelctl.core.colors import display_width
 from modelctl.core.tui.data import HardwareSnapshot, ModelsSnapshot
 from modelctl.core.tui.panels.plan import (
     _profile_fields,
+)
+from modelctl.core.tui.panels.plan import (
     render as render_plan,
 )
 from modelctl.core.tui.state import TUIState
-
 
 # ─────────────────────────────────────────────────────────
 # helpers
@@ -387,7 +386,7 @@ def test_plan_dry_run_idempotent_no_subprocess():
 def test_plan_no_open_write_mode():
     """面板自身不允许 open('w') 写文件（spec §6.2 禁区）。"""
     import builtins
-    from modelctl.core.tui.panels import plan as plan_module
+
 
     real_open = builtins.open
     opened = {"n": 0}
