@@ -142,3 +142,85 @@ def test_docker_json_line_text_empty():
 
     assert am._docker_json_line_text("") is None
     assert am._docker_json_line_text(_json.dumps({"stream": "stderr"})) is None
+
+
+# ---------------------------------------------------------------------------
+# 模型运行态判定 _model_summary（is_running_any）回归
+# ---------------------------------------------------------------------------
+
+def test_model_summary_uses_is_running_any(monkeypatch):
+    """_model_summary 必须走 is_running_any（端口/health 2xx 探测优先 + PID 文件兜底）。
+
+    docker runtime `start_profile` 不写 PID 文件 → is_running(name) 恒 False，
+    旧版只取 PID 文件会让 docker 启动的 vllm 模型（如 qwen2.5-0.5b-vllm）列表
+    与详情均误显"已停止"。此处 monkeypatch 两步抽象拼回真相：is_running_any
+    直接断言返回 True（端口 health 2xx 命中），保证 _model_summary 没退化回
+    is_running(name) 这样的单源判定（那会让本用例拿到 False 红）。
+    """
+    import modelctl.core.process as process
+
+    # 模拟：PID 文件不存在（docker 路径），但端口 /health 2xx 可达 → is_running_any True
+    monkeypatch.setattr(process, "is_running", lambda name: False, raising=True)
+    monkeypatch.setattr(process, "is_running_any", lambda name, profile: True, raising=True)
+
+    p = SimpleNamespace(
+        name="qwen2.5-0.5b-vllm",
+        engine="vllm",
+        port=8108,
+        path=None,
+        yaml_path=None,
+        group=None,
+        display_name=None,
+        api_key="test-key",
+        host="127.0.0.1",
+        gpu_count=None,
+        cli_args=None,
+        extra_env=None,
+        docker_image="vllm/vllm-openai:latest",
+        docker_env=None,
+        engine_config={"docker_image": "vllm/vllm-openai:latest", "enforce_eager": True},
+        variant=None,
+        aliases=[],
+    )
+
+    # _model_summary 必须调用 is_running_any（不是 is_running(name) 单源 PID 文件）
+    s = am._model_summary(p)
+    # state 来自端口/health 探测 (is_running_any=True) 而非 PID 文件（is_running=False）
+    assert s["state"] == "running"
+
+
+def test_model_summary_falls_back_to_pid_file_when_health_probe_off(monkeypatch):
+    """端口探测失败（health 非 2xx / 引擎不可达）+ 无 PID 文件 → 详情 running=False。
+
+    is_running_any 内部"先 health 再 PID 文件"顺序由 process.py 保证；这里钉
+    住「webui 走 is_running_any」这一对外契约——无论内部如何分支，
+    _model_summary 都须尊重其最终返回值。
+    """
+    import modelctl.core.process as process
+
+    monkeypatch.setattr(process, "is_running", lambda name: True, raising=True)
+    # is_running_any 返回 False 模拟：端口没起来 + PID 文件也没了（双重"已停止"）
+    monkeypatch.setattr(process, "is_running_any", lambda name, profile: False, raising=True)
+
+    p = SimpleNamespace(
+        name="qwen2.5-0.5b-vllm",
+        engine="vllm",
+        port=8108,
+        path=None,
+        yaml_path=None,
+        group=None,
+        display_name=None,
+        api_key="test-key",
+        host="127.0.0.1",
+        gpu_count=None,
+        cli_args=None,
+        extra_env=None,
+        docker_image="vllm/vllm-openai:latest",
+        docker_env=None,
+        engine_config={"docker_image": "vllm/vllm-openai:latest", "enforce_eager": True},
+        variant=None,
+        aliases=[],
+    )
+
+    s = am._model_summary(p)
+    assert s["state"] == "stopped"

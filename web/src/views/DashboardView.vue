@@ -16,19 +16,39 @@ const errMsg = ref('');
 
 let timer: number | undefined;
 
-async function refresh() {
-  try {
-    const res = await overview();
-    data.value = res;
-  } catch (err) {
-    console.warn('overview 失败:', err);
-    errMsg.value = (err as { message?: string })?.message || '后端返回异常';
-  }
+/**
+ * 上一次轮询是否还在飞（防重叠：3s setInterval 在后端还没回来时再次进入会
+ * 发起第二条同 URL 请求；两条同 URL 请求共用浏览器保活池时，浏览器可能
+ * abort 旧连接 → 控制台 net::ERR_ABORTED（前端 axios 表现为 ERR_CANCELED
+ * / ECONNABORTED）。后端慢一拍时本帧自然顺延而不堆积，UI 保留旧 data。
+ */
+let pending: Promise<void> | null = null;
+
+function refresh(): Promise<void> {
+  if (pending) return pending;
+  pending = (async () => {
+    try {
+      data.value = await overview();
+    } catch (err: unknown) {
+      const e = err as { message?: string; code?: string; isCancel?: boolean };
+      // axios 取消/中断：isCancel（取消令牌）+ ECONNABORTED + "aborted/canceled" 文案
+      const isAbort =
+        !!e?.isCancel ||
+        e?.code === 'ECONNABORTED' ||
+        /aborted|canceled|cancelled/i.test(e?.message ?? '');
+      if (isAbort) return; // 静默：UI 无影响（保留旧 data），避免误报警
+      if (typeof console !== 'undefined') console.warn('overview 失败:', e);
+      errMsg.value = e?.message || '后端返回异常';
+    } finally {
+      pending = null;
+    }
+  })();
+  return pending;
 }
 
 onMounted(() => {
   refresh();
-  timer = window.setInterval(refresh, 3000);
+  timer = window.setInterval(() => void refresh(), 3000);
 });
 onBeforeUnmount(() => {
   if (timer !== undefined) clearInterval(timer);

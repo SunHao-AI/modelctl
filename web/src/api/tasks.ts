@@ -66,12 +66,24 @@ export function openTaskStream(taskId: string, hooks: TaskStreamHooks = {}): Tas
   const url = `/admin/api/tasks/${encodeURIComponent(taskId)}/stream?key=${encodeURIComponent(token)}`;
   const es = new EventSource(url);
 
+  /**
+   * 主动 close 后的 error 不再上抛：浏览器在「另一端 close 后被 dispose」的场景会
+   * 先发一次 error（即 console 的 net::ERR_ABORTED，浏览器层不可拦截），
+   * 紧接着 onclose 事件。tasks store 的 teardown→finalize 流程中,
+   * finalize 本身不会再发任何 onDone，此时 onError 触发会让 tasks store 走
+   * resyncPending=true + 启动 RECONNECT_GRACE_MS 定时器（虽 finalize 已非活跃，
+   * isActive 会直接 false 不启动轮询，但白消耗 timer + 无意义 resync 重置）。
+   * 本标记方案与 sse.ts 的 suppressedByClose 同款，与模型日志 SSE 对齐。
+   */
+  let suppressedByClose = false;
+
   /** 命名事件的 data 已是纯 JSON 字符串，直接解析；解析异常走 onError */
   function dispatch<T>(raw: string | undefined, cb?: (evt: T) => void) {
     if (typeof raw !== 'string' || !raw) return;
     try {
       cb?.(JSON.parse(raw) as T);
     } catch {
+      if (suppressedByClose) return;
       hooks.onError?.(new Error(`Malformed SSE data: ${raw}`) as unknown as Event);
     }
   }
@@ -83,12 +95,18 @@ export function openTaskStream(taskId: string, hooks: TaskStreamHooks = {}): Tas
     ['heartbeat', (() => hooks.onHeartbeat?.()) as EventListener],
   ];
   for (const [name, fn] of listeners) es.addEventListener(name, fn);
-  const onErr: EventListener = (e) => hooks.onError?.(e);
+  const onErr: EventListener = (e) => {
+    // 主动 close 后的 error (浏览器 net::ERR_ABORTED): 抑制不向上抛，避免 tasks store
+    // 走 resync + 宽限期定时器副作用
+    if (suppressedByClose) return;
+    hooks.onError?.(e);
+  };
   es.addEventListener('error', onErr);
 
   return {
     close() {
       try {
+        suppressedByClose = true; // 必须先标记——onErr 监听器还会收到当前已挂的 error
         for (const [name, fn] of listeners) es.removeEventListener(name, fn);
         es.removeEventListener('error', onErr);
         es.close();

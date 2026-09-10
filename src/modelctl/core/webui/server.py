@@ -147,7 +147,19 @@ def main() -> None:
     hint = "（未找到 dist/，仅暴露 /admin/api；先执行 npm run build）" if not dist_ready() else ""
     print(f"modelctl Web UI 运行于 http://{host}:{port}/ {hint}", flush=True)
     # 前端 3-5s 轮询 /admin/api 属心跳式访问：access 日志降级为 DEBUG 语义
-    uvicorn.run(app, host=host, port=port, log_level="info", log_config=uvicorn_log_config())
+    # timeout_keep_alive=15：uvicorn 0.52.4 默认 5s，主流浏览器保活习惯更
+    # 宽松（Chrome 60s / Firefox 115s / EDGE 120s）——5s 窗口未对齐时服务端
+    # 先 close（FIN 已发但客户端可能还没收到 RST），下一条请求命中的 socket
+    # 可能已被 reset，表现为浏览器层 net::ERR_ABORTED。拉长到 15s 既降低
+    # 竞争命中率，又不至于拖到 OS 层主动弃。
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level="info",
+        log_config=uvicorn_log_config(),
+        timeout_keep_alive=15,
+    )
 
 
 if __name__ == "__main__":

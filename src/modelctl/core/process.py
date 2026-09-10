@@ -307,7 +307,11 @@ def is_running_any(name: str, profile: Profile | None) -> bool:
                 headers["Authorization"] = f"Bearer {key}"
             try:
                 req = urllib.request.Request(f"http://127.0.0.1:{port}/health", headers=headers)
-                with open_local(req, timeout=2.0) as resp:
+                # timeout=1.5：webui /overview 3s 轮询 × 51 profile 端口探测
+                # 的最坏 wave 时间（端口无响应 ≈1.5s；已关闭时 connect 失败 < 20ms）。
+                # 比原值 2.0s 小 25%，让聚合端点整体落在前端 axios 30s 超时下方 ≥6x。
+                # CLI 单次 list / status 的可感知差异 ~0（原本就是 1-2s 内做决策）。
+                with open_local(req, timeout=1.5) as resp:
                     if 200 <= resp.status < 300:
                         return True
             except (urllib.error.URLError, OSError, ValueError):

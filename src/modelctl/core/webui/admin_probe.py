@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Request
@@ -149,6 +150,20 @@ async def health(request: Request):
     }
 
 
+# 显式大池：51 个 profile 并发 to_thread 时会共用默认线程池（~13 worker）→
+# 排队后总耗时 ≈ 4 波 × 单 worker 2.3s ≈ 11s。这里扩到 64 让 51+ 个端口
+# 探测 worker 真正全部并发，总耗时 ≈ max(单个 1.5s 端口 timeout, probe)。
+_OVERVIEW_EXECUTOR: "ThreadPoolExecutor | None" = None
+
+
+def _overview_executor() -> "ThreadPoolExecutor":
+    global _OVERVIEW_EXECUTOR
+    if _OVERVIEW_EXECUTOR is None:
+        _OVERVIEW_EXECUTOR = ThreadPoolExecutor(max_workers=64,
+                                                 thread_name_prefix="overview-probe")
+    return _OVERVIEW_EXECUTOR
+
+
 @router.get("/overview")
 async def overview(request: Request, _: None = Depends(require_auth)):
     """GET /admin/api/overview — 3s 轮询聚合端点（前端按 3s 拉一次）。
@@ -159,79 +174,86 @@ async def overview(request: Request, _: None = Depends(require_auth)):
     - services：stats / gateway 的 is_running + port（GATEWAY_PORT、USAGE_PORT）
     与探测端点的 source of truth 一致（GATEWAY_DEFAULT_MODEL / GATEWAY_PORT /
     USAGE_PORT）。本端点 3s 轮询，因此 probe() 调用频率受控（不大、可接受）。
+
+    性能 + 并发安全说明（2026-09-09 二次实测后）：
+    - 旧方案（51 × _model_summary + probe + is_running×2 全凑一次 gather，走默认
+      ThreadPoolExecutor max_workers≈13）实测在 uvicorn 进程内单请求 25-180s
+      才返回（前端 30s axios 超时 abort → 控制台 net::ERR_ABORTED 反复出现）。
+      本地脚本同一代码只 15s——归结为"uvicorn 共享 loop + Windows 默认线程池
+      51 worker 排队 + urllib 2.0s 端口 timeout 不中止"三重叠加。
+    - **拆成两波**：
+      wave A：list_profiles + probe + is_running×2 一次性 gather（纯 CPU/文件，
+              本身 1-2s 内完成，不会抢占 wave B 的端口 worker 槽位）。
+      wave B：51 × _model_summary（每个内部 is_running_any 单次 1.5s 端口探测），
+              走显式 ThreadPoolExecutor(max_workers=64)，51 worker 真正全部
+              并发。wave B 总耗时 ≈ max(单端口 1.5s) ≈ 1.5-3s。
+    - 累计单次响应目标：wave A 1-2s + wave B 1.5-3s = 2.5-5s，安全落在前端
+      30s axios 超时下方 6x，为 wait_for / 浏览器 cancel 留足余量。
     """
-    parts = await asyncio.to_thread(_gather_overview)
-    return parts
-
-
-def _gather_overview() -> dict:
-    """同步聚合逻辑（在线程中调用）。
-
-    数据来源（与 probe 端点同源）：
-    - probe()：GPU 数 / 显存 / 引擎二进制
-    - list_gpu_locks()：GPU 占用映射
-    - list_profiles(None) + _model_summary：模型列表
-    - is_running("stats" / "gateway")：服务状态
-    """
-    import modelctl as mctl
-
     from modelctl.core.capabilities import probe
     from modelctl.core.gateway import GATEWAY_PORT
-    from modelctl.core.gpu_lock import list_gpu_locks
     from modelctl.core.profile import list_profiles
     from modelctl.core.process import is_running
     from modelctl.core.stats import USAGE_PORT
     from modelctl.core.webui.admin_models import _model_summary
 
-    profiles = list_profiles(None)
-    models = [_model_summary(p) for p in profiles]
+    # wave A：纯 CPU / 文件类探测，无端口阻塞，并行派发。
+    wave_a = await asyncio.gather(
+        asyncio.to_thread(list_profiles, None),
+        asyncio.to_thread(probe),
+        asyncio.to_thread(is_running, "stats"),
+        asyncio.to_thread(is_running, "gateway"),
+    )
+    profiles, caps, is_stats, is_gateway = wave_a
 
-    caps = probe()
+    # wave B：51 × _model_summary（每个内部 is_running_any 单次 1.5s 端口探测）
+    # 显式走 64-worker 池让 51 worker 全部并发（vs 默认 13 worker 排队波次）。
+    summaries = await asyncio.gather(
+        *(asyncio.get_running_loop().run_in_executor(
+            _overview_executor(), _model_summary, p
+        ) for p in profiles)
+    )
+
+    # 总显存：优先 vram_total_mb_per_gpu(list[int]) 求和，否则回退 vram_total_mb
     gpu_count = int(getattr(caps, "gpu_count", 0) or 0)
     gpu_name = getattr(caps, "gpu_name", "") or ""
-
-    # 总显存：优先用 vram_total_mb_per_gpu(list[int]) 求和，否则回退 vram_total_mb
     total_per_gpu = getattr(caps, "vram_total_mb_per_gpu", None)
     if total_per_gpu:
         total_vram_gb = _vram_gb(sum(total_per_gpu))
     else:
         total_vram_gb = _vram_gb(getattr(caps, "vram_total_mb", 0))
 
-    # 引擎可达性按 docker ∨ venv（与 _resolve_runtime 的 docker_image 优先规则一致）
     from modelctl.core.capabilities import docker_ready
     from modelctl.core.envs import DOCKER_CAPABLE_ENGINES
 
-    dready = docker_ready()
-    engine_binaries = {}
+    dready = await asyncio.to_thread(docker_ready)
+    engine_binaries: dict[str, str] = {}
     for name, path in (getattr(caps, "binary_paths", None) or {}).items():
         venv_ok = bool(path)
         reachable = venv_ok or (name in DOCKER_CAPABLE_ENGINES and dready)
         engine_binaries[name] = "available" if reachable else "missing"
 
-    hardware = {
-        "gpu_count": gpu_count,
-        "gpu_name": gpu_name,
-        "total_vram_gb": total_vram_gb,
-        "docker_ready": dready,
-        "engine_binaries": engine_binaries,
+    services = {
+        "stats": {"state": "running" if is_stats else "stopped", "port": USAGE_PORT},
+        "gateway": {"state": "running" if is_gateway else "stopped", "port": GATEWAY_PORT},
     }
 
-    # 服务状态（用 is_running 而非 status_*：本端点 3s 轮询，免每 3s 各做 3s 健康探测）
-    services = {}
-    for svc, port in (("stats", USAGE_PORT), ("gateway", GATEWAY_PORT)):
-        services[svc] = {
-            "state": "running" if is_running(svc) else "stopped",
-            "port": port,
-        }
+    import modelctl as mctl
 
     return {
         "version": getattr(mctl, "__version__", ""),
         "uptime_s": None,  # 需 async tm.uptime；本同步函数留空由前端覆盖（产品定）
         "default_model": os.environ.get("GATEWAY_DEFAULT_MODEL", ""),
         "gateway_port": GATEWAY_PORT,
-        "model_count": len(models),
-        "hardware": hardware,
-        "models": models,
+        "model_count": len(summaries),
+        "hardware": {
+            "gpu_count": gpu_count,
+            "gpu_name": gpu_name,
+            "total_vram_gb": total_vram_gb,
+            "docker_ready": dready,
+            "engine_binaries": engine_binaries,
+        },
+        "models": list(summaries),
         "services": services,
         # 带偏移的 ISO：naive 时间会被前端按浏览器时区二次解释，跨时区即偏差
         "probed_at": datetime.now().astimezone().isoformat(timespec="seconds"),

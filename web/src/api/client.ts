@@ -23,8 +23,9 @@ client.interceptors.request.use((config: InternalAxiosRequestConfig) => {
 client.interceptors.response.use(
   (res) => res,
   (err: AxiosError<{ message?: string; code?: string }>) => {
+    // 401 = 鉴权失效：清 token 回登录页（仅 handle 401；其它错误包括 abort
+    // 直接 reject 交调用方自行判断——axios 内部对 CanceledError 已做 isCancel 标记）
     const status = err.response?.status;
-    // 401 = 鉴权失效：清 token 回登录页
     if (status === 401) {
       const auth = useAuthStore();
       auth.clear();

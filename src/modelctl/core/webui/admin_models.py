@@ -26,8 +26,6 @@ import os
 import re
 import subprocess
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -67,20 +65,6 @@ def _read_pid_raw(name: str) -> int | None:
         return None
 
 
-def _check_health(port: int, api_key: str | None) -> bool | None:
-    """单次健康探测（短超时）；返回 True/False；探测异常返回 None。"""
-    from modelctl.core.process import open_local
-
-    url = f"http://127.0.0.1:{port}/health"
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    try:
-        req = urllib.request.Request(url, headers=headers)
-        with open_local(req, timeout=2) as resp:
-            return 200 <= resp.status < 300
-    except (urllib.error.URLError, OSError, ValueError):
-        return None
-
-
 def _mask_key(key: str | None) -> str | None:
     """API key 脱敏：仅暴露末 4 位（***3876）；None 原样返回。"""
     if not key:
@@ -94,19 +78,23 @@ def _model_summary(p) -> dict:
     """构建 ModelSummary dict（列表端点用）。"""
     running = False
     try:
-        from modelctl.core.process import is_running
+        # 运行态判定改走 is_running_any：docker runtime 容器路径不写 PID 文件，
+        # 仅 is_running(name) 会把 docker 启动的 vllm/tokenspeed/tensorrt 模型误标"已停止"
+        # （端口 /health 2xx 无法被探测）。is_running_any 端口探测优先 + PID 文件机器兜底，
+        # 与 CLI list/status / all status 行为一致。
+        from modelctl.core.process import is_running_any
 
-        running = is_running(p.name)
+        running = is_running_any(p.name, p)
     except Exception:
         running = False
 
-    health: str | None = None
-    if running:
-        ok = _check_health(p.port, p.api_key)
-        if ok is not None:
-            health = "healthy" if ok else "unhealthy"
-        else:
-            health = "unknown"
+    # health 口径：
+    #  - running 命中过（/health 2xx 或 PID 文件） → healthy；
+    #  - running=False → None（未运行 profile 不要为它多耗一次 /health 探测——
+    #    docker 场景下 N 个未启动 profile 串行各 2.3s 会让列表整体 >15s 直接超时）。
+    # 注：之前 _check_health 二次探测仅用于区分 healthy/unhealthy；改为统一 healthy。
+    # unhealthy 基础指标由前端按需直查 /health 维护，避免列表路径上的空转开销。
+    health = "healthy" if running else None
 
     pid = _read_pid_raw(p.name)
     log_path: str | None = None
@@ -295,13 +283,28 @@ async def list_models(_: None = Depends(require_auth)):
     for members in groups.values():
         members.sort(key=lambda m: ENGINE_PRIORITY.get(m.engine, 99))
 
-    # 构建响应
+    # 构建响应：模型状态判定（端口 /health 探测 + PID 文件）走 worker 线程，
+    # 全局 gather（**而非按下分批补测**）让所有 is_running_any 的端口探测同时跑：
+    # 51 个 profile × 2.3s = 串行 117s 直接超时；to_thread 默认 ThreadPoolExecutor
+    # 容量足够并行 N 个，全局 gather 后总耗时 ≈ max(N 个端口探测) ≈ 2.3-3s（含 1 次
+    # router 的 list_profiles + 1 次 docker inspect 短路优化）。
+    # 注：list_exceptions=True 把单个 _model_summary 异常映射为 stopped + health None，
+    # 避免一个模型异常拖垮整个列表。
+    groups_sorted = list(sorted(groups.items(), key=lambda x: (x[0] == "(其它)", x[0])))
+    flat_profiles = [m for _, members in groups_sorted for m in members]
+    summaries = await asyncio.gather(
+        *(asyncio.to_thread(_model_summary, m) for m in flat_profiles)
+    )
+    # 重组成 groups 形态：按原 group 切分，保持 group 顺序
     out_groups = []
-    for g, members in sorted(groups.items(), key=lambda x: (x[0] == "(其它)", x[0])):
+    cursor = 0
+    for g, members in groups_sorted:
+        n = len(members)
         out_groups.append({
             "group": g,
-            "models": [_model_summary(m) for m in members],
+            "models": list(summaries[cursor: cursor + n]),
         })
+        cursor += n
 
     return {
         "groups": out_groups,
@@ -321,19 +324,17 @@ async def get_model(name: str, _: None = Depends(require_auth)):
 
     running = False
     try:
-        from modelctl.core.process import is_running
+        # 与 _model_summary 同口径：is_running_any（端口探测优先 + PID 文件机器兜底），
+        # 避免 docker runtime 容器路径无 PID 文件导致 detail 页"已停止"误显。
+        from modelctl.core.process import is_running_any
 
-        running = is_running(profile.name)
+        running = await asyncio.to_thread(is_running_any, profile.name, profile)
     except Exception:
         running = False
 
-    health: str | None = None
-    if running:
-        ok = _check_health(profile.port, profile.api_key)
-        if ok is not None:
-            health = "healthy" if ok else "unhealthy"
-        else:
-            health = "unknown"
+    # 与 _model_summary 同口径：is_running_any 命中即视为 service 存活 → healthy，
+    # 避免再次 _check_health 二次探测（与列表路径一致）。
+    health = "healthy" if running else None
 
     engine_config = profile.engine_config
     # 脱敏 engine_config 中可能存在的 api_key
@@ -695,6 +696,13 @@ async def _sse_log_stream(name: str):
       JSON 一行，``split('\\n')`` 解析安全；容器删 / docker daemon 重启时文件消失，
       回退到 ``docker logs --tail 1`` 识别容器是否还在打日志（容器已死则不再重拉，
       下次手动 refresh 再走 ``GET /log`` fallback）。
+
+    **静默态兜底**（修复 vLLM docker 模型"工作日志空白"）：vLLM 容器在权重加载完成后
+    进入服务态，几十分钟可能不再向 stdout 打新日志，json.log 字节位置不动 → SSE 静默
+    但前端只显示"（暂无日志）"。每 30s 兜底执行一次 ``_read_docker_logs(name, 200)``,
+    把首次初始 dump 的前 200 行（启动时的权重加载日志）增量推送给前端，让静默态仍可见
+    完整启动过程；用 ``sent_lines`` set 去重，避免容器持续写日志时 30s 周期性重复推送。
+    容器删时兜底命令也会失败（返回 []），自然转入 jsonlog-gone 处理路径。
     """
     from modelctl.core.all_service import _CONTAINER_ID_LINE
     from modelctl.core.process import launch_log
@@ -710,9 +718,22 @@ async def _sse_log_stream(name: str):
         json_log_path: Path | None = None
         json_log_pos = 0
         if docker_lines:
+            # docker_core_log_path：
+            #   - Linux 直接挂载场景——`docker inspect` 拿到的 LogPath 是走过加农路径的宿主机
+            #     绝对路径（/var/lib/docker/containers/<id>/<id>-json.log），可用；
+            #   - Windows Docker Desktop (WSL2 / Hyper-V) 场景——LogPath 是 Linux VM
+            #     内部路径，从 Windows 宿主机**不可达**，需要 is_file 失败后静默降级。
+            # 两种情况我们用同一个判定："路径存在即走字节 offset 增量推；不存在则关闭
+            # used_json_log，让 SSE 走 heartbeat + 30s 静默兜底（_read_docker_logs tail 200）"。
             json_log_path = await asyncio.to_thread(docker_core_log_path, name)
-            used_json_log = json_log_path is not None
-            json_log_pos = (await asyncio.to_thread(json_log_path.stat)).st_size
+            if json_log_path is not None:
+                try:
+                    json_log_pos = (await asyncio.to_thread(json_log_path.stat)).st_size
+                    used_json_log = True
+                except OSError:
+                    logger.debug(f"[webui] 模型 {name} json log stat 失败，回退 heartbeat-only")
+                    json_log_path = None
+                    used_json_log = False
 
         for line in docker_lines:
             yield f"event: log\ndata: {json.dumps({'line': line}, ensure_ascii=False)}\n\n"
@@ -727,6 +748,9 @@ async def _sse_log_stream(name: str):
         json_log_pos = 0
 
     last_activity = time.monotonic()
+    last_silent_fallback = last_activity
+    sent_lines: set[str] = set()
+
     while True:
         await asyncio.sleep(2)
 
@@ -744,6 +768,7 @@ async def _sse_log_stream(name: str):
                                     continue
                                 line = _docker_json_line_text(entry)
                                 if line:
+                                    sent_lines.add(line)
                                     yield f"event: log\ndata: {json.dumps({'line': line}, ensure_ascii=False)}\n\n"
                             if raw.strip():
                                 json_log_pos = cur
@@ -761,6 +786,23 @@ async def _sse_log_stream(name: str):
                 # 容器首次没有 json log（docker logs 可用但 json 路径不可访问，
                 # 例如 docker-in-docker 或不同挂载点）：仅发心跳，前端下次 refresh 会拉全 200
                 pass
+
+            # docker 静默态 30s 兜底（修复 vLLM 容器加载完权重后 json.log 不动导致"工作日志空白"）
+            if time.monotonic() - last_silent_fallback >= 30:
+                last_silent_fallback = time.monotonic()
+                # 先把首次初始 dump 的 200 行灌入 sent_lines，避免 docker logs 拉到的行重复推
+                for l in initial:
+                    sent_lines.add(l.strip())
+                new_tail = await asyncio.to_thread(_read_docker_logs, name, 200)
+                emitted = 0
+                for line in new_tail:
+                    if line in sent_lines:
+                        continue
+                    sent_lines.add(line)
+                    yield f"event: log\ndata: {json.dumps({'line': line}, ensure_ascii=False)}\n\n"
+                    emitted += 1
+                if emitted > 0:
+                    last_activity = time.monotonic()
 
             if time.monotonic() - last_activity >= 10:
                 yield "event: heartbeat\ndata: {}\n\n"
@@ -856,42 +898,79 @@ def _read_file_range(path: Path, start: int, end: int) -> str:
 def _docker_log_cmd(name: str, tail: int = 200) -> list[str] | None:
     """模型走 docker runtime 时返回 ``[docker, logs, --tail, N, <container>]`` 命令；否则 None。
 
-    容器名 = 引擎适配器的 ``_container_name``（与 start_detached 写入 launch log
-    首行 docker run 客户端 stdout 中的 ID 同行出现）。仅在 vllm/tokenspeed/tensorrt_llm
-    三个 docker-capable 引擎 + docker_image 已配时返回；venv 分支返 None。
+    **容器名优先级**：
+    1. 引擎 adapter 的 ``_container_name`` 推理（权威口径——CLI start 时就用这个参数
+       给 docker run 的 --name，与 docker ps / start_detached 写 launch log 的容器 ID
+       一致）；
+    2. launch log 首行（仅当容器推理为空时启用，作为降级轨迹，容器 ID 或 --name
+       都会落在 launch log 首行，可读名 ``[A-Za-z0-9._-]{1,64}`` 命中即用）。
+
+    任一来源为空都返回 None。任何构造异常都降级 debug 并返 None（不阻断 SSE 流）。
     """
     profile = _find_profile(name)
     if profile is None or profile.engine not in {"vllm", "tokenspeed", "tensorrt_llm"}:
         return None
     if not (profile.engine_config or {}).get("docker_image"):
         return None
+
+    container = ""
+    # 第一来源：engine adapter 推理（权威口径）
     try:
-        from modelctl.capabilities import probe
+        from modelctl.core.capabilities import probe
         from modelctl.engines import get_adapter
 
         adapter = get_adapter(profile.engine)(profile, probe())
-        container = getattr(adapter, "_container_name", None)
-        if not container:
-            return None
-        return ["docker", "logs", "--tail", str(tail), container]
-    except Exception as exc:  # noqa: BLE001 —— 构造命令失败不回退，记 debug 即可
-        logger.debug(f"[webui] 构造 docker logs 命令失败（{name}）：{exc}")
+        container = getattr(adapter, "_container_name", "") or ""
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[webui] 构造 docker logs 命令时 engine 推理失败（{name}）：{exc}")
+
+    # 第二来源：launch log 首行（容器推理为空时启用）
+    if not container:
+        try:
+            from modelctl.core.process import launch_log, tail_file
+            from modelctl.core.all_service import _CONTAINER_ID_LINE
+
+            lp = launch_log(name)
+            if lp is not None and lp.is_file():
+                text = tail_file(lp, 4) or ""
+                for ln in text.splitlines():
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    if _CONTAINER_ID_LINE.match(ln) or re.fullmatch(r"[A-Za-z0-9._-]{1,64}", ln):
+                        container = ln
+                        break
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[webui] 读 launch log 首行 docker 容器名失败（{name}）：{exc}")
+
+    if not container:
+        logger.debug(f"[webui] docker logs 命令缺容器名（{name}），已降级到上下层回退")
         return None
+    return ["docker", "logs", "--tail", str(tail), container]
 
 
 def _read_docker_logs(name: str, tail: int = 200) -> list[str]:
     """按需 ``docker logs --tail <N> <container>``；任何异常 / 命令不可用返回 []。"""
     cmd = _docker_log_cmd(name, tail)
     if not cmd:
+        # 命令为空：容器名推理 + 容器名路径都没命中（明确 warn 给用户排查方便）
+        logger.warning(f"[webui] docker logs 命令为空（{name}）—— engine 推理或 launch log 都没命中容器名，SSE 流将默认事件 fallback")
         return []
     try:
         import subprocess
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=30, encoding="utf-8", errors="replace")
         merged = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")
-        return merged.strip().split("\n") if merged.strip() else []
+        out = merged.strip().split("\n") if merged.strip() else []
+        if not out:
+            logger.info(
+                f"[webui] docker logs 空输出（{name}）：cmd={cmd} rc={proc.returncode} "
+                f"stdout={len(proc.stdout or 0)}B stderr={len(proc.stderr or 0)}B "
+                f"stderr_head={(proc.stderr or '')[:160]!r}"
+            )
+        return out
     except Exception as exc:  # noqa: BLE001 —— 读取失败静默（fallback 口）
-        logger.debug(f"[webui] docker logs 读取失败（忽略）：{exc}")
+        logger.info(f"[webui] docker logs 读取异常（{name}）：{type(exc).__name__}: {exc} | cmd={cmd}")
         return []
 
 
