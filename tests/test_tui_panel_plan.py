@@ -106,8 +106,10 @@ def _render_text(st, hw, models, *, profile=None,
             mock.patch("modelctl.engines.get_adapter", return_value=fake_adapter_cls)
         )
     if fake_adapter_kv_estimate is not mock.DEFAULT:
+        # T5-8 把 kv_estimate_for_profile 改成 _render_kv_estimate 函数体内 lazy import，
+        # 锚点迁回源模块 modelctl.core.vram_estimator（panel 不再持有顶层 attr）
         ctx_blocks.append(
-            mock.patch("modelctl.core.tui.panels.plan.kv_estimate_for_profile",
+            mock.patch("modelctl.core.vram_estimator.kv_estimate_for_profile",
                        return_value=fake_adapter_kv_estimate)
         )
     for blk in ctx_blocks:

@@ -30,6 +30,7 @@ from modelctl.core.tui.data import (
     _SnapshotBase,
 )
 from modelctl.core.tui.keyboard import Key, KeyboardInput
+from modelctl.core.tui.panels.cluster import render as render_cluster
 from modelctl.core.tui.panels.detail import render as render_detail
 from modelctl.core.tui.panels.main_dashboard import render as render_dashboard
 from modelctl.core.tui.panels.plan import render as render_plan
@@ -119,6 +120,15 @@ class TuiApp:
                 self.state,
                 self._snap["hw"],  # type: ignore[arg-type]
                 self._snap["models"],  # type: ignore[arg-type]
+                width=width,
+                height=height,
+                theme_id=self._theme,
+            )
+        elif view == "cluster":
+            # Cluster 视图：3 section + SoloStub（T5 交付，T6 接 Tab 键盘 + 事件流）
+            group = render_cluster(
+                self.state,
+                self._snap["cluster"],  # type: ignore[arg-type]
                 width=width,
                 height=height,
                 theme_id=self._theme,

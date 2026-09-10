@@ -47,9 +47,9 @@ from rich.text import Text
 
 from modelctl.core.colors import pad_width
 from modelctl.core.tui.data import HardwareSnapshot, ModelsSnapshot
+from modelctl.core.tui.panels.common import resolve_profile_from_apps as _resolve_profile_from_apps
 from modelctl.core.tui.state import TUIState
 from modelctl.core.tui.theme import get_rich_theme
-from modelctl.core.vram_estimator import kv_estimate_for_profile
 
 
 def _header(state: TUIState, profile_name: str, width: int, theme: dict) -> Text:
@@ -214,9 +214,11 @@ def _render_kv_estimate(profile, width: int, theme: dict) -> Panel:
             title="KV 估算", title_align="left",
             width=width, border_style=theme["dim"],
         )
+    # lazy import：core.tui → core.vram_estimator 顶层环（T5 接力 T5-8）
     try:
+        from modelctl.core.vram_estimator import kv_estimate_for_profile
         result = kv_estimate_for_profile(profile)
-    except Exception as e:  # noqa: BLE001 — estimator 不应静默失败
+    except Exception as e:  # noqa: BLE001 — estimator 异常 / import 失败统一黄
         return Panel(
             Text(pad_width(f"估算异常：{type(e).__name__}：{e}", inner_w),
                  style=theme["warning"]),
@@ -244,17 +246,19 @@ def _render_kv_estimate(profile, width: int, theme: dict) -> Panel:
                  width=width, border_style=theme["success"])
 
 
-def _render_precheck(profile, width: int, theme: dict) -> RenderableType:
+def _render_precheck(profile, width: int, theme: dict, caps: object | None = None) -> RenderableType:
     """健康预检 Panel：对齐 T3 detail.py 三态逻辑（generalized prefix）。
 
     - RequirementError → 红 `FAIL: {msg}`
     - 其他 Exception → 黄 `precheck 异常：{type}：{msg}`
     - adapter 不存在 / import 失败 → 黄 `(无 adapter)`
     - 无异常 → 绿 `precheck passed`
+
+    T5 接力项 T5-3：`probe()` 调用从函数体内移除，改用形参 `caps`（键入 host 时由
+    app.py 注入；保持 None 时 check_requirements 走 fallback）。
     """
     inner_w = max(20, width - 4)
     try:
-        from modelctl.core.capabilities import probe
         from modelctl.engines import get_adapter
         from modelctl.engines.base import RequirementError
     except ImportError as e:  # pragma: no cover
@@ -278,10 +282,6 @@ def _render_precheck(profile, width: int, theme: dict) -> RenderableType:
             title="预检", title_align="left",
             width=width, border_style=theme["warning"],
         )
-    try:
-        caps = probe()
-    except Exception:  # noqa: BLE001 — probe 失败走 precheck 异常分支
-        caps = None
     try:
         adapter = adapter_cls(profile, caps)
         adapter.check_requirements()
@@ -308,27 +308,6 @@ def _empty_panel(width: int, theme: dict) -> Panel:
         title="Plan", title_align="left",
         width=width, border_style=theme["warning"],
     )
-
-
-def _resolve_profile_from_apps(name: str, engine: str, port: int):
-    """从 `list_profiles()` 按 name 查真实 Profile；未命中 / 离线 → None。
-
-    与 T3 detail.py 同 pattern（lazy import + 静默降级），避免 plan 与 detail
-    互相 import。T5 接力项可能将 5 view 共享 helper 抽出到 panels/common.py。
-    """
-    if not name:
-        return None
-    try:
-        from modelctl.core.profile import list_profiles
-    except ImportError:  # pragma: no cover
-        return None
-    try:
-        for p in list_profiles():
-            if getattr(p, "name", None) == name:
-                return p
-    except Exception:  # noqa: BLE001
-        return None
-    return None
 
 
 def render(

@@ -12,9 +12,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 # Detail 视图 5 子 Tab（顺序固定：yaml → agent → log → rate → precheck）
-_DETAIL_TABS = ("yaml", "agent", "log", "rate", "precheck")
+# 类型收窄：仅在 {yaml, agent, log, rate, precheck} 间切换（T5 接力项 T5-2）
+_DetailTabKey = Literal["yaml", "agent", "log", "rate", "precheck"]
+_DETAIL_TABS: tuple[_DetailTabKey, ...] = ("yaml", "agent", "log", "rate", "precheck")
+
+# Cluster 视图 3 子 Tab（顺序固定：nodes → goals → events）
+_CLUSTER_TABS = ("nodes", "goals", "events")
 
 
 @dataclass
@@ -28,7 +34,8 @@ class TUIState:
 
     active_view: str = "dashboard"  # dashboard / detail / plan / cluster / monitor
     active_index: int = 0
-    active_detail_subtab: str = "yaml"  # yaml / agent / log / rate / precheck
+    active_detail_subtab: _DetailTabKey = "yaml"  # yaml / agent / log / rate / precheck
+    active_cluster_tab: int = 0  # Cluster 视图 section 切（0=nodes / 1=goals / 2=events）
     plan_edit: dict = field(default_factory=dict)
     plan_edit_cursor: int = 0  # Plan 视图当前编辑字段 index（cycle_plan_cursor 维护）
     plan_dry_run_done: bool = False  # 用户按过 D 键（重绘保留 dry-run 状态，不回滚）
@@ -77,10 +84,21 @@ class TUIState:
         start = max(0, self.page) * page_size
         return profiles[start:start + page_size]
 
-    def switch_detail_tab(self, key: str) -> None:
+    def switch_detail_tab(self, key: _DetailTabKey) -> None:
         """切 Detail 子 Tab。key ∈ {'yaml','agent','log','rate','precheck'}；越界 no-op。"""
         if key in _DETAIL_TABS:
             self.active_detail_subtab = key
+
+    def cycle_cluster_tab(self, direction: int, count: int = 3) -> None:
+        """Cluster 视图 section ±1 回绕（direction=0 / count=0 → no-op）。
+
+        `direction` ∈ {-1, 0, +1}；`count` = section 数（默认 3，对齐
+        _CLUSTER_TABS (nodes / goals / events)）。`count == 0` ⇒ no-op；
+        越界自动取模回绕，结果始终在 [0, count) 区间。
+        """
+        if count <= 0 or direction == 0:
+            return
+        self.active_cluster_tab = (self.active_cluster_tab + direction) % count
 
     def cycle_plan_cursor(self, direction: int, count: int) -> None:
         """Plan 字段光标 ±1 回绕（不会被调用方向为 0 / count 为 0）。

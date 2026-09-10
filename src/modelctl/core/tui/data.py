@@ -235,9 +235,6 @@ class LogsSnapshot(_SnapshotBase):
     lines: list[str] = field(default_factory=list)
     truncated: bool = False
 
-    def _fetch_kwargs(self, *, now: float | None) -> dict:
-        return {"name": self.name, "tail": self.tail, "now": now}
-
     @classmethod
     def fetch(cls, *, name: str = "", tail: int = 2, now: float | None = None) -> LogsSnapshot:
         """按实例名读取 launch_log 末 `tail` 行；name 空 / 文件不存在 → lines=[]。"""
