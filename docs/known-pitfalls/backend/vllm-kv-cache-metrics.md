@@ -122,3 +122,40 @@ Warning: Prefix caching in Mamba cache 'align' mode is currently enabled. Its su
 - 混合注意力模型上"前缀缓存命中"的语义 ≠ 纯注意力模型——命中意味着**全 64 层**（含 48 层 GDN）的 KV+状态快照都能复用，因此 qwen3.8 上 70~73% 命中率的收益远大于纯注意力模型同样命中率下的收益。
 - 看到 `Warning: ... experimental ...` **不必回退**，先验证命中率再决策；vLLM 0.27.1 + Qwen3.5/Qwen3_5 家族上此路径稳定。
 - 想主动关闭 align 需要 `--mamba-cache-mode=...`（当前版本下），但这等于放弃 prefix caching 绝大部分收益，几乎不存在"值得关"的场景。
+
+## vllm qwen3.8-flash-next 推理阶段 OOM（`_short_conv_dilated_prefill_batched` → `F.silu`）
+
+**日期**：2026-09-11
+**症状**：`qwen3.8-flash-next-vllm`（`vllm/vllm-openai:qwen38-flash-next` Day-0 镜像，TEP8，triton MoE，PLE CPU offload，`gpu_memory_utilization` 0.92）启动与 CUDA graph 捕获均通过，但**推理会话中 8 卡同时**抛 `torch.OutOfMemoryError`，trace 落在 PLE short conv 路径：
+
+```
+qwen3_8_flash_next_ple_short_conv
+ → _short_conv
+  → _short_conv_dilated_dispatch
+   → _short_conv_dilated_prefill_batched
+    → F.silu
+```
+
+分配失败细节：`Tried to allocate 140.00 MiB, free 138.19 MiB`，PyTorch 提示 `reserved but unallocated 161.74 MiB`（= 缓存分配器已 reserve 但还没 alloc 的块，碎片化征兆）。
+
+**根因**：
+
+1. `gpu_memory_utilization` 0.92 把 KV cache 按预算**贪心分满**后，每卡仅剩 ~3.8 GiB 给 CUDA Graph + 峰值激活。
+2. Qwen4Exp 的 PLE short conv `_short_conv_dilated_prefill_batched` 在 batch prefill 路径上做 `F.silu(conv_output)` + 多段 dilated kernel + `.contiguous()` 拷贝，瞬时激活量随 `--max-num-batched-tokens 7168` 放大，把剩余 3.8 GiB 一举压穿。
+3. 日志明确提示 "reserved but unallocated 161 MiB"——PyTorch 缓存分配器已出现碎片；固定 segment 分配器无法把已 reserve 但 unalloc 的块重新增长给下一个更大分配，进一步放大 OOM 概率。
+
+注意：这不是"KV 池不够"（KV cache usage 还很低），也不是"权重/PLE 表太大"（PLE CPU offload 已生效）。**是 KV 池 + CUDA Graph 之外的第三层（推理峰值激活）显存预算给得不够**。
+
+**解决**（修改 [qwen3.8-flash-next.yaml](file:///d:/WorkPlace/Pycharm/modelctl/models/vllm/qwen3.8-flash-next.yaml)）：
+
+1. `gpu_memory_utilization` 从 **0.92 → 0.88**：释放 ~5.67 GiB/卡给峰值激活（约 1.15 GiB/卡 ≥ 3.8 旧余量 + 2×1.4 新档 needed 经验余量）。
+2. `docker_env` 新增 `PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"`（走 `docker run -e` 注入）：让缓存分配器用可扩展分段，已 reserve 但未 alloc 的块可增长而不是被丢弃再生成新 segment，直接缓解上述碎片化。
+
+**回退条件**：若 0.88 + expandable_segments 仍 OOM，按 `max_num_batched_tokens` 阶梯降档（7168 → 6144 → 5120 → 4096）；**不要继续降 `gpu_memory_utilization`**（会损失 KV 并发上限）。`max_num_batched_tokens ≤ 4096` 仍 OOM 时再放 0.85 一档。
+
+**教训**：
+
+- `gpu_memory_utilization` 职责有三层含义：**KV + CUDA Graph + 推理峰值激活**——只留前两层，启动捕获能过、推理 prefill 期照样 OOM。混合架构模型的"峰值激活"层预算高于纯注意力模型，因为 GDN/QSA 的循环状态在 prefill 时是 per-token 快照（而非每 token 独立 KV），`F.silu` + `.contiguous()` 在 `short_conv_dilated` 路径上会进一步放大瞬时拷贝。
+- 拿到 OOM 日志时**先 grep 提示里的 `reserved but unallocated`**：有 = 缓存分配器碎片化，`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 是低代价止血项，不必动其他配置。
+- 8 卡 TEP 拓扑下，OOM 日志里 rank 0~7 同一时刻同一行 traceback（`F.silu` in `_short_conv_dilated_prefill_batched`）是**确定性瓶颈**（每个 rank 走同一 kernel、同一 batch 形状），不是某卡 OOM 的偶发——按"全 rank 同栈"判断时直接走预算调参，不用怀疑 CUDA context / NCCL 单点故障。
+- docker 路径的 `PYTORCH_CUDA_ALLOC_CONF` 必须走 `docker_env`（`docker run -e` 注入容器内）；`build_command` 返回的 env dict 只进宿主 docker CLI 进程，进不了容器，那样写进 `docker_env` 旁边的键会**静默无效**且 OOM 复现。
