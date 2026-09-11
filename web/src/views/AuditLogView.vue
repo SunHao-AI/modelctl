@@ -80,9 +80,9 @@ function levelStyle(level: string | undefined): string {
   if (level === 'info') return 'bg-blue-600/15 text-blue-300 border border-blue-500/30';
   return 'bg-slate-600/15 text-slate-300 border border-slate-500/30';
 }
-/** 摘要：endpoint · model · status */
+/** 摘要：端点 · model · status（网关写入键是 path，endpoint 仅旧格式兼容） */
 function summaryOf(e: AuditEntry): string {
-  const ep = (e.endpoint ?? '').toString();
+  const ep = (e.path ?? e.endpoint ?? '').toString();
   const model = (e.model ?? '').toString();
   const status = e.status_code ?? e.status;
   const parts: string[] = [];

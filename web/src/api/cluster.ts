@@ -48,6 +48,8 @@ export interface GoalView {
 export interface ModelState {
   node_id: string;
   profile: string;
+  /** 引擎维度（同 stem 多引擎时 (node, profile, engine) 才唯一）；旧 worker 心跳为 '' */
+  engine: string;
   state: string;
   gpu: number[] | null;
   port: number | null;

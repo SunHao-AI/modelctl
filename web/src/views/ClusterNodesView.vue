@@ -16,19 +16,38 @@ const STATUS_STYLE: Record<string, string> = {
   disabled: 'bg-rose-500/15 text-rose-400 border-rose-500/30',
 };
 
-async function refresh() {
-  try {
-    status.value = await getClusterStatus();
-    nodes.value = (await getClusterNodes()).nodes;
-    disabled.value = false;
-    error.value = '';
-  } catch (e) {
-    if ((e as AxiosError).response?.status === 404) {
-      disabled.value = true;
-      return;
+// 轮询防重叠：pending 期间新的 tick 直接返回，避免同样的同 URL 请求被浏览器
+// keep-alive 池 abort（见 docs/known-pitfalls/frontend/polling-overlap-err-aborted.md）
+let pending: Promise<void> | null = null;
+
+function refresh(): Promise<void> {
+  if (pending) return pending;
+  pending = (async () => {
+    try {
+      status.value = await getClusterStatus();
+      nodes.value = (await getClusterNodes()).nodes;
+      disabled.value = false;
+      error.value = '';
+    } catch (e) {
+      const err = e as AxiosError & { isCancel?: boolean };
+      // 静默 abort：UI 无影响，保留旧 data
+      if (
+        !!err?.isCancel ||
+        err?.code === 'ECONNABORTED' ||
+        /aborted|canceled|cancelled/i.test(err?.message ?? '')
+      ) {
+        return;
+      }
+      if (err?.response?.status === 404) {
+        disabled.value = true;
+        return;
+      }
+      error.value = (e as Error).message;
+    } finally {
+      pending = null;
     }
-    error.value = (e as Error).message;
-  }
+  })();
+  return pending;
 }
 
 function fmtAge(s: number | null): string {

@@ -56,20 +56,39 @@ function errText(e: unknown): string {
   return ax.response?.data?.detail || ax.message || String(e);
 }
 
-async function refresh() {
-  try {
-    const [n, g] = await Promise.all([getClusterNodes(), listClusterGoals()]);
-    nodes.value = n.nodes;
-    goals.value = g.goals;
-    disabled.value = false;
-    error.value = '';
-  } catch (e) {
-    if ((e as AxiosError).response?.status === 404) {
-      disabled.value = true;
-      return;
+// 轮询防重叠：pending 期间新的 tick 直接返回，避免同 URL 请求被浏览器
+// keep-alive 池 abort（见 docs/known-pitfalls/frontend/polling-overlap-err-aborted.md）
+let pending: Promise<void> | null = null;
+
+function refresh(): Promise<void> {
+  if (pending) return pending;
+  pending = (async () => {
+    try {
+      const [n, g] = await Promise.all([getClusterNodes(), listClusterGoals()]);
+      nodes.value = n.nodes;
+      goals.value = g.goals;
+      disabled.value = false;
+      error.value = '';
+    } catch (e) {
+      const err = e as AxiosError & { isCancel?: boolean };
+      // 静默 abort：UI 无影响，保留旧 data
+      if (
+        !!err?.isCancel ||
+        err?.code === 'ECONNABORTED' ||
+        /aborted|canceled|cancelled/i.test(err?.message ?? '')
+      ) {
+        return;
+      }
+      if (err?.response?.status === 404) {
+        disabled.value = true;
+        return;
+      }
+      error.value = errText(e);
+    } finally {
+      pending = null;
     }
-    error.value = errText(e);
-  }
+  })();
+  return pending;
 }
 
 async function loadCatalog() {

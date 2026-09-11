@@ -390,11 +390,13 @@ export interface AuditEntry {
   time?: string;
   ts?: string;
   timestamp?: string;
-  /** 级别（info / warn / error） */
+  /** 级别（info / warn / error）：JSONL 无此字段，由后端按 status_code 派生后注入 */
   level?: string;
   /** 模型名 / 客户端模型 */
   model?: string;
-  /** 请求 endpoint（如 /v1/chat/completions） */
+  /** 请求端点（网关写入键为 path，如 chat/completions / messages） */
+  path?: string;
+  /** 兼容旧格式审计文件的端点字段 */
   endpoint?: string;
   /** HTTP 方法 */
   method?: string;
@@ -427,8 +429,8 @@ export interface AuditQueryParams {
 
 /** GET /audit 响应 */
 export interface AuditListResponse {
-  /** 实际生效的 since（已解析为本地时区 ISO） */
-  since: string;
+  /** 实际生效的 since（已解析为本地时区 ISO；未过滤时为 null） */
+  since: string | null;
   /** 条目（新在前） */
   entries: AuditEntry[];
   /** 总条数（过滤后未截断） */
@@ -449,8 +451,12 @@ export interface AuditDayCount {
 
 /** GET /audit/stats 响应 */
 export interface AuditStatsResponse {
+  /** 实际生效的 since（未过滤时为 null） */
+  since?: string | null;
   total: number;
-  /** 按日期聚合 */
+  /** 错误数（4xx + 5xx） */
+  errors: number;
+  /** 按日期聚合（升序） */
   by_day: AuditDayCount[];
   /** 按模型聚合 */
   by_model: Record<string, number>;
@@ -459,10 +465,17 @@ export interface AuditStatsResponse {
 /** POST /audit/cleanup 响应 */
 export interface AuditCleanupResponse {
   ok: boolean;
-  /** 删除的条数 */
+  /** 应删/已删的文件个数 */
   removed: number;
   /** 释放的字节数 */
   freed_bytes: number;
+  /** 释放的 MB（整数除法） */
+  size_mb: number;
+  /** 文件名单 */
+  deleted: string[];
+  dry_run: boolean;
+  /** 实际生效的保留期（天） */
+  retention_days?: number;
 }
 
 /** GET /nginx-snippet 响应 */

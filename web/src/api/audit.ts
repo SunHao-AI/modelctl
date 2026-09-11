@@ -30,9 +30,9 @@ export function auditStats(since?: string): Promise<AuditStatsResponse> {
   );
 }
 
-/** 清理 N 天前的审计记录。 */
+/** 清理 N 天前的审计记录（days 走 body——后端从 JSON body 读取保留期）。 */
 export function auditCleanup(days = 30): Promise<AuditCleanupResponse> {
-  return dataOf<AuditCleanupResponse>(client.post('/audit/cleanup', null, { params: { days } }));
+  return dataOf<AuditCleanupResponse>(client.post('/audit/cleanup', { days, dry_run: false }));
 }
 
 /** 取审计目录的绝对路径（用于前端展示）。 */

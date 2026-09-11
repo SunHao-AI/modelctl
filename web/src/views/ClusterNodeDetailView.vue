@@ -51,23 +51,42 @@ function fmtEpoch(v: number | null): string {
 /** 轮询请求序号 + 节点快照：晚到的过期响应/错误直接丢弃，防串节点渲染 */
 let refreshSeq = 0;
 
-async function refresh() {
-  const seq = ++refreshSeq;
-  const target = nodeId.value;
-  try {
-    const d = await getClusterNodeDetail(target);
-    const ev = (await listClusterEvents({ node_id: target, limit: 100 })).events;
-    if (seq !== refreshSeq || nodeId.value !== target) return; // 过期响应：已切节点或有更新的轮询
-    detail.value = d;
-    events.value = ev;
-    notFound.value = '';
-    error.value = '';
-  } catch (e) {
-    if (seq !== refreshSeq || nodeId.value !== target) return;
-    const st = (e as AxiosError).response?.status;
-    if (st === 404) notFound.value = `节点 ${target} 不存在（或已退役）`;
-    else error.value = errText(e);
-  }
+// 轮询防重叠：pending 期间新的 tick 直接返回，避免同 URL 请求被浏览器
+// keep-alive 池 abort（见 docs/known-pitfalls/frontend/polling-overlap-err-aborted.md）
+let pending: Promise<void> | null = null;
+
+function refresh(): Promise<void> {
+  if (pending) return pending;
+  pending = (async () => {
+    const seq = ++refreshSeq;
+    const target = nodeId.value;
+    try {
+      const d = await getClusterNodeDetail(target);
+      const ev = (await listClusterEvents({ node_id: target, limit: 100 })).events;
+      if (seq !== refreshSeq || nodeId.value !== target) return; // 过期响应：已切节点或有更新的轮询
+      detail.value = d;
+      events.value = ev;
+      notFound.value = '';
+      error.value = '';
+    } catch (e) {
+      if (seq !== refreshSeq || nodeId.value !== target) return;
+      const err = e as AxiosError & { isCancel?: boolean };
+      // 静默 abort：UI 无影响，保留旧 data
+      if (
+        !!err?.isCancel ||
+        err?.code === 'ECONNABORTED' ||
+        /aborted|canceled|cancelled/i.test(err?.message ?? '')
+      ) {
+        return;
+      }
+      const st = err?.response?.status;
+      if (st === 404) notFound.value = `节点 ${target} 不存在（或已退役）`;
+      else error.value = errText(e);
+    } finally {
+      pending = null;
+    }
+  })();
+  return pending;
 }
 
 async function runAction(fn: () => Promise<unknown>) {
@@ -227,21 +246,29 @@ onBeforeUnmount(() => window.clearInterval(timer));
         <table class="w-full text-left text-sm">
           <thead class="text-slate-400">
             <tr class="border-b border-slate-700">
-              <th class="py-2 pr-4">profile</th><th class="py-2 pr-4">state</th>
-              <th class="py-2 pr-4">gpu</th><th class="py-2 pr-4">端口</th>
+              <th class="py-2 pr-4">profile</th><th class="py-2 pr-4">engine</th>
+              <th class="py-2 pr-4">state</th><th class="py-2 pr-4">gpu</th>
+              <th class="py-2 pr-4">端口</th>
               <th class="py-2 pr-4">endpoint</th><th class="py-2">更新于</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="m in detail.model_states" :key="m.profile" class="border-b border-slate-800 text-slate-200">
+            <!-- 同 stem 多引擎共存时，(profile, engine) 才是唯一行键：旧 worker 心跳为 ''，
+                 仍按该行键唯一。:key 用 profile|engine 拼接避免 stale vnode。 -->
+            <tr
+              v-for="m in detail.model_states"
+              :key="`${m.profile}__${m.engine ?? ''}`"
+              class="border-b border-slate-800 text-slate-200"
+            >
               <td class="py-2 pr-4 font-mono">{{ m.profile }}</td>
+              <td class="py-2 pr-4 text-slate-400">{{ m.engine || '-' }}</td>
               <td class="py-2 pr-4">{{ m.state }}</td>
               <td class="py-2 pr-4 text-slate-400">{{ m.gpu?.join(',') || '-' }}</td>
               <td class="py-2 pr-4 text-slate-400">{{ m.port ?? '-' }}</td>
               <td class="py-2 pr-4 font-mono text-xs text-slate-400">{{ m.endpoint_url || '-' }}</td>
               <td class="py-2 text-slate-400">{{ fmtEpoch(m.updated_at) }}</td>
             </tr>
-            <tr v-if="!detail.model_states.length"><td colspan="6" class="py-4 text-center text-slate-500">该节点当前无在跑模型上报</td></tr>
+            <tr v-if="!detail.model_states.length"><td colspan="7" class="py-4 text-center text-slate-500">该节点当前无在跑模型上报</td></tr>
           </tbody>
         </table>
       </section>
