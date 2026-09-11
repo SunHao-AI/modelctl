@@ -18,6 +18,7 @@ hello 帧内用 join_token/node_token 鉴权（worker 不持有 API_KEY）。Nod
 
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 import json
 import shutil
@@ -134,8 +135,26 @@ def _goal_view(goal: dict[str, Any], state: dict[str, Any] | None, *,
 
 
 def _goal_views(rows: list[dict[str, Any]], *, now: float) -> list[dict[str, Any]]:
-    states = {(s["node_id"], s["profile"]): s for s in get_registry().store.list_model_states()}
-    return [_goal_view(g, states.get((g["node_id"], g["profile"])), now=now) for g in rows]
+    """goal 视图列表：按 `(node_id, profile, engine)` 精配 model_states 行。
+
+    同 stem 多引擎（vllm + aphrodite 同指 qwen2.5-1.5b）时，旧版按 (node, profile)
+    join 会让 states 字典后写覆盖先写——goal 视图的端口/GPU 漂到另一个引擎头上
+    （known-pitfalls backend/stem-ledger-collision.md）。精配键：goal 声明 engine
+    非空时直接用；worker 上报无 engine 字段（旧 worker / 未接引擎 adapter）时
+    回退空串匹配，避免把旧行当"另一引擎"丢在 view 外。
+    """
+    states: dict[tuple[str, str, str], dict] = {}
+    for s in get_registry().store.list_model_states():
+        states[(s["node_id"], s["profile"], s.get("engine", "") or "")] = s
+    out: list[dict[str, Any]] = []
+    for g in rows:
+        engine = str(g.get("engine", "") or "")
+        st = states.get((g["node_id"], g["profile"], engine))
+        if st is None and engine:
+            # 防御性回退：worker 未上报 engine 时，states 行 engine=''
+            st = states.get((g["node_id"], g["profile"], ""))
+        out.append(_goal_view(g, st, now=now))
+    return out
 
 
 @router.get("/cluster/status")
@@ -621,21 +640,32 @@ async def ws_cluster(ws: WebSocket):
                 await ws.send_text(wsproto.dumps(wsproto.make_error("消息解析失败")))
                 continue
             if mtype == "heartbeat":
-                ack = reg.handle_heartbeat(node_id, wsproto.parse_heartbeat_v2(data), now=time.time())
-                _sweep_if_due()
+                # 同步 SQLite 写必须卸载到线程：WS 消息循环跑在事件循环上，
+                # 逐条 commit 会头阻塞整个 loop（所有 HTTP/WS 请求一起卡）。
+                # 逐消息顺序 await → 单连接内仍保序。
+                ack = await asyncio.to_thread(
+                    reg.handle_heartbeat, node_id, wsproto.parse_heartbeat_v2(data),
+                    now=time.time(),
+                )
+                await asyncio.to_thread(_sweep_if_due)
                 await ws.send_text(wsproto.dumps(ack))
             elif mtype == "event":
                 payload = data.get("payload")
-                reg.store.append_event(str(data.get("kind", "")), node_id=node_id,
-                                       payload=payload if isinstance(payload, dict) else None)
+                await asyncio.to_thread(
+                    reg.store.append_event, str(data.get("kind", "")),
+                    node_id=node_id,
+                    payload=payload if isinstance(payload, dict) else None,
+                )
                 await ws.send_text(wsproto.dumps({"t": "ack"}))
             elif mtype == "result":
                 # 指令回执只落账不裁决：ok=False 时改不改状态由 worker 的 reconcile 决定，
                 # 中心重复动作会与"失败即终态 + 人工 retry"的立场冲突。
                 res = wsproto.parse_result(data)
-                reg.store.append_event("action.result", node_id=node_id,
-                                       payload={"seq": res["seq"], "ok": res["ok"],
-                                                "detail": res["detail"]}, now=time.time())
+                await asyncio.to_thread(
+                    reg.store.append_event, "action.result", node_id=node_id,
+                    payload={"seq": res["seq"], "ok": res["ok"],
+                             "detail": res["detail"]}, now=time.time(),
+                )
                 await ws.send_text(wsproto.dumps({"t": "ack"}))
             else:
                 await ws.send_text(wsproto.dumps(wsproto.make_error("未知消息类型")))

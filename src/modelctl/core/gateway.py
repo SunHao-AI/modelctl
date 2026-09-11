@@ -30,6 +30,8 @@ import os
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -132,6 +134,20 @@ def client_ip_of(request) -> str:
     return getattr(client, "host", "") or ""
 
 
+def _safe_int(value: object, *, default: int = 1, lo: int = 1, hi: int = 10_000_000) -> int:
+    """客户端可控字段的安全整数化：非数字/越界一律夹到 [lo, hi]，绝不抛。
+
+    网关 TPM 估算在鉴权之前跑，裸 int() 会让匿名请求用一个 `"abc"` 打出 500。
+    """
+    try:
+        if isinstance(value, bool):
+            raise ValueError("bool is not a token count")
+        n = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, n))
+
+
 def _accounts_tpm_estimate(body: dict | None) -> int:
     """Task 6 TPM 预占估算：tokens ≈ chars（英文启发式下上界抬到 chars 量级）。
 
@@ -152,7 +168,7 @@ def _accounts_tpm_estimate(body: dict | None) -> int:
     # estimate_prompt_tokens 定义在本文件更下方；Python 函数体延迟求值
     # （def 时只看名字，call 时才做名字查找），此处顺序无依赖问题。
     prompt = max(0, estimate_prompt_tokens(body))
-    completion = max(1, int(body.get("max_tokens") or 1))
+    completion = _safe_int(body.get("max_tokens"), default=1, lo=1)
     return prompt + completion
 
 
@@ -427,6 +443,7 @@ def _build_audit_entry(
     collector_diff_completion: int = 0,
     user_id: int | None = None,
     key_id: int | None = None,
+    upstream_request_id: str | None = None,
 ) -> dict:
     """统一 build 入口（纯函数，无副作用）；token 取值优先级见 spec §2 / §4.2。
 
@@ -438,6 +455,8 @@ def _build_audit_entry(
     client_ip：nginx 透传的真实来源 IP；
     user_id / key_id：启用了 accounts 时透传身份 id；未启用或 401 时保持
     None（旧 JSONL 无此字段，序列化时 None 视同缺省便于向后兼容）。
+    upstream_request_id：上游引擎的 X-Request-Id（vLLM 需 --enable-request-id-headers），
+    用于把 JSONL 审计与引擎进程日志 / accounts 会话记录对到同一次请求。
     """
     source = "vllm_native" if native_metrics else "gateway_estimate"
     if usage:
@@ -450,6 +469,14 @@ def _build_audit_entry(
         prompt = max(0, int(collector_diff_prompt))
         completion = max(0, int(collector_diff_completion))
         total = prompt + completion if (prompt or completion) else None
+    # prefix cache 命中量：vLLM 需 --enable-prompt-tokens-details 才在
+    # usage.prompt_tokens_details 回带 cached_tokens。缺省记 None 而非 0——0 表示
+    # "确实没命中"，None 表示"引擎未开该 flag"，两者混同会让人误判缓存零命中。
+    cached_tokens = None
+    if isinstance(usage, dict):
+        _det = usage.get("prompt_tokens_details")
+        if isinstance(_det, dict) and isinstance(_det.get("cached_tokens"), int):
+            cached_tokens = _det["cached_tokens"]
     return {
         "ts": _dt.datetime.now().astimezone().isoformat(timespec="milliseconds"),
         "model": profile_name or model_name,
@@ -461,6 +488,8 @@ def _build_audit_entry(
         "prompt_tokens": prompt,
         "completion_tokens": completion,
         "total_tokens": total,
+        "cached_tokens": cached_tokens,
+        "upstream_request_id": upstream_request_id,
         "input_char_len": input_char_len,
         "native_metrics": native_metrics,
         "gateway_metrics": gateway_metrics,
@@ -579,22 +608,27 @@ def build_groups(models_dir: Path | None = None, host: str = "127.0.0.1") -> dic
 def apply_context_switch(
     registry: dict[str, GatewayModel],
     rules: dict[str, list[ContextSwitchRule]],
-    body_model: str | None,
+    match_keys: "Sequence[str]",
     prompt_tokens: int,
 ) -> GatewayModel | None:
     """按上下文长度规则把请求切换到 high/balanced/light 变体（附录 B.3）。
 
-    规则按 base 模型名匹配请求中的 model 字段；选择第一个 min_prompt_tokens <=
-    估算输入 token 数的目标。目标不在注册表（未配置/未启动）时返回 None，调用方沿用原模型。
+    `match_keys`：按优先级依次尝试的规则键序列。必须包含**路由前**的语义键
+    （请求原始 model / group 名）——家族路由会把 target 换成成员名，
+    只用 `target.name` 匹配规则的话，规则 key（base 名）永远对不上。
+    目标不在注册表（未配置/未启动）时返回 None，调用方沿用原模型。
     """
-    if not rules or not body_model:
+    if not rules:
         return None
-    candidates = rules.get(body_model)
-    if not candidates:
-        return None
-    for rule in candidates:
-        if prompt_tokens >= rule.min_prompt_tokens:
-            return registry.get(rule.target)
+    for key in match_keys:
+        if not key:
+            continue
+        candidates = rules.get(key)
+        if not candidates:
+            continue
+        for rule in candidates:
+            if prompt_tokens >= rule.min_prompt_tokens:
+                return registry.get(rule.target)
     return None
 
 
@@ -608,11 +642,151 @@ def is_model_available(model: GatewayModel) -> bool:
 
 
 def _resolve_group(groups: dict[str, list[GatewayModel]], name: str) -> GatewayModel | None:
-    """家族解析：按引擎优先级顺序返回第一个可用（运行中或外部启动且健康）的成员；无则 None。"""
+    """家族解析：按引擎优先级顺序返回第一个可用（运行中或外部启动且健康）的成员；无则 None。
+
+    ⚠ 同步阻塞：每个成员一次 `is_running_any` → 回环 /health（端口 listen 但不响应
+    时吃满 1.5s，见 process.is_running_any）。数据面每请求路径必须经
+    `GroupRouteCache` 复用结果，勿直接调用本函数。
+    """
     for m in groups.get(name, []):
         if is_model_available(m):
             return m
     return None
+
+
+# /health 探测结果缓存 TTL（秒），两层各自独立；均可用同名 env 覆盖，0 关闭。
+# route 层影响**路由正确性**（选错成员=请求打错端口），必须小；
+# avail 层只是状态展示，陈旧几秒无感，但要**大于前端 3s 轮询间隔**才有命中。
+GROUP_ROUTE_CACHE_TTL_S = 2.0
+AVAIL_CACHE_TTL_S = 5.0
+
+
+class GroupRouteCache:
+    """同步 /health 探测结果的短 TTL 缓存（进程内、单事件循环使用，无需加锁）。
+
+    两层，**TTL 独立**、键空间互不相通（route 用 group 名、avail 用模型 name）：
+
+    - `route`（`route_ttl`）：家族解析结果（`_resolve_group` 的返回值）。数据面每请求走
+      这层，命中即零 HTTP，且保留"命中第一个可用成员就短路"的语义。
+    - `avail`（`avail_ttl`）：单成员可用性判定。所有"遍历 profile 探状态"的路径共用它——
+      网关 `/v1/models`、WebUI `/admin/api/overview`（3s 轮询）、`/admin/api/models`。
+      TTL 必须 > 前端轮询间隔，否则每次轮询都落在过期后，命中率恒 0。
+
+    为何必须有：`_resolve_group` / `is_model_available` / `is_running_any` 走同步 urllib
+    打回环 /health，跑在事件循环线程（或把线程池占满）——家族成员越多代价越高
+    （qwen3.8 组 11 个成员；管理面 51 个 profile），且有正反馈：引擎高负载 → /health 变慢
+    → 事件循环被拖住 / worker 池排干 → 全体请求更慢。
+
+    负缓存与正缓存同 TTL：`stop` 之后运维必然看到失败并重试/重启，几秒的陈旧窗口可接受，
+    换来的是"全家族宕机时不再每请求重复探测"——那正是探测最贵的时刻。
+    主动失效兜住可感知的滞后：上游转发失败（502）与 WebUI 启停端点都会立即失效相关条目。
+    """
+
+    def __init__(
+        self,
+        ttl: float = GROUP_ROUTE_CACHE_TTL_S,
+        *,
+        avail_ttl: float = AVAIL_CACHE_TTL_S,
+        clock=time.monotonic,
+    ) -> None:
+        self.ttl = ttl
+        self.avail_ttl = avail_ttl
+        self._clock = clock
+        self._entries: dict[str, tuple[GatewayModel | None, float]] = {}
+        self._avail: dict[str, tuple[bool, float]] = {}
+
+    def resolve(
+        self, groups: dict[str, list[GatewayModel]], name: str
+    ) -> GatewayModel | None:
+        if self.ttl <= 0:
+            return _resolve_group(groups, name)
+        now = self._clock()
+        hit = self._entries.get(name)
+        if hit is not None and hit[1] > now:
+            return hit[0]
+        target = _resolve_group(groups, name)
+        self._entries[name] = (target, now + self.ttl)
+        return target
+
+    def cached(self, name: str) -> bool | None:
+        """成员可用性的缓存值；None = 未命中或已过期（`avail_ttl<=0` 时恒 None）。"""
+        if self.avail_ttl <= 0:
+            return None
+        hit = self._avail.get(name)
+        if hit is None or hit[1] <= self._clock():
+            return None
+        return hit[0]
+
+    def record(self, name: str, ok: bool) -> None:
+        """回填成员可用性判定；`avail_ttl<=0`（缓存关闭）时为 no-op。"""
+        if self.avail_ttl <= 0:
+            return
+        self._avail[name] = (ok, self._clock() + self.avail_ttl)
+
+    def invalidate(self, name: str) -> None:
+        """丢弃某个家族的路由结果；键不存在时静默返回。"""
+        self._entries.pop(name, None)
+
+    def invalidate_model(self, name: str) -> None:
+        """丢弃某个成员的可用性判定。
+
+        两类场景必须调：
+        - 502：与 `invalidate` 成对。只清路由、留着 `available=True`，重解析会立刻把
+          同一个死端口再选一次，`/v1/models` 也会继续把死端口列为可用模型。
+        - WebUI 启停/重启端点：否则 5s 的 avail TTL 会让界面在用户点了按钮之后
+          仍显示旧状态，是可感知的产品回归。
+        """
+        self._avail.pop(name, None)
+
+
+def _env_ttl(key: str, default: float) -> float:
+    """读取 TTL 类环境变量；非法值告警回退默认（配置写错不该崩在启动期）。"""
+    try:
+        return float(os.environ.get(key, default))
+    except (TypeError, ValueError):
+        logger.warning(f"{key} 非法，回退默认 {default}s")
+        return default
+
+
+async def probe_availability(
+    cache: GroupRouteCache,
+    names: Sequence[str],
+    fetch: Callable[[str], bool],
+    *,
+    executor: ThreadPoolExecutor | None = None,
+) -> dict[str, bool]:
+    """按 `avail` 层批量探测可用性：TTL 内复用，只并发派发未命中项。
+
+    网关 `/v1/models` 与 WebUI `/admin/api/overview`、`/admin/api/models` 共用本函数
+    + 同一个 cache（webui 与 gateway 是**两个进程**，各自一份 cache；进程内三处共享）。
+
+    `fetch` 由调用方提供而非在此直接调 `is_model_available`：各调用点的探测口径与
+    **测试 patch 目标**不同——gateway 是模块级 `is_running_any` 绑定，webui 走
+    `admin_models` 函数体内的延迟导入（patch `modelctl.core.process` 属性）。在此写死
+    任一个绑定都会让另一处的测试桩静默失效（桩没被调到，探测真跑 → 恒 False）。
+
+    值一次快照读全：探测期间 clock 可能跨过 TTL，二次读取会把已过期条目读成 None，
+    同一请求内出现两套判定。
+    """
+    loop = asyncio.get_running_loop()
+    snapshot = {n: cache.cached(n) for n in names}
+    stale = [n for n in names if snapshot[n] is None]
+
+    def _fetch_one(name: str) -> tuple[str, bool]:
+        return name, fetch(name)
+
+    if executor is None:
+        results = await asyncio.gather(*(asyncio.to_thread(_fetch_one, n) for n in stale))
+    else:
+        results = await asyncio.gather(
+            *(loop.run_in_executor(executor, _fetch_one, n) for n in stale)
+        )
+
+    available = {n: bool(v) for n, v in snapshot.items() if v is not None}
+    for name, ok in results:
+        cache.record(name, ok)
+        available[name] = ok
+    return available
 
 
 def resolve_model(
@@ -620,19 +794,29 @@ def resolve_model(
     body_model: str | None,
     default_model: str | None,
     groups: dict[str, list[GatewayModel]] | None = None,
+    group_cache: GroupRouteCache | None = None,
 ) -> GatewayModel | None:
     """按 body.model 解析目标模型；支持家族（group）路由。
 
     顺序：body_model 命中 group（家族解析，无健康成员即 None 不回退）→
     body_model 精确匹配 name/alias → 回退 default_model（同样 group 优先）→ None。
     groups 为 None（未启用家族路由）时行为与旧版一致。
+    group_cache：家族解析的 TTL 缓存；None 时每次实探（CLI / 测试等单次调用口径）。
     """
+
+    def _group(name: str) -> GatewayModel | None:
+        return (
+            group_cache.resolve(groups, name)
+            if group_cache is not None
+            else _resolve_group(groups, name)
+        )
+
     if groups and body_model and body_model in groups:
-        return _resolve_group(groups, body_model)
+        return _group(body_model)
     if body_model and body_model in registry:
         return registry[body_model]
     if groups and default_model and default_model in groups:
-        return _resolve_group(groups, default_model)
+        return _group(default_model)
     if default_model and default_model in registry:
         return registry[default_model]
     return None
@@ -701,6 +885,14 @@ def create_app(
     default_model = default_model or os.environ.get("GATEWAY_DEFAULT_MODEL")
     context_rules = context_rules if context_rules is not None else load_context_switch_rules(_env_context_rules())
 
+    # /health 探测结果缓存：resolve_model 在两条数据面通道上每请求调用，/v1/models 每次
+    # 遍历全部 profile，都走同步 /health（阻塞事件循环）。两层 TTL 各自可配，=0 关闭；
+    # 非法值告警回退默认（配置写错不该崩在启动期）。
+    group_cache = GroupRouteCache(
+        _env_ttl("GATEWAY_GROUP_ROUTE_TTL", GROUP_ROUTE_CACHE_TTL_S),
+        avail_ttl=_env_ttl("GATEWAY_AVAIL_CACHE_TTL", AVAIL_CACHE_TTL_S),
+    )
+
     # 请求级审计日志：缺省从 AUDIT_DIR（默认 <项目根>/data/audit，见 core/paths.py）构造；
     # 启动幂等的后台清理线程，应用关闭时 destroy 回收（绝不阻塞请求路径）。lifespan 管理线程生命周期。
     audit_log = audit_log or _new_audit_log(audit_dir())
@@ -763,6 +955,8 @@ def create_app(
         lifespan=_lifespan,
     )
     app.state.audit_log = audit_log
+    # 家族路由 TTL 缓存挂点（测试与排障可直接读取 ttl / 条目数）
+    app.state.group_route_cache = group_cache
     # Task 6 accounts 挂点：accounts 启用时全部三件 instance 一并挂上；
     # 未启用时保持 None（gateway.accounts_gate 通过 app.state._accounts_enabled
     # 走 legacy verify_client 分支，绝不触碰空指）。
@@ -813,12 +1007,24 @@ def create_app(
                     seen.add(m.name)
                     models.append(m)
 
+            # 探测集 = 注册表去重模型 ∪ 全部家族成员（家族成员可能被同名去重挤掉）。
+            # 并集让家族名展示直接复用同一份判定，省掉旧实现里 _group_healthy 的第二轮探测。
+            candidates: dict[str, GatewayModel] = {}
+            for m in models:
+                candidates.setdefault(m.name, m)
+            for members in groups.values():
+                for m in members:
+                    candidates.setdefault(m.name, m)
+
             # 并发可用性探测：串行会让未运行模型各耗 timeout 秒，10 个模型累积到十几秒。
             # 过滤条件见 is_model_available：受管运行中，或无 PID 文件但端口健康（外部启动）。
-            def _available(m: GatewayModel) -> bool:
-                return is_model_available(m)
+            # TTL 内已判定过的直接复用，只派发未命中项——列表接口高频轮询时这是主要收益。
+            available = await probe_availability(
+                group_cache,
+                list(candidates),
+                lambda name: is_model_available(candidates[name]),
+            )
 
-            results = await asyncio.gather(*(asyncio.to_thread(_available, m) for m in models))
             data = [
                 {
                     "id": m.aliases[0] if m.aliases else m.name,
@@ -826,19 +1032,15 @@ def create_app(
                     "created": 0,
                     "owned_by": "modelctl",
                 }
-                for m, ok in zip(models, results, strict=False)
-                if ok
+                for m in models
+                if available[m.name]
             ]
             # 家族逻辑名：组内有健康成员时展示（id=group 名，与具体成员 id 去重）
             existing_ids = {item["id"] for item in data}
-
-            def _group_healthy(members: list[GatewayModel]) -> bool:
-                return any(is_model_available(m) for m in members)
-
             for group_name, members in groups.items():
                 if group_name in existing_ids:
                     continue
-                if await asyncio.to_thread(_group_healthy, members):
+                if any(available[m.name] for m in members):
                     data.append({"id": group_name, "object": "model", "created": 0, "owned_by": "modelctl"})
             return {"object": "list", "data": data}
         finally:
@@ -927,7 +1129,7 @@ def create_app(
             f"msg_blocks={[ [b.get('type') for b in (m.get('content') or []) if isinstance(b, dict)] if isinstance(m.get('content'), list) else type(m.get('content')).__name__ for m in (body.get('messages') or []) ]} "
             f"auth_xkey={'x-api-key' in request.headers} auth={label}"
         )
-        target = resolve_model(registry, body.get("model"), default_model, groups)
+        target = resolve_model(registry, body.get("model"), default_model, groups, group_cache)
         if target is None:
             err_msg = f"model not found: {body.get('model')}"
             # 404：release（不 settle）
@@ -936,6 +1138,18 @@ def create_app(
                     limit_guard_obj.release(identity.user_id)
                 except Exception as exc:
                     logger.warning(f"anthropic 404 路径 release 异常：{exc}")
+            # 审计：与 OpenAI 分支同口径，保留调用方原始模型名便于定位拼写错误。
+            if audit_log is not None:
+                audit_log.record(_build_audit_entry(
+                    model_name=str(body.get("model") or ""), profile_name="", profile_engine="",
+                    path="messages", stream=bool(body.get("stream")),
+                    native_metrics=None, usage=None, gateway_metrics=None,
+                    status_code=404, error=err_msg, finish_reason=None,
+                    input_char_len=body_char_len,
+                    auth=label, client_ip=client_ip_of(request),
+                    user_id=(identity.user_id if identity else None),
+                    key_id=(identity.key_id if identity else None),
+                ))
             return JSONResponse(
                 status_code=404,
                 content={"error": {"message": err_msg, "type": "invalid_request_error"}},
@@ -1234,8 +1448,29 @@ def create_app(
                     limit_guard_obj.release(identity.user_id)
                 except Exception as exc:
                     logger.warning(f"anthropic 502 路径 release 异常：{exc}")
+            # 上游不可达 → 作废该家族的缓存路由 + 该成员的可用性判定，下一请求重新探测；
+            # 只清路由会留下 available=True，让 /v1/models 继续把死端口列为可用模型。
+            group_cache.invalidate(target.group or target.name)
+            group_cache.invalidate_model(target.name)
             await client.aclose()
             err_msg = f"后端不可达：{error}"
+            # 审计：502 是最需要留痕的失败（引擎宕机/端口错），无此记录则前端
+            # 错误列表永远看不到后端不可用；error 只记异常文本，不含响应体。
+            try:
+                if target.audit_log is not None:
+                    target.audit_log.record(_build_audit_entry(
+                        model_name=target.name, profile_name=target.name,
+                        profile_engine=target.engine, path="messages",
+                        stream=bool(body.get("stream")) if body else False,
+                        native_metrics=None, usage=None, gateway_metrics=None,
+                        status_code=502, error=err_msg[:500], finish_reason=None,
+                        input_char_len=body_char_len,
+                        auth=label, client_ip=client_ip_of(request),
+                        user_id=(identity.user_id if identity else None),
+                        key_id=(identity.key_id if identity else None),
+                    ))
+            except Exception as exc:
+                logger.warning(f"审计写盘异常（502 路径不受影响）: {exc}")
             return JSONResponse(status_code=502, content={"error": {"message": err_msg, "type": "upstream_error"}})
 
     # /v1 与 /v1/{path:path} 共用同一处理器：redirect_slashes=False 后裸 /v1 不再
@@ -1329,10 +1564,23 @@ def create_app(
             f"resp_format={'response_format' in body} msgs={len(body.get('messages') or [])} "
             f"auth={label} stream_options={'stream_options' in body}"
         )
-        target = resolve_model(registry, body.get("model"), default_model, groups)
+        target = resolve_model(registry, body.get("model"), default_model, groups, group_cache)
         if target is None:
             _release_if_acquired()
             err_msg = f"model not found: {body.get('model')}"
+            # 审计：模型名写请求原始值（resolve 失败即无 profile 可参照），否则
+            # "调用方拼错模型名"这类高频错误在审计里完全无痕。
+            if audit_log is not None:
+                audit_log.record(_build_audit_entry(
+                    model_name=str(body.get("model") or ""), profile_name="", profile_engine="",
+                    path=path, stream=bool(body.get("stream")),
+                    native_metrics=None, usage=None, gateway_metrics=None,
+                    status_code=404, error=err_msg, finish_reason=None,
+                    input_char_len=len(json.dumps(body, ensure_ascii=False, separators=(",", ":"))),
+                    auth=label, client_ip=client_ip_of(request),
+                    user_id=(identity.user_id if identity else None),
+                    key_id=(identity.key_id if identity else None),
+                ))
             return JSONResponse(
                 status_code=404,
                 content={"error": {"message": err_msg, "type": "invalid_request_error"}},
@@ -1340,7 +1588,13 @@ def create_app(
         # 上下文切换（附录 B.3）：按估算输入长度路由到 high/balanced/light 变体
         if context_rules:
             prompt_tokens = estimate_prompt_tokens(body)
-            switched = apply_context_switch(registry, context_rules, target.name, prompt_tokens)
+            # 匹配键顺序：请求原始 model → group 名 → 解析后的成员名。
+            # 只传 target.name 会让"经 group 路由而来"的请求永远匹配不上规则。
+            switched = apply_context_switch(
+                registry, context_rules,
+                (str(body.get("model") or ""), target.group or "", target.name),
+                prompt_tokens,
+            )
             if switched is not None and switched.name != target.name:
                 logger.info(f"上下文切换：{target.name} -> {switched.name}（估算输入 {prompt_tokens} tokens）")
                 target = switched
@@ -1384,9 +1638,33 @@ def create_app(
                 upstream = await client.send(req, stream=True)  # stream=True：连接保持打开，逐块读 SSE
                 _t_first = time.monotonic()
                 ctype = upstream.headers.get("content-type")
+                _up_rid = (upstream.headers.get("x-request-id") or "").strip() or None
                 if upstream.status_code >= 400:
                     content = await upstream.aread()
                     await client.aclose()
+                    # 审计：上游 4xx/5xx 原样透传给客户端，但网关侧必须留痕，
+                    # 否则排障时只看到"客户端收到 400"却无任何上下文。
+                    try:
+                        if self_audit_log is not None:
+                            self_audit_log.record(_build_audit_entry(
+                                model_name=target.name, profile_name=target.name,
+                                profile_engine=target.engine, path=path, stream=True,
+                                native_metrics=None, usage=None, gateway_metrics=None,
+                                status_code=upstream.status_code,
+                                error=content.decode("utf-8", "replace")[:500],
+                                finish_reason=None, input_char_len=body_char_len,
+                                auth=label, client_ip=client_ip_of(request),
+                                user_id=(identity.user_id if identity else None),
+                                key_id=(identity.key_id if identity else None),
+                                upstream_request_id=_up_rid,
+                            ))
+                    except Exception as exc:
+                        logger.warning(f"审计写盘异常（上游错误响应不中断）: {exc}")
+                    # 早退分支直接 return Response（非 StreamingResponse），
+                    # SSE 生成器的 finally 永不执行 → 必须在此释放并发槽，
+                    # 否则 gate 已 acquire 的槽永久泄漏（对照 anthropic 代理同分支）。
+                    # 不 settle：非 2xx 保留干净 usage_records（与 404/502 早退一致）。
+                    _release_if_acquired()
                     return Response(status_code=upstream.status_code, content=content, media_type=ctype)
 
                 # 已累计到该 chunk 的 token（不含当前块，避免重复累计）
@@ -1505,6 +1783,7 @@ def create_app(
                                     key_id=(identity.key_id if identity else None),
                                     collector_diff_prompt=_diff_prompt,
                                     collector_diff_completion=_diff_completion,
+                                    upstream_request_id=_up_rid,
                                 ))
                         except Exception as exc:
                             logger.warning(f"审计写盘异常（SSE 不中断）: {exc}")
@@ -1557,6 +1836,7 @@ def create_app(
             _snap_before = target.collector.snapshot() if target.collector is not None and hasattr(target.collector, "snapshot") else None
             upstream = await client.post(url, json=body, headers=headers)
             _t1 = time.monotonic()
+            _up_rid = (upstream.headers.get("x-request-id") or "").strip() or None
             # 非流式：响应体完整读回，直接统计 usage（后端未回 usage 时静默跳过）
             _ns_data: dict | None
             try:
@@ -1623,7 +1903,12 @@ def create_app(
                         usage=_usage_a if isinstance(_usage_a, dict) else None,
                         gateway_metrics=_gm,
                         status_code=upstream.status_code,
-                        error=None,
+                        # 上游 4xx/5xx 的响应体留在 error 里；2xx 保持 None 以免污染
+                        # `auth_stats`/CLI 的错误统计（_entry_is_error 只看 status_code）。
+                        error=(
+                            upstream.content.decode("utf-8", "replace")[:500]
+                            if upstream.status_code >= 400 else None
+                        ),
                         finish_reason=_finish,
                         input_char_len=body_char_len,
                         auth=label, client_ip=client_ip_of(request),
@@ -1631,6 +1916,7 @@ def create_app(
                         key_id=(identity.key_id if identity else None),
                         collector_diff_prompt=_diff_prompt,
                         collector_diff_completion=_diff_completion,
+                        upstream_request_id=_up_rid,
                     ))
             except Exception as exc:
                 logger.warning(f"审计写盘异常（转发不受影响）: {exc}")
@@ -1687,8 +1973,28 @@ def create_app(
                     limit_guard_obj.release(identity.user_id)
                 except Exception as exc:
                     logger.warning(f"proxy 502 路径 release 异常：{exc}")
+            # 上游不可达 → 作废该家族的缓存路由 + 该成员的可用性判定，下一请求重新探测；
+            # 只清路由会留下 available=True，让 /v1/models 继续把死端口列为可用模型。
+            group_cache.invalidate(target.group or target.name)
+            group_cache.invalidate_model(target.name)
             await client.aclose()
             err_msg = f"后端不可达：{error}"
+            # 审计：同 anthropic 分支——引擎宕机必须留痕，否则错误列表看不到 502。
+            try:
+                if target.audit_log is not None:
+                    target.audit_log.record(_build_audit_entry(
+                        model_name=target.name, profile_name=target.name,
+                        profile_engine=target.engine, path=path,
+                        stream=bool(body.get("stream")) if body else False,
+                        native_metrics=None, usage=None, gateway_metrics=None,
+                        status_code=502, error=err_msg[:500], finish_reason=None,
+                        input_char_len=body_char_len,
+                        auth=label, client_ip=client_ip_of(request),
+                        user_id=(identity.user_id if identity else None),
+                        key_id=(identity.key_id if identity else None),
+                    ))
+            except Exception as exc:
+                logger.warning(f"审计写盘异常（502 路径不受影响）: {exc}")
             return JSONResponse(status_code=502, content={"error": {"message": err_msg, "type": "upstream_error"}})
 
     if admin:

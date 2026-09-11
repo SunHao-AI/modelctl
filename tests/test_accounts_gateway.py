@@ -475,6 +475,40 @@ def _upstream_sse_raw() -> httpx.Response:
                           content=buf)
 
 
+def test_stream_upstream_error_releases_concurrency_slot(tmp_path, monkeypatch):
+    """GW-P1-2：流式请求遇上游 ≥400 早退时必须释放并发槽。
+
+    早退分支直接 return Response（非 StreamingResponse），SSE 生成器的
+    finally 永不执行 → 槽永久泄漏，concurrency_limit=1 的用户第二次请求
+    起永久 429。
+    """
+    monkeypatch.delenv("GATEWAY_CLIENT_API_KEY", raising=False)
+    store = _mk_store(tmp_path)
+    audit = _noop_audit()
+    try:
+        uid, cred = _mk_user_key(store, username="alice", policy={"concurrency_limit": 1})
+        app = create_app(
+            _reg_one(), default_model="qwen3.8",
+            transport=httpx.MockTransport(lambda r: httpx.Response(400, text="bad request")),
+            audit_log=audit,
+            accounts_enabled=True,
+            accounts_store=store,
+        )
+        for i in range(3):
+            r = _post_headers(
+                app, "/v1/chat/completions",
+                json_body={"model": "qwen3.8", "stream": True,
+                           "messages": [{"role": "user", "content": "hi"}]},
+                headers={"Authorization": f"Bearer {cred}"},
+            )
+            assert r.status_code == 400, f"第 {i + 1} 次应透传上游 400"
+        with app.state.limit_guard._lock:
+            assert app.state.limit_guard._concurrency.get(uid) in (None, 0), \
+                f"并发槽泄漏：仍有 {app.state.limit_guard._concurrency.get(uid)} 个未释放"
+    finally:
+        store.close()
+
+
 # ---------------------------------------------------------------------------
 # 会话归属 + settle 落库
 # ---------------------------------------------------------------------------

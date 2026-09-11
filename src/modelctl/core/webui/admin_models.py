@@ -26,6 +26,7 @@ import os
 import re
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -74,19 +75,25 @@ def _mask_key(key: str | None) -> str | None:
     return f"***{key[-4:]}"
 
 
-def _model_summary(p) -> dict:
-    """构建 ModelSummary dict（列表端点用）。"""
-    running = False
-    try:
-        # 运行态判定改走 is_running_any：docker runtime 容器路径不写 PID 文件，
-        # 仅 is_running(name) 会把 docker 启动的 vllm/tokenspeed/tensorrt 模型误标"已停止"
-        # （端口 /health 2xx 无法被探测）。is_running_any 端口探测优先 + PID 文件机器兜底，
-        # 与 CLI list/status / all status 行为一致。
-        from modelctl.core.process import is_running_any
+def _model_summary(p, running: bool | None = None) -> dict:
+    """构建 ModelSummary dict（列表端点用）。
 
-        running = is_running_any(p.name, p)
-    except Exception:
+    `running`：调用方已判定的运行态（批量探测 + TTL 缓存路径传入）。传入时**不再**
+    自探一次——51 个 profile 的列表端点若逐个再 `is_running_any`，缓存就白接了。
+    传 None（CLI / 单条查询等单次调用口径）时保持原行为：自行探测。
+    """
+    if running is None:
         running = False
+        try:
+            # 运行态判定改走 is_running_any：docker runtime 容器路径不写 PID 文件，
+            # 仅 is_running(name) 会把 docker 启动的 vllm/tokenspeed/tensorrt 模型误标"已停止"
+            # （端口 /health 2xx 无法被探测）。is_running_any 端口探测优先 + PID 文件机器兜底，
+            # 与 CLI list/status / all status 行为一致。
+            from modelctl.core.process import is_running_any
+
+            running = is_running_any(p.name, p)
+        except Exception:
+            running = False
 
     # health 口径：
     #  - running 命中过（/health 2xx 或 PID 文件） → healthy；
@@ -179,17 +186,14 @@ async def _do_start(profile, caps, timeout: float, task, gpus: str | None) -> No
     loop = asyncio.get_running_loop()
     _on_stage = _stage_event_bridge(task, loop)
 
-    # gpus 逗号字符串 → 环境变量（让 adapter.selected_gpus() 可见）
-    prev_gpus = os.environ.get("MODELCTL_GPUS")
-    if gpus:
-        parsed = resolve_gpu_list(None, None, gpus)
-        if parsed:
-            os.environ["MODELCTL_GPUS"] = ",".join(str(g) for g in parsed)
+    # gpus 逗号字符串 → 显式参数透传（不再写 os.environ["MODELCTL_GPUS"]：
+    # 全局态在并发 to_thread 任务间互相覆盖，导致 GPU 分配错乱）
+    gpu_list = resolve_gpu_list(None, None, gpus) if gpus else None
 
     try:
         task.update_status("running")
         result = await asyncio.to_thread(
-            lambda: start_profile(profile, caps, timeout, on_progress=_on_stage)
+            lambda: start_profile(profile, caps, timeout, on_progress=_on_stage, gpus=gpu_list)
         )
         task.update_detail(result.detail)
         if result.status == "error":
@@ -207,13 +211,6 @@ async def _do_start(profile, caps, timeout: float, task, gpus: str | None) -> No
                 _fail_task(task, 1, str(exc), profile.engine)
         except ImportError:
             _fail_task(task, 1, str(exc), profile.engine)
-    finally:
-        # 恢复环境变量
-        if gpus:
-            if prev_gpus is None:
-                os.environ.pop("MODELCTL_GPUS", None)
-            else:
-                os.environ["MODELCTL_GPUS"] = prev_gpus
 
 
 async def _do_restart(profile, caps, timeout: float, task, gpus: str | None) -> None:
@@ -225,16 +222,13 @@ async def _do_restart(profile, caps, timeout: float, task, gpus: str | None) -> 
     loop = asyncio.get_running_loop()
     _on_stage = _stage_event_bridge(task, loop)
 
-    prev_gpus = os.environ.get("MODELCTL_GPUS")
-    if gpus:
-        parsed = resolve_gpu_list(None, None, gpus)
-        if parsed:
-            os.environ["MODELCTL_GPUS"] = ",".join(str(g) for g in parsed)
+    # 与 _do_start 同构：显式参数透传，不写全局 MODELCTL_GPUS（并发互污）
+    gpu_list = resolve_gpu_list(None, None, gpus) if gpus else None
 
     try:
         task.update_status("running")
         result = await asyncio.to_thread(
-            lambda: restart_profile(profile, caps, timeout, on_progress=_on_stage)
+            lambda: restart_profile(profile, caps, timeout, on_progress=_on_stage, gpus=gpu_list)
         )
         task.update_detail(result.detail)
         if result.status == "error":
@@ -252,12 +246,6 @@ async def _do_restart(profile, caps, timeout: float, task, gpus: str | None) -> 
                 _fail_task(task, 1, str(exc), profile.engine)
         except ImportError:
             _fail_task(task, 1, str(exc), profile.engine)
-    finally:
-        if gpus:
-            if prev_gpus is None:
-                os.environ.pop("MODELCTL_GPUS", None)
-            else:
-                os.environ["MODELCTL_GPUS"] = prev_gpus
 
 
 # ---------------------------------------------------------------------------
@@ -265,8 +253,51 @@ async def _do_restart(profile, caps, timeout: float, task, gpus: str | None) -> 
 # ---------------------------------------------------------------------------
 
 
+# 共享大池：N 个 profile 并发探测时若走 `asyncio.to_thread` 默认池，本机 cpu=8 →
+# min(32, 8+4)=12 worker，51 个端口探测排成 4 波 → 冷路径实测 10-18s。
+# 两个列表端点（/admin/api/models 与 /admin/api/overview）在 webui 同一进程内
+# 共用这个 64-worker 池：冷的那一轮 51 个探测真正全部并发（≈ max 单个探测），
+# 热的那一轮直接命中 TTL 缓存（≈0ms）。池是线程安全的、复用线程，单一实例即可。
+_PROBE_EXECUTOR: "ThreadPoolExecutor | None" = None
+
+
+def probe_executor() -> "ThreadPoolExecutor":
+    """返回 webui 进程内共享的探测线程池（懒初始化，64 worker）。"""
+    global _PROBE_EXECUTOR
+    if _PROBE_EXECUTOR is None:
+        _PROBE_EXECUTOR = ThreadPoolExecutor(max_workers=64, thread_name_prefix="webui-probe")
+    return _PROBE_EXECUTOR
+
+
+async def build_summaries(
+    request: Request, profiles: list, executor: ThreadPoolExecutor | None = None
+) -> list[dict]:
+    """批量构建 ModelSummary：运行态走**进程内共享**的 TTL 缓存探测。
+
+    `/admin/api/models` 与 `/admin/api/overview` 共用本函数 + 同一个
+    `app.state.group_route_cache`（webui 与 gateway 是两个进程，各自一份缓存；这里是
+    webui 进程内两处共享）。overview 3s 轮询填的缓存，列表请求直接命中，反之亦然。
+
+    `executor`：调用方应传 `probe_executor()` 共享大池（51 个 profile 真并发）；
+    None 退回 `asyncio.to_thread` 默认池——本机仅 12 worker，冷路径会排 4 波。
+
+    `is_running_any` 在**函数体内**导入：既有测试 patch
+    `modelctl.core.process.is_running_any`（模块属性），延迟导入才能在调用时取到桩；
+    模块级 `from ... import` 会绑死原始函数、让桩静默失效（探测真跑 → 恒 False）。
+    """
+    from modelctl.core.gateway import probe_availability
+    from modelctl.core.process import is_running_any
+
+    cache = request.app.state.group_route_cache
+    by_name = {p.name: p for p in profiles}
+    available = await probe_availability(
+        cache, list(by_name), lambda n: is_running_any(n, by_name[n]), executor=executor
+    )
+    return [_model_summary(p, available[p.name]) for p in profiles]
+
+
 @router.get("")
-async def list_models(_: None = Depends(require_auth)):
+async def list_models(request: Request, _: None = Depends(require_auth)):
     """GET /admin/api/models — 按家族分组列出所有模型。"""
     from modelctl.core.gateway import ENGINE_PRIORITY
     from modelctl.core.profile import list_profiles
@@ -284,17 +315,14 @@ async def list_models(_: None = Depends(require_auth)):
         members.sort(key=lambda m: ENGINE_PRIORITY.get(m.engine, 99))
 
     # 构建响应：模型状态判定（端口 /health 探测 + PID 文件）走 worker 线程，
-    # 全局 gather（**而非按下分批补测**）让所有 is_running_any 的端口探测同时跑：
-    # 51 个 profile × 2.3s = 串行 117s 直接超时；to_thread 默认 ThreadPoolExecutor
-    # 容量足够并行 N 个，全局 gather 后总耗时 ≈ max(N 个端口探测) ≈ 2.3-3s（含 1 次
-    # router 的 list_profiles + 1 次 docker inspect 短路优化）。
+    # 全局 gather 让所有 is_running_any 的端口探测同时跑：51 个 profile 串行
+    # 2.3s 直接超时。**必须显式走 probe_executor() 共享大池**——退回默认池
+    # （本机 12 worker）就变成 4 波排队，冷路径实测 10-18s（与 overview 同源问题）。
     # 注：list_exceptions=True 把单个 _model_summary 异常映射为 stopped + health None，
     # 避免一个模型异常拖垮整个列表。
     groups_sorted = list(sorted(groups.items(), key=lambda x: (x[0] == "(其它)", x[0])))
     flat_profiles = [m for _, members in groups_sorted for m in members]
-    summaries = await asyncio.gather(
-        *(asyncio.to_thread(_model_summary, m) for m in flat_profiles)
-    )
+    summaries = await build_summaries(request, flat_profiles, executor=probe_executor())
     # 重组成 groups 形态：按原 group 切分，保持 group 顺序
     out_groups = []
     cursor = 0
@@ -428,13 +456,17 @@ async def start_model(
         )
         task = tm.create_task(kind="model_start", action="start", target=name)
         task.update_status("queued")
-        asyncio.ensure_future(_do_start(profile, caps, eff_timeout, task, gpus))
+        # 锁所有权移交 worker：spawn 的 runner 结束后才 release（旧 finally 写法
+        # 在任务刚投递就解锁，同 target 可被并发重复投递）
+        tm.spawn(name, "start", lambda: _do_start(profile, caps, eff_timeout, task, gpus))
         return JSONResponse(
             status_code=202,
             content={"task_id": task.id, "stream_url": f"/admin/api/tasks/{task.id}/stream"},
         )
-    finally:
+    except Exception:
+        # 仅在投递前（探测/超时计算/建任务）失败时释放；spawn 后由 worker 释放
         await tm.release(name, "start")
+        raise
 
 
 def _build_profile_from_override(name: str, base_profile, yaml_text: str):
@@ -498,7 +530,7 @@ def _probe_caps():
 
 
 @router.post("/{name}/stop")
-async def stop_model(name: str, _: None = Depends(require_auth)):
+async def stop_model(name: str, request: Request, _: None = Depends(require_auth)):
     """POST /admin/api/models/{name}/stop — 同步停止模型。"""
     profile = await asyncio.to_thread(_find_profile, name)
     if profile is None:
@@ -512,6 +544,10 @@ async def stop_model(name: str, _: None = Depends(require_auth)):
 
     caps = await asyncio.to_thread(probe)
     result = await asyncio.to_thread(stop_profile, profile, caps, None)
+    # 运行态判定立即失效：stop 是同步的，缓存里的 True 会让界面在用户点了"停止"之后
+    # 仍显示 running 达 avail TTL（5s）——可感知的产品回归。
+    # start / restart 不需要同步失效：它们是 202 异步任务，引擎起来本身远超 TTL。
+    request.app.state.group_route_cache.invalidate_model(profile.name)
     return {"ok": result.status != "error", "detail": result.detail}
 
 
@@ -553,13 +589,15 @@ async def restart_model(
         )
         task = tm.create_task(kind="model_restart", action="restart", target=name)
         task.update_status("queued")
-        asyncio.ensure_future(_do_restart(profile, caps, eff_timeout, task, gpus))
+        # 锁所有权移交 worker：spawn 的 runner 结束后才 release
+        tm.spawn(name, "restart", lambda: _do_restart(profile, caps, eff_timeout, task, gpus))
         return JSONResponse(
             status_code=202,
             content={"task_id": task.id, "stream_url": f"/admin/api/tasks/{task.id}/stream"},
         )
-    finally:
+    except Exception:
         await tm.release(name, "restart")
+        raise
 
 
 @router.get("/{name}/startup")

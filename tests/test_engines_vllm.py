@@ -157,6 +157,20 @@ def test_vllm_metrics(tmp_path):
     assert a.metrics_mapping()["predicted_total"] == ["vllm:generation_tokens_total"]
 
 
+def test_vllm_metrics_mapping_saturation_keys(tmp_path):
+    """容量/调度类扩展键声明齐全，且旧版本指标名作为候选名兜底。"""
+    p = _write(tmp_path, "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: m\n")
+    m = get_adapter("vllm")(p, CAPS8).metrics_mapping()
+    assert m["waiting"] == ["vllm:num_requests_waiting"]
+    assert m["kv_cache_usage"][0] == "vllm:kv_cache_usage_perc"
+    assert "vllm:gpu_cache_usage_perc" in m["kv_cache_usage"]
+    assert m["preemptions_total"][0] == "vllm:num_preemptions_total"
+    assert "vllm:num_preemptions" in m["preemptions_total"]
+    assert "vllm:prefix_cache_hits_total" in m["prefix_cache_hits"][0]
+    assert m["e2e_ms"] == ["vllm:e2e_request_latency_seconds"]
+    assert m["queue_ms"] == ["vllm:request_queue_time_seconds"]
+
+
 def test_vllm_requirements_allow_download_only(tmp_path, monkeypatch):
     _stub_venv(tmp_path, monkeypatch, "vllm")
     p = _write(
@@ -908,6 +922,89 @@ def test_build_command_only_force_include_usage(tmp_path, monkeypatch):
     cmd, _ = a.build_command()
     assert "--enable-force-include-usage" in cmd
     assert "--enable-per-request-metrics" not in cmd
+
+
+# ---- 审计关联 + 运维安全类一等参数 ----
+
+
+def test_build_command_audit_flags_default_on(tmp_path, monkeypatch):
+    """yaml 未声明 → 两个审计关联 flag 默认追加（网关靠它们对齐 request_id / cached_tokens）。"""
+    monkeypatch.setenv("HF_HOME", "/raid5/sh/model/huggingface")
+    _stub_venv(tmp_path, monkeypatch, "vllm")
+    p = _write(tmp_path, "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: Qwen/Qwen3-32B\n")
+    a = get_adapter("vllm")(p, CAPS8)
+    cmd, _ = a.build_command()
+    assert "--enable-request-id-headers" in cmd
+    assert "--enable-prompt-tokens-details" in cmd
+
+
+def test_build_command_audit_flags_can_be_disabled(tmp_path, monkeypatch):
+    """显式 false → 两个 flag 均不追加（异常场景的回退开关）。"""
+    monkeypatch.setenv("HF_HOME", "/raid5/sh/model/huggingface")
+    _stub_venv(tmp_path, monkeypatch, "vllm")
+    p = _write(
+        tmp_path,
+        "name: q\nengine: vllm\nport: 8000\nvllm:\n"
+        "  model: Qwen/Qwen3-32B\n"
+        "  enable_request_id_headers: false\n"
+        "  enable_prompt_tokens_details: false\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    cmd, _ = a.build_command()
+    assert "--enable-request-id-headers" not in cmd
+    assert "--enable-prompt-tokens-details" not in cmd
+
+
+def test_build_command_ops_flags(tmp_path, monkeypatch):
+    """运维安全类参数：shutdown_timeout / 访问日志静音（list 与字符串两种写法）/ 文档页 / root_path。"""
+    monkeypatch.setenv("HF_HOME", "/raid5/sh/model/huggingface")
+    _stub_venv(tmp_path, monkeypatch, "vllm")
+    p = _write(
+        tmp_path,
+        "name: q\nengine: vllm\nport: 8000\nvllm:\n"
+        "  model: Qwen/Qwen3-32B\n"
+        "  shutdown_timeout: 30\n"
+        "  disable_access_log_for_endpoints: [/health, /metrics]\n"
+        "  disable_fastapi_docs: true\n"
+        '  root_path: /upstream/qwen38\n',
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    cmd, _ = a.build_command()
+    assert cmd[cmd.index("--shutdown-timeout") + 1] == "30"
+    assert cmd[cmd.index("--disable-access-log-for-endpoints") + 1] == "/health,/metrics"
+    assert "--disable-fastapi-docs" in cmd
+    assert cmd[cmd.index("--root-path") + 1] == "/upstream/qwen38"
+
+
+def test_build_command_ops_flags_absent_by_default(tmp_path, monkeypatch):
+    """关键守门：未配置运维参数 → 一个都不追加，命令与改造前一致。"""
+    monkeypatch.setenv("HF_HOME", "/raid5/sh/model/huggingface")
+    _stub_venv(tmp_path, monkeypatch, "vllm")
+    p = _write(tmp_path, "name: q\nengine: vllm\nport: 8000\nvllm:\n  model: Qwen/Qwen3-32B\n")
+    a = get_adapter("vllm")(p, CAPS8)
+    cmd, _ = a.build_command()
+    for flag in ("--shutdown-timeout", "--disable-access-log-for-endpoints", "--disable-fastapi-docs", "--root-path"):
+        assert flag not in cmd
+
+
+def test_build_command_ops_flags_docker_branch(tmp_path, monkeypatch, tmp_path_factory):
+    """docker 分支同样带上审计 flag 与运维参数（model_args 为两分支共享段）。"""
+    model = tmp_path_factory.mktemp("models") / "Qwen3.8"
+    model.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HF_HOME", "/raid5/sh/model/huggingface")
+    p = _write(
+        tmp_path,
+        f"name: q\nengine: vllm\nport: 8110\nvllm:\n"
+        f"  model: {model.as_posix()}\n"
+        "  docker_image: vllm/vllm-openai:qwen38-flash-next\n"
+        "  shutdown_timeout: 60\n",
+    )
+    a = get_adapter("vllm")(p, CAPS8)
+    cmd, _ = a.build_command()
+    assert cmd[0] == "docker"
+    assert "--enable-request-id-headers" in cmd
+    assert "--enable-prompt-tokens-details" in cmd
+    assert cmd[cmd.index("--shutdown-timeout") + 1] == "60"
 
 
 def test_requirement_version_guard(tmp_path, monkeypatch):

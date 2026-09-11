@@ -55,7 +55,7 @@ def _cache_volume_name(profile_name: str) -> str:
 
 
 class VllmAdapter(EngineAdapter):
-    def check_requirements(self) -> None:
+    def check_requirements(self, *, readonly: bool = False) -> None:
         cfg = self.profile.engine_config
         runtime, _image, dual_error = self._resolve_runtime()
         if dual_error:
@@ -67,8 +67,10 @@ class VllmAdapter(EngineAdapter):
             if missing:
                 raise RequirementError(f"docker_image 已配置但 Docker 环境未就绪：{'；'.join(missing)}——{docker_setup.MSG_GUIDE}")
             # 清冲突残留容器（幂等；失败仅 warning + 解码 stderr，不再静默吞）
-            from modelctl.core.process import clear_stale_docker_container
-            clear_stale_docker_container(self.profile.name, container_name)
+            # readonly（TUI 预检渲染）：浏览界面不得删容器
+            if not readonly:
+                from modelctl.core.process import clear_stale_docker_container
+                clear_stale_docker_container(self.profile.name, container_name)
             # model 必填
             if not cfg.get("model") and not cfg.get("download"):
                 raise RequirementError(f"{self.profile.name}：vllm.model 必填（或配置 download 段自动下载）")
@@ -114,7 +116,7 @@ class VllmAdapter(EngineAdapter):
         if per_request_on and not force_on:
             self.warnings.append(f"{self.profile.name}：enable_per_request_metrics=true 但 enable_force_include_usage=false，" "流式中间块缺 usage 会使 stats.record_tokens 仅末块入账；建议同时开启")
         self.run_compat_checks()  # 预检：软件规则 + 模型 id 特征
-        if gpus is not None:
+        if gpus is not None and not readonly:
             acquire_gpu_lock(self.profile.name, gpus)
 
     def _check_vram_advisory(self, cfg: dict, gpus: list[int] | None) -> None:
@@ -199,6 +201,35 @@ class VllmAdapter(EngineAdapter):
             model_args.append("--enable-per-request-metrics")
         if cfg.get("enable_force_include_usage"):
             model_args.append("--enable-force-include-usage")
+        # 审计关联（默认开）：网关 JSONL 审计靠这两个 flag 才能与上游对上号——
+        #   request-id-headers → 响应头 X-Request-Id，写进审计 upstream_request_id；
+        #   prompt-tokens-details → usage.prompt_tokens_details.cached_tokens，写进审计 cached_tokens
+        #   （prefix cache 命中量，判断"重复上下文是否真省了算力"的唯一依据）。
+        # 两者只增输出、不改推理行为，故默认 True；异常场景可显式置 false 关闭。
+        if cfg.get("enable_request_id_headers", True):
+            model_args.append("--enable-request-id-headers")
+        if cfg.get("enable_prompt_tokens_details", True):
+            model_args.append("--enable-prompt-tokens-details")
+        # 运维安全类（默认关/不设，按 profile 需要显式打开）
+        if cfg.get("shutdown_timeout") is not None:
+            # 0 = 立即中止，>0 = 等待在途请求结束。venv 分支走 SIGTERM，此值决定
+            # 正在生成的长回复是否会被强杀；docker 分支仍由 `docker rm -f` 兜底。
+            model_args += ["--shutdown-timeout", str(cfg["shutdown_timeout"])]
+        if cfg.get("disable_access_log_for_endpoints"):
+            # 逗号分隔路径列表，压制 /health、/metrics 这类高频轮询的访问日志噪音。
+            # 本项目健康检查每秒探一次，不设则该引擎日志几乎只剩健康检查行。
+            ep = cfg["disable_access_log_for_endpoints"]
+            ep = ",".join(str(x).strip() for x in ep) if isinstance(ep, (list, tuple)) else str(ep).strip()
+            if ep:
+                model_args += ["--disable-access-log-for-endpoints", ep]
+        if cfg.get("disable_fastapi_docs"):
+            # 关闭 /docs、/redoc、/openapi.json，减少对外暴露的接口面（引擎端口虽默认
+            # 只绑 loopback，但 bind_host: 0.0.0.0 的部署应一并关掉文档页）。
+            model_args.append("--disable-fastapi-docs")
+        if cfg.get("root_path"):
+            # 引擎经 nginx 按路径前缀转发时必须设置，否则 OpenAPI/文档里的回调地址、
+            # 以及部分 SDK 拼出的 URL 会丢掉前缀。
+            model_args += ["--root-path", str(cfg["root_path"])]
         # api_key / extra_args 恒定追加到末尾：extra_args 里的同名参数需能覆盖上面的默认值
         tail = self.api_key_args() + extra
 
@@ -292,6 +323,15 @@ class VllmAdapter(EngineAdapter):
         }
 
     def metrics_mapping(self) -> dict[str, list[str]]:
+        """vLLM /metrics 指标名 → stats 内部键的映射。
+
+        核心五键（prompt_total / predicted_total / prompt_rate / predicted_rate /
+        ttft_ms）由 stats 直接渲染；其余为**扩展键**，stats 按原键名透传到快照，
+        仅在 vLLM 暴露该指标时出现（老版本/未开 --enable-metrics 时为 0）。
+
+        候选名列表首个命中即生效，故老版本 vLLM 的旧指标名（gpu_cache_usage_perc、
+        num_preemptions）作为兜底放在后面。
+        """
         return {
             "prompt_total": ["vllm:prompt_tokens_total"],
             "predicted_total": ["vllm:generation_tokens_total"],
@@ -305,8 +345,27 @@ class VllmAdapter(EngineAdapter):
                 "vllm:generation_tokens_seconds",
                 "vllm:avg_generation_throughput_toks_per_sec",
             ],
-            # 首 Token 耗时：Histogram，无现成均值 gauge；stats.parse_metrics 以 sum/count 取均值
+            # 首 Token 耗时：Histogram，无现成均值 gauge；stats.parse_metrics 以
+            # sum/count 取均值并按 _ms 键约定换算成毫秒
             "ttft_ms": ["vllm:time_to_first_token_seconds"],
+            # ---- 调度与容量（Gauge）----
+            # 运行中 / 等待中的请求数：waiting 持续 >0 说明已过饱和，是排队深度的直接信号
+            "running": ["vllm:num_requests_running"],
+            "waiting": ["vllm:num_requests_waiting"],
+            # KV cache 占用：0–1 的分数（不是百分数），>0.9 即接近打满、随时可能抢占
+            "kv_cache_usage": ["vllm:kv_cache_usage_perc", "vllm:gpu_cache_usage_perc"],
+            # 抢占次数：Counter，显存不足导致请求被退回重算 prefill，非 0 即值得警觉
+            "preemptions_total": ["vllm:num_preemptions_total", "vllm:num_preemptions"],
+            # ---- Prefix cache（Counter；命中率 gauge 上游已弃用，由 hits/queries 派生）----
+            # 查询/命中的 token 数；--enable-prefix-caching 未开时两者恒为 0
+            "prefix_cache_queries": ["vllm:prefix_cache_queries_total", "vllm:prefix_cache_queries"],
+            "prefix_cache_hits": ["vllm:prefix_cache_hits_total", "vllm:prefix_cache_hits"],
+            # ---- 分段耗时（Histogram，均值 = sum/count，stats 换算为毫秒）----
+            # 端到端延迟含排队；queue_ms 单拎出来用于区分"慢在算"还是"慢在等"
+            "e2e_ms": ["vllm:e2e_request_latency_seconds"],
+            "queue_ms": ["vllm:request_queue_time_seconds"],
+            "prefill_ms": ["vllm:request_prefill_time_seconds"],
+            "decode_ms": ["vllm:request_decode_time_seconds"],
         }
 
     def upstream_model_name(self) -> str:

@@ -32,6 +32,12 @@ _MASK_KEEP_TAIL = 4
 #: set_node_status 允许的状态白名单，防止调用方 typo 污染台账状态机
 NODE_STATUSES = ("online", "stale", "offline", "disabled")
 
+# events 台账保留策略（纯 DML 裁剪，不改 schema）：中心节点事件只进不出会让
+# 单文件 SQLite 无界膨胀 + 备份变慢。保留 30 天；每 500 次 append 顺带清一次
+# （摊销成本，避免每次写都扫表）。
+EVENTS_RETENTION_DAYS = 30
+EVENTS_TRIM_EVERY = 500
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS nodes (
@@ -48,10 +54,11 @@ CREATE TABLE IF NOT EXISTS goals (
   created_by TEXT, created_at REAL, updated_at REAL
 );
 CREATE TABLE IF NOT EXISTS model_states (
-  node_id TEXT NOT NULL, profile TEXT NOT NULL, state TEXT NOT NULL, gpu TEXT, port INTEGER,
+  node_id TEXT NOT NULL, profile TEXT NOT NULL, engine TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL, gpu TEXT, port INTEGER,
   pid INTEGER, reason TEXT, endpoint_url TEXT, endpoint_ready INTEGER, engine_version TEXT,
   gpu_util INTEGER, metrics_p50_ms INTEGER, last_probe_ms INTEGER, error_class TEXT, updated_at REAL,
-  PRIMARY KEY (node_id, profile)
+  PRIMARY KEY (node_id, profile, engine)
 );
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, node_id TEXT, goal_id TEXT,
@@ -98,7 +105,7 @@ _GOAL_COLS = ("goal_id", "node_id", "profile", "engine", "profile_yaml", "profil
               "runtime_ref", "target_role", "traffic_weight", "stage", "stage_reason",
               "error_class", "created_by", "created_at", "updated_at")
 
-_MODEL_STATE_COLS = ("node_id", "profile", "state", "gpu", "port", "pid", "reason",
+_MODEL_STATE_COLS = ("node_id", "profile", "engine", "state", "gpu", "port", "pid", "reason",
                      "endpoint_url", "endpoint_ready", "engine_version", "gpu_util",
                      "metrics_p50_ms", "last_probe_ms", "error_class", "updated_at")
 
@@ -125,6 +132,8 @@ class ClusterStore:
         self._db_path = db_path
         self._lock = threading.Lock()
         self._conn: sqlite3.Connection | None = None
+        # append_event 计数（每 EVENTS_TRIM_EVERY 次触发一次 events 保留裁剪）
+        self._append_count = 0
 
     @property
     def db_path(self) -> Path:
@@ -154,14 +163,79 @@ class ClusterStore:
             self._db().commit()
 
     def _ensure_columns(self) -> None:
-        """幂等补列（M1 起 nodes 需要）。**只增不删**，绝不改/删既有列。
+        """幂等补列（M1 起 nodes 需要；M2 起 model_states.engine 需要）。
 
-        全新库为空操作；旧库（M0 早期版本）逐列 ALTER。调用方已持锁，不再取锁。
+        **只增不删**，绝不改/删既有列。全新库为空操作；旧库（M0 早期版本）逐列 ALTER。
+        调用方已持锁，不再取锁。
+
+        engine 列加入后，`model_states` 的联合主键从 `(node_id, profile)` 变为
+        `(node_id, profile, engine)`——旧库需 DROP PRIMARY KEY 重建 PK（详见
+        `_migrate_model_states_pk`，幂等）。同 stem 多引擎共存（vllm + aphrodite
+        同指 qwen2.5-1.5b）时，旧 PK 会让两行互相覆盖，goal 视图端口/显存漂移
+        （known-pitfalls backend/stem-ledger-collision.md）。
         """
         have = {r["name"] for r in self._db().execute("PRAGMA table_info(nodes)").fetchall()}
         for name, sql_type in _NODE_M1_COLUMNS:
             if name not in have:
                 self._db().execute(f"ALTER TABLE nodes ADD COLUMN {name} {sql_type}")
+        self._ensure_model_state_engine()
+        self._migrate_model_states_pk()
+
+    def _ensure_model_state_engine(self) -> None:
+        """model_states 补 engine 列（幂等，旧库 M1 之前没有该列）。"""
+        have = {r["name"] for r in self._db().execute("PRAGMA table_info(model_states)").fetchall()}
+        if "engine" not in have:
+            self._db().execute("ALTER TABLE model_states ADD COLUMN engine TEXT NOT NULL DEFAULT ''")
+
+    def _migrate_model_states_pk(self) -> None:
+        """model_states 主键 `(node_id, profile)` → `(node_id, profile, engine)`。
+
+        SQLite 的 ALTER TABLE 不支持 DROP/改 PK；标准做法是"建临时副本 → 拷数据
+        （去重同 stem 多行）→ 删旧表 → 重命名"。幂等：已经含 engine PK 的库直接返回。
+        """
+        cols = {r["pk"]: r for r in self._db().execute("PRAGMA table_info(model_states)").fetchall()}
+        pk_cols = tuple(cols[i]["name"] for i in range(1, len(cols) + 1) if i in cols and cols[i]["pk"])
+        if pk_cols == ("node_id", "profile", "engine"):
+            return
+        self._db().execute("PRAGMA foreign_keys=OFF;")
+        try:
+            self._db().execute(
+                """CREATE TABLE model_states_new (
+                     node_id TEXT NOT NULL, profile TEXT NOT NULL, engine TEXT NOT NULL DEFAULT '',
+                     state TEXT NOT NULL, gpu TEXT, port INTEGER,
+                     pid INTEGER, reason TEXT, endpoint_url TEXT, endpoint_ready INTEGER,
+                     engine_version TEXT, gpu_util INTEGER, metrics_p50_ms INTEGER,
+                     last_probe_ms INTEGER, error_class TEXT, updated_at REAL,
+                     PRIMARY KEY (node_id, profile, engine)
+                   )""")
+            # 同 stem 多行（旧 PK 下 engine 全为 ''）只保留最新 updated_at 一行
+            self._db().execute(
+                """INSERT INTO model_states_new(node_id, profile, engine, state, gpu, port,
+                                                pid, reason, endpoint_url, endpoint_ready,
+                                                engine_version, gpu_util, metrics_p50_ms,
+                                                last_probe_ms, error_class, updated_at)
+                   SELECT node_id, profile, COALESCE(engine, ''), state, gpu, port,
+                          pid, reason, endpoint_url, endpoint_ready,
+                          engine_version, gpu_util, metrics_p50_ms,
+                          last_probe_ms, error_class, updated_at
+                   FROM model_states
+                   WHERE (node_id, profile, updated_at) IN (
+                       SELECT node_id, profile, MAX(updated_at) FROM model_states GROUP BY node_id, profile
+                   )""")
+            # 补回同 (node_id, profile) 但不同 engine 的行（理论上旧库不存在，防御性）
+            self._db().execute(
+                """INSERT OR IGNORE INTO model_states_new
+                   (node_id, profile, engine, state, gpu, port, pid, reason,
+                    endpoint_url, endpoint_ready, engine_version, gpu_util,
+                    metrics_p50_ms, last_probe_ms, error_class, updated_at)
+                   SELECT node_id, profile, COALESCE(engine, ''), state, gpu, port,
+                          pid, reason, endpoint_url, endpoint_ready,
+                          engine_version, gpu_util, metrics_p50_ms,
+                          last_probe_ms, error_class, updated_at FROM model_states""")
+            self._db().execute("DROP TABLE model_states")
+            self._db().execute("ALTER TABLE model_states_new RENAME TO model_states")
+        finally:
+            self._db().execute("PRAGMA foreign_keys=ON;")
 
     # ---- meta ----
     def get_meta(self, key: str) -> str:
@@ -462,25 +536,36 @@ class ClusterStore:
     # ---- model_states（心跳全量覆盖式写入）----
     def upsert_model_state(self, *, node_id: str, profile: str, state: str,
                            gpu: list[int] | None, port: int | None, pid: int | None,
-                           reason: str = "", error_class: str = "", now: float) -> None:
+                           reason: str = "", error_class: str = "", now: float,
+                           engine: str = "") -> None:
         with self._lock:
             self._db().execute(
-                """INSERT INTO model_states(node_id,profile,state,gpu,port,pid,reason,error_class,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?)
-                   ON CONFLICT(node_id,profile) DO UPDATE SET
+                """INSERT INTO model_states(node_id,profile,engine,state,gpu,port,pid,reason,error_class,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(node_id,profile,engine) DO UPDATE SET
                      state=excluded.state, gpu=excluded.gpu, port=excluded.port, pid=excluded.pid,
                      reason=excluded.reason, error_class=excluded.error_class,
                      updated_at=excluded.updated_at""",
-                (node_id, profile, state, json.dumps(gpu) if gpu else None, port, pid,
-                 reason, error_class, now))
+                (node_id, profile, engine or "", state,
+                 json.dumps(gpu) if gpu else None, port, pid, reason, error_class, now))
             self._db().commit()
 
-    def list_model_states(self, *, node_id: str = "") -> list[dict]:
+    def list_model_states(self, *, node_id: str = "", profile: str = "",
+                          engine: str = "") -> list[dict]:
         sql, params = _MODEL_STATE_SELECT, []
+        where: list[str] = []
         if node_id:
-            sql += " WHERE node_id=?"
+            where.append("node_id=?")
             params.append(node_id)
-        sql += " ORDER BY node_id, profile"
+        if profile:
+            where.append("profile=?")
+            params.append(profile)
+        if engine:
+            where.append("engine=?")
+            params.append(engine)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY node_id, profile, engine"
         with self._lock:
             rows = self._db().execute(sql, params).fetchall()
         out = []
@@ -490,10 +575,19 @@ class ClusterStore:
             out.append(d)
         return out
 
-    def delete_model_state(self, node_id: str, profile: str) -> None:
+    def delete_model_state(self, node_id: str, profile: str, engine: str = "") -> None:
+        """删除该节点的 model_state 行。engine 传空时按 (node_id, profile) 全删
+        （兼容旧调用方；stem 下所有 engine 清空），传引擎名时只删指定 engine 一行。
+        """
         with self._lock:
-            self._db().execute("DELETE FROM model_states WHERE node_id=? AND profile=?",
-                               (node_id, profile))
+            if engine:
+                self._db().execute(
+                    "DELETE FROM model_states WHERE node_id=? AND profile=? AND engine=?",
+                    (node_id, profile, engine))
+            else:
+                self._db().execute(
+                    "DELETE FROM model_states WHERE node_id=? AND profile=?",
+                    (node_id, profile))
             self._db().commit()
 
     # ---- events ----
@@ -514,6 +608,23 @@ class ClusterStore:
                  json.dumps(payload, ensure_ascii=False) if payload else None),
             )
             self._db().commit()
+            # 周期性保留裁剪（同一锁内完成，不新开锁；不可调 self.trim_events——
+            # threading.Lock 非重入会自死锁）
+            self._append_count += 1
+            if self._append_count % EVENTS_TRIM_EVERY == 0:
+                self._db().execute(
+                    "DELETE FROM events WHERE ts < ?",
+                    (time.time() - EVENTS_RETENTION_DAYS * 86400,),
+                )
+                self._db().commit()
+
+    def trim_events(self, now: "float | None" = None) -> int:
+        """删除超过保留窗口的事件，返回删除条数。幂等 DML，不动表结构。"""
+        cutoff = (now if now is not None else time.time()) - EVENTS_RETENTION_DAYS * 86400
+        with self._lock:
+            cur = self._db().execute("DELETE FROM events WHERE ts < ?", (cutoff,))
+            self._db().commit()
+            return cur.rowcount
 
     def recent_events(self, limit: int = 100, node_id: str | None = None, *,
                       kind: str | None = None) -> list[dict]:
