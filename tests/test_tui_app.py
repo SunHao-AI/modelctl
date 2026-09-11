@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from rich.console import Console
 
 from modelctl.core.tui import TuiApp, TUIState
 from modelctl.core.tui.data import (
@@ -352,3 +353,82 @@ def test_dashboard_minimum_width_80():
         assert display_width(ln) == width, (
             f"未对齐: {ln!r} 当前 {display_width(ln)} 期望 {width}"
         )
+
+
+# ─────────────────────────────────────────────────────────
+# Task 3.2（TUI-P1-2）：非 smoke 主循环 + 按键派发
+# ─────────────────────────────────────────────────────────
+
+
+def _stub_app_loop(app, keys, monkeypatch):
+    """屏蔽真实渲染/数据/终端，read_key_block 依次吐 keys（耗尽回 Q 兜底防死循环）。"""
+    app._revalidate = lambda: None
+    app.realize_render_once = lambda: None
+    app.loop_begin = lambda: None
+    it = iter(keys)
+    monkeypatch.setattr(app.keyboard, "read_key_block",
+                        lambda timeout: next(it, Key.Q))
+    monkeypatch.setattr(app.keyboard, "restore_term", lambda: None)
+    return it
+
+
+def test_run_non_smoke_loops_until_q(tmp_path, monkeypatch):
+    """旧实现非 smoke 只渲染一帧就 return 0；keybar 承诺的按键全无实现。"""
+    console = Console(width=120, height=40)
+    app = TuiApp(TUIState(), console, theme_file=tmp_path / "tui.theme")
+    it = _stub_app_loop(app, [Key.Tab, Key.Esc, Key.Q], monkeypatch)
+    assert app.run(smoke=False) == 0
+    # Tab → plan；Esc → 回 dashboard；Q → 退出（3 键恰好吃满，无兜底消费）
+    assert app.state.active_view == "dashboard"
+    assert next(it, None) is None
+
+
+def test_dashboard_esc_exits_loop(tmp_path, monkeypatch):
+    """dashboard 上 Esc 与 q 同义（无更上一层）→ 退出且返回 0。"""
+    console = Console(width=120, height=40)
+    app = TuiApp(TUIState(), console, theme_file=tmp_path / "tui.theme")
+    _stub_app_loop(app, [Key.Esc], monkeypatch)
+    assert app.run(smoke=False) == 0
+    assert app.state.active_view == "dashboard"
+
+
+def test_dashboard_arrows_move_selection(tmp_path, monkeypatch):
+    console = Console(width=120, height=40)
+    app = TuiApp(TUIState(), console, theme_file=tmp_path / "tui.theme")
+    _stub_app_loop(app, [Key.Down, Key.Down, Key.Up, Key.Q], monkeypatch)
+    app.run(smoke=False)
+    assert app.state.active_index == 1  # Down Down Up → 1（下限 clamp 到 0）
+
+
+def test_dashboard_arrows_clamp_at_zero(tmp_path, monkeypatch):
+    console = Console(width=120, height=40)
+    app = TuiApp(TUIState(), console, theme_file=tmp_path / "tui.theme")
+    _stub_app_loop(app, [Key.Up, Key.K, Key.Q], monkeypatch)
+    app.run(smoke=False)
+    assert app.state.active_index == 0  # Up / k 不允许为负
+
+
+def test_enter_opens_detail_and_tab_cycles_subtab(tmp_path, monkeypatch):
+    """Enter → detail；detail 内 Tab 切子 Tab（yaml→agent）、Shift-Tab 回退。"""
+    console = Console(width=120, height=40)
+    app = TuiApp(TUIState(), console, theme_file=tmp_path / "tui.theme")
+    _stub_app_loop(app, [Key.Enter, Key.Tab, Key.Tab, Key.ShiftTab, Key.Q],
+                   monkeypatch)
+    app.run(smoke=False)
+    assert app.state.active_view == "detail"  # Esc 未按下，留在 detail
+    assert app.state.active_detail_subtab == "agent"  # yaml→agent→log→agent
+
+
+def test_theme_key_q_semantics_in_loop(tmp_path, monkeypatch):
+    """T 键循环主题并在退出时持久化；其余视图 Tab 走各自 section 切换。"""
+    console = Console(width=120, height=40)
+    app = TuiApp(TUIState(), console, theme_file=tmp_path / "tui.theme")
+    _stub_app_loop(app, [Key.T, Key.Tab, Key.Q], monkeypatch)
+    app.run(smoke=False)
+    assert app._theme == "light"  # T 生效
+    import json
+
+    assert json.loads((tmp_path / "tui.theme").read_text(encoding="utf-8"))["theme"] == "light"
+    # dashboard 上首个 Tab 是视图切换（plan），不是 section
+    assert app.state.active_view == "plan"
+    assert app.state.active_cluster_tab == 0

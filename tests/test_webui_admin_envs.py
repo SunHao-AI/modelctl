@@ -407,3 +407,50 @@ def test_install_endpoint_rate_limit_when_self_at_max(admin_client, monkeypatch)
     assert r.status_code == 429
     err = r.json().get("error") or {}
     assert err.get("code") == "rate_limited"
+
+
+# ---- WEB-P1-2：非法 body 不得泄漏 pending 名额（否则累计后永久 429） ----
+
+
+def test_invalid_max_concurrent_downloads_does_not_leak_pending(admin_client, monkeypatch):
+    """非法 body 返回 400 前不得占用 pending 名额；否则 3 次后该用户永久 429。"""
+    import modelctl.core.webui.admin_envs as ae
+
+    _clear_docker_installs(monkeypatch)
+    monkeypatch.setattr(ae.sys, "platform", "win32", raising=True)
+
+    body = {"os": "windows", "max_concurrent_downloads": 999}  # 越界（合法 0-8）
+    for i in range(4):
+        r = _post(admin_client, "/admin/api/envs/docker/install", body)
+        assert r.status_code == 400, f"第 {i + 1} 次应恒 400，实得 {r.status_code}：{r.text[:200]}"
+    assert not ae._user_pending.get(KEY), "非法请求不得写入 _user_pending"
+
+
+def test_bool_max_downloads_rejected(admin_client, monkeypatch):
+    """True/False 是 int 子类，必须显式拒绝，不能当 1/0 通过。"""
+    import modelctl.core.webui.admin_envs as ae
+
+    _clear_docker_installs(monkeypatch)
+    monkeypatch.setattr(ae.sys, "platform", "win32", raising=True)
+
+    r = _post(admin_client, "/admin/api/envs/docker/install",
+              {"os": "windows", "max_concurrent_downloads": True})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "bad_body"
+
+
+def test_valid_request_still_accepted_after_bad_ones(admin_client, monkeypatch):
+    """非法请求不得污染后续合法请求。"""
+    import modelctl.core.webui.admin_envs as ae
+
+    _clear_docker_installs(monkeypatch)
+    monkeypatch.setattr(ae.sys, "platform", "win32", raising=True)
+
+    bad = _post(admin_client, "/admin/api/envs/docker/install",
+                {"os": "windows", "max_concurrent_downloads": 99})
+    assert bad.status_code == 400
+    with mock.patch("modelctl.core.windows_setup.run_install") as mi:
+        mi.return_value = 0
+        ok = _post(admin_client, "/admin/api/envs/docker/install",
+                   {"os": "windows", "max_concurrent_downloads": 2})
+    assert ok.status_code == 202, ok.text[:200]

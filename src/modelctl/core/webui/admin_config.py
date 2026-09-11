@@ -27,8 +27,19 @@ from loguru import logger
 
 from modelctl.core.webui.admin_auth import require_auth
 
-# .env 中需要脱敏的键（值只展示 *** + 末 4 位）
+# .env 中需要脱敏的键（值只展示 *** + 末 4 位）。
+# 显式名单 + 语义模式双保险：只列名单必然漏新增键（ACCOUNTS_JWT_SECRET /
+# GATEWAY_CLIENT_API_KEY 等曾明文回显），任何含密钥语义的键一律按模式兜底。
 _SENSITIVE_KEYS = {"API_KEY", "UNSLOTH_API_KEY"}
+_SENSITIVE_PATTERNS = ("KEY", "SECRET", "TOKEN", "PASSWORD", "PASSWD")
+
+
+def _is_sensitive_key(key: str) -> bool:
+    """键是否敏感：命中显式名单，或含 KEY/SECRET/TOKEN/PASSWORD/PASSWD（大小写不敏感）。"""
+    if key in _SENSITIVE_KEYS:
+        return True
+    upper = key.upper()
+    return any(p in upper for p in _SENSITIVE_PATTERNS)
 
 router = APIRouter()
 
@@ -94,7 +105,9 @@ async def nginx_snippet(
         return build_llm_map(list_profiles(None), node, host, port)
 
     content = await asyncio.to_thread(_work)
-    return {"content": content}
+    # 契约键 = `snippet`（web/src/api/types.ts NginxSnippetResponse）：
+    # 曾返回 {"content": ...} 与前端 `.snippet` 不一致，生成器永远空白。
+    return {"ok": True, "snippet": content}
 
 
 @router.get("/config/static")
@@ -109,9 +122,8 @@ async def read_env(_base: None = Depends(require_auth)):
 
     keys = []
     for k, v in data.items():
-        keys.append(
-            {"key": k, "value": _mask_value(v) if k in _SENSITIVE_KEYS else v, "sensitive": k in _SENSITIVE_KEYS}
-        )
+        sensitive = _is_sensitive_key(k)
+        keys.append({"key": k, "value": _mask_value(v) if sensitive else v, "sensitive": sensitive})
     return {
         "path": str(env_path),
         "exists": env_path.is_file(),
@@ -162,13 +174,15 @@ async def build_trtllm(
     try:
         task = tm.create_task(kind="trtllm_build", action="build", target=name)
         task.update_status("queued")
-        asyncio.ensure_future(_do_trtllm_build(name, task))
+        # 锁所有权移交 worker：spawn 的 runner 结束后才 release
+        tm.spawn(name, "build", lambda: _do_trtllm_build(name, task))
         return JSONResponse(
             status_code=202,
             content={"task_id": task.id, "stream_url": f"/admin/api/tasks/{task.id}/stream"},
         )
-    finally:
+    except Exception:
         await tm.release(name, "build")
+        raise
 
 
 @router.get("/trtllm/{name}/status")

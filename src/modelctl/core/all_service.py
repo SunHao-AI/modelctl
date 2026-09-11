@@ -131,7 +131,8 @@ def docker_logs_fallback(adapter: Any, excerpt: str) -> str | None:
 
 
 def start_profile(profile: Profile, caps: Capabilities, timeout: float,
-                  on_progress: "Callable[[Any], None] | None" = None) -> ComponentResult:
+                  on_progress: "Callable[[Any], None] | None" = None,
+                  gpus: "list[int] | None" = None) -> ComponentResult:
     """启动单个模型 profile（幂等：已运行返回 skipped）。
 
     check_requirements 失败时抛 RequirementError（配置错误语义，交给调用方/编排处理）。
@@ -139,6 +140,7 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float,
 
     on_progress：可选 `StageEvent` 回调（core.startup_progress.StageEvent）。WebUI 绑
     task SSE、CLI 打日志；缺省 None 时除多写一份快照文件外行为与旧实现一致。
+    gpus：本次操作的显式 GPU 选择（WebUI 并发任务）；None 走 profile/env 解析。
     """
     from modelctl.core.startup_progress import LoadingWatcher, StartupTracker
 
@@ -150,6 +152,7 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float,
     # adapter/tracker 先于端口预检创建（adapter 构造无副作用）：预检失败也要有
     # preflight running→failed 事件与快照，否则前端进度卡片看不到失败原因。
     adapter = get_adapter(profile.engine)(profile, caps)
+    adapter.set_gpu_override(gpus)
     is_docker = adapter.is_docker_runtime()
     tracker = StartupTracker(profile.name, profile.engine, "docker" if is_docker else "venv",
                              on_progress=on_progress)
@@ -205,13 +208,17 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float,
             tee_cmd = adapter.log_tee_cmd()
             if tee_cmd:
                 spawn_log_tee(profile.name, tee_cmd)
-        try:
-            from modelctl.core.gpu_lock import update_gpu_lock_owner
+        # GPU 锁 owner 只跟"长驻 PID"（venv runtime 写 PID 文件的那个进程）；
+        # docker runtime 的 pid 是秒退的 `docker run` 客户端——重绑到它之后，
+        # is_pid_alive 判 stale 会把锁文件删掉，GPU 互斥静默失效。
+        if not is_docker:
+            try:
+                from modelctl.core.gpu_lock import update_gpu_lock_owner
 
-            if adapter.selected_gpus():
-                update_gpu_lock_owner(profile.name, pid)
-        except Exception:
-            pass
+                if adapter.selected_gpus():
+                    update_gpu_lock_owner(profile.name, pid)
+            except Exception:
+                pass
         tracker.done("launch")
     except Exception as exc:  # noqa: BLE001 —— 拉起段任何异常都要落 fail 事件，快照不能永停 running
         kill_log_tee(profile.name)  # tee 若已挂上则回收
@@ -293,15 +300,17 @@ def stop_profile(profile: Profile, caps: Capabilities, models_dir: Path | None) 
 
 
 def restart_profile(profile: Profile, caps: Capabilities, timeout: float,
-                    on_progress: "Callable[[Any], None] | None" = None) -> ComponentResult:
+                    on_progress: "Callable[[Any], None] | None" = None,
+                    gpus: "list[int] | None" = None) -> ComponentResult:
     """重启单个模型 profile：运行中先停后启，未运行直接启。
 
     运行态判定改走 `is_running_any(name, profile)`（端口 /health 2xx 优先 + PID 文件机器
     兜底），docker 路径下 PID 文件不存在时仍能据端口探测判定为运行中。
+    gpus：本次操作的显式 GPU 选择（WebUI 并发任务）；None 走 profile/env 解析。
     """
     if is_running_any(profile.name, profile):
         stop_profile(profile, caps, None)
-    return start_profile(profile, caps, timeout, on_progress=on_progress)
+    return start_profile(profile, caps, timeout, on_progress=on_progress, gpus=gpus)
 
 
 def _detached_script(module: str, interpreter: str | None = None) -> tuple[list[str], dict[str, str]]:
@@ -536,10 +545,12 @@ def status_stats() -> ComponentResult:
 
 
 def start_all(models_dir: Path | None, model_name: str | None = None,
-              timeout: float | None = 300) -> list[ComponentResult]:
+              timeout: float | None = 300,
+              gpus: "list[int] | None" = None) -> list[ComponentResult]:
     """一键启动：默认模型 → gateway → stats；单组件失败继续后续。
 
     timeout=None（CLI 未显式指定 --timeout）→ 按 profile 运行时自适应（见 default_start_timeout）。
+    gpus：透传给 start_profile 的显式 GPU 选择（WebUI 并发任务，不再写全局 env）。
     """
     caps = probe()
     results: list[ComponentResult] = []
@@ -558,7 +569,7 @@ def start_all(models_dir: Path | None, model_name: str | None = None,
         if timeout is None:
             timeout = default_start_timeout(profile, caps)
         try:
-            results.append(start_profile(profile, caps, timeout))
+            results.append(start_profile(profile, caps, timeout, gpus=gpus))
         except RequirementError as error:  # check_requirements 失败（配置错误）
             results.append(ComponentResult(f"model:{profile.name}", "error", str(error)))
     results.append(start_gateway())
@@ -578,10 +589,12 @@ def stop_all(models_dir: Path | None) -> list[ComponentResult]:
 
 
 def restart_all(models_dir: Path | None, model_name: str | None = None,
-                timeout: float | None = 300) -> list[ComponentResult]:
+                timeout: float | None = 300,
+                gpus: "list[int] | None" = None) -> list[ComponentResult]:
     """一键重启：仅默认模型 + gateway + stats。
 
     timeout=None（CLI 未显式指定 --timeout）→ 按 profile 运行时自适应（见 default_start_timeout）。
+    gpus：透传给 restart_profile 的显式 GPU 选择（WebUI 并发任务，不再写全局 env）。
     """
     caps = probe()
     results: list[ComponentResult] = []
@@ -600,7 +613,7 @@ def restart_all(models_dir: Path | None, model_name: str | None = None,
         if timeout is None:
             timeout = default_start_timeout(profile, caps)
         try:
-            results.append(restart_profile(profile, caps, timeout))
+            results.append(restart_profile(profile, caps, timeout, gpus=gpus))
         except RequirementError as error:
             results.append(ComponentResult(f"model:{profile.name}", "error", str(error)))
     results.append(restart_gateway())

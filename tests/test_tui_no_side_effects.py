@@ -253,3 +253,106 @@ def test_no_side_effects_all_views_render():
     assert guard.open_w == [], f"open(..., 'w') 被调用：{guard.open_w!r}"
     assert guard.kill == [], f"os.kill 被调用：{guard.kill!r}"
     assert guard.nvml == [], f"nvml proxy 被调用：{guard.nvml!r}"
+
+
+# ---------------------------------------------------------------------------
+# TUI-P1-1：precheck Tab 的 check_requirements 必须只读
+# ---------------------------------------------------------------------------
+
+def _stub_side_effect_channels(monkeypatch) -> list[str]:
+    """把两类写副作用通道换成记录调用的 stub，返回记录列表。
+
+    记录顺序即执行顺序：`clear` = 删陈旧容器，`lock` = 抢 GPU 锁。
+
+    **patch 目标必须是 `modelctl.engines.vllm` 里的名字**：vllm.py 顶部是
+    `from modelctl.core.gpu_lock import acquire_gpu_lock`（模块级绑定），patch
+    `modelctl.core.gpu_lock.acquire_gpu_lock` 对已绑定的名字完全无效——那样对照组
+    永远缺 `lock`，而只读组会因为"根本没观察到副作用"假绿。
+    `clear_stale_docker_container` 在函数内延迟 import，patch process 模块才有效。
+    """
+    called: list[str] = []
+    monkeypatch.setattr(
+        "modelctl.core.process.clear_stale_docker_container",
+        lambda *a, **k: called.append("clear") or True,
+    )
+    monkeypatch.setattr(
+        "modelctl.engines.vllm.acquire_gpu_lock",
+        lambda *a, **k: called.append("lock"),
+    )
+    # docker PATH 检查放行，确保真走到 clear 分支（本机可能没装 docker）
+    monkeypatch.setattr("modelctl.core.docker_setup.path_level_missing", lambda: [])
+    return called
+
+
+def _vllm_docker_profile():
+    """docker 运行时 + 显式 gpu_list 的 vllm profile：两类副作用分支都会命中。
+
+    `gpu_list` 必填——否则 `selected_gpus()` 返回 None，抢锁分支根本不执行，
+    对照组就失去灵敏度。
+    """
+    from modelctl.core.profile import Profile
+
+    return Profile(
+        name="qwen2.5-0.5b", engine="vllm", port=8500,
+        engine_config={"docker_image": "vllm/vllm-openai:test", "model": "/models/q",
+                       "gpu_list": "0"},
+    )
+
+
+def test_precheck_writes_side_effects_when_not_readonly(monkeypatch):
+    """对照组：真实启动口径（readonly=False）**必须**清容器 + 抢锁。
+
+    本用例证明护栏真的能观察到这两类副作用——否则 readonly=True 那条断言
+    只是因为压根走不到副作用分支而假绿。
+    """
+    from modelctl.core.capabilities import Capabilities
+    from modelctl.engines import get_adapter
+
+    called = _stub_side_effect_channels(monkeypatch)
+    caps = Capabilities(gpu_count=8, gpu_indices=list(range(8)),
+                        compute_capability="9.0", binaries={"vllm": True})
+    adapter = get_adapter("vllm")(_vllm_docker_profile(), caps)
+    adapter.check_requirements()
+    assert called == ["clear", "lock"], f"非只读预检副作用缺失：{called}"
+
+
+def test_detail_precheck_is_readonly(monkeypatch):
+    """Detail 的 precheck Tab 渲染曾真调 check_requirements → 删容器 + 写 GPU 锁。"""
+    from modelctl.core.capabilities import Capabilities
+    from modelctl.core.tui.data import ModelsSnapshot
+    from modelctl.core.tui.panels.detail import render as render_detail
+
+    called = _stub_side_effect_channels(monkeypatch)
+    monkeypatch.setattr(
+        "modelctl.core.profile.list_profiles", lambda *a, **k: [_vllm_docker_profile()])
+
+    snaps = _snapshots_fresh()
+    st = TUIState()
+    st.active_detail_subtab = "precheck"
+    caps = Capabilities(gpu_count=8, gpu_indices=list(range(8)),
+                        compute_capability="9.0", binaries={"vllm": True})
+    models = ModelsSnapshot(profiles=[
+        {"name": "qwen2.5-0.5b", "engine": "vllm", "port": 8500, "status": "stopped"}])
+    render_detail(st, snaps["hw"], models, snaps["logs"],
+                  width=120, height=40, theme_id="dark", caps=caps)
+    assert called == [], f"precheck 渲染仍有副作用：{called}"
+
+
+def test_plan_precheck_is_readonly(monkeypatch):
+    """Plan 视图常驻预检 Panel 同样不得有写副作用。"""
+    from modelctl.core.capabilities import Capabilities
+    from modelctl.core.tui.data import ModelsSnapshot
+    from modelctl.core.tui.panels.plan import render as render_plan
+
+    called = _stub_side_effect_channels(monkeypatch)
+    monkeypatch.setattr(
+        "modelctl.core.profile.list_profiles", lambda *a, **k: [_vllm_docker_profile()])
+
+    snaps = _snapshots_fresh()
+    st = TUIState()
+    caps = Capabilities(gpu_count=8, gpu_indices=list(range(8)),
+                        compute_capability="9.0", binaries={"vllm": True})
+    models = ModelsSnapshot(profiles=[
+        {"name": "qwen2.5-0.5b", "engine": "vllm", "port": 8500, "status": "stopped"}])
+    render_plan(st, snaps["hw"], models, width=120, height=40, theme_id="dark", caps=caps)
+    assert called == [], f"plan 预检渲染仍有副作用：{called}"

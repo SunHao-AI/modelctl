@@ -213,7 +213,8 @@ def _render_precheck(profile, width: int, theme: dict, caps: object | None = Non
         )
     try:
         adapter = adapter_cls(profile, caps)
-        adapter.check_requirements()
+        # 渲染路径只读：严禁清容器 / 抢 GPU 锁等写副作用（TUI-P1-1）
+        adapter.check_requirements(readonly=True)
     except Exception as e:  # noqa: BLE001
         # RequirementError（软性条件不满足）→ 红；其他（硬性崩溃 / ImportError 等）→ 黄
         if isinstance(e, RequirementError):

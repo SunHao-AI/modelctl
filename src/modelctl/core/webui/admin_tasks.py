@@ -101,12 +101,19 @@ class Task:
         payload = f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
         for q in list(self._subscribers):
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.call_soon_threadsafe(q.put_nowait, payload)
-                else:
+                # 只认"正在运行的循环"：无运行循环（同步调用线程 / 测试里未起 loop）
+                # 时退化为同步 put_nowait。不能用已废弃的 get_event_loop()——当
+                # current loop 被前序 asyncio.run() 置 None 时它会抛 RuntimeError，
+                # 被下面的 except 吞掉，事件静默丢失（顺序相关的偶发失败）。
+                loop = asyncio.get_running_loop()
+                loop.call_soon_threadsafe(q.put_nowait, payload)
+            except RuntimeError:
+                # get_running_loop() 无运行循环 → 同步投递
+                try:
                     q.put_nowait(payload)
-            except (RuntimeError, asyncio.exceptions.CancelledError):
+                except Exception:  # noqa: BLE001 — 队列关闭/取消时静默吞，绝不回灌
+                    pass
+            except asyncio.exceptions.CancelledError:
                 pass
 
     # ------------------------------------------------------------------
@@ -219,6 +226,21 @@ class TaskManager:
         lock = self._locks.get(target)
         if lock is not None and lock.locked():
             lock.release()
+
+    def spawn(self, target: str, action: str, coro_factory) -> None:
+        """投递 worker 协程，并把互斥锁的释放交给 worker 结束时刻。
+
+        调用方必须已经 acquire 成功。旧写法在 handler 的 `finally` 里 release，
+        等于"任务刚提交就解锁"，同 target 可被重复投递；正确边界是 worker 结束。
+        """
+
+        async def _runner() -> None:
+            try:
+                await coro_factory()
+            finally:
+                await self.release(target, action)
+
+        asyncio.ensure_future(_runner())
 
     def is_active(self, target: str) -> bool:
         """指定 target 是否有活动任务（running/queued）。"""

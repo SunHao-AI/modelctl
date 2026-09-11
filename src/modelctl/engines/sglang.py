@@ -26,7 +26,7 @@ from modelctl.engines.base import EngineAdapter, RequirementError
 
 
 class SglangAdapter(EngineAdapter):
-    def check_requirements(self) -> None:
+    def check_requirements(self, *, readonly: bool = False) -> None:
         envs.ensure_env("sglang")
         cfg = self.profile.engine_config
         if not cfg.get("model") and not cfg.get("download"):
@@ -48,7 +48,7 @@ class SglangAdapter(EngineAdapter):
                 raise RequirementError(f"tensor_parallel_size={tp} 超过实际 GPU 数 {self.caps.gpu_count}")
         self._check_vram_advisory(cfg, gpus)
         self.run_compat_checks()  # 预检：软件规则 + 模型 id 特征
-        if gpus is not None:
+        if gpus is not None and not readonly:
             acquire_gpu_lock(self.profile.name, gpus)
 
     def _check_vram_advisory(self, cfg: dict, gpus: list[int] | None) -> None:

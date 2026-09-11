@@ -21,9 +21,10 @@
    （**不**塞 username/display_name/UI 展示列——那些应来自 store 现查，避免
    token 里的信息过期）。`iat` / `exp` 用 `int(time.time())` 秒（CLAUDE.md
    约定，避免 ms 意外触发 PyJWT 3.x 的浮点秒陷阱）。
-2. **SECRET 取值三段策略**：优先 `ACCOUNTS_JWT_SECRET`；空/缺省则退 `API_KEY`；
-   **两环境变量皆为空**时才抛 `RuntimeError`——生产缺配置起见举出的硬错，
-   测试用 monkeypatch 控 `API_KEY` 走兜底，无需显式设 `ACCOUNTS_JWT_SECRET`。
+2. **SECRET 独立密钥（fail-fast）**：只认 `ACCOUNTS_JWT_SECRET`，**不回退**
+   `API_KEY`——管理面（API_KEY）与账号面（JWT）是两个信任域，共用一把秘密会让
+   "管理面密钥泄漏"直接升级成"任意用户身份伪造"。缺失即抛 `RuntimeError`
+   硬错暴露给部署者；测试须显式 monkeypatch `ACCOUNTS_JWT_SECRET`。
 3. **`require_account` 走 Bearer JWT**，不嗅探 `x-api-key`（后者是数据面
    `x-api-key` 语义、走 `resolve_account` 独立链路；本函数的 JWT 是 WebUI 面板
    语义，关闭双通道防止 token 被误当 Key 放进 `x-api-key` 触发限流窗口）。
@@ -51,9 +52,10 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 #: 端点（本 Task 未实现，Task 8 前端会展示刷新按钮）。
 JWT_TTL_S = 8 * 3600
 
-#: `ACCOUNTS_JWT_SECRET` 为空时使用的兜底环境变量（与 `admin_auth.API_KEY_ENV`
-#: 同 key，避免网关管理面 / 账号面板混用两个不同 secret）。
-_JWT_SECRET_FALLBACK_ENV = "API_KEY"
+#: 账号面 JWT 专用签名密钥环境变量。
+#: **不回退 API_KEY**：管理面（API_KEY）与账号面（JWT）是两个信任域，共用一把秘密
+#: 会让"管理面密钥泄漏"直接升级成"任意用户身份伪造"。缺失即 fail-fast。
+_JWT_SECRET_ENV = "ACCOUNTS_JWT_SECRET"
 
 # `auto_error=False`：缺 header 不抛内置 403，统一 401（与 admin_auth 同口径，
 # 前端拦截器只识 `{"code":"auth"}` 一种 401 形状）。
@@ -72,19 +74,12 @@ class AccountPrincipal:
 
 
 def _jwt_secret() -> str:
-    """按"ACCOUNTS_JWT_SECRET → API_KEY"顺序取签名用 secret。
-
-    两者皆空/空白 → `RuntimeError`（生产缺配置强暴露给部署者；测试一定会
-    monkeypatch 至少一个环境变量，故生产逻辑不会走到这里）。
-    """
-    raw = os.environ.get("ACCOUNTS_JWT_SECRET", "").strip()
-    if raw:
-        return raw
-    raw = os.environ.get(_JWT_SECRET_FALLBACK_ENV, "").strip()
+    """取账号面 JWT 签名 secret；未配置抛 `RuntimeError`（强暴露给部署者）。"""
+    raw = os.environ.get(_JWT_SECRET_ENV, "").strip()
     if raw:
         return raw
     raise RuntimeError(
-        "JWT 签名密钥未配置：请设置 ACCOUNTS_JWT_SECRET 或 API_KEY")
+        f"JWT 签名密钥未配置：请设置 {_JWT_SECRET_ENV}（账号面专用，不复用 API_KEY）")
 
 
 def _auth_error(message: str) -> HTTPException:

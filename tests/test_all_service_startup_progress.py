@@ -58,6 +58,9 @@ class _FakeAdapter:
     def set_progress_sink(self, cb):
         self._progress_cb = cb
 
+    def set_gpu_override(self, gpus):
+        self._gpu_override = gpus
+
     def log_fallback_cmd(self):
         return None
 

@@ -64,7 +64,7 @@ def _runtime_api_key_from_log(name: str) -> str | None:
 
 
 class UnslothAdapter(EngineAdapter):
-    def check_requirements(self) -> None:
+    def check_requirements(self, *, readonly: bool = False) -> None:
         if not self.caps.binaries.get("unsloth"):
             raise RequirementError("未安装 unsloth（PATH 中找不到 unsloth 命令）")
         cfg = self.profile.engine_config
@@ -89,7 +89,7 @@ class UnslothAdapter(EngineAdapter):
                 "unsloth /metrics 已禁用（unsloth.metrics_enabled=false），用量统计降级为'不支持精确统计'"
             )
         self.run_compat_checks()  # 预检：软件规则 + 模型 id 特征
-        if gpus:
+        if gpus and not readonly:
             acquire_gpu_lock(self.profile.name, gpus)
 
     def _check_vram(self, cfg: dict) -> None:

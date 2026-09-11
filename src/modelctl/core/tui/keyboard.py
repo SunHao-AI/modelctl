@@ -109,6 +109,14 @@ _ANSI_TABLE: dict[str, Key] = {
     ESC + ESC + "[C": Key.PgDn, ESC + ESC + "[D": Key.PgUp,
 }
 
+# Windows 扩展键前缀字节（getwch() 对方向键/PgUp/PgDn 等返回 0x00 或 0xE0）
+_WIN_EXTENDED_CODES = frozenset({0x00, 0xE0})
+# 扩展键第二字节扫描码 → Key（_read_windows 拼成 b"\xe0<scan>" 后由此解码）
+_WIN_SCANCE_KEYS: dict[int, Key] = {
+    0x48: Key.Up, 0x50: Key.Down, 0x4B: Key.Left, 0x4D: Key.Right,
+    0x49: Key.PgUp, 0x51: Key.PgDn,
+}
+
 
 def _decode_key(raw: bytes) -> Key:
     """字节码 → Key。COMBO 表 + ANSI 表共用。
@@ -128,6 +136,9 @@ def _decode_key(raw: bytes) -> Key:
     if raw.startswith(ESC.encode("latin-1")):
         s: str = raw.decode("latin-1")
         return _ANSI_TABLE.get(s, Key.Unknown)
+    if len(raw) == 2 and raw[0] == 0xE0:
+        # Windows 扩展键（_read_windows 拼装的 b"\xe0<扫描码>"）
+        return _WIN_SCANCE_KEYS.get(raw[1], Key.Unknown)
     return Key.Unknown
 
 
@@ -180,6 +191,10 @@ def _read_windows(timeout: float) -> bytes | None:
                 code: int = ord(ch[0]) if ch else 0
             else:
                 code = int(ch) & 0xFF
+            if code in _WIN_EXTENDED_CODES:
+                # 扩展键前缀（方向键/PgUp/PgDn）：再取扫描码字节，拼 2 字节供解码
+                code2 = msvcrt.getch()
+                return bytes([0xE0, code2 & 0xFF])
             if code < 0x20 or code in (0x1B, 0x7F):
                 # 组合键 / ESC / 控制字：getwch 只返回单字符，需明确要求 getch() 取真实码
                 code = msvcrt.getch()  # int（0x12=Ctrl-R / 0x02-0x19 Ctrl 组合键 等）

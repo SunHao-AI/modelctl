@@ -90,3 +90,15 @@ def test_v1_models_requires_client_key(admin_client):
     assert admin_client.get("/v1/models", headers={"Authorization": f"Bearer {CLIENT_KEY}"}).status_code == 200
     assert admin_client.get("/v1/models", headers={"Authorization": f"Bearer {KEY}"}).status_code == 401
     assert admin_client.get("/v1/models").status_code == 401
+
+
+def test_non_ascii_bearer_key_returns_401_not_500(admin_client):
+    """WEB-P2-1：hmac.compare_digest 直接吃含非 ASCII 的 str 抛 TypeError → 500。
+
+    客户端用一个中文 Bearer 头就能把管理面打出 500；修复后必须恒定 401。
+    头值以 UTF-8 原始字节发送（等价 curl 行为）：httpx 对 str 头值强制 ascii
+    编码，会在**客户端**就抛 UnicodeEncodeError，请求根本到不了服务端。
+    """
+    raw = "Bearer 测试键".encode("utf-8")
+    r = admin_client.get("/admin/api/config/static", headers=[(b"authorization", raw)])
+    assert r.status_code == 401, f"非 ASCII 凭据必须 401，实得 {r.status_code}"

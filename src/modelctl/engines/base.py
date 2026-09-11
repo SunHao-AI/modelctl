@@ -43,14 +43,29 @@ class EngineAdapter(ABC):
         self.spawned_proc: subprocess.Popen | None = None
         # 启动进度回调（set_progress_sink 注入）：签名 (label: str, pct: float|None) -> None
         self._progress_cb: Callable[[str, float | None], None] | None = None
+        # 本次操作的显式 GPU 选择（set_gpu_override 注入）；None 表示不覆盖。
+        # 不用 os.environ 全局态传递：WebUI 并发任务互写会互相污染 GPU 分配。
+        self._gpu_override: list[int] | None = None
+
+    def set_gpu_override(self, gpus: "list[int] | None") -> None:
+        """注入本次操作的 GPU 选择（WebUI 并发任务用）。None 表示不覆盖。
+
+        为什么不用全局环境变量：`os.environ["MODELCTL_GPUS"]` 是进程级共享态，
+        两个并发 start/restart 任务互相覆盖 → GPU 分配错乱。
+        """
+        self._gpu_override = gpus
 
     @abstractmethod
     def build_command(self) -> tuple[list[str], dict[str, str]]:
         """返回 (启动命令, 需注入的环境变量)。"""
 
     @abstractmethod
-    def check_requirements(self) -> None:
-        """校验硬件/配置门槛；可降级的写 self.warnings，硬性不满足抛 RequirementError。"""
+    def check_requirements(self, *, readonly: bool = False) -> None:
+        """校验硬件/配置门槛；可降级的写 self.warnings，硬性不满足抛 RequirementError。
+
+        readonly=True（TUI 预检）：跳过清容器 / 抢 GPU 锁等一切写副作用——
+        浏览界面的渲染路径绝不允许改变运行时状态。
+        """
 
     @abstractmethod
     def metrics_mapping(self) -> dict[str, list[str]] | None:
@@ -69,9 +84,18 @@ class EngineAdapter(ABC):
         return f"http://127.0.0.1:{self.profile.port}/health"
 
     def selected_gpus(self) -> list[int] | None:
-        """按 profile.gpu_list > 环境变量 MODELCTL_GPUS（CLI --gpus 亦写入此变量）解析。"""
+        """优先级：profile.engine_config.gpu_list > 本次 override > 环境变量 MODELCTL_GPUS。
+
+        override 等价于 CLI `--gpus`（用户本次显式选择），排在 profile 之后、
+        环境变量之前——直接走 resolve_gpu_list 的三级解析，不要在其前面短路。
+        """
         cfg = self.profile.engine_config
-        return resolve_gpu_list(cfg.get("gpu_list"), None, os.environ.get("MODELCTL_GPUS"))
+        override = (
+            ",".join(str(g) for g in self._gpu_override)
+            if self._gpu_override is not None
+            else None
+        )
+        return resolve_gpu_list(cfg.get("gpu_list"), override, os.environ.get("MODELCTL_GPUS"))
 
     def validate_gpu_selection(self, gpus: list[int] | None = None) -> None:
         gpus = gpus if gpus is not None else self.selected_gpus()

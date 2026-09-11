@@ -224,7 +224,7 @@ class LlamaCppAdapter(EngineAdapter):
         self._mmproj: Path | None = None
         self._want_mmproj = False
 
-    def check_requirements(self) -> None:
+    def check_requirements(self, *, readonly: bool = False) -> None:
         cfg = self.profile.engine_config
         if self.caps.gpu_count == 0:
             raise RequirementError("未探测到 GPU（nvidia-smi 失败或无 GPU）")
@@ -289,7 +289,7 @@ class LlamaCppAdapter(EngineAdapter):
             if need_mb > free_mb:
                 raise RequirementError(f"剩余显存不足：模型约需 {need_mb:.0f}MB（×1.1），剩余 {free_mb}MB")
         self.run_compat_checks()  # 预检：软件规则 + 模型 id 特征
-        if gpus:
+        if gpus and not readonly:
             acquire_gpu_lock(self.profile.name, gpus)
 
     def _find_draft(self, cfg: dict) -> Path | None:

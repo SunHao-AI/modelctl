@@ -346,18 +346,22 @@ async def docker_install(
                                 "message": f"用户 {user_id} 未完成的 docker install 已达 {active_count} 任务，请稍后再试"}},
         )
 
-    task = docker_install_task_manager.create_task(
-        kind="docker", action="install", target=f"docker:{target_os}"
-    )
-    _user_pending.setdefault(user_id, set()).add(task.id)
+    # 参数校验必须在任何状态写入之前：create_task + _user_pending.add 之后才返 400
+    # 会让 pending 名额只增不减（无过期机制），累计 _DOCKER_MAX_ACTIVE_PER_USER 次
+    # 非法请求后该用户永久 429。
     registry_mirrors = body.get("registry_mirrors") or []
     max_downloads = body.get("max_concurrent_downloads", 0) or 0
-    if not isinstance(max_downloads, int) or max_downloads < 0 or max_downloads > 8:
+    if not isinstance(max_downloads, int) or isinstance(max_downloads, bool) or max_downloads < 0 or max_downloads > 8:
         return JSONResponse(
             status_code=400,
             content={"error": {"code": "bad_body",
                                 "message": "max_concurrent_downloads 必须为 0-8 的整数"}},
         )
+
+    task = docker_install_task_manager.create_task(
+        kind="docker", action="install", target=f"docker:{target_os}"
+    )
+    _user_pending.setdefault(user_id, set()).add(task.id)
 
     _user_active_installs[user_id] = {
         "task_id": task.id,
@@ -572,13 +576,15 @@ async def setup_env(
     try:
         task = tm.create_task(kind="env_setup", action="setup", target=target)
         task.update_status("queued")
-        asyncio.ensure_future(_do_env_setup(target, task))
+        # 锁所有权移交 worker：spawn 的 runner 结束后才 release
+        tm.spawn(target, "setup", lambda: _do_env_setup(target, task))
         return JSONResponse(
             status_code=202,
             content={"task_id": task.id, "stream_url": f"/admin/api/tasks/{task.id}/stream"},
         )
-    finally:
+    except Exception:
         await tm.release(target, "setup")
+        raise
 
 
 @router.post("/{target}/remove")

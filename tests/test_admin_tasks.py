@@ -105,3 +105,58 @@ def test_task_error_without_code_omits_fields():
     d = task.to_dict()
     assert "code" not in d
     assert "engine" not in d
+
+
+# ---- WEB-P1-4：任务锁必须覆盖 worker 全生命周期 ----
+
+
+def test_spawn_holds_lock_until_worker_finishes():
+    """旧实现在 handler 的 finally 里 release → 锁在 worker 刚提交时就放开，
+    同一 target 的第二个请求不再 409，重复投递同一动作。"""
+    import asyncio
+
+    from modelctl.core.webui.admin_tasks import TaskManager
+
+    async def _run():
+        tm = TaskManager()
+        started = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def worker():
+            started.set()
+            await finish.wait()
+
+        assert await tm.acquire("m1", "start") is not None
+        tm.spawn("m1", "start", worker)
+        await asyncio.wait_for(started.wait(), 1)
+        # worker 仍在跑 → 锁必须仍被持有
+        assert await tm.acquire("m1", "start") is None, "worker 未完成时锁已释放"
+        finish.set()
+        await asyncio.sleep(0.05)  # 让 worker 收尾
+        lock = await tm.acquire("m1", "start")
+        assert lock is not None, "worker 结束后锁未释放"
+        await tm.release("m1", "start")
+
+    asyncio.run(_run())
+
+
+def test_spawn_releases_lock_when_worker_raises():
+    """worker 抛异常同样必须解锁，否则该 target 永久 409。"""
+    import asyncio
+
+    from modelctl.core.webui.admin_tasks import TaskManager
+
+    async def _run():
+        tm = TaskManager()
+
+        async def boom():
+            raise RuntimeError("worker 内部失败")
+
+        assert await tm.acquire("m1", "start") is not None
+        tm.spawn("m1", "start", boom)
+        await asyncio.sleep(0.05)
+        lock = await tm.acquire("m1", "start")
+        assert lock is not None, "worker 抛异常后锁未释放"
+        await tm.release("m1", "start")
+
+    asyncio.run(_run())

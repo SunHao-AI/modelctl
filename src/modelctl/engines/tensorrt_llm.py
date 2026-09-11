@@ -30,7 +30,7 @@ class TensorRtLlmAdapter(EngineAdapter):
         image = str(cfg.get("docker_image") or "").strip()
         return ("docker", image) if image else ("venv", None)
 
-    def check_requirements(self) -> None:
+    def check_requirements(self, *, readonly: bool = False) -> None:
         cfg = self.profile.engine_config
         runtime, image = self._resolve_runtime()
         if runtime == "docker":
@@ -38,8 +38,10 @@ class TensorRtLlmAdapter(EngineAdapter):
             if missing:
                 raise RequirementError(f"docker_image 已配置但 Docker 环境未就绪：{'；'.join(missing)}——{docker_setup.MSG_GUIDE}")
             # 清冲突残留容器（幂等；失败仅 warning + 解码 stderr，不再静默吞）
-            from modelctl.core.process import clear_stale_docker_container
-            clear_stale_docker_container(self.profile.name, self._container_name)
+            # readonly（TUI 预检渲染）：浏览界面不得删容器
+            if not readonly:
+                from modelctl.core.process import clear_stale_docker_container
+                clear_stale_docker_container(self.profile.name, self._container_name)
         else:
             envs.ensure_env("tensorrt_llm")
         if not cfg.get("model"):
@@ -62,7 +64,7 @@ class TensorRtLlmAdapter(EngineAdapter):
             if self.caps.gpu_count and tp > self.caps.gpu_count:
                 raise RequirementError(f"tensor_parallel_size={tp} 超过实际 GPU 数")
         self.run_compat_checks()
-        if gpus is not None:
+        if gpus is not None and not readonly:
             acquire_gpu_lock(self.profile.name, gpus)
 
     def pre_start(self) -> None:

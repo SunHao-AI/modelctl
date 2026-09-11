@@ -43,11 +43,12 @@ from modelctl.core.tui.panels.detail import render as render_detail
 from modelctl.core.tui.panels.main_dashboard import render as render_dashboard
 from modelctl.core.tui.panels.monitor import render as render_monitor
 from modelctl.core.tui.panels.plan import render as render_plan
-from modelctl.core.tui.state import TUIState
+from modelctl.core.tui.state import _DETAIL_TABS, TUIState
 from modelctl.core.tui.theme import cycle_theme, load_theme, save_theme
 
 SMOKE_KEY_SEQUENCE_LEN = 3  # smoke 模式消费的虚拟 key 事件数
 DEFAULT_MIN_SIZE = (80, 24)  # 最小终端尺寸，console.size 探测失败时回落
+FRAME_TIMEOUT_S = 0.5  # 主循环单帧等键超时：无按键时的重绘/刷新节奏
 
 
 class TuiApp:
@@ -96,7 +97,14 @@ class TuiApp:
                 self.loop_end()
                 return 0
             self.loop_begin()
-            self.render_once()
+            # 真实主循环：渲染一帧 → 等键（超时即下一帧，实现快照自动刷新）→ 派发
+            while True:
+                self.render_once()
+                key = self.keyboard.read_key_block(FRAME_TIMEOUT_S)
+                if key is None:
+                    continue
+                if not self._dispatch_key(key):
+                    break
             self.loop_end()
             return 0
         except KeyboardInterrupt:
@@ -120,6 +128,72 @@ class TuiApp:
     def cycle_theme(self) -> None:
         """切主题到下一个（T 键钩子；Task 6 接通键派发）。"""
         self._theme = cycle_theme(self._theme)
+
+    def _plan_field_count(self) -> int:
+        """Plan 视图可编辑字段数（Tab 光标回绕上界）；无法解析时回落 1。"""
+        from modelctl.core.tui.panels.common import resolve_profile_from_apps
+        from modelctl.core.tui.panels.plan import _profile_fields
+
+        profiles = getattr(self._snap["models"], "profiles", None) or []
+        idx = self.state.active_index
+        if not profiles or idx < 0 or idx >= len(profiles):
+            return 1
+        item = profiles[idx]
+        engine = item.get("engine", "")
+        profile = resolve_profile_from_apps(
+            str(item.get("name", "") or ""), engine if isinstance(engine, str) else "")
+        if profile is None:
+            return 1
+        return max(1, len(_profile_fields(profile)))
+
+    def _dispatch_key(self, key: Key) -> bool:
+        """按键派发；返回 False 表示退出主循环。语义与各 view keybar 文案一致。"""
+        st = self.state
+        view = st.active_view
+        if key == Key.Q:
+            return False
+        if key == Key.T:
+            self.cycle_theme()
+            return True
+        if key == Key.Esc:
+            if view == "dashboard":
+                return False  # dashboard 上 Esc 与 q 同义（无更上一层）
+            st.active_view = "dashboard"
+            return True
+        if view == "dashboard":
+            if key in (Key.Down, Key.J):
+                st.active_index += 1
+            elif key in (Key.Up, Key.K):
+                st.active_index = max(0, st.active_index - 1)
+            elif key == Key.Enter:
+                st.active_view = "detail"
+            elif key == Key.Tab:
+                st.active_view = "plan"
+        elif view == "detail":
+            if key == Key.Tab:
+                cur = _DETAIL_TABS.index(st.active_detail_subtab)
+                st.switch_detail_tab(_DETAIL_TABS[(cur + 1) % len(_DETAIL_TABS)])
+            elif key == Key.ShiftTab:
+                cur = _DETAIL_TABS.index(st.active_detail_subtab)
+                st.switch_detail_tab(_DETAIL_TABS[(cur - 1) % len(_DETAIL_TABS)])
+            elif key in (Key.Down, Key.J):
+                st.active_index += 1
+            elif key in (Key.Up, Key.K):
+                st.active_index = max(0, st.active_index - 1)
+        elif view == "plan":
+            if key == Key.Tab:
+                st.cycle_plan_cursor(1, self._plan_field_count())
+            elif key == Key.ShiftTab:
+                st.cycle_plan_cursor(-1, self._plan_field_count())
+            elif key == Key.D:
+                st.plan_dry_run_done = True
+        elif view == "cluster":
+            if key == Key.Tab:
+                st.cycle_cluster_tab(1)
+        elif view == "monitor":
+            if key == Key.Tab:
+                st.cycle_monitor_tab(1)
+        return True
 
     def realize_render_once(self) -> None:
         """渲染一帧：快照 revalidate → 按 active_view 派发 → console.print。

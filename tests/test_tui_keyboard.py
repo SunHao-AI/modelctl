@@ -252,6 +252,52 @@ def test_read_windows_getch_ctrl_r(monkeypatch, mock_msvcrt):
 
 
 # ---------------------------------------------------------------------------
+# Windows 扩展键（方向键 / PgUp / PgDn）—— TUI-P1-3
+# ---------------------------------------------------------------------------
+
+def test_read_windows_extended_arrow_key(mock_msvcrt):
+    """方向键：getwch 返回 \xe0 前缀（224 不在 <0x20 集合），必须再取扫描码字节。"""
+    seq = iter(["\xe0", "H"])  # 0xE0 + 0x48 → Up
+    mock_msvcrt.kbhit = mock.Mock(return_value=True)
+    mock_msvcrt.getwch = mock.Mock(side_effect=lambda: seq.__next__())
+    mock_msvcrt.getch = mock.Mock(return_value=0x48)
+    assert _decode_key(_read_windows(0.05)) is Key.Up  # type: ignore[arg-type]
+
+
+def test_windows_extended_keys_end_to_end(monkeypatch):
+    """KeyboardInput 端到端：6 个扩展键扫描码依次解为方向/PgUp/PgDn。"""
+    class _M:
+        def __init__(self, pairs):
+            self.buf = [c for p in pairs for c in p]
+
+        def kbhit(self):
+            return bool(self.buf)
+
+        def getwch(self):
+            return self.buf.pop(0)
+
+        def getch(self):
+            return ord(self.buf.pop(0))
+
+    m = _M([("\xe0", "H"), ("\xe0", "P"), ("\xe0", "K"), ("\xe0", "M"),
+            ("\xe0", "I"), ("\xe0", "Q")])
+    monkeypatch.setattr(kbd, "msvcrt", m)
+    monkeypatch.setattr(kbd, "_is_windows", lambda: True)
+    ki = KeyboardInput()
+    ki._is_windows = True
+    got = [ki.read_key_block(0) for _ in range(6)]
+    assert got == [Key.Up, Key.Down, Key.Left, Key.Right, Key.PgUp, Key.PgDn]
+
+
+def test_windows_null_prefix_also_decodes(mock_msvcrt):
+    """部分控制台用 0x00 前缀（getwch 返回 \x00）：同样必须走扩展键分支。"""
+    mock_msvcrt.kbhit = mock.Mock(return_value=True)
+    mock_msvcrt.getwch = mock.Mock(return_value="\x00")
+    mock_msvcrt.getch = mock.Mock(return_value=0x50)  # Down
+    assert _decode_key(_read_windows(0.05)) is Key.Down  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
 # KeyboardInput 对象：构造 / read / restore
 # ---------------------------------------------------------------------------
 

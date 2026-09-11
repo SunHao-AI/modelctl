@@ -423,8 +423,14 @@ def test_self_jwt_tampered_401(tmp_path, monkeypatch):
     uid = _create_user(store, username="tam")
     app = _mk_app(tmp_path, monkeypatch, accounts_store=store)
     tok = _mk_token(uid)
-    # 翻转末字符导致签名失效
-    tampered = tok[:-1] + ("A" if tok[-1] != "A" else "B")
+    # 翻转**签名首字符**导致签名失效。
+    # 切勿翻转末字符：HS256 签名 32 字节 = 256 bit，base64url 编码成 43 字符即 258 bit，
+    # 多出的 2 bit 全在末字符上（解码时被丢弃）→ 同一解码结果对应 4 个末字符。
+    # 翻转它有 4/64 = 1/16 概率解出完全相同的 32 字节签名 → 校验通过 → 用例概率性假红。
+    # 首字符的 6 bit 全部有效，翻转必然改变解码后的签名字节。
+    # 详见 docs/known-pitfalls/backend/test-isolation.md
+    hdr, payload, sig = tok.split(".")
+    tampered = f"{hdr}.{payload}.{'A' if sig[0] != 'A' else 'B'}{sig[1:]}"
     with TestClient(app) as c:
         assert c.get("/api/account/keys",
                      headers=_self_headers(tampered)).status_code == 401

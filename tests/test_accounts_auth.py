@@ -249,3 +249,28 @@ def test_resolve_account_valid_key_touches_last_used(store) -> None:
     k = store.get_key_by_id(resolved.key_id)
     # 从有效身份解析过程中 touch 了这个 Key
     assert k["last_used_at"] == 1234.0
+
+
+# ---- GW-P2-5：账号面 JWT 不得复用管理面 API_KEY 签名 ----
+
+
+def test_jwt_secret_does_not_fall_back_to_api_key(monkeypatch):
+    """两信任域不得共用一把秘密：仅配 API_KEY 时账号面必须 fail-fast。
+
+    旧实现回退 API_KEY → 管理面密钥泄漏即可伪造任意用户 JWT。
+    """
+    from modelctl.core.webui import account_auth as aa
+
+    monkeypatch.delenv("ACCOUNTS_JWT_SECRET", raising=False)
+    monkeypatch.setenv("API_KEY", "admin-side-key-should-not-sign-jwt")
+    with pytest.raises(RuntimeError) as ei:
+        aa._jwt_secret()
+    assert "ACCOUNTS_JWT_SECRET" in str(ei.value)
+
+
+def test_jwt_secret_uses_dedicated_env_only(monkeypatch):
+    from modelctl.core.webui import account_auth as aa
+
+    monkeypatch.setenv("ACCOUNTS_JWT_SECRET", "dedicated-jwt-secret")
+    monkeypatch.setenv("API_KEY", "admin-side-key")
+    assert aa._jwt_secret() == "dedicated-jwt-secret"

@@ -113,7 +113,7 @@ def _do_all_args(timeout_query):
 
     captured = {}
 
-    def fake_start_all(models_dir, model, timeout):
+    def fake_start_all(models_dir, model, timeout, gpus=None):
         captured["args"] = (models_dir, model, timeout)
         return []
 
@@ -153,7 +153,7 @@ def test_all_start_endpoint_timeout_default_none(admin_client, monkeypatch):
 
     seen: list = []
 
-    def fake_start_all(models_dir, model, timeout):
+    def fake_start_all(models_dir, model, timeout, gpus=None):
         seen.append(timeout)
         from modelctl.core.all_service import ComponentResult
         return [ComponentResult("model:q", "ok", "ok")]
@@ -205,7 +205,7 @@ def test_do_start_stage_events_reach_subscriber_queue_from_worker_thread():
         task = TaskManager().create_task("model_start", "start", "q")
         q = task.subscribe()
 
-        def fake_start(profile, caps, timeout, on_progress=None):
+        def fake_start(profile, caps, timeout, on_progress=None, gpus=None):
             from modelctl.core.all_service import ComponentResult
             from modelctl.core.startup_progress import StageEvent
             # 当前线程即 asyncio.to_thread 工作线程（生产链路）：直接 task.event 会丢帧

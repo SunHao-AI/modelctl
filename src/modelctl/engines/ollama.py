@@ -39,7 +39,7 @@ class OllamaAdapter(EngineAdapter):
             env.update(self.cuda_visible_devices(gpus))
         return ["ollama", "serve"], env
 
-    def check_requirements(self) -> None:
+    def check_requirements(self, *, readonly: bool = False) -> None:
         if not self.caps.binaries.get("ollama"):
             raise RequirementError("未安装 ollama（PATH 中找不到 ollama 命令）")
         if not self.profile.engine_config.get("model"):

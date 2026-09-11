@@ -63,12 +63,21 @@ def _auth_error(message: str) -> HTTPException:
     return HTTPException(status_code=401, detail={"code": "auth", "message": message})
 
 
+def _consteq(a: str, b: str) -> bool:
+    """恒定时间比较；先 UTF-8 编码再比。
+
+    `hmac.compare_digest` 直接吃 str 时，任一侧含非 ASCII 会抛 TypeError → 500
+    （客户端用一个中文 Bearer 头就能打出 500）。编码后比较语义不变。
+    """
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
 def is_valid_key(key: str) -> bool:
     """key 是否与环境变量 API_KEY 恒定时间相等；API_KEY 未配置时恒 False。"""
     expected = os.environ.get(API_KEY_ENV)
     if not expected or not key:
         return False
-    return hmac.compare_digest(key, expected)
+    return _consteq(key, expected)
 
 
 def mask_key(key: str) -> str:
@@ -92,7 +101,7 @@ async def require_auth(
         raise _auth_error("未提供认证凭据")
     if credentials.scheme != "Bearer":
         raise _auth_error("不支持的认证方案")
-    if not hmac.compare_digest(credentials.credentials, os.environ[API_KEY_ENV]):
+    if not _consteq(credentials.credentials, os.environ[API_KEY_ENV]):
         raise _auth_error("认证失败")
 
 
@@ -126,10 +135,10 @@ async def require_auth_or_query(
     if (
         credentials is not None
         and credentials.scheme == "Bearer"
-        and hmac.compare_digest(credentials.credentials, os.environ[API_KEY_ENV])
+        and _consteq(credentials.credentials, os.environ[API_KEY_ENV])
     ):
         return
     # query 降级（事件源；key 为空时 fail-closed 走 401）
-    if key and key.strip() and hmac.compare_digest(key.strip(), os.environ[API_KEY_ENV]):
+    if key and key.strip() and _consteq(key.strip(), os.environ[API_KEY_ENV]):
         return
     raise _auth_error("未提供认证凭据或认证失败")

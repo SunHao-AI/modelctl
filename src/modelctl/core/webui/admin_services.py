@@ -169,13 +169,15 @@ async def service_action(svc: str, action: str, request: Request, _: None = Depe
     try:
         task = tm.create_task(kind=f"service_{action}", action=action, target=svc)
         task.update_status("queued")
-        asyncio.ensure_future(_do_service_action(svc, action, task))
+        # 锁所有权移交 worker：spawn 的 runner 结束后才 release
+        tm.spawn(svc, action, lambda: _do_service_action(svc, action, task))
         return JSONResponse(
             status_code=202,
             content={"task_id": task.id, "stream_url": f"/admin/api/tasks/{task.id}/stream"},
         )
-    finally:
+    except Exception:
         await tm.release(svc, action)
+        raise
 
 
 async def _do_service_action(svc: str, action: str, task) -> None:
@@ -250,13 +252,15 @@ async def all_start(
     try:
         task = tm.create_task(kind="all_start", action="start", target="all")
         task.update_status("queued")
-        asyncio.ensure_future(_do_all(start_all, thru, task))
+        # 锁所有权移交 worker：spawn 的 runner 结束后才 release
+        tm.spawn("all", "start", lambda: _do_all(start_all, thru, task))
         return JSONResponse(
             status_code=202,
             content={"task_id": task.id, "stream_url": f"/admin/api/tasks/{task.id}/stream"},
         )
-    finally:
+    except Exception:
         await tm.release("all", "start")
+        raise
 
 
 @router.post("/all/stop")
@@ -322,13 +326,15 @@ async def all_restart(
     try:
         task = tm.create_task(kind="all_restart", action="restart", target="all")
         task.update_status("queued")
-        asyncio.ensure_future(_do_all(restart_all, thru, task))
+        # 锁所有权移交 worker：spawn 的 runner 结束后才 release
+        tm.spawn("all", "restart", lambda: _do_all(restart_all, thru, task))
         return JSONResponse(
             status_code=202,
             content={"task_id": task.id, "stream_url": f"/admin/api/tasks/{task.id}/stream"},
         )
-    finally:
+    except Exception:
         await tm.release("all", "restart")
+        raise
 
 
 @router.get("/all/status")
@@ -355,7 +361,8 @@ async def all_status(_: None = Depends(require_auth)):
 async def _do_all(func, thru: dict, task) -> None:
     """Worker 线程：执行一键 start/restart（all_service.start_all / restart_all）。
 
-    gpus 透传为逗号串（解析 + env 注入放在 _apply_gpus 里，成功后恢复原值）；
+    gpus 解析后以关键字参数透传（不再写 os.environ["MODELCTL_GPUS"]：
+    全局态在并发任务间互相覆盖，GPU 分配错乱）；
     model / timeout 直接进 fn 签名（thru 语义：timeout None = 自适应，
     透传给 start_all/restart_all，其内部按 default_start_timeout 兜底）。
     结束时按 error 数量分级：== 0 静默、1 个 warning、>= 2 error。
@@ -364,17 +371,14 @@ async def _do_all(func, thru: dict, task) -> None:
 
     task.update_status("running")
     gpus = thru.get("gpus")
-    prev_gpus = os.environ.get("MODELCTL_GPUS")
-    if gpus:
-        parsed = resolve_gpu_list(None, None, gpus)
-        if parsed:
-            os.environ["MODELCTL_GPUS"] = ",".join(str(g) for g in parsed)
+    gpu_list = resolve_gpu_list(None, None, gpus) if gpus else None
     try:
         model = thru.get("model")
         raw = thru.get("timeout")
         # None = 未显式指定 → 原样透传，start_all/restart_all 内部走 default_start_timeout 自适应
         timeout = float(raw) if raw is not None else None
-        results = await asyncio.to_thread(func, None, model, timeout)
+        results = await asyncio.to_thread(
+            lambda: func(None, model, timeout, gpus=gpu_list))
 
         task.update_detail(f"{len(results)} 个组件已处理")
         errors = [r for r in results if r.status == "error"]
@@ -402,10 +406,3 @@ async def _do_all(func, thru: dict, task) -> None:
     except Exception as exc:  # noqa: BLE001 — 一键操作异常统一记录 + 失败上报
         logger.exception(f"一键操作异常 ({getattr(func, '__name__', func)}): {exc}")
         task.error(exit_code=1, message=str(exc))
-    finally:
-        # 恢复 GPU 环境变量（无论 main / exception / 异常 三条路径都恢复）
-        if gpus:
-            if prev_gpus is None:
-                os.environ.pop("MODELCTL_GPUS", None)
-            else:
-                os.environ["MODELCTL_GPUS"] = prev_gpus

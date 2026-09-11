@@ -26,7 +26,7 @@ from modelctl.engines.base import EngineAdapter, RequirementError
 
 
 class LmdeployAdapter(EngineAdapter):
-    def check_requirements(self) -> None:
+    def check_requirements(self, *, readonly: bool = False) -> None:
         envs.ensure_env("lmdeploy")
         cfg = self.profile.engine_config
         if not cfg.get("model"):
@@ -47,7 +47,7 @@ class LmdeployAdapter(EngineAdapter):
             if self.caps.gpu_count and tp > self.caps.gpu_count:
                 raise RequirementError(f"tensor_parallel_size={tp} 超过实际 GPU 数")
         self.run_compat_checks()
-        if gpus is not None:
+        if gpus is not None and not readonly:
             acquire_gpu_lock(self.profile.name, gpus)
 
     def pre_start(self) -> None:

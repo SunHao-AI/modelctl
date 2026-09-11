@@ -102,6 +102,10 @@ class _FakeAdapter:
         """Task 7 引入：非 docker 路径返回 None（不 spawn 日志 tee）。"""
         return None
 
+    def set_gpu_override(self, gpus) -> None:
+        """WEB-P1-3 引入：start_profile 无条件注入本次 GPU 选择。默认仅记录。"""
+        self._gpu_override = gpus
+
 
 # ---- 默认模型解析 ----
 
@@ -174,6 +178,9 @@ def test_start_profile_check_raises_requirement(monkeypatch):
             return False
 
         def set_progress_sink(self, cb) -> None:
+            return None
+
+        def set_gpu_override(self, gpus) -> None:
             return None
 
         def check_requirements(self):
@@ -335,7 +342,7 @@ def test_start_all_starts_default_model_first(tmp_path, monkeypatch):
     monkeypatch.setattr(
         all_service,
         "start_profile",
-        lambda p, c, t: (order.append("model") or ComponentResult("model:m", "ok", "")),
+        lambda p, c, t, gpus=None: (order.append("model") or ComponentResult("model:m", "ok", "")),
     )
     monkeypatch.setattr(
         all_service,
@@ -380,7 +387,7 @@ def test_restart_all_only_default_model(tmp_path, monkeypatch):
     monkeypatch.setattr(
         all_service,
         "restart_profile",
-        lambda p, c, t: (restarted.append(p.name) or ComponentResult("model:m", "ok", "")),
+        lambda p, c, t, gpus=None: (restarted.append(p.name) or ComponentResult("model:m", "ok", "")),
     )
     monkeypatch.setattr(all_service, "restart_gateway", lambda: ComponentResult("gateway", "ok", ""))
     monkeypatch.setattr(all_service, "restart_stats", lambda: ComponentResult("stats", "ok", ""))
