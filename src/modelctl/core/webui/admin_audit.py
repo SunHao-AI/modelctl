@@ -112,12 +112,40 @@ def _entry_time(entry: dict) -> _dt.datetime | None:
     return None
 
 
-def _entry_is_error(entry: dict) -> bool:
-    """审计记录的错误判定：status>=400 或显式 error/error_type/buccess 标志。"""
+def _entry_level(entry: dict) -> str:
+    """审计记录级别（后端统一派生，前端不再自行判定）。
+
+    vLLM/网关的 JSONL 审计**没有 level 字段**（写入侧只落 status_code / error），
+    而前端列表有级别列与级别过滤器，故这里按状态码派生：5xx → error、4xx → warn、
+    其余 → info；无状态码但带 error 的（如上游连接异常）按 error 处理。
+
+    4xx 归 warn 而非 error：客户端拼错模型名、鉴权失败属调用方问题，与后端故障
+    混在一个级别里会让人找不到真正需要处理的 5xx。
+    """
     st = entry.get("status") or entry.get("status_code") or entry.get("response_status")
     if isinstance(st, int):
-        return st >= 400
-    return bool(entry.get("error") or entry.get("error_type") or entry.get("is_error"))
+        if st >= 500:
+            return "error"
+        if st >= 400:
+            return "warn"
+        return "info"
+    if entry.get("error") or entry.get("error_type") or entry.get("is_error"):
+        return "error"
+    return "info"
+
+
+def _entry_is_error(entry: dict) -> bool:
+    """错误判定：非 info 即计入错误数（5xx + 4xx + 显式 error 标志）。"""
+    return _entry_level(entry) != "info"
+
+
+def _entry_matches_keyword(entry: dict, needle: str) -> bool:
+    """关键字匹配：在所有标量字段（含 status_code 等数字）拼成的文本里做小写子串查找。
+
+    嵌套的 native_metrics / gateway_metrics 不参与——数值字典做子串匹配只会产生噪音。
+    """
+    parts = [str(v) for v in entry.values() if isinstance(v, (str, int, float)) and not isinstance(v, bool)]
+    return needle in " ".join(parts).lower()
 
 
 def _filter_entries(
@@ -144,27 +172,35 @@ def _filter_entries(
 
 @router.get("")
 async def read_audit(
-    since: str | None = Query(default=None, description="相对时间：30m | 1h | 24h | 7d"),
+    since: str | None = Query(default=None, description="相对时间：10m | 1h | 6h | 24h | 7d | 30d"),
     model: str | None = Query(default=None, description="过滤 model 名"),
-    endpoints: str | None = Query(default=None, description="逗号分隔的 endpoint 白名单"),
+    endpoints: str | None = Query(default=None, description="逗号分隔的 endpoint（path）白名单"),
     auth: str = Query(default="", description="过滤准入结果标签：ok | missing | invalid | unconfigured"),
     client_ip: str = Query(default="", description="过滤来源 IP（精确匹配）"),
+    level: str = Query(default="", description="级别过滤：info | warn | error（后端按 status_code 派生）"),
+    keyword: str = Query(default="", description="关键字：在所有标量字段上做大小写不敏感子串匹配"),
     limit: int = Query(default=100, ge=1, le=5000),
     _json: bool = Query(default=False, alias="json", description="true 时返回原始 JSONL 行文本"),
     _: None = Depends(require_auth),
 ):
     """GET /admin/api/audit — 读取匹配的审计记录（最新优先）。
 
-    ``since`` 形如 ``1h/24h/7d``；``model`` 单值；``endpoints`` 逗号分隔白名单；
-    ``auth`` / ``client_ip`` 精确匹配准入标签与来源 IP；``limit`` 默认 100 上限 5000。
-    ``json=true`` 时返回原始 JSONL 行文本（``bytes`` 友好），否则解析为 dict 列表。
+    ``since`` 形如 ``10m/1h/6h/24h/7d/30d``；``model`` 单值；``endpoints`` 逗号分隔白名单；
+    ``auth`` / ``client_ip`` 精确匹配准入标签与来源 IP；``level`` / ``keyword`` 为前端
+    工具条的级别与关键字过滤；``limit`` 默认 100 上限 5000。
+    ``json=true`` 时返回原始 JSONL 行文本，否则解析为 dict 列表。
+
+    响应含 ``total`` / ``error_count``：这是**过滤后未截断**的计数（``entries`` 会被
+    ``limit`` 截断），前端"错误数"卡片直接读它，故必须在截断前统计。
     """
 
     since_dt, model_keys, ep_keys, auth_key, client_ip_key = _filter_entries(
         since, model, endpoints, auth, client_ip
     )
+    level_key = level.strip().lower()
+    keyword_key = keyword.strip().lower()
 
-    def _collect() -> list[dict[str, Any]]:
+    def _collect() -> tuple[list[dict[str, Any]], int, int]:
         out: list[dict[str, Any]] = []
         for f in _all_audit_files():
             try:
@@ -188,36 +224,78 @@ async def read_audit(
                         continue
                 if model_keys and entry.get("model") not in model_keys:
                     continue
-                if ep_keys and entry.get("endpoint") not in ep_keys:
-                    continue
+                if ep_keys:
+                    # 写入侧（gateway._build_audit_entry）落的是 "path" 键（如
+                    # "chat/completions" / "messages"），历史上这里读 "endpoint"，
+                    # 取值恒为 None → 端点过滤器永久失效（选任何端点都返回空）。
+                    # 保留对 "endpoint" 的兼容读取，以防存在旧格式审计文件。
+                    ep = entry.get("path")
+                    if ep is None:
+                        ep = entry.get("endpoint")
+                    if ep not in ep_keys:
+                        continue
                 if auth_key and entry.get("auth") != auth_key:
                     continue
                 if client_ip_key and entry.get("client_ip") != client_ip_key:
                     continue
+                if level_key and _entry_level(entry) != level_key:
+                    continue
+                if keyword_key and not _entry_matches_keyword(entry, keyword_key):
+                    continue
                 out.append(entry)
+        total = len(out)
+        errors = sum(1 for e in out if _entry_is_error(e))
         # 倒序（最新在前）：基于记录时间戳稳定排序，原始时间无法解析→排最前（视为最早）
         out.sort(
             key=lambda e: (_entry_time(e) is None, _entry_time(e) or _dt.datetime.min),
             reverse=True,
         )
-        return out
+        return out, total, errors
 
-    entries = await asyncio.to_thread(_collect)
+    entries, total, error_count = await asyncio.to_thread(_collect)
     entries = entries[:limit]
+    payload: dict[str, Any] = {
+        # 实际生效的 since（前端据此回显；未过滤时为 None）
+        "since": since_dt.isoformat(timespec="seconds") if since_dt else None,
+        "total": total,
+        "error_count": error_count,
+    }
     if _json:
-        return {"entries": [json.dumps(e, ensure_ascii=False) for e in entries]}
-    return {"entries": entries}
+        payload["entries"] = [json.dumps(e, ensure_ascii=False) for e in entries]
+    else:
+        # 级别由后端派生后注入：JSONL 里没有 level 字段，前端若各自判定会出现
+        # 列表列与过滤器口径不一致（过滤器按 4xx→warn，列表却全显示成 log）
+        payload["entries"] = [{**e, "level": _entry_level(e)} for e in entries]
+    return payload
 
 
 @router.get("/stats")
-async def audit_stats(_: None = Depends(require_auth)):
-    """GET /admin/api/audit/stats — 审计聚合：total / errors / by_model。"""
+async def audit_stats(
+    since: str | None = Query(default=None, description="相对时间：10m | 1h | 6h | 24h | 7d | 30d"),
+    _: None = Depends(require_auth),
+):
+    """GET /admin/api/audit/stats — 审计聚合：total / errors / by_day / by_model。
 
-    def _collect() -> tuple[int, int, dict[str, int]]:
+    ``since`` 与列表端点同源（缺省不限时间）——前端切时间范围时统计卡必须跟着变，
+    否则会出现"列表按 1 小时过滤、统计卡还是全量"的口径分裂。
+
+    ``by_day`` 是 ``[{date, total, error}]`` 按日期升序的数组（前端直接画柱状图）；
+    **仅统计有明确日期的文件**，按 ``since`` 过滤时以文件所属日粗筛（整日纳入/排除），
+    避免为画图把全部 JSONL 逐行读一遍。
+    """
+    since_dt = _parse_since(since)
+
+    def _collect() -> tuple[int, int, list[dict[str, int]], dict[str, int]]:
         total = 0
         errors = 0
         by_model: dict[str, int] = {}
+        day_total: dict[str, int] = {}
+        day_error: dict[str, int] = {}
         for f in _all_audit_files():
+            day = _parse_day(f.name)
+            # 按日粗筛：整日早于 since 下限的文件直接跳过（日粒度足够画图）
+            if since_dt is not None and day is not None and day < since_dt.date():
+                continue
             try:
                 with open(f, encoding="utf-8") as fh:
                     for line in fh:
@@ -231,35 +309,64 @@ async def audit_stats(_: None = Depends(require_auth)):
                         if not isinstance(entry, dict):
                             continue
                         total += 1
-                        if _entry_is_error(entry):
+                        is_err = _entry_is_error(entry)
+                        if is_err:
                             errors += 1
+                        if day is not None:
+                            k = day.isoformat()
+                            day_total[k] = day_total.get(k, 0) + 1
+                            if is_err:
+                                day_error[k] = day_error.get(k, 0) + 1
                         m = entry.get("model")
                         if isinstance(m, str) and m:
                             by_model[m] = by_model.get(m, 0) + 1
             except OSError:
                 continue
-        return total, errors, by_model
+        by_day = [
+            {"date": d, "total": day_total[d], "error": day_error.get(d, 0)}
+            for d in sorted(day_total)
+        ]
+        return total, errors, by_day, by_model
 
-    total, errors, by_model = await asyncio.to_thread(_collect)
-    return {"total": total, "errors": errors, "by_model": by_model}
+    total, errors, by_day, by_model = await asyncio.to_thread(_collect)
+    return {
+        "since": since_dt.isoformat(timespec="seconds") if since_dt else None,
+        "total": total,
+        "errors": errors,
+        "by_day": by_day,
+        "by_model": by_model,
+    }
 
 
 @router.post("/cleanup")
 async def audit_cleanup(body: dict | None = None, _: None = Depends(require_auth)):
-    """POST /admin/api/audit/cleanup — 按 AUDIT_RETENTION_DAYS / AUDIT_MAX_SIZE_MB 清理。
+    """POST /admin/api/audit/cleanup — 清理过期审计分片。
 
-    Body 可选：``{dry_run?: bool = true}``。保留今日文件；超保留期/超尺码的文件
-    从最旧开始删除，直到满足两条约束。
+    Body 可选：``{dry_run?: bool = true, days?: int}``。``days`` 显式给出时按它作保留期
+    （前端"清理 30 天前"按钮就靠这个参数表达意图），缺省回退 ``AUDIT_RETENTION_DAYS``；
+    尺码约束恒取 ``AUDIT_MAX_SIZE_MB``。保留今日文件；超保留期/超尺码的文件从最旧开始删。
+
+    响应：``removed``（应删/已删文件个数）、``freed_bytes``（释放字节）、``deleted``
+    （文件名列表）、``size_mb``（释放 MB，整数除法便于人读）、``dry_run``。
     """
     from modelctl.core.audit import RequestAuditLog
 
-    dry_run = bool((body or {}).get("dry_run", True))
+    payload = body if isinstance(body, dict) else {}
+    dry_run = bool(payload.get("dry_run", True))
+    days_raw = payload.get("days")
+    if days_raw is None:
+        retention_days = _int_env("AUDIT_RETENTION_DAYS", 30)
+    else:
+        try:
+            retention_days = max(0, int(float(days_raw)))
+        except (TypeError, ValueError):
+            retention_days = _int_env("AUDIT_RETENTION_DAYS", 30)
 
     # 为了与 core.audit 完全一致的清理口径，临时构造一个 RequestAuditLog，
     # 走 collect_dead_files 权威计算应删文件（纯函数，不起线程）。
     log = RequestAuditLog(
         data_dir=_audit_dir(),
-        retention_days=_int_env("AUDIT_RETENTION_DAYS", 30),
+        retention_days=retention_days,
         max_size_mb=_int_env("AUDIT_MAX_SIZE_MB", 512),
         cleanup_interval_s=float("inf"),  # 不起线程，collect 是同步纯计算
     )
@@ -272,7 +379,11 @@ async def audit_cleanup(body: dict | None = None, _: None = Depends(require_auth
             log.destroy()
         deleted: list[str] = []
         freed = 0
-        if not dry_run:
+        if dry_run:
+            # 预览同样统计预计释放量：只给文件个数不足以判断"这次清理值不值"。
+            for p in dead:
+                freed += p.stat().st_size if p.exists() else 0
+        else:
             for p in dead:
                 size = p.stat().st_size if p.exists() else 0
                 try:
@@ -282,14 +393,18 @@ async def audit_cleanup(body: dict | None = None, _: None = Depends(require_auth
                 except OSError as exc:
                     logger.warning(f"审计日志删除失败 {p.name}: {exc}")
                     continue
-        return deleted, freed // (1024 * 1024), dead
+        return deleted, freed, dead
 
-    deleted, size_mb, dead = await asyncio.to_thread(_work)
-    # dry_run 时返回即将删除的沙箱列表
+    deleted, freed_bytes, dead = await asyncio.to_thread(_work)
+    names = deleted if not dry_run else [p.name for p in dead]
     return {
-        "deleted": deleted if not dry_run else [p.name for p in dead],
-        "size_mb": size_mb,
+        "ok": True,
+        "removed": len(names),
+        "freed_bytes": freed_bytes,
+        "size_mb": freed_bytes // (1024 * 1024),
+        "deleted": names,
         "dry_run": dry_run,
+        "retention_days": retention_days,
     }
 
 
