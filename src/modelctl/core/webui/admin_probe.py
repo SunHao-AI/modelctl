@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Request
@@ -150,18 +149,8 @@ async def health(request: Request):
     }
 
 
-# 显式大池：51 个 profile 并发 to_thread 时会共用默认线程池（~13 worker）→
-# 排队后总耗时 ≈ 4 波 × 单 worker 2.3s ≈ 11s。这里扩到 64 让 51+ 个端口
-# 探测 worker 真正全部并发，总耗时 ≈ max(单个 1.5s 端口 timeout, probe)。
-_OVERVIEW_EXECUTOR: "ThreadPoolExecutor | None" = None
-
-
-def _overview_executor() -> "ThreadPoolExecutor":
-    global _OVERVIEW_EXECUTOR
-    if _OVERVIEW_EXECUTOR is None:
-        _OVERVIEW_EXECUTOR = ThreadPoolExecutor(max_workers=64,
-                                                 thread_name_prefix="overview-probe")
-    return _OVERVIEW_EXECUTOR
+# 探测大池已收敛到 `admin_models.probe_executor()`（webui 进程内单例，64 worker）：
+# 本端点与 /admin/api/models 共用同一个池，冷路径都真正并发、热路径都命中 TTL 缓存。
 
 
 @router.get("/overview")
@@ -189,13 +178,19 @@ async def overview(request: Request, _: None = Depends(require_auth)):
               并发。wave B 总耗时 ≈ max(单端口 1.5s) ≈ 1.5-3s。
     - 累计单次响应目标：wave A 1-2s + wave B 1.5-3s = 2.5-5s，安全落在前端
       30s axios 超时下方 6x，为 wait_for / 浏览器 cancel 留足余量。
+    - **2026-09-10 叠加 TTL 缓存**：wave B 的运行态判定改走 `build_summaries` →
+      `probe_availability`，命中 `app.state.group_route_cache` 的 avail 层（默认 5s，
+      > 本端点 3s 轮询间隔）。稳态下约每 2 次轮询才真探一轮，wave B 常见耗时 → ~0ms；
+      同时该缓存与 `/admin/api/models` 共享，两个视图来回切不再各探一轮。
+      **必须保留 64-worker 大池**：缓存只是降低探测频率，未命中的那一轮仍是 51 个
+      并发 1.5s 探测，退回默认 13 worker 就又变成上面记录的 4 波排队 ≈ 11s。
     """
     from modelctl.core.capabilities import probe
     from modelctl.core.gateway import GATEWAY_PORT
     from modelctl.core.profile import list_profiles
     from modelctl.core.process import is_running
     from modelctl.core.stats import USAGE_PORT
-    from modelctl.core.webui.admin_models import _model_summary
+    from modelctl.core.webui.admin_models import build_summaries, probe_executor
 
     # wave A：纯 CPU / 文件类探测，无端口阻塞，并行派发。
     wave_a = await asyncio.gather(
@@ -206,13 +201,9 @@ async def overview(request: Request, _: None = Depends(require_auth)):
     )
     profiles, caps, is_stats, is_gateway = wave_a
 
-    # wave B：51 × _model_summary（每个内部 is_running_any 单次 1.5s 端口探测）
-    # 显式走 64-worker 池让 51 worker 全部并发（vs 默认 13 worker 排队波次）。
-    summaries = await asyncio.gather(
-        *(asyncio.get_running_loop().run_in_executor(
-            _overview_executor(), _model_summary, p
-        ) for p in profiles)
-    )
+    # wave B：运行态判定走共享 TTL 缓存；未命中项显式走 64-worker 大池，让 51 个
+    # 端口探测真正全部并发（vs 默认 12 worker 排队波次）。
+    summaries = await build_summaries(request, profiles, executor=probe_executor())
 
     # 总显存：优先 vram_total_mb_per_gpu(list[int]) 求和，否则回退 vram_total_mb
     gpu_count = int(getattr(caps, "gpu_count", 0) or 0)
