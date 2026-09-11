@@ -305,6 +305,21 @@ def test_anthropic_messages_404_unknown_model():
     assert resp.status_code == 404
 
 
+def test_anthropic_messages_backend_unreachable_audited(tmp_path):
+    """anthropic 分支 502 也必须落审计（该分支早前无审计，且变量域与 OpenAI 分支不同）。"""
+
+    def upstream(request):
+        raise httpx.ConnectError("connection refused")
+
+    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None, "http://upstream/", group="qwen3.8")}
+    app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
+    resp = _run(_post(app, "/v1/messages", json={"model": "qwen3.8", "messages": []}))
+    assert resp.status_code == 502
+    rows = _read_audit_records(tmp_path)
+    assert rows[-1]["status_code"] == 502
+    assert rows[-1]["path"] == "messages"
+
+
 def test_reasoning_effort_normalized_openai():
     """OpenAI 端点：Claude Code 的 reasoning_effort=high 映射为 vLLM 支持的 xhigh。"""
     captured = {}
@@ -606,13 +621,206 @@ def test_resolve_model_group_as_default():
     assert target is members[0]
 
 
+# ---------- 家族路由 TTL 缓存（GroupRouteCache）----------
+
+
+def _group_members():
+    return [GatewayModel("qwen3.8-vllm", "vllm", "http://127.0.0.1:2", "q", None, "http://127.0.0.1:2/")]
+
+
+def test_group_route_cache_hit_skips_probe():
+    """TTL 内第二次解析不得再探测 /health——这是本缓存存在的全部理由。"""
+    from modelctl.core.gateway import GroupRouteCache
+
+    members = _group_members()
+    groups = {"qwen3.8": members}
+    now = [1000.0]
+    cache = GroupRouteCache(2.0, clock=lambda: now[0])
+    with patch("modelctl.core.gateway.is_running_any", return_value=True) as probe:
+        assert resolve_model({}, "qwen3.8", None, groups=groups, group_cache=cache) is members[0]
+        assert resolve_model({}, "qwen3.8", None, groups=groups, group_cache=cache) is members[0]
+    assert probe.call_count == 1
+
+
+def test_group_route_cache_expires_and_reprobes():
+    from modelctl.core.gateway import GroupRouteCache
+
+    members = _group_members()
+    groups = {"qwen3.8": members}
+    now = [1000.0]
+    cache = GroupRouteCache(2.0, clock=lambda: now[0])
+    with patch("modelctl.core.gateway.is_running_any", return_value=True) as probe:
+        resolve_model({}, "qwen3.8", None, groups=groups, group_cache=cache)
+        now[0] += 2.001
+        resolve_model({}, "qwen3.8", None, groups=groups, group_cache=cache)
+    assert probe.call_count == 2
+
+
+def test_group_route_cache_negative_result_is_cached():
+    """全家族不可用时的 None 同样缓存：宕机态下探测最贵，不能每请求重复付。"""
+    from modelctl.core.gateway import GroupRouteCache
+
+    groups = {"qwen3.8": _group_members()}
+    now = [1000.0]
+    cache = GroupRouteCache(2.0, clock=lambda: now[0])
+    with patch("modelctl.core.gateway.is_running_any", return_value=False) as probe:
+        assert resolve_model({}, "qwen3.8", None, groups=groups, group_cache=cache) is None
+        assert resolve_model({}, "qwen3.8", None, groups=groups, group_cache=cache) is None
+    assert probe.call_count == 1
+
+
+def test_group_route_cache_invalidate_forces_reprobe():
+    """502 主动失效口径：invalidate 后下一请求必须重新探测（故障切换不等 TTL）。"""
+    from modelctl.core.gateway import GroupRouteCache
+
+    members = _group_members()
+    groups = {"qwen3.8": members}
+    cache = GroupRouteCache(2.0, clock=lambda: 1000.0)
+    with patch("modelctl.core.gateway.is_running_any", return_value=True) as probe:
+        resolve_model({}, "qwen3.8", None, groups=groups, group_cache=cache)
+        cache.invalidate("qwen3.8")
+        resolve_model({}, "qwen3.8", None, groups=groups, group_cache=cache)
+    assert probe.call_count == 2
+
+
+def test_group_route_cache_ttl_zero_disables_caching():
+    from modelctl.core.gateway import GroupRouteCache
+
+    groups = {"qwen3.8": _group_members()}
+    cache = GroupRouteCache(0, clock=lambda: 1000.0)
+    with patch("modelctl.core.gateway.is_running_any", return_value=True) as probe:
+        resolve_model({}, "qwen3.8", None, groups=groups, group_cache=cache)
+        resolve_model({}, "qwen3.8", None, groups=groups, group_cache=cache)
+    assert probe.call_count == 2
+
+
+def test_resolve_model_without_cache_probes_every_time():
+    """未注入缓存（CLI / 既有调用方）行为不变：每次实探，无回归。"""
+    groups = {"qwen3.8": _group_members()}
+    with patch("modelctl.core.gateway.is_running_any", return_value=True) as probe:
+        resolve_model({}, "qwen3.8", None, groups=groups)
+        resolve_model({}, "qwen3.8", None, groups=groups)
+    assert probe.call_count == 2
+
+
+def test_proxy_502_invalidates_group_route_cache():
+    """上游不可达 → 缓存必须作废，否则成员挂掉后 TTL 内所有请求继续打同一死端口。"""
+    from modelctl.core.gateway import GroupRouteCache
+
+    members = _group_members()
+    members[0].group = "qwen3.8"
+
+    def upstream(request):
+        raise httpx.ConnectError("connection refused")
+
+    app = create_app({}, groups={"qwen3.8": members}, transport=httpx.MockTransport(upstream))
+    cache: GroupRouteCache = app.state.group_route_cache
+    with patch("modelctl.core.gateway.is_running_any", return_value=True):
+        # 先填充缓存
+        assert resolve_model({}, "qwen3.8", None, groups={"qwen3.8": members}, group_cache=cache) is members[0]
+        resp = _run(_post(app, "/v1/chat/completions", json={"model": "qwen3.8", "messages": []}))
+    assert resp.status_code == 502
+    # 502 路径已失效该家族 → 再解析必须重新探测（缓存里已无条目）
+    with patch("modelctl.core.gateway.is_running_any", return_value=True) as probe:
+        resolve_model({}, "qwen3.8", None, groups={"qwen3.8": members}, group_cache=cache)
+    assert probe.call_count == 1
+
+
+def test_group_route_ttl_env_override(monkeypatch):
+    """两层 TTL 各自可配；非法值回退默认而非崩在启动期。"""
+    from modelctl.core.gateway import AVAIL_CACHE_TTL_S, GROUP_ROUTE_CACHE_TTL_S
+
+    monkeypatch.setenv("GATEWAY_GROUP_ROUTE_TTL", "7.5")
+    monkeypatch.setenv("GATEWAY_AVAIL_CACHE_TTL", "11")
+    app = create_app({}, groups={}, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    assert app.state.group_route_cache.ttl == 7.5
+    assert app.state.group_route_cache.avail_ttl == 11.0
+
+    monkeypatch.setenv("GATEWAY_GROUP_ROUTE_TTL", "not-a-number")
+    monkeypatch.setenv("GATEWAY_AVAIL_CACHE_TTL", "")
+    app = create_app({}, groups={}, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    assert app.state.group_route_cache.ttl == GROUP_ROUTE_CACHE_TTL_S
+    assert app.state.group_route_cache.avail_ttl == AVAIL_CACHE_TTL_S
+
+
 def test_list_models_shows_group_when_member_healthy():
+    """家族成员不在 registry（registry 传空）时仍须被探测到——探测集是并集。"""
     members = [GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "q", None, "http://upstream/")]
     app = create_app({}, groups={"qwen3.8": members}, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
     with patch("modelctl.core.gateway.is_running_any", return_value=True):
         resp = _run(_get(app, "/v1/models"))
     assert resp.status_code == 200
     assert [m["id"] for m in resp.json()["data"]] == ["qwen3.8"]
+
+
+# ---------- /v1/models 接入可用性缓存 ----------
+
+
+def test_list_models_ttl_hit_skips_probes(monkeypatch):
+    """avail TTL 内第二次列表请求不得再探测——Web UI / CLI 高频轮询时的主要收益。"""
+    monkeypatch.setenv("GATEWAY_AVAIL_CACHE_TTL", "600")
+    members = [GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "q", None, "http://upstream/")]
+    app = create_app({}, groups={"qwen3.8": members}, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    with patch("modelctl.core.gateway.is_running_any", return_value=True) as probe:
+        first = _run(_get(app, "/v1/models"))
+        second = _run(_get(app, "/v1/models"))
+    assert [m["id"] for m in first.json()["data"]] == ["qwen3.8"]
+    assert [m["id"] for m in second.json()["data"]] == ["qwen3.8"]
+    assert probe.call_count == 1
+
+
+def test_list_models_ttl_zero_probes_every_call(monkeypatch):
+    """avail 缓存显式关闭时列表接口回到每请求实探（排障口径）。
+
+    注意关的是 `GATEWAY_AVAIL_CACHE_TTL` 而非 route 层：/v1/models 走 avail 层，
+    route 层 TTL 再小也不会让列表多探一次——两层独立是刻意的。
+    """
+    monkeypatch.setenv("GATEWAY_AVAIL_CACHE_TTL", "0")
+    members = [GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "q", None, "http://upstream/")]
+    app = create_app({}, groups={"qwen3.8": members}, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    with patch("modelctl.core.gateway.is_running_any", return_value=True) as probe:
+        _run(_get(app, "/v1/models"))
+        _run(_get(app, "/v1/models"))
+    assert probe.call_count == 2
+
+
+def test_list_models_only_probes_stale_members(monkeypatch):
+    """部分命中时只派发未命中项：新出现的模型探测，已缓存的复用。"""
+    monkeypatch.setenv("GATEWAY_AVAIL_CACHE_TTL", "600")
+    a = GatewayModel("a-vllm", "vllm", "http://upstream", "a", None, "http://upstream/")
+    b = GatewayModel("b-vllm", "vllm", "http://upstream", "b", None, "http://upstream/")
+    registry = {"a-vllm": a}
+    app = create_app(registry, groups={}, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    with patch("modelctl.core.gateway.is_running_any", return_value=True) as probe:
+        _run(_get(app, "/v1/models"))
+        assert probe.call_count == 1
+        registry["b-vllm"] = b
+        resp = _run(_get(app, "/v1/models"))
+    assert probe.call_count == 2  # 仅 b 新探，a 命中缓存
+    assert sorted(m["id"] for m in resp.json()["data"]) == ["a-vllm", "b-vllm"]
+
+
+def test_upstream_502_invalidates_model_availability(monkeypatch):
+    """502 必须同时清掉可用性判定：否则 /v1/models 会在 TTL 内继续把死端口列为可用模型。"""
+    monkeypatch.setenv("GATEWAY_AVAIL_CACHE_TTL", "600")
+
+    def upstream(request):
+        raise httpx.ConnectError("connection refused")
+
+    reg = {"ds": GatewayModel("deepseek-v4-flash", "llamacpp", "http://upstream", "deepseek-v4-flash", None, "http://upstream/")}
+    app = create_app(reg, default_model="ds", transport=httpx.MockTransport(upstream))
+
+    with patch("modelctl.core.gateway.is_running_any", return_value=True):
+        resp = _run(_get(app, "/v1/models"))
+    assert [m["id"] for m in resp.json()["data"]] == ["deepseek-v4-flash"]
+
+    resp = _run(_post(app, "/v1/chat/completions", json={"model": "ds", "messages": []}))
+    assert resp.status_code == 502
+
+    # 成员已不可用；若 502 未清缓存，这里会命中陈旧的 True 而错误列出
+    with patch("modelctl.core.gateway.is_running_any", return_value=False):
+        resp = _run(_get(app, "/v1/models"))
+    assert resp.json()["data"] == []
 
 
 def test_list_models_hides_group_when_no_member_healthy():
@@ -947,6 +1155,103 @@ def test_proxy_streaming_chunk_split_usage_line():
     assert collector.calls == [(8, 2)]
 
 
+# ---------- 审计字段：upstream_request_id / cached_tokens / 失败留痕 ----------
+
+
+def _read_audit_records(tmp_path) -> list[dict]:
+    """读取 AUDIT_DIR（conftest 已隔离到 tmp_path/audit）当日全部 JSONL 记录。"""
+    files = sorted((tmp_path / "audit").glob("modelctl-*.jsonl"))
+    rows: list[dict] = []
+    for f in files:
+        for line in f.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rows.append(json.loads(line))
+    return rows
+
+
+def test_audit_records_upstream_request_id_and_cached_tokens(tmp_path):
+    """非流式：上游 X-Request-Id 与 usage.prompt_tokens_details.cached_tokens 都要落审计。"""
+
+    def upstream(request):
+        return httpx.Response(
+            200,
+            headers={"x-request-id": "req-abc-123"},
+            json={
+                "id": "1",
+                "object": "chat.completion",
+                "model": "ds",
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 5,
+                    "prompt_tokens_details": {"cached_tokens": 64},
+                },
+            },
+        )
+
+    app = create_app({"ds": _make_model()}, default_model="ds", transport=httpx.MockTransport(upstream))
+    resp = _run(_post(app, "/v1/chat/completions", json={"model": "ds", "messages": []}))
+    assert resp.status_code == 200
+    rows = _read_audit_records(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["upstream_request_id"] == "req-abc-123"
+    assert rows[0]["cached_tokens"] == 64
+
+
+def test_audit_cached_tokens_none_when_flag_off(tmp_path):
+    """引擎未开 --enable-prompt-tokens-details → cached_tokens 记 None（不得伪装成 0 命中）。"""
+
+    def upstream(request):
+        return httpx.Response(
+            200,
+            json={"id": "1", "model": "ds", "usage": {"prompt_tokens": 10, "completion_tokens": 2}},
+        )
+
+    app = create_app({"ds": _make_model()}, default_model="ds", transport=httpx.MockTransport(upstream))
+    _run(_post(app, "/v1/chat/completions", json={"model": "ds", "messages": []}))
+    rows = _read_audit_records(tmp_path)
+    assert "cached_tokens" in rows[0]
+    assert rows[0]["cached_tokens"] is None
+    assert rows[0]["upstream_request_id"] is None
+
+
+def test_audit_records_upstream_error_response(tmp_path):
+    """上游 4xx 原样透传，但审计须留下 status_code 与错误体，否则排障无上下文。"""
+
+    def upstream(request):
+        return httpx.Response(400, json={"error": {"message": "maximum context length exceeded"}})
+
+    app = create_app({"ds": _make_model()}, default_model="ds", transport=httpx.MockTransport(upstream))
+    resp = _run(_post(app, "/v1/chat/completions", json={"model": "ds", "messages": []}))
+    assert resp.status_code == 400
+    rows = _read_audit_records(tmp_path)
+    assert rows[-1]["status_code"] == 400
+    assert "maximum context length" in rows[-1]["error"]
+
+
+def test_audit_records_model_not_found(tmp_path):
+    """model 解析失败（404）也须留痕，且 model 字段保留调用方原始拼写。"""
+    app = create_app({"ds": _make_model()}, default_model=None, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    resp = _run(_post(app, "/v1/chat/completions", json={"model": "typo-model", "messages": []}))
+    assert resp.status_code == 404
+    rows = _read_audit_records(tmp_path)
+    assert rows[-1]["status_code"] == 404
+    assert rows[-1]["model"] == "typo-model"
+
+
+def test_audit_records_backend_unreachable(tmp_path):
+    """后端不可达（502）是最需要留痕的失败：引擎宕机时审计里必须能看到。"""
+
+    def upstream(request):
+        raise httpx.ConnectError("connection refused")
+
+    app = create_app({"ds": _make_model()}, default_model="ds", transport=httpx.MockTransport(upstream))
+    resp = _run(_post(app, "/v1/chat/completions", json={"model": "ds", "messages": []}))
+    assert resp.status_code == 502
+    rows = _read_audit_records(tmp_path)
+    assert rows[-1]["status_code"] == 502
+    assert "后端不可达" in rows[-1]["error"]
+
+
 # ---------- 客户端鉴权（GATEWAY_CLIENT_API_KEY，fail-closed） ----------
 # _CLIENT_KEY 已上移到 _isolate_cache_dir 之前（autouse fixture 引用它）
 
@@ -1115,3 +1420,24 @@ def test_v1_all_endpoints_fail_closed_when_unconfigured(monkeypatch):
         resp = _run(call(app, path, headers={"Authorization": f"Bearer {_CLIENT_KEY}"}))
         assert resp.status_code == 401, path
         assert "not configured" in resp.json()["error"]["message"]
+
+
+# ---- GW-P1-1：客户端可控 max_tokens 不得让 gate 之前抛异常（未认证 500） ----
+
+
+@pytest.mark.parametrize("bad", ["abc", None, "", {}, [], 1.5, "1e999", -5, True, 10**18])
+def test_tpm_estimate_survives_hostile_max_tokens(bad):
+    """旧实现裸 int() → 匿名请求用一个 "abc" 就能打出 500。"""
+    from modelctl.core.gateway import _accounts_tpm_estimate
+
+    est = _accounts_tpm_estimate({"messages": [{"role": "user", "content": "hi"}], "max_tokens": bad})
+    assert isinstance(est, int)
+    assert est >= 1
+
+
+def test_tpm_estimate_respects_valid_max_tokens():
+    from modelctl.core.gateway import _accounts_tpm_estimate
+
+    est = _accounts_tpm_estimate({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 512})
+    # prompt("hi"=2 字符 //4=0) + completion 512；合法值必须原样进估算，不被夹取
+    assert est == 512

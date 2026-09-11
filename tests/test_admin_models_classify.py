@@ -41,7 +41,7 @@ def test_do_start_exception_venv_missing_attaches_code(monkeypatch):
     import modelctl.core.all_service as all_service
     from modelctl.core.envs import EngineEnvError
 
-    def boom(profile, caps, timeout, on_progress=None):
+    def boom(profile, caps, timeout, on_progress=None, gpus=None):
         raise EngineEnvError("vllm 的专用环境未创建，请先执行：modelctl env setup vllm")
 
     monkeypatch.setattr(all_service, "start_profile", boom)
@@ -56,7 +56,7 @@ def test_do_start_error_result_unactionable_no_code(monkeypatch):
     import modelctl.core.all_service as all_service
     from modelctl.core.all_service import ComponentResult
 
-    def fail(profile, caps, timeout, on_progress=None):
+    def fail(profile, caps, timeout, on_progress=None, gpus=None):
         return ComponentResult("model:x", "error", "引擎进程提前退出")
 
     monkeypatch.setattr(all_service, "start_profile", fail)
@@ -71,7 +71,7 @@ def test_do_start_requirement_error_keeps_exit_code_2(monkeypatch):
     import modelctl.core.all_service as all_service
     from modelctl.engines.base import RequirementError
 
-    def boom(profile, caps, timeout, on_progress=None):
+    def boom(profile, caps, timeout, on_progress=None, gpus=None):
         raise RequirementError("端口 8101 已被占用（nginx:80）")
 
     monkeypatch.setattr(all_service, "start_profile", boom)
@@ -85,7 +85,7 @@ def test_do_restart_exception_venv_missing_attaches_code(monkeypatch):
     import modelctl.core.all_service as all_service
     from modelctl.core.envs import EngineEnvError
 
-    def boom(profile, caps, timeout, on_progress=None):
+    def boom(profile, caps, timeout, on_progress=None, gpus=None):
         raise EngineEnvError("vllm 的专用环境未创建，请先执行：modelctl env setup vllm")
 
     monkeypatch.setattr(all_service, "restart_profile", boom)
@@ -224,3 +224,86 @@ def test_model_summary_falls_back_to_pid_file_when_health_probe_off(monkeypatch)
 
     s = am._model_summary(p)
     assert s["state"] == "stopped"
+
+
+# ---------- build_summaries 共享 TTL 缓存（/admin/api/models 与 /overview 合流）----------
+
+
+def _summary_profile(name: str) -> SimpleNamespace:
+    """_model_summary 只用到这几个字段，鸭子类型即可。"""
+    return SimpleNamespace(
+        name=name, group=None, engine="vllm", variant=None,
+        port=8108, aliases=[], api_key="k",
+    )
+
+
+def _fake_request(cache):
+    from modelctl.core.gateway import GroupRouteCache
+
+    assert isinstance(cache, GroupRouteCache)
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(group_route_cache=cache)))
+
+
+def test_build_summaries_reuses_cache_across_calls(monkeypatch):
+    """两次 build_summaries 只探一轮——overview 3s 轮询与列表视图共用同一份判定。"""
+    import modelctl.core.process as process
+    from modelctl.core.gateway import GroupRouteCache
+
+    calls = []
+    monkeypatch.setattr(process, "is_running_any",
+                        lambda name, profile: calls.append(name) or True, raising=True)
+    req = _fake_request(GroupRouteCache(2.0, avail_ttl=600.0))
+    profiles = [_summary_profile("a"), _summary_profile("b")]
+
+    first = asyncio.run(am.build_summaries(req, profiles))
+    second = asyncio.run(am.build_summaries(req, profiles))
+
+    assert [s["state"] for s in first] == ["running", "running"]
+    assert [s["state"] for s in second] == ["running", "running"]
+    assert calls == ["a", "b"]  # 第二次零探测
+
+
+def test_build_summaries_uses_injected_executor(monkeypatch):
+    """overview 的 64-worker 大池必须透传到探测派发（退回默认池即旧 11s 排队回归）。"""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    import modelctl.core.process as process
+    from modelctl.core.gateway import GroupRouteCache
+
+    seen_threads = []
+
+    def probe(name, profile):
+        seen_threads.append(threading.current_thread().name)
+        return True
+
+    monkeypatch.setattr(process, "is_running_any", probe, raising=True)
+    req = _fake_request(GroupRouteCache(2.0, avail_ttl=600.0))
+
+    pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="probe-test")
+    try:
+        asyncio.run(am.build_summaries(req, [_summary_profile("a")], executor=pool))
+    finally:
+        pool.shutdown(wait=True)
+
+    assert seen_threads and all(n.startswith("probe-test") for n in seen_threads), (
+        f"探测未走注入的 executor：{seen_threads}"
+    )
+
+
+def test_build_summaries_zero_avail_ttl_probes_every_call(monkeypatch):
+    """avail 缓存关闭时每次调用都实探（排障口径）。"""
+    import modelctl.core.process as process
+    from modelctl.core.gateway import GroupRouteCache
+
+    calls = []
+    monkeypatch.setattr(process, "is_running_any",
+                        lambda name, profile: calls.append(name) or False, raising=True)
+    req = _fake_request(GroupRouteCache(2.0, avail_ttl=0))
+    profiles = [_summary_profile("a")]
+
+    asyncio.run(am.build_summaries(req, profiles))
+    second = asyncio.run(am.build_summaries(req, profiles))
+
+    assert calls == ["a", "a"]
+    assert second[0]["state"] == "stopped"
