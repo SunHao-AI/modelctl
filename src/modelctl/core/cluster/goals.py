@@ -376,13 +376,21 @@ class GoalService:
                                stage=stage, stage_reason=reason[:500], error_class=error_class)
 
     def record_model_states(self, node_id: str, profiles_reported: dict, now: float) -> None:
-        """心跳回流：全量覆盖该节点的 model_states（空 dict 表示"当前无在跑模型"）。"""
-        seen: set[str] = set()
+        """心跳回流：全量覆盖该节点的 model_states（空 dict 表示"当前无在跑模型"）。
+
+        profiles 顶层键 = worker 侧 stem（**不含 engine**）；候选行身份 `(stem, engine)`，
+        因此以 `(node_id, stem, engine)` 联合主键承载（同 stem 多引擎共存
+        vllm + aphrodite 不再互相覆盖）。worker 上报的 `info.get("engine")` 缺失时
+        维护空串——存值和展示走同一口径（`_goal_view` 也按 goal 声明 engine 回退空串匹配）。
+        """
+        seen: dict[tuple[str, str], None] = {}
         for name, info in profiles_reported.items():
             if not isinstance(info, dict) or not profiles.is_safe_name(str(name)):
                 continue
-            seen.add(str(name))
+            engine = str(info.get("engine", "") or "")[:64]
+            seen[(str(name), engine)] = None
             self.store.upsert_model_state(node_id=node_id, profile=str(name),
+                                          engine=engine,
                                           state=str(info.get("state", "unknown"))[:32],
                                           gpu=_int_list(info.get("gpu")),
                                           port=_safe_int(info.get("port")),
@@ -390,9 +398,10 @@ class GoalService:
                                           reason=str(info.get("reason", ""))[:500],
                                           error_class=str(info.get("error_class", ""))[:64],
                                           now=now)
+        # 旧行剪枝：现存 (profile, engine) 不在心跳上报集合里 → 删
         for row in self.store.list_model_states(node_id=node_id):
-            if row["profile"] not in seen:
-                self.store.delete_model_state(node_id, row["profile"])
+            if (row["profile"], row["engine"]) not in seen:
+                self.store.delete_model_state(node_id, row["profile"], row["engine"])
 
     # ---------------- 内部 ----------------
     def _abort(self, reason: str) -> dict[str, Any]:

@@ -7,8 +7,9 @@
 group: qwen2.5-0.5b
 # alias：短名别名，网关/nginx 路由可用 `qwen2.5-0.5b` 指代本模型（如 URL /<node>/llm/qwen2.5-0.5b/v1）
 alias: qwen2.5-0.5b
-# port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）；避开 18888-18896/18909，用 18897
-port: 18897
+# port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）；避开 18888-18896/18909，用 18910
+# 单机 mock 测试约定 ports：vllm 18911、llamacpp 18910（见 docs/cluster-mock-test-steps.md §0）
+port: 18910
 # api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值
 api_key: ${API_KEY}
 

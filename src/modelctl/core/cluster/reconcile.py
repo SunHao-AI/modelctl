@@ -43,7 +43,13 @@ from typing import Any
 import yaml
 from loguru import logger
 
-from modelctl.core.capabilities import Capabilities, all_vram_total_mb, free_vram_total_mb, probe
+from modelctl.core.capabilities import (
+    Capabilities,
+    all_vram_total_mb,
+    docker_ready,
+    free_vram_total_mb,
+    probe,
+)
 from modelctl.core.cluster import config, sync, wsproto
 from modelctl.core.cluster.profiles import profile_sha
 from modelctl.core.envfile import PROJECT_ROOT
@@ -61,18 +67,24 @@ DEGRADE_LIMIT = 3
 _CAPS_TTL_S = 30.0
 
 # --- 8 态 stage（spec §7.2）--------------------------------------------------
-PENDING_PROFILE_SYNC = "PENDING_PROFILE_SYNC"   # 中心已声明，本地还没有这份文件
-PROFILE_SYNCED = "PROFILE_SYNCED"               # 文件已落盘且 sha 相符
-RUNTIME_OK = "RUNTIME_OK"                       # 运行时具备启动条件
-STARTING = "STARTING"                           # 正在起（含下载权重/健康检查等待）
+PENDING_PROFILE_SYNC = "PENDING_PROFILE_SYNC"  # 中心已声明，本地还没有这份文件
+PROFILE_SYNCED = "PROFILE_SYNCED"  # 文件已落盘且 sha 相符
+RUNTIME_OK = "RUNTIME_OK"  # 运行时具备启动条件
+STARTING = "STARTING"  # 正在起（含下载权重/健康检查等待）
 READY = "READY"
-DEGRADED = "DEGRADED"                           # 进程在但健康检查连续失败
-FAILED = "FAILED"                               # 终态：需 retry 或 goal 变更
+DEGRADED = "DEGRADED"  # 进程在但健康检查连续失败
+FAILED = "FAILED"  # 终态：需 retry 或 goal 变更
 STOPPED = "STOPPED"
 
 VALID_STAGES: tuple[str, ...] = (
-    PENDING_PROFILE_SYNC, PROFILE_SYNCED, RUNTIME_OK, STARTING,
-    READY, DEGRADED, FAILED, STOPPED,
+    PENDING_PROFILE_SYNC,
+    PROFILE_SYNCED,
+    RUNTIME_OK,
+    STARTING,
+    READY,
+    DEGRADED,
+    FAILED,
+    STOPPED,
 )
 
 #: stage → 中心 `model_states.state`（与单机 CLI 的八态对齐，dashboard 一套渲染）。
@@ -83,9 +95,14 @@ VALID_STAGES: tuple[str, ...] = (
 #: import，避免 worker 顶层背中心的 store），任一侧改词表立刻炸，而不是让中心
 #: gate 的卡位冲突/占满两项检查静默失效。
 _STATE_OF_STAGE: dict[str, str] = {
-    PENDING_PROFILE_SYNC: "pending", PROFILE_SYNCED: "synced", RUNTIME_OK: "ready_to_start",
-    STARTING: "starting", READY: "running", DEGRADED: "degraded",
-    FAILED: "failed", STOPPED: "stopped",
+    PENDING_PROFILE_SYNC: "pending",
+    PROFILE_SYNCED: "synced",
+    RUNTIME_OK: "ready_to_start",
+    STARTING: "starting",
+    READY: "running",
+    DEGRADED: "degraded",
+    FAILED: "failed",
+    STOPPED: "stopped",
 }
 
 #: 占卡三态对应的 stage（READY/STARTING/DEGRADED）——"卡还握着"的三态；
@@ -110,17 +127,23 @@ def _verify_state_vocabulary() -> None:
 
     occupying = {_STATE_OF_STAGE[s] for s in _OCCUPYING_STAGES}
     if not occupying <= GPU_OCCUPYING_STATES:
-        raise RuntimeError(f"_STATE_OF_STAGE 占卡态 {sorted(occupying - GPU_OCCUPYING_STATES)} "
-                           "不在 goals.GPU_OCCUPYING_STATES 词表内（两侧必须同源，裁决1）")
+        raise RuntimeError(f"_STATE_OF_STAGE 占卡态 {sorted(occupying - GPU_OCCUPYING_STATES)} " "不在 goals.GPU_OCCUPYING_STATES 词表内（两侧必须同源，裁决1）")
     free = {_STATE_OF_STAGE[s] for s in VALID_STAGES} - occupying
     if leaked := free & GPU_OCCUPYING_STATES:
-        raise RuntimeError(f"_STATE_OF_STAGE 非占卡态 {sorted(leaked)} 混入词表："
-                           "会被中心当作握卡永久占用（裁决1）")
+        raise RuntimeError(f"_STATE_OF_STAGE 非占卡态 {sorted(leaked)} 混入词表：" "会被中心当作握卡永久占用（裁决1）")
     _vocabulary_checked = True
 
+
 ERROR_CLASSES: tuple[str, ...] = (
-    "venv_missing", "gpu_lock", "oom", "startup_timeout", "model_download_failed",
-    "runtime_capability", "profile_invalid", "port_conflict", "health_lost",
+    "venv_missing",
+    "gpu_lock",
+    "oom",
+    "startup_timeout",
+    "model_download_failed",
+    "runtime_capability",
+    "profile_invalid",
+    "port_conflict",
+    "health_lost",
 )
 
 #: 有序子串规则表：先具体后笼统。`[gpu_lock]` 带方括号前缀（gpu_lock.py 的报错格式），
@@ -198,15 +221,31 @@ def _raw_of(text: str) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
-def runtime_readiness(engine: str, raw: dict[str, Any],
-                      caps: Capabilities) -> tuple[bool, str, str]:
+def _docker_image_of(engine: str, raw: dict[str, Any]) -> str:
+    """取该引擎生效的 docker_image 声明（与引擎适配器 `_resolve_runtime` 同层级）。
+
+    profile.yaml 把引擎参数放在**引擎段**下（`vllm: { docker_image: ... }`），适配器
+    读的是 `profile.engine_config`（= `raw[engine]`）。reconcile 拿到的是 YAML 顶层
+    原文，必须下探一层再判，否则配了容器旁路的 profile 会被误判成"venv 未创建"而
+    终态——`runtime_readiness` 的 docker 分支形同虚设。顶层 `docker_image` 一并兼容
+    （历史 profile 可能平铺），二者任一非空即视为声明了容器 runtime。
+    """
+    section = raw.get(engine)
+    if isinstance(section, dict):
+        img = str(section.get("docker_image") or "").strip()
+        if img:
+            return img
+    return str(raw.get("docker_image") or "").strip()
+
+
+def runtime_readiness(engine: str, raw: dict[str, Any], caps: Capabilities) -> tuple[bool, str, str]:
     """运行时是否具备启动该引擎的条件 → (ok, reason, error_class)。
 
     托管引擎看 venv，但 YAML 显式声明 `docker_image` 时用容器 runtime，venv
     不参与（这条路径必须可达，否则是死代码）；非托管引擎看 `probe()` 的 PATH 结果。
     """
     if engine in MANAGED_ENGINES:
-        if str(raw.get("docker_image", "")).strip():
+        if _docker_image_of(engine, raw):
             return True, "", ""
         if has_env(engine):
             return True, "", ""
@@ -286,8 +325,7 @@ def local_profile_paths(models_dir: Path) -> dict[str, Path]:
                 continue
             out[stem] = f
     if conflicts:
-        pairs = "；".join(f"{stem} 取 {winner}，忽略 {loser}"
-                          for stem, winner, loser in conflicts)
+        pairs = "；".join(f"{stem} 取 {winner}，忽略 {loser}" for stem, winner, loser in conflicts)
         logger.warning(f"models/ 下 {len(conflicts)} 处 stem 冲突：{pairs}")
     _PROFILE_PATHS_CACHE[str(root)] = (fp, out)
     return out
@@ -366,8 +404,36 @@ def _default_prober(profile: Any) -> dict[str, Any]:
         pid = None
     alive = is_pid_alive(pid) if pid else False
     gpus = [idx for idx, owner in list_gpu_locks().items() if owner == profile.name]
-    return {"up": bool(up), "alive": bool(alive), "port": profile.port,
-            "pid": pid, "gpus": gpus, "name": profile.name}
+    return {"up": bool(up), "alive": bool(alive), "port": profile.port, "pid": pid, "gpus": gpus, "name": profile.name}
+
+
+def _default_docker_alive(profile: Any) -> bool:
+    """docker runtime 引擎的容器存在性兜底。
+
+    同 stem 多引擎共存（vllm + aphrodite 同指 qwen2.5-1.5b）时，`_identity_of`
+    把两个 profile 的 name 都归一为 stem，PID 文件 / GPU 锁 / 端口 health 相互
+    覆盖。`is_running_any` 走**端口** health（对 docker 引擎打到 `127.0.0.1:port`），
+    但 aphrodite 的 8141 端口空着时会被判 alive=False——即使该 stem 的 vllm
+    容器还在 8107 上跑着——stopper 就永远不会被调用。此函数直接 `docker inspect`
+    容器名，不依赖 PID/锁，从构造上还原"docker 容器还在？"这一最基础的事实。
+
+    保守语义沿用 `docker_container_alive`：docker 不可用一律 True（宁可多走一次
+    stopper 让它查已停止的容器，也不能漏杀活着的容器）。非 docker 引擎返回 False
+    （stop 分支已经按 `up/alive` 走默认路径，不会走到这里）。
+    """
+    from modelctl.core.process import docker_container_alive
+    from modelctl.engines import get_adapter
+
+    try:
+        adapter = get_adapter(str(getattr(profile, "engine", "") or ""))(profile)
+    except Exception:
+        return False
+    try:
+        if not adapter.is_docker_runtime():
+            return False
+        return docker_container_alive(adapter._container_name)
+    except Exception:
+        return False
 
 
 def _usable_overlay(raw: Any) -> dict[str, str]:
@@ -422,8 +488,7 @@ class _OverlayScope:
 #: 判定"下发内容是否与本地台账一致"时比对的 goal 字段（sync 持久化 entry 与中心
 #: 快照 goal 的交集键；yaml 以 sha 代表，path/version 不参与——前者本地属性、后者
 #: 不进同步语义）。
-_SYNC_GOAL_KEYS: tuple[str, ...] = ("goal_id", "profile", "engine", "sha",
-                                    "intent", "params", "env_overlay")
+_SYNC_GOAL_KEYS: tuple[str, ...] = ("goal_id", "profile", "engine", "sha", "intent", "params", "env_overlay")
 
 
 def _snapshot_rewrites_state(snapshot: dict[str, Any], state: dict[str, Any]) -> bool:
@@ -451,11 +516,17 @@ class Reconciler:
     单测里不可用，而"该不该调"的判断逻辑（本任务的全部价值）必须能被完整测到。
     """
 
-    def __init__(self, models_dir: Path | None = None, cache_dir: Path | None = None, *,
-                 starter: Callable[..., Outcome] | None = None,
-                 stopper: Callable[..., Outcome] | None = None,
-                 prober: Callable[[Any], dict[str, Any]] | None = None,
-                 caps: Capabilities | None = None) -> None:
+    def __init__(
+        self,
+        models_dir: Path | None = None,
+        cache_dir: Path | None = None,
+        *,
+        starter: Callable[..., Outcome] | None = None,
+        stopper: Callable[..., Outcome] | None = None,
+        prober: Callable[[Any], dict[str, Any]] | None = None,
+        docker_alive: Callable[[Any], bool] | None = None,
+        caps: Capabilities | None = None,
+    ) -> None:
         # 占卡词表同源校验（裁决1）：装错词表绝不上岗——宁可启动即炸，
         # 也不让中心 gate 的卡位检查静默空转
         _verify_state_vocabulary()
@@ -464,6 +535,7 @@ class Reconciler:
         self._starter = starter or _default_starter
         self._stopper = stopper or _default_stopper
         self._prober = prober or _default_prober
+        self._docker_alive = docker_alive or _default_docker_alive
         self._caps = caps
         self._lock = threading.RLock()
         # goal_id → {sha, intent, stage, reason, error_class, manual, degrade, path,
@@ -550,12 +622,11 @@ class Reconciler:
             if goal is None:
                 out.append(wsproto.make_result(seq, False, f"本机没有目标 {goal_id}"))
                 continue
-            self._pending.append({"seq": seq, "action": action, "goal_id": goal_id,
-                                  "ok_seen": now})
+            self._pending.append({"seq": seq, "action": action, "goal_id": goal_id, "ok_seen": now})
             name = str(goal.get("profile", goal_id))
             out.append(wsproto.make_result(seq, True, f"{name} 已受理，下一轮生效"))
         if out:
-            self._results.extend(out)      # 无锁：list.extend 是原子的
+            self._results.extend(out)  # 无锁：list.extend 是原子的
 
     def flush_results(self) -> list[dict[str, Any]]:
         """取走并清空待回传的 result 帧（原子换表，Agent 线程可安全调用）。"""
@@ -577,15 +648,13 @@ class Reconciler:
         # 二者等价；但 reconcile 的 goal/intent/sha/env_overlay 变化若被 sync 的同
         # revision 短路吞掉，状态机永远看不到新意图（测试正是手填固定 revision 下发
         # 变更内容，逼出这条"内容变了就必须落盘"的下界）。内容完全一致时仍短路。
-        force = bool(snapshot.get("force")) or _snapshot_rewrites_state(
-            snapshot, sync.read_state(self._cache))
-        out = sync.apply_snapshot(snapshot, models_dir=self._models,
-                                  cache_dir=self._cache, force=force, now=now)
+        force = bool(snapshot.get("force")) or _snapshot_rewrites_state(snapshot, sync.read_state(self._cache))
+        out = sync.apply_snapshot(snapshot, models_dir=self._models, cache_dir=self._cache, force=force, now=now)
         state = sync.read_state(self._cache)
         present = {str(g["goal_id"]): g for g in state["goals"]}
         for goal_id in list(self._recs):
             if goal_id not in present:
-                del self._recs[goal_id]          # goal 已从快照消失 = 记录一并作废
+                del self._recs[goal_id]  # goal 已从快照消失 = 记录一并作废
         for goal_id, goal in present.items():
             self._ensure_rec(goal_id, goal, now)
         self._save()
@@ -608,13 +677,23 @@ class Reconciler:
         rec = self._recs.get(goal_id)
         if rec is not None and rec.get("sha") == sha and rec.get("intent") == intent:
             return
-        self._recs[goal_id] = {"sha": sha, "intent": intent, "stage": PENDING_PROFILE_SYNC,
-                               "reason": "", "error_class": "", "manual": "",
-                               "degrade": 0, "engine": str(goal.get("engine", "")),
-                               "profile": str(goal.get("profile", "")),
-                               "path": str(goal.get("path", "")),
-                               "env_overlay": goal.get("env_overlay"),
-                               "port": None, "pid": None, "gpu": [], "at": now}
+        self._recs[goal_id] = {
+            "sha": sha,
+            "intent": intent,
+            "stage": PENDING_PROFILE_SYNC,
+            "reason": "",
+            "error_class": "",
+            "manual": "",
+            "degrade": 0,
+            "engine": str(goal.get("engine", "")),
+            "profile": str(goal.get("profile", "")),
+            "path": str(goal.get("path", "")),
+            "env_overlay": goal.get("env_overlay"),
+            "port": None,
+            "pid": None,
+            "gpu": [],
+            "at": now,
+        }
 
     def _apply_manual(self, actions: list[dict[str, Any]], *, now: float) -> None:
         for act in actions:
@@ -624,8 +703,7 @@ class Reconciler:
                 continue
             action = str(act.get("action", ""))
             if action == "retry":
-                rec.update({"stage": PENDING_PROFILE_SYNC, "reason": "", "error_class": "",
-                            "manual": "", "degrade": 0, "at": now})
+                rec.update({"stage": PENDING_PROFILE_SYNC, "reason": "", "error_class": "", "manual": "", "degrade": 0, "at": now})
             elif action in ("stop", "restart", "start"):
                 rec["manual"] = action
                 rec["at"] = now
@@ -633,8 +711,7 @@ class Reconciler:
     # ------------------------------------------------------------------ 执行
 
     def _fail(self, rec: dict[str, Any], detail: str, now: float) -> None:
-        rec.update({"stage": FAILED, "reason": detail, "error_class": classify_error(detail),
-                    "degrade": 0, "at": now})
+        rec.update({"stage": FAILED, "reason": detail, "error_class": classify_error(detail), "degrade": 0, "at": now})
 
     def _managed_path(self, rec: dict[str, Any]) -> Path | None:
         """goal → 本地 YAML 路径。
@@ -663,35 +740,29 @@ class Reconciler:
         try:
             prof = _identity_of(load_profile_at(path), str(rec.get("profile", "")))
         except Exception as exc:  # ProfileError / yaml 错误 / 字段非法
-            return {"up": False, "alive": False, "port": None, "pid": None, "gpus": [],
-                    "name": str(rec.get("profile", "")), "profile_error": str(exc)}
+            return {"up": False, "alive": False, "port": None, "pid": None, "gpus": [], "name": str(rec.get("profile", "")), "profile_error": str(exc)}
         got = dict(self._prober(prof))
         got["profile"] = prof
         return got
 
-    def _step(self, goal_id: str, goal: dict[str, Any], rec: dict[str, Any],
-              caps: Capabilities, now: float) -> None:
+    def _step(self, goal_id: str, goal: dict[str, Any], rec: dict[str, Any], caps: Capabilities, now: float) -> None:
         """单个 goal 的一拍推进。顺序敏感，改动前先读注释。"""
         # 失败即终态：早退，绝不重复撞同一个错误（本任务规则 2）
         if rec["stage"] == FAILED:
             return
         path = self._managed_path(rec)
         if path is None:
-            rec.update({"stage": PENDING_PROFILE_SYNC,
-                        "reason": "等待中心下发 profile 文件", "at": now})
+            rec.update({"stage": PENDING_PROFILE_SYNC, "reason": "等待中心下发 profile 文件", "at": now})
             return
         try:
             text = path.read_text(encoding="utf-8")
         except OSError:
-            rec.update({"stage": PENDING_PROFILE_SYNC,
-                        "reason": "profile 文件不可读，等待重新下发", "at": now})
+            rec.update({"stage": PENDING_PROFILE_SYNC, "reason": "profile 文件不可读，等待重新下发", "at": now})
             return
         want = str(rec.get("sha", ""))
         got = profile_sha(text)
         if want and got != want:
-            rec.update({"stage": PENDING_PROFILE_SYNC,
-                        "reason": "本地 profile 文件与中心声明不一致（漂移），等待重新下发",
-                        "at": now})
+            rec.update({"stage": PENDING_PROFILE_SYNC, "reason": "本地 profile 文件与中心声明不一致（漂移），等待重新下发", "at": now})
             return
 
         # **必须在写 PROFILE_SYNCED 之前**取上一拍：否则"上一拍是否 READY"永远为假，
@@ -708,8 +779,16 @@ class Reconciler:
         # ---- 方向为停：先停，本轮到此为止（restart 是"停完下轮由 intent 拉起"）
         if intent in ("stop", "restart"):
             obs = self._observe(rec)
-            if obs.get("up") or obs.get("alive"):
-                prof = obs.get("profile")
+            # 同 stem 多引擎共存（vllm + aphrodite 同指 qwen2.5-1.5b）时，PID 文件 /
+            # GPU 锁只挂一条，`_identity_of` 归一后两条 goal 共用同一 PID 名与 lock
+            # owner。若 aphrodite 的 8141 端口空着、但 vllm 容器的 8107 还在，
+            # `_observe` 对 aphrodite 的 `alive=False` 就是"假死"——本 goal 会以为
+            # "没东西可停"直接落 STOPPED，但 stem 的 vllm 容器仍在占卡。
+            # `_docker_alive` 直采 docker inspect 容器名,从构造上还原"容器还在?"
+            # 这一最基础的事实,把被 stem 共用 PID/GPU 锁遮住的活容器捞回 stopper。
+            prof = obs.get("profile")
+            docker_fallback = prof is not None and self._docker_alive(prof)
+            if obs.get("up") or obs.get("alive") or docker_fallback:
                 if prof is None:
                     self._fail(rec, "profile 解析失败，无法定位进程", now)
                     return
@@ -718,11 +797,9 @@ class Reconciler:
                 if out.status == "error":
                     self._fail(rec, out.detail or "停止失败", now)
                     return
-                rec.update({"stage": STOPPED, "reason": "", "error_class": "",
-                            "degrade": 0, "pid": None, "gpu": [], "at": now})
+                rec.update({"stage": STOPPED, "reason": "", "error_class": "", "degrade": 0, "pid": None, "gpu": [], "at": now})
             else:
-                rec.update({"stage": STOPPED, "reason": "", "error_class": "",
-                            "degrade": 0, "at": now})
+                rec.update({"stage": STOPPED, "reason": "", "error_class": "", "degrade": 0, "at": now})
             # 手动 stop **不清位**：清了下轮按 intent=start 复活（规则 3）
             if intent == "restart":
                 rec["manual"] = ""
@@ -731,9 +808,7 @@ class Reconciler:
         # ---- 方向为起：已在服务 → READY
         obs = self._observe(rec)
         if obs.get("up"):
-            rec.update({"stage": READY, "reason": "", "error_class": "", "degrade": 0,
-                        "port": obs.get("port"), "pid": obs.get("pid"),
-                        "gpu": list(obs.get("gpus") or []), "at": now})
+            rec.update({"stage": READY, "reason": "", "error_class": "", "degrade": 0, "port": obs.get("port"), "pid": obs.get("pid"), "gpu": list(obs.get("gpus") or []), "at": now})
             return
 
         # ---- 上一拍在服务、这一拍不通：进程没了直接终态，进程还在才计数降级
@@ -747,15 +822,13 @@ class Reconciler:
                 self._fail(rec, f"连续 {degrade} 次健康检查失败，进程仍在但不可服务", now)
                 rec["error_class"] = "health_lost"
                 return
-            rec.update({"stage": DEGRADED, "degrade": degrade,
-                        "reason": "健康检查连续失败（进程仍在）", "at": now})
+            rec.update({"stage": DEGRADED, "degrade": degrade, "reason": "健康检查连续失败（进程仍在）", "at": now})
             return
 
         # ---- 运行时不具备条件：不撞进程，直接终态并说明怎么修
         ok, reason, cls = runtime_readiness(str(rec.get("engine", "")), _raw_of(text), caps)
         if not ok:
-            rec.update({"stage": FAILED, "reason": reason, "error_class": cls,
-                        "degrade": 0, "at": now})
+            rec.update({"stage": FAILED, "reason": reason, "error_class": cls, "degrade": 0, "at": now})
             return
         rec["stage"] = RUNTIME_OK
 
@@ -779,9 +852,7 @@ class Reconciler:
 
         after = self._observe(rec)
         if after.get("up"):
-            rec.update({"stage": READY, "port": after.get("port"), "pid": after.get("pid"),
-                        "gpu": list(after.get("gpus") or []), "reason": "",
-                        "error_class": "", "degrade": 0, "at": now})
+            rec.update({"stage": READY, "port": after.get("port"), "pid": after.get("pid"), "gpu": list(after.get("gpus") or []), "reason": "", "error_class": "", "degrade": 0, "at": now})
         else:
             # skipped（已在运行）或起完还没过健康检查：保持 STARTING，下一拍再判
             rec.update({"port": after.get("port"), "pid": after.get("pid"), "at": now})
@@ -804,11 +875,22 @@ class Reconciler:
                 continue
             got = self._prober(prof)
             stage = READY if got.get("up") else (STOPPED if not got.get("alive") else DEGRADED)
-            self._local.setdefault(stem, {"goal_id": "", "stage": stage,
-                                          "state": _STATE_OF_STAGE[stage], "reason": "",
-                                          "error_class": "", "managed": False,
-                                          "port": got.get("port"), "pid": got.get("pid"),
-                                          "gpu": list(got.get("gpus") or []), "at": now})
+            self._local.setdefault(
+                stem,
+                {
+                    "goal_id": "",
+                    "stage": stage,
+                    "state": _STATE_OF_STAGE[stage],
+                    "reason": "",
+                    "error_class": "",
+                    "managed": False,
+                    "port": got.get("port"),
+                    "pid": got.get("pid"),
+                    "engine": str(getattr(prof, "engine", "") or ""),
+                    "gpu": list(got.get("gpus") or []),
+                    "at": now,
+                },
+            )
             self._local[stem]["stage"] = stage
             self._local[stem]["state"] = _STATE_OF_STAGE[stage]
             self._local[stem]["at"] = now
@@ -854,15 +936,25 @@ class Reconciler:
 
     def _capacity(self, caps: Capabilities) -> dict[str, Any]:
         """capacity 的显存口径是**节点总量**（all/free 都对全部卡求和），非单卡。"""
-        return {"gpu_count": caps.gpu_count, "vram_total_mb": all_vram_total_mb(caps),
-                "vram_free_mb": free_vram_total_mb(caps)}
+        return {"gpu_count": caps.gpu_count, "vram_total_mb": all_vram_total_mb(caps), "vram_free_mb": free_vram_total_mb(caps)}
 
     def _runtimes(self, caps: Capabilities) -> dict[str, dict[str, Any]]:
         """遍历**全部** KNOWN_ENGINES：只报"装过的"会让中心无法区分"没装"与"没探测"，
-        于是 gate 会把不可用的引擎放行到这台节点上。"""
+        于是 gate 会把不可用的引擎放行到这台节点上。
+
+        托管引擎与状态机 `runtime_readiness` 同口径：**docker ∨ venv 任一可达即 ok**。
+        profile 具体走哪条（yaml 有 `docker_image` 走容器、否则走 venv）由状态机
+        在 `_step` 里按 profile 级再判；节点级只要两条路径任一就绪即视为"能跑该引擎"，
+        否则 Windows + docker 部署（配了 docker_image 但没建托管 venv）永远被 gate
+        挡下——`runtime_readiness` 的 docker 分支就成死代码。
+        """
+        docker_ok = docker_ready()
         out: dict[str, dict[str, Any]] = {}
         for engine in sorted(KNOWN_ENGINES):
-            ok = has_env(engine) if engine in MANAGED_ENGINES else bool(caps.binaries.get(engine))
+            if engine in MANAGED_ENGINES:
+                ok = docker_ok or has_env(engine)
+            else:
+                ok = bool(caps.binaries.get(engine))
             out[engine] = {"ok": bool(ok)}
         return out
 
@@ -889,19 +981,29 @@ class Reconciler:
             else:
                 stage = str(rec.get("stage", PENDING_PROFILE_SYNC))
                 port, pid, gpu = rec.get("port"), rec.get("pid"), list(rec.get("gpu") or [])
-            entry = {"goal_id": goal_id, "stage": stage,
-                     "state": _STATE_OF_STAGE.get(stage, "pending"),
-                     "reason": str((rec or {}).get("reason", "")),
-                     "error_class": str((rec or {}).get("error_class", "")),
-                     "managed": True, "port": port, "pid": pid, "gpu": gpu,
-                     "at": (rec or {}).get("at")}
+            # engine 来自 goal（中心启动指令携带）；rec 未起时也保持 goal 侧口径。
+            # 同 stem 多引擎共存（vllm + aphrodite 同指 qwen2.5-1.5b）时，center
+            # 的 model_states PK `(node_id, profile, engine)` 需 engine 精配，避免
+            # 一条 goal 的端口/状态漂到另一条 goal 头上。
+            goal_engine = str((rec or {}).get("engine") or goal.get("engine", "") or "")
+            entry = {
+                "goal_id": goal_id,
+                "stage": stage,
+                "state": _STATE_OF_STAGE.get(stage, "pending"),
+                "reason": str((rec or {}).get("reason", "")),
+                "error_class": str((rec or {}).get("error_class", "")),
+                "managed": True,
+                "port": port,
+                "pid": pid,
+                "engine": goal_engine,
+                "gpu": gpu,
+                "at": (rec or {}).get("at"),
+            }
             # setdefault：有 goal 的条目**不被本地同名观测覆盖**（goal 侧信息更全）
             profiles.setdefault(name, entry)
         for name, entry in self._local.items():
             profiles.setdefault(name, dict(entry))
-        snap = {"revision": state["revision"], "profiles": profiles, "drift": drift,
-                "local_profiles": sorted(set(stems)), "capacity": self._capacity(caps),
-                "runtimes": self._runtimes(caps)}
+        snap = {"revision": state["revision"], "profiles": profiles, "drift": drift, "local_profiles": sorted(set(stems)), "capacity": self._capacity(caps), "runtimes": self._runtimes(caps)}
         # 留一份给 snapshot() 的降级兜底（评审 M-1）；本拍照常返回新构造的 dict
         self._last_snapshot = snap
         return snap
@@ -928,9 +1030,14 @@ class Reconciler:
     def heartbeat_payload(self) -> dict[str, Any]:
         """心跳扩展段（Task 2 的六个键）。缺失段由 Agent 侧决定"整段省略"。"""
         got = self.snapshot()
-        return {"profiles": got["profiles"], "goal_sync": {"revision": got["revision"]},
-                "drift": got["drift"], "local_profiles": got["local_profiles"],
-                "capacity": got["capacity"], "runtimes": got["runtimes"]}
+        return {
+            "profiles": got["profiles"],
+            "goal_sync": {"revision": got["revision"]},
+            "drift": got["drift"],
+            "local_profiles": got["local_profiles"],
+            "capacity": got["capacity"],
+            "runtimes": got["runtimes"],
+        }
 
     # ------------------------------------------------------------------ 循环
 
@@ -974,8 +1081,7 @@ def start_reconciler_in_background() -> Reconciler | None:
             return None
         rt = Reconciler()
         stop = threading.Event()
-        thread = threading.Thread(target=rt.run, args=(stop,),
-                                  name="cluster-reconcile", daemon=True)
+        thread = threading.Thread(target=rt.run, args=(stop,), name="cluster-reconcile", daemon=True)
         _CURRENT, _STOP = rt, stop
         thread.start()
         return rt
