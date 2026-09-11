@@ -151,16 +151,13 @@ def test_classify_pull_error_hard_failures():
 
 
 class _PullProc:
-    """伪造 docker pull 的子进程（ensure_image 流式化后走 Popen 契约：可迭代 + wait）。"""
+    """伪造 docker pull 的子进程（ensure_image 流式化后走 Popen 契约：proc.stdout 可迭代 + wait）。"""
 
     def __init__(self, rc: int, stderr: str = ""):
         self.returncode = rc
-        self.stderr = stderr
-        self.stdout = ""
-        self._lines = [f"{stderr}\n"] if stderr else []
-
-    def __iter__(self):
-        return iter(self._lines)
+        # stderr 已合并进 stdout（stderr=STDOUT），实现只读 proc.stdout
+        self.stderr = None
+        self.stdout = iter([f"{stderr}\n"] if stderr else [])
 
     def wait(self):
         return self.returncode

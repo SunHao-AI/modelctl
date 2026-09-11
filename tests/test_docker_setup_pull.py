@@ -10,13 +10,12 @@ from modelctl.core import docker_setup
 
 class _FakeProc:
     def __init__(self, lines, returncode=0):
-        self._lines = lines
         self.returncode = returncode
-        self.stderr = ""
-        self.stdout = ""
-
-    def __iter__(self):
-        return iter(self._lines)
+        # 实现从 proc.stdout 逐行读取（docker_setup.ensure_image 内
+        # `stdout = proc.stdout; for line in stdout`），不再是 `for line in proc`；
+        # stderr 已由 subprocess 合并进 stdout（stderr=STDOUT）。
+        self.stdout = iter(lines)
+        self.stderr = None
 
     # 简报 fixture 缺 wait()：实现必须 wait() 回收子进程防僵尸（设计意图），
     # 故按测试+设计意图为准补齐 fake 的 wait 契约，不改任何断言。
@@ -59,6 +58,7 @@ def test_ensure_image_kills_proc_on_keyboard_interrupt():
             self.returncode = None  # 读循环被打断时子进程仍在运行
             self.killed = False
             self.waited = False
+            self.stdout = self  # 实现读 proc.stdout；本桩迭代一次即抛中断
 
         def __iter__(self):
             yield "aaa: Pulling fs layer"
