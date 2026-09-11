@@ -200,43 +200,141 @@ def _hist_mean(text: str, name: str) -> float:
     return float(sum_m.group(1)) / cnt
 
 
+#: `/api/usage` 与网关差分共同依赖的核心键：恒存在于 parse_metrics/snapshot 结果中，
+#: 即便引擎未声明（老 profile、非 vLLM 引擎）也不会 KeyError。
+CORE_METRIC_KEYS = ("prompt_total", "predicted_total", "prompt_rate", "predicted_rate", "ttft_ms")
+
+#: 各时间单位后缀对应的纳秒数（长后缀在前，避免 `_ms` 抢先匹配 `_milliseconds`）。
+_UNIT_SUFFIX_TO_NS = (
+    ("_nanoseconds", 1),
+    ("_microseconds", 1_000),
+    ("_milliseconds", 1_000_000),
+    ("_seconds", 1_000_000_000),
+    ("_ms", 1_000_000),
+)
+
+_NS_PER_MS = 1_000_000
+
+
+def _to_ms_factor(metric_name: str, key: str) -> float:
+    """指标值从「指标名声明的单位」换算到「键名承诺的单位」的倍率。
+
+    键名以 `_ms` 结尾即承诺毫秒（ttft_ms / e2e_ms / queue_ms / prefill_ms /
+    decode_ms）。判据取**指标名的单位后缀**，而不是"走的是裸值分支还是直方图分支"
+    ——两条分支取到的是同一个指标的同单位数值，换算规则必须一致，否则兜底路径
+    会独自漏换算（这正是早先 gauge 档 TTFT 恒显示 0 ms 的成因）。
+
+    倍率由「指标名单位 = 多少纳秒 ÷ 每毫秒纳秒数」推导，而不是手写十的幂：
+    换算系数极易写反一档（纳秒→毫秒是 ÷1e6，与纳秒→微秒只差一档）且结果仍
+    "看着像个数"，比漏换算更难发现。
+
+    先用 key 把关是关键：`vllm:prompt_tokens_seconds` 这类**吞吐率** gauge 的名字
+    也以 `_seconds` 结尾（语义是"每秒 token 数"），但它只会被映射到 `prompt_rate`
+    这类非 `_ms` 键，因此恒得 1.0，不会被误乘 1000。
+
+    指标名不带单位后缀时保守返回 1.0：漏乘会让数值偏小、容易被当成"没流量"发现，
+    误乘 1000 则会造出一个以假乱真的延迟值。
+    """
+    if not key.endswith("_ms"):
+        return 1.0
+    for suffix, ns in _UNIT_SUFFIX_TO_NS:
+        if metric_name.endswith(suffix):
+            return ns / _NS_PER_MS
+    return 1.0
+
+
 def parse_metrics(text: str, mapping: dict[str, list[str]]) -> dict[str, float]:
     """解析 Prometheus 文本，返回指标名映射对应的数值。
 
-    已知四个键（prompt_total / predicted_total / prompt_rate / predicted_rate）
-    取 gauge 裸值（候选名第一个命中）。可选键 ttft_ms 额外支持直方图：
+    核心键（prompt_total / predicted_total / prompt_rate / predicted_rate / ttft_ms）
+    总是出现在结果里，取 gauge 裸值（候选名第一个命中）。可选键 ttft_ms 额外支持直方图：
     候选名裸名未命中时用 <name>_sum / <name>_count 相除得均值（引擎内置 TTFT
     直方图，如 vllm:time_to_first_token_seconds）。未声明 ttft_ms 键恒得 0.0。
+
+    引擎在核心键之外声明的键（如 vLLM 的排队深度 / KV cache 占用 / 抢占次数 /
+    prefix cache 命中）**一并解析并按原键名返回**——此前这里用固定白名单过滤
+    mapping，任何新增键都会被静默丢弃（配了映射也永远取不到值）。
+
+    落到 `_ms` 键的数值一律由 `_to_ms_factor` 按指标名单位换算成毫秒（裸值与
+    直方图两条分支同口径）：vLLM 的 `*_seconds` 直方图均值是秒，裸 gauge 若存在
+    同样按 `_seconds` 后缀识别为秒，两者都得 ×1000 才兑现键名承诺的毫秒。
     """
-    result = {
-        "prompt_total": 0.0,
-        "predicted_total": 0.0,
-        "prompt_rate": 0.0,
-        "predicted_rate": 0.0,
-        "ttft_ms": 0.0,
-    }
-    patterns = _build_patterns({k: v for k, v in mapping.items() if k in result})
+    result: dict[str, float] = {k: 0.0 for k in CORE_METRIC_KEYS}
+    for key in mapping:
+        result.setdefault(key, 0.0)
+    patterns = _build_patterns(mapping)
     for key, key_patterns in patterns.items():
-        for pattern in key_patterns:
+        for name, pattern in zip(mapping[key], key_patterns):
             m = pattern.search(text)
-            if m:
-                try:
-                    result[key] = float(m.group(1))
-                except ValueError:
-                    pass
-                break
-    if "ttft_ms" in mapping and result["ttft_ms"] == 0.0:
-        for name in mapping["ttft_ms"]:
+            if not m:
+                continue
+            try:
+                result[key] = float(m.group(1)) * _to_ms_factor(name, key)
+            except ValueError:
+                pass
+            break
+    # 直方图兜底：键名以 _ms 结尾（ttft_ms / e2e_ms 等）时裸名通常不存在（vLLM 只
+    # 暴露 *_seconds 直方图），用 sum/count 取均值，再按指标名单位换算成毫秒。
+    for key in mapping:
+        if not key.endswith("_ms") or result.get(key):
+            continue
+        for name in mapping[key]:
             val = _hist_mean(text, name)
             if val:
-                result["ttft_ms"] = val
+                result[key] = val * _to_ms_factor(name, key)
                 break
     return result
+
+
+def _derive_engine_metrics(metrics: dict[str, float], keys: tuple[str, ...]) -> dict[str, float]:
+    """从 parse_metrics 结果里挑出扩展键，并补上派生指标。
+
+    vLLM 的 prefix cache 命中率 gauge 已被上游弃用，只留 queries / hits 两个
+    Counter，因此命中率必须在这里现算：**用累计值相除得到的是"自启动以来的
+    平均命中率"**，它平滑但滞后，适合看趋势，不适合看瞬时。
+    """
+    out = {k: float(metrics.get(k, 0.0) or 0.0) for k in keys}
+    queries = out.get("prefix_cache_queries", 0.0)
+    hits = out.get("prefix_cache_hits", 0.0)
+    if queries > 0:
+        out["prefix_cache_hit_rate"] = round(min(hits / queries, 1.0), 4)
+    return out
 
 
 def calc_cost(prompt_total: float, predicted_total: float, price_in: float, price_out: float) -> float:
     """按元/M tokens 单价折算累计费用（元）。"""
     return prompt_total / 1e6 * price_in + predicted_total / 1e6 * price_out
+
+
+def _engine_metrics_suffix(em: dict | None) -> str:
+    """把引擎扩展指标渲染成 extra 文本尾部的若干段（无值即整段省略）。
+
+    只呈现"运维看了会采取行动"的项，且**只报异常侧**：排队为 0、KV cache 空闲、
+    零抢占、prefix cache 未命中这些"一切正常"的状态不值得占用卡片文本宽度。
+    """
+    if not em:
+        return ""
+    parts: list[str] = []
+    waiting = em.get("waiting", 0.0)
+    running = em.get("running", 0.0)
+    if waiting > 0:
+        parts.append(f"| 排队 {int(waiting)}（运行 {int(running)}）")
+    kv = em.get("kv_cache_usage", 0.0)
+    if kv > 0.5:
+        parts.append(f"| KV cache {kv * 100:.0f}%")
+    pre = em.get("preemptions_total", 0.0)
+    if pre > 0:
+        parts.append(f"| 抢占 {int(pre)} 次")
+    hit = em.get("prefix_cache_hit_rate", 0.0)
+    if hit > 0:
+        parts.append(f"| 前缀缓存命中 {hit * 100:.0f}%")
+    queue_ms = em.get("queue_ms", 0.0)
+    if queue_ms >= 1:
+        parts.append(f"| 排队耗时 {round(queue_ms)} ms")
+    e2e_ms = em.get("e2e_ms", 0.0)
+    if e2e_ms >= 1:
+        parts.append(f"| 端到端均值 {round(e2e_ms)} ms")
+    return "".join(parts)
 
 
 def build_usage_payload(tokens: dict[str, float], usage_cfg: dict, start_time: float, now: float) -> dict:
@@ -274,6 +372,7 @@ def build_usage_payload(tokens: dict[str, float], usage_cfg: dict, start_time: f
             f"| 输入速率 {prompt_rate:.1f} tok/s"
             f"| 输出速率 {predicted_rate:.1f} tok/s"
             f"{ttft_suffix}"
+            f"{_engine_metrics_suffix(tokens.get('engine_metrics'))}"
         ),
         "prompt_rate": prompt_rate,
         "predicted_rate": predicted_rate,
@@ -421,6 +520,10 @@ class UsageCollector:
         self._native_window_cap = 20
         self._lock = threading.Lock()
         self._monotonic = time.monotonic  # 网关注入与轮询共用的速率计算时钟基准
+        # 引擎扩展指标键：mapping 里除核心五键以外的部分（如 vLLM 的排队深度 /
+        # KV cache 占用 / 抢占 / prefix cache / 分段耗时）。核心键有固定渲染位，
+        # 扩展键统一塞进快照的 engine_metrics 子字典随快照透传，避免污染顶层契约。
+        self._extra_keys = tuple(k for k in self.mapping if k not in CORE_METRIC_KEYS)
         self._snapshot: dict[str, object] = {
             "ok": False,
             "error": None,
@@ -431,6 +534,7 @@ class UsageCollector:
             "ttft_ms": 0.0,
             "ttft_ms_p95": 0.0,
             "rate_source": "none",
+            "engine_metrics": {k: 0.0 for k in self._extra_keys},
         }
         self._last = {"time": None, "predicted_total": 0.0}
         self._rate_window: list[tuple[float, float, float]] = []
@@ -615,6 +719,7 @@ class UsageCollector:
                     "ttft_ms": 0.0,
                     "ttft_ms_p95": 0.0,
                     "rate_source": "none",
+                    "engine_metrics": {k: 0.0 for k in self._extra_keys},
                 }
             return
         # 引擎 token 计数 gauge 可能恒为 0（如 vLLM 未启用 --enable-metrics），此时累计值
@@ -656,6 +761,7 @@ class UsageCollector:
                 "ttft_ms": metrics.get("ttft_ms", 0.0),
                 "ttft_ms_p95": 0.0,
                 "rate_source": source,
+                "engine_metrics": _derive_engine_metrics(metrics, self._extra_keys),
             }
         if changed:
             self._persist(new_prompt, new_predicted)
@@ -820,6 +926,13 @@ class UsageHandler(BaseHTTPRequestHandler):
             payload["ttft_ms_p95"] = tokens["ttft_ms_p95"]
         if tokens.get("rate_source"):
             payload["rate_source"] = tokens["rate_source"]
+        # 引擎扩展指标（排队深度 / KV cache / 抢占 / prefix cache / 分段耗时）结构化
+        # 透传：extra 是给人读的一句话，这些键给调用方做图表和阈值告警用。全为 0 时
+        # 不下发，避免老 profile 或非 vLLM 引擎出现一屏空值。
+        em = tokens.get("engine_metrics") or {}
+        nonzero = {k: v for k, v in em.items() if v}
+        if nonzero:
+            payload["engine_metrics"] = nonzero
         return payload
 
     def _aggregate_payload(self) -> dict:

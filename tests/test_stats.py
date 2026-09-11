@@ -17,7 +17,13 @@ import urllib.request
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from modelctl.core.stats import _hist_mean, build_usage_payload, parse_metrics
+from modelctl.core.stats import (
+    CORE_METRIC_KEYS,
+    _hist_mean,
+    _to_ms_factor,
+    build_usage_payload,
+    parse_metrics,
+)
 
 LLAMACPP_MAPPING = {
     "prompt_total": ["llamacpp:prompt_tokens_total"],
@@ -905,14 +911,59 @@ def test_hist_mean_missing_sum_returns_zero():
 
 
 def test_parse_metrics_ttft_from_histogram_when_no_bare_gauge():
+    """直方图均值 2.5/10 = 0.25 **秒**，落到 ttft_ms 键必须换算成 250 毫秒。"""
     got = parse_metrics(TEXT_HIST, _TF(ttft_ms=["vllm:time_to_first_token_seconds"]))
-    assert got["ttft_ms"] == 0.25
+    assert got["ttft_ms"] == 250.0
 
 
 def test_parse_metrics_ttft_prefers_bare_gauge():
+    """裸名 gauge 优先于直方图均值（0.3 而非 0.25），但**同样要换算成毫秒**。
+
+    "prefer bare" 说的是取值优先级，不是免换算：指标名以 `_seconds` 结尾即声明单位为
+    秒，落到 `ttft_ms` 键就得 ×1000，否则 gauge 档会显示 0.3 ms 这种以假乱真的值。
+    """
     text = "vllm:time_to_first_token_seconds 0.3\n" + TEXT_HIST
     got = parse_metrics(text, _TF(ttft_ms=["vllm:time_to_first_token_seconds"]))
+    assert got["ttft_ms"] == 300.0
+
+
+def test_parse_metrics_bare_gauge_already_milliseconds_not_scaled():
+    """指标名本身声明 `_ms` 时倍率为 1.0，不能再乘 1000。"""
+    text = "engine:first_token_ms 300\n"
+    got = parse_metrics(text, _TF(ttft_ms=["engine:first_token_ms"]))
+    assert got["ttft_ms"] == 300.0
+
+
+def test_parse_metrics_bare_gauge_without_unit_suffix_not_scaled():
+    """指标名无单位后缀时保守不换算——误乘 1000 会造出逼真的假延迟。"""
+    text = "engine:ttft 0.3\n"
+    got = parse_metrics(text, _TF(ttft_ms=["engine:ttft"]))
     assert got["ttft_ms"] == 0.3
+
+
+def test_parse_metrics_throughput_gauge_never_treated_as_latency():
+    """吞吐率 gauge 名字也以 `_seconds` 结尾（语义是"每秒 token 数"），落到非 `_ms`
+    键必须原样返回，否则 12.5 tok/s 会变成 12500。"""
+    text = "llamacpp:prompt_tokens_seconds 12.5\n"
+    got = parse_metrics(text, _TF())
+    assert got["prompt_rate"] == 12.5
+
+
+def test_to_ms_factor_only_applies_to_millisecond_keys():
+    """非 `_ms` 键恒得 1.0，与指标名后缀无关。"""
+    assert _to_ms_factor("vllm:prompt_tokens_seconds", "prompt_rate") == 1.0
+    assert _to_ms_factor("vllm:kv_cache_usage_perc", "kv_cache_usage") == 1.0
+
+
+def test_to_ms_factor_by_metric_unit_suffix():
+    """倍率按指标名单位后缀判定；长后缀优先，`_ms` 自身不再放大。"""
+    assert _to_ms_factor("vllm:time_to_first_token_seconds", "ttft_ms") == 1e3
+    assert _to_ms_factor("engine:latency_milliseconds", "e2e_ms") == 1.0
+    assert _to_ms_factor("engine:latency_microseconds", "e2e_ms") == 1e-3
+    assert _to_ms_factor("engine:latency_nanoseconds", "e2e_ms") == 1e-6
+    assert _to_ms_factor("engine:latency_ms", "e2e_ms") == 1.0
+    # 无单位后缀保守 1.0，避免凭空放大出假延迟
+    assert _to_ms_factor("engine:ttft", "ttft_ms") == 1.0
 
 
 def test_parse_metrics_without_ttft_key_defaults_zero():
@@ -968,7 +1019,7 @@ def test_snapshot_keeps_gauge_ttft_when_native_window_empty(monkeypatch, tmp_pat
     )
     c._poll_once()
     snap = c.snapshot()
-    assert snap["ttft_ms"] == 0.25
+    assert snap["ttft_ms"] == 250.0
     assert snap["ttft_ms_p95"] == 0.0
 
 
@@ -1448,3 +1499,201 @@ def test_run_server_injects_groups(tmp_path, monkeypatch):
         targets[0],
         targets[1],
     ]
+
+
+# ---------- 引擎扩展指标（排队深度 / KV cache / 抢占 / prefix cache / 分段耗时）----------
+
+
+VLLM_EXTENDED_MAPPING = {
+    "prompt_total": ["vllm:prompt_tokens_total"],
+    "predicted_total": ["vllm:generation_tokens_total"],
+    "prompt_rate": ["vllm:prompt_tokens_seconds"],
+    "predicted_rate": ["vllm:generation_tokens_seconds"],
+    "ttft_ms": ["vllm:time_to_first_token_seconds"],
+    "running": ["vllm:num_requests_running"],
+    "waiting": ["vllm:num_requests_waiting"],
+    "kv_cache_usage": ["vllm:kv_cache_usage_perc", "vllm:gpu_cache_usage_perc"],
+    "preemptions_total": ["vllm:num_preemptions_total", "vllm:num_preemptions"],
+    "prefix_cache_queries": ["vllm:prefix_cache_queries_total", "vllm:prefix_cache_queries"],
+    "prefix_cache_hits": ["vllm:prefix_cache_hits_total", "vllm:prefix_cache_hits"],
+    "e2e_ms": ["vllm:e2e_request_latency_seconds"],
+    "queue_ms": ["vllm:request_queue_time_seconds"],
+}
+
+VLLM_EXTENDED_TEXT = """
+vllm:prompt_tokens_total 5000
+vllm:generation_tokens_total 1500
+vllm:num_requests_running 3
+vllm:num_requests_waiting 7
+vllm:kv_cache_usage_perc 0.82
+vllm:num_preemptions_total 4
+vllm:prefix_cache_queries_total 1000
+vllm:prefix_cache_hits_total 640
+vllm:e2e_request_latency_seconds_sum 12.0
+vllm:e2e_request_latency_seconds_count 10
+vllm:request_queue_time_seconds_sum 0.9
+vllm:request_queue_time_seconds_count 10
+"""
+
+
+def test_parse_metrics_keeps_extended_keys():
+    """核心五键之外的引擎键必须原样解析返回——曾被固定白名单静默丢弃。"""
+    got = parse_metrics(VLLM_EXTENDED_TEXT, VLLM_EXTENDED_MAPPING)
+    assert got["waiting"] == 7.0
+    assert got["running"] == 3.0
+    assert got["kv_cache_usage"] == 0.82
+    assert got["preemptions_total"] == 4.0
+    assert got["prefix_cache_queries"] == 1000.0
+    assert got["prefix_cache_hits"] == 640.0
+
+
+def test_parse_metrics_extended_histogram_keys_are_milliseconds():
+    """_ms 扩展键走 sum/count 并换算毫秒：12.0/10 = 1.2s → 1200 ms。"""
+    got = parse_metrics(VLLM_EXTENDED_TEXT, VLLM_EXTENDED_MAPPING)
+    assert got["e2e_ms"] == 1200.0
+    assert got["queue_ms"] == 90.0
+
+
+def test_parse_metrics_legacy_gauge_name_fallback():
+    """老版本 vLLM 只有旧指标名时按候选名兜底命中。"""
+    text = "vllm:gpu_cache_usage_perc 0.55\nvllm:num_preemptions 2\n"
+    got = parse_metrics(text, VLLM_EXTENDED_MAPPING)
+    assert got["kv_cache_usage"] == 0.55
+    assert got["preemptions_total"] == 2.0
+
+
+def test_derive_engine_metrics_hit_rate_from_counters():
+    """prefix cache 命中率 gauge 已弃用，须由 hits/queries 现算。"""
+    from modelctl.core.stats import _derive_engine_metrics
+
+    metrics = parse_metrics(VLLM_EXTENDED_TEXT, VLLM_EXTENDED_MAPPING)
+    keys = tuple(k for k in VLLM_EXTENDED_MAPPING if k not in CORE_METRIC_KEYS)
+    em = _derive_engine_metrics(metrics, keys)
+    assert em["prefix_cache_hit_rate"] == 0.64
+    assert em["waiting"] == 7.0
+
+
+def test_derive_engine_metrics_no_hit_rate_without_queries():
+    from modelctl.core.stats import _derive_engine_metrics
+
+    em = _derive_engine_metrics({"prefix_cache_queries": 0.0, "prefix_cache_hits": 0.0},
+                                ("prefix_cache_queries", "prefix_cache_hits"))
+    assert "prefix_cache_hit_rate" not in em
+
+
+def test_collector_snapshot_carries_engine_metrics(tmp_path, monkeypatch):
+    """轮询解析出的扩展键必须活到 snapshot()——曾只在 parse 层存在、快照处被丢弃。"""
+    from modelctl.core.stats import UsageCollector
+
+    class _Resp:
+        def read(self):
+            return VLLM_EXTENDED_TEXT.encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: _Resp())
+    c = UsageCollector(
+        name="ext",
+        base_url="http://127.0.0.1:8000",
+        poll_interval=999,
+        api_key=None,
+        data_dir=tmp_path,
+        mapping=dict(VLLM_EXTENDED_MAPPING),
+    )
+    c._poll_once()
+    em = c.snapshot()["engine_metrics"]
+    assert em["waiting"] == 7.0
+    assert em["kv_cache_usage"] == 0.82
+    assert em["prefix_cache_hit_rate"] == 0.64
+
+
+def test_collector_snapshot_engine_metrics_without_mapping(tmp_path):
+    """无扩展 mapping 的引擎：engine_metrics 恒为空字典，不引入任何新键。"""
+    from modelctl.core.stats import UsageCollector
+
+    c = UsageCollector(
+        name="plain",
+        base_url="http://127.0.0.1:8000",
+        poll_interval=999,
+        api_key=None,
+        data_dir=tmp_path,
+        mapping={"prompt_total": ["vllm:prompt_tokens_total"]},
+    )
+    assert c.snapshot()["engine_metrics"] == {}
+
+
+def test_usage_payload_extra_reports_only_pressure():
+    """extra 只报异常侧：排队/KV 高/抢占/命中/排队耗时有值才出现。"""
+    tokens = {
+        "prompt_total": 5000.0,
+        "predicted_total": 1500.0,
+        "prompt_rate": 30.0,
+        "predicted_rate": 20.0,
+        "ttft_ms": 120.0,
+        "engine_metrics": {
+            "waiting": 7.0,
+            "running": 3.0,
+            "kv_cache_usage": 0.82,
+            "preemptions_total": 4.0,
+            "prefix_cache_hit_rate": 0.64,
+            "queue_ms": 90.0,
+        },
+    }
+    extra = build_usage_payload(tokens, {}, 0.0, 0.0)["extra"]
+    assert "排队 7（运行 3）" in extra
+    assert "KV cache 82%" in extra
+    assert "抢占 4 次" in extra
+    assert "前缀缓存命中 64%" in extra
+    assert "排队耗时 90 ms" in extra
+
+
+def test_usage_payload_extra_quiet_when_engine_idle():
+    """一切正常（零排队、缓存空闲、无抢占）时 extra 不出现任何扩展段落。"""
+    tokens = {
+        "prompt_total": 100.0,
+        "predicted_total": 50.0,
+        "prompt_rate": 30.0,
+        "predicted_rate": 20.0,
+        "ttft_ms": 80.0,
+        "engine_metrics": {"waiting": 0.0, "running": 1.0, "kv_cache_usage": 0.05,
+                           "preemptions_total": 0.0, "prefix_cache_hit_rate": 0.0},
+    }
+    extra = build_usage_payload(tokens, {}, 0.0, 0.0)["extra"]
+    assert "排队" not in extra
+    assert "KV cache" not in extra
+    assert "抢占" not in extra
+
+
+def test_usage_payload_structured_engine_metrics_all_zero_omitted():
+    """全 0 的 engine_metrics 不下发结构化字段，避免非 vLLM 引擎一屏空值。"""
+    handler = _mk_target_for_gate(
+        {
+            "prompt_rate": 40.0,
+            "predicted_rate": 42.0,
+            "ttft_ms": 120.0,
+            "ttft_ms_p95": 0.0,
+            "rate_source": "engine_gauge",
+            "engine_metrics": {"waiting": 0.0, "kv_cache_usage": 0.0},
+        }
+    )
+    payload = handler._build_target_payload(handler.targets[0])
+    assert "engine_metrics" not in payload
+
+
+def test_usage_payload_structured_engine_metrics_passthrough():
+    handler = _mk_target_for_gate(
+        {
+            "prompt_rate": 40.0,
+            "predicted_rate": 42.0,
+            "ttft_ms": 120.0,
+            "ttft_ms_p95": 0.0,
+            "rate_source": "engine_gauge",
+            "engine_metrics": {"waiting": 5.0, "kv_cache_usage": 0.0},
+        }
+    )
+    payload = handler._build_target_payload(handler.targets[0])
+    assert payload["engine_metrics"] == {"waiting": 5.0}
