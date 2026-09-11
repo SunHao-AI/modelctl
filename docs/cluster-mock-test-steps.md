@@ -1,368 +1,489 @@
-# modelctl 集群 · 单机 mock 两节点功能测试手册
+# modelctl 集群 · 单机 mock 两节点功能测试（按终端划分）
 
-> 目标：在本机（`D:\WorkPlace\Pycharm\modelctl`，`127.0.0.1`）**同时模拟 center + worker 两个 modelctl 节点**，跑通 M0–M2 全链路（节点注册/心跳、goal 下发、profile 同步、模型远程启停/停止/重试、故障注入、节点退役）。
+> 目标：在本机（`D:\WorkPlace\Pycharm\modelctl`，`127.0.0.1`）**同时模拟 center + worker 两个 modelctl 节点**，跑通 M0–M2 全链路（节点注册、goal 下发、profile 同步、模型远程启停、故障注入、节点治理）。
 >
-> 哪些用代码（自动）验证，哪些需要人工肉眼验证，每步都标了。
+> **本文档完全按终端组织**。每个 step 顶部都用 `T-center` / `T-worker` / `Both` 标明应在哪个窗口里执行；step 之间的命令可跨窗口交叉——**你只需在这些窗口间切换**。
 
-## 0. 架构与端口表
+## 0. 终端拓扑
 
-| 项 | center A（本机开发目录） | worker B（mock 副本） |
+| 终端 | 路径 | 角色 | webui | 典型用途 |
+| --- | --- | --- | --- | --- |
+| **T-center** | `D:\WorkPlace\Pycharm\modelctl` | `CLUSTER_ROLE=both`（中心控制面；不向自己注册为节点，见下方说明） | `127.0.0.1:4173` | 集群 init、goal 下发、nodes / status / events / backup 等中心侧操作 |
+| **T-worker** | `D:\WorkPlace\Pycharm\modelctl\mock-worker` | `CLUSTER_ROLE=worker`（`CLUSTER_NODE_ID=w-mock-01`） | `127.0.0.1:4183` | 加入集群、模型被拉起位置（`18911/vllm` 或 `18910/llamacpp`） |
+| *(可选)* **T-browser** | 浏览器 — | — | — | 登录 4173 webui 看"节点"页、看 SSE 事件流 |
+
+**端口约定**：
+
+| 端口 | T-center 占用 | T-worker 占用 |
 | --- | --- | --- |
-| 源码目录 | `D:\WorkPlace\Pycharm\modelctl` | `D:\WorkPlace\Pycharm\modelctl-mock-worker` |
-| `PROJECT_ROOT` | （由 `envfile.PROJECT_ROOT` 推导，不可覆盖） | 同左推导，独立 |
-| `data/` | `<src>/data`（已有） | `<dst>/data`（新） |
-| `CLUSTER_ROLE` | `both` | `worker` |
-| `CLUSTER_NODE_ID` | 自带（center 无需注册 self；不下发 goal） | `w-mock-01` |
-| `CLUSTER_LAN` | `lan-a` | `lan-a` |
-| webui | `127.0.0.1:4173` | `127.0.0.1:4183` |
-| 网关 | `127.0.0.1:5003`（默认，本轮不跑） | `127.0.0.1:5005` |
-| 模型端口 | `18897`（llamacpp）/ `8108`（vllm；本轮不跑） | `18911`（vllm，yaml 已 patch）；llmacpp 副本 `18910` 备用 |
-| 引擎 | — | vllm `qwen2.5-0.5b`（6GB 显存 `gpu_memory_utilization=0.62`） |
-| llamacpp 副本 | — | 同步打了 port patch，如需切换可走 |
+| 4173 | webui（admin REST + SSE） | — |
+| 4183 | — | webui（worker 本地管理面） |
+| 18911 | — | vllm `qwen2.5-0.5b`（默认 yaml；`models/vllm/qwen2.5-0.5b.yaml`） |
+| 18910 | — | llamacpp（备用副本） |
+| 5005 | — | worker 网关（默认，本轮不跑） |
 
-> **为什么必须两份源码目录**：`envfile.PROJECT_ROOT = Path(__file__).resolve().parents[3]` 由
-> `python -c "import modelctl"` 的实际安装路径推导，**不能**用 `MODELCTL_PROJECT_ROOT`
-> 环境变量覆盖；同一份 `src/` 装在两个 venv 中会指向同一个 `PROJECT_ROOT`，
-> 导致 `data/cache/cluster-meta.db`（SQLite 台账）和 `data/cache/pid` 文件
-> **被两个 webui 进程读写同一份**，测试作废。
+> ⚠️ **18911/18910 已经同时是 center 自己 yaml 的端口**：center 的 `models/vllm/qwen2.5-0.5b.yaml` 现在写的就是 `port: 18911`、`models/llamacpp/qwen2.5-0.5b.yaml` 写的就是 `port: 18910`。这意味着：
+> - `worker_copy.ps1` 里 `8108 → 18911` / `18897 → 18910` 的端口 patch **已成 no-op**（源值已等于目标值），别再指望它做隔离；
+> - center（`CLUSTER_ROLE=both`）**不要本地跑同名 profile**，否则与 worker 抢同一端口，`all_service` 的 `port_in_use` 前置拦截会点名占用者并直接失败；
+> - 需要真正双跑同名 profile 时，改 **center 的 yaml**（sync 会把它推到 worker，两侧仍同端口，互斥关系不变）或换 profile。
 
-## 1. 一键准备（人工一次；幂等）
+> **两份源码目录的强约束**：`envfile.PROJECT_ROOT = Path(__file__).resolve().parents[3]` 由 `python -c "import modelctl"` 实际安装路径推导，不可被 env 变量覆盖；**同一份 `src/` 装两个 venv 会让 SQLite 台账 + pid 文件被两个 webui 进程读写同一份**——测试作废。worker 必须用 `worker_copy.ps1` 生成的独立项目副本 + 独立 venv。
+
+> **profile 下发小陷阱（已踩过）**：center 用 `profiles.load(name)` 读自己 `models/<engine>/<stem>.yaml` 原样存进 goal（`goals.py._write_goal(profile_yaml=source["yaml"], profile_sha=source["sha"])`），worker 收到后**直接用这份 yaml 覆盖本地文件**——这意味着：
+> - 想改 worker 端运行端口 / 显存参数，**改 center 的 yaml**（中心是 profile 的"单一事实源"）；
+> - 改 worker 本地 yaml 只会被下一拍 sync 覆盖回去，**无效**。
+>
+> **Windows 桌面 vllm 冷启动需显式 `CLUSTER_START_TIMEOUT_S=1800`**：
+> - Worker 默认 `CLUSTER_START_TIMEOUT_S=300`（[config.py L88](file:///d:/WorkPlace/Pycharm/modelctl/src/modelctl/core/cluster/config.py#L88-L90)），与 `all_service.START_TIMEOUT_DOCKER=1800` **不同源**——worker reconciler 用前者，导致 vllm docker 在 WSL2/FUSE+nvidia 7.5 上 >5 min 的权重加载直接被判 `startup_timeout`。
+> - 修：worker `.env` 显式 `CLUSTER_START_TIMEOUT_S=1800`（已 sunk 进 [worker_copy.ps1 L105](file:///d:/WorkPlace/Pycharm/modelctl/docs/cluster-mock/worker_copy.ps1#L105-L108)），worker webui **restart** 后生效；`all_service.default_start_timeout` 路径无变化（仍按 `is_docker_runtime` 给 1800）。
+> - ⚠️ **历史 `.env` 不会被脚本纠正**：`worker_copy.ps1` 每次 `Remove-Item` 重建整个副本（含已下载的 `data\models\*` 权重），所以只想改超时**别重跑脚本**，直接改 `mock-worker\.env`。曾因手工留档把该项停在 `600`，Windows 冷启动仍被判 `startup_timeout`——核对：
+>   ```powershell
+>   Select-String -Path D:\WorkPlace\Pycharm\modelctl\mock-worker\.env -Pattern "^CLUSTER_START_TIMEOUT_S="
+>   # 非 1800 时：
+>   (Get-Content D:\WorkPlace\Pycharm\modelctl\mock-worker\.env) -replace "^CLUSTER_START_TIMEOUT_S=.*","CLUSTER_START_TIMEOUT_S=1800" | Set-Content D:\WorkPlace\Pycharm\modelctl\mock-worker\.env -Encoding UTF8
+>   ```
+>
+> **placement gate 拒绝常见原因**：
+> - `machine_not_ready`（worker 本机 `.venvs/<engine>` 没建）：sglang / tokenspeed / aphrodite / lmdeploy / tensorrt_llm 等——worker 必须先 `modelctl env setup <engine>`（worker 用**自己**的 venv，center 的 venv 不算）。
+> - `docker_image 非空` 的引擎（vllm / tensorrt_llm / tokenspeed）走 docker 旁路绕过 venv 检查，**不需要** `env setup`；本地 `docker start+pull` 完即可。
+> - `llamacpp` 特殊：不在 MANAGED_ENGINES，需**源码编译**——PATH 有 `llama-server` 或 `LLAMACPP_SOURCE_DIR` 下有 `<src>/build/bin/llama-server`；missing 时 `dry-run` 直接 `[dry-run] SKIP <node> engine llamacpp 在 <node> 上不可用`。
+
+## 1. 一次性准备（Both；幂等）
 
 ```powershell
 cd D:\WorkPlace\Pycharm\modelctl
 powershell -ExecutionPolicy Bypass -File docs\cluster-mock\worker_copy.ps1
 ```
 
-产物核对：
+产物核对（**Both**，不需要任何 venv 激活）：
 
 ```powershell
-dir D:\WorkPlace\Pycharm\modelctl-mock-worker\.env
-dir D:\WorkPlace\Pycharm\modelctl-mock-worker\models\\llamacpp\qwen2.5-0.5b.yaml
-dir D:\WorkPlace\Pycharm\modelctl-mock-worker\models\vllm\qwen2.5-0.5b.yaml
-dir D:\WorkPlace\Pycharm\modelctl-mock-worker\venv\Scripts\python.exe
+dir D:\WorkPlace\Pycharm\modelctl\mock-worker\.env
+dir D:\WorkPlace\Pycharm\modelctl\mock-worker\models\vllm\qwen2.5-0.5b.yaml
+dir D:\WorkPlace\Pycharm\modelctl\mock-worker\models\llamacpp\qwen2.5-0.5b.yaml
+dir D:\WorkPlace\Pycharm\modelctl\mock-worker\venv\Scripts\python.exe
 ```
 
-**人工验证**：`Get-Content D:\WorkPlace\Pycharm\modelctl-mock-worker\models\vllm\qwen2.5-0.5b.yaml | Select-String "port:|gpu_memory_utilization:"` 应见 `port: 18911` 与 `gpu_memory_utilization: 0.62`。
-
-**代码验证**：
+代码侧核对（**Both**）：
 
 ```powershell
-D:\WorkPlace\Pycharm\modelctl-mock-worker\venv\Scripts\python.exe -c "import modelctl,sys; print(modelctl.__file__)"
+# 期望：输出 …\modelctl\mock-worker\src\modelctl\__init__.py（不是 center 路径）
+D:\WorkPlace\Pycharm\modelctl\mock-worker\venv\Scripts\python.exe -c "import modelctl,sys; print(modelctl.__file__)"
 ```
 
-应输出 `D:\WorkPlace\Pycharm\modelctl-mock-worker\src\modelctl\__init__.py`，**不是** center 的路径。
-
-## 2. T0 — 前置：环境自检（代码）
+**入口自检（Both）**：
 
 ```powershell
-# 两个 venv 都用各自 venv 里的 modelctl，互不串
-D:\WorkPlace\Pycharm\modelctl\.venv\Scripts\python.exe -m modelctl --help | Select-Object -First 3
-D:\WorkPlace\Pycharm\modelctl-mock-worker\venv\Scripts\python.exe -m modelctl --help | Select-Object -First 3
-```
-
-**验证点（三行都"OK"）**：
-1. 两个 python 都能 `import modelctl`；
-2. `modelctl --version` 一致；
-3. 检查 **不**冲突端口：
-
-```powershell
-# 期望：无 system.process 监听 4173 / 4183 / 18910 / 18911
+# 期望：无监听 4173/4183/18910/18911
 Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -in 4173, 4183, 18910, 18911 } | Format-Table -AutoSize
+# 如有残留：
+modelctl webui stop     # 或在对应 venv 里
+Stop-Process -Name python -Force
 ```
 
-> 如果本机刚才还在跑旧 webui：`modelctl webui stop` 或 `Stop-Process -Name python -Force` 后再开新 webui。
-
-## 3. T1 — center 启用控制面（人工 + 代码）
+## 2. center 侧：启用控制面 + 初始化集群（T-center）
 
 ```powershell
 cd D:\WorkPlace\Pycharm\modelctl
-. venv\Scripts\Activate.ps1   # 可选：沿 script 路径用绝对路径也行
-modelctl webui start
-modelctl cluster init
+modelctl webui start                     # 4173 listen
+modelctl cluster init                    # 输出 join token: JT-XXXX
 ```
 
-`cluster init` 应输出 `join token: <TOKEN_A>`（如已存在则复用）。记下这个 token。
+记下打印的 `TOKEN_A`。
 
-**代码验证**：
+代码核对（**T-center**）：
 
 ```powershell
-modelctl cluster join-token   # 仅中心本机可直读台账；应输出同一 token
-modelctl cluster status       # 应见 role=both，nodes=0
+modelctl cluster join-token              # 同一 token，直读台账
+modelctl cluster status                  # 角色: both  中心: True  节点: 0 online / N total
 ```
 
-**人工验证（任一）**：
-- 浏览器 `http://localhost:4173/`，登录后选"节点"页，看到 `both`/center 自身条目的状态 + 机载模型列表（若 center 自跑）。
-- 或 webshell：`curl http://127.0.0.1:4173/admin/api/cluster/nodes` 应返回 200；否则：`401`（key 不对）、`403`（CLUSTER_ROLE 不是 both）、`404`（webui 没起）。
+人工核对（**T-browser** 任选其一）：
 
-## 4. T2 — worker 加入（代码）
+- `http://localhost:4173/` → 登录 → 节点页，此步**列表为空属正常**（见 §0：center 不向自己注册）。第一条记录要等 §3 worker join 后出现。
+
+## 3. worker 侧：加入 + 起 webui（T-worker）
 
 ```powershell
-cd D:\WorkPlace\Pycharm\modelctl-mock-worker
-. venv\Scripts\Activate.ps1   # 可选
+cd D:\WorkPlace\Pycharm\modelctl\mock-worker
 modelctl cluster join --center http://127.0.0.1:4173 --token <TOKEN_A> --node-id w-mock-01 --lan lan-a
 ```
 
-**人工验证**：
-- 输出应为：预检通过 → 已写入 `CLUSTER_CENTER_URL`/`CLUSTER_NODE_ID`/`CLUSTER_LAN` 到 `.env`，中心签发 `CLUSTER_NODE_TOKEN`（响应里一次性回显，自己截屏）。
-- 若报 `token mismatch`：说明 center `cluster join-token --rotate` 过——重新看 token。
+**预期**：预检通过 → 写入 `.env`（`CLUSTER_CENTER_URL`、`CLUSTER_NODE_ID`、`CLUSTER_LAN`、`CLUSTER_NODE_TOKEN`，**token 一次性回显请随手记下**）。
 
-**代码验证**：worker webui 启动一次。
+**常见报错**：`token mismatch` → 中心做 `cluster join-token --rotate` 过；先 `cluster join-token` 重新获取 token 再来一遍 join。
+
+继续：
 
 ```powershell
-modelctl webui start            # 4183 起
-curl.exe -s http://127.0.0.1:4183/admin/api/health     # 200 {"ok": true, "version": "2.8.1"}
+modelctl webui start                     # 4183 listen
+curl.exe -s http://127.0.0.1:4183/admin/api/health     # 200 {"ok": true, "version": "..."}
 ```
 
-## 5. T3 — 节点在线检查（代码，自动）
+## 4. 节点在线核验（Both）
+
+在 T-worker 起完 webui、**等 5~10 秒心跳**后：
 
 ```powershell
-# 切回 center 终端
+# —— T-center：看节点状态
 modelctl cluster nodes
+# 期望：w-mock-01 状态列 = online，hostname=127.0.0.1，port 列对应 goal 端口
 ```
 
-**期望输出**：表头 + 一行；`node_id` 列 = `w-mock-01`，`状态` 列 = **online**（三叶草也来自 REST 中心已格式化、CLI 不二次加工），`port`=18910，`since_seen_s` 与 `lease_left_s` 数值合理（默认 `CLUSTER_HEARTBEAT_INTERVAL_S=10` / `LEASE_S=90`：seent_s≈0~10、lease_left≈90）。
+```powershell
+# —— T-worker：自检自己视角
+modelctl cluster status
+# 期望：role=worker, 自身 running
+```
 
-**代码断言**（一行 PowerShell 锁定）：
+```powershell
+# —— T-worker：worker 侧 jobs 看 profile sync 有没有把 yaml 推下来
+modelctl status --port 18911    # 暂未 ready 没关系，能看到引擎 chunk 行即可
+```
+
+**代码断言（T-center）**：
 
 ```powershell
 $r = (modelctl cluster nodes --json 2>$null) | ConvertFrom-Json
 $mine = $r.nodes | Where-Object { $_.node_id -eq "w-mock-01" }
-if (-not $mine -or $mine.status -ne "online") { Write-Error "T3 FAILED" } else { "T3 OK" }
+if (-not $mine -or $mine.status -ne "online") { Write-Error "T4 FAILED: $mine.status" } else { "T4 OK: $mine.status" }
 ```
 
-**人工验证**：浏览器 `http://localhost:4173/` → "节点" 页，`w-mock-01` 卡片 online，`hostname=127.0.0.1`。注意：`-i "online"` 也在 `modelctl cluster nodes` 输出里能抓到同一信号（不是 RPC name 不同——前端 `cluster.ts` 的 `listNodesValid`/`getProbe`/`listGoal` 与 CLI 走同一 REST）。
+## 5. goal 下发（Both：先 dry-run 再实际 set）
 
-## 6. T4 — goal 下发（代码）
+> 中心侧候选已被 `worker_copy` 写入 `CLUSTER_NODE_ID=w-mock-01`，所以**所有 goal 子命令在 T-center 执行**（实际下发的 REST 请求到 4173 由中心代理，CLI 无需切终端）。**T-worker 在这一步只是被动接收并自愈**。
+
+### 5a. dry-run 验 placement gate（T-center）
 
 ```powershell
-# center 侧
-modelctl cluster goal set qwen2.5-0.5b-vllm --node w-mock-01 --create
+modelctl cluster goal set qwen2.5-0.5b --node w-mock-01 --engine vllm --dry-run
+```
+
+- 期望：报告行 "候选 w-mock-01 → 通过"。
+- **不会**写台账（`goal list` 仍空）。
+
+### 5b. 实际下发（T-center）
+
+```powershell
+modelctl cluster goal set qwen2.5-0.5b --node w-mock-01 --engine vllm --create
 modelctl cluster goal list --node w-mock-01
 ```
 
-**期望**：
-1. 第一次 `set` 创建 goal，gate 报告行：候选 `w-mock-01` → 通过。
-2. `list` 里看到 stage 在 **`PROFILE_SYNCED`** 或更早（`PENDING_PROFILE_SYNC` 刚诞生），reason 为空。
+- 第一次 set 创建 goal；立刻 `list` 时 stage 通常是 `PENDING_PROFILE_SYNC`（worker 还没回拍 sync 完成回调）。
 
-> stage 推不推进由 worker 端 reconciler 一拍一拍来（设计文档 §A2）；`goal list` 只是看时刻，所以 stage 可能出现"还在推进"的中间态（PROFILE_SYNCED→RUNTIME_OK 等 worker 下载模型/镜像/启动容器）。
+### 5c. 持续观察 stage 推进（Both）
 
-> 如果显示 `REJECTED` 或 stage 卡 `PENDING_PROFILE_SYNC`：worker 没起 webui 或 WS 通道没通；回 T2 检查 `curl /admin/api/health`。
-
-## 7. T5 — 模型实际拉起（代码 + 人工等模型）
-
-持续刷 stage 到 `READY`：
+worker 端 reconciler 一拍一拍推，**T-worker** 侧查本地状态最快：
 
 ```powershell
-# 每 5~10s 看一次，直到 stage=READY
+# 看 worker 本地 stage（不经网络，0 延迟）
+Get-Content D:\WorkPlace\Pycharm\modelctl\mock-worker\data\cache\cluster-reconcile.json -Raw | ConvertFrom-Json |
+    Select-Object -ExpandProperty goals |
+    ForEach-Object { "{0:,-24} {1:,-22} = {2}" -f $_.profile_name, $_.stage, $_.profile_sha }
+```
+
+中心侧（**T-center**）走 REST：
+
+```powershell
 modelctl cluster goal list --node w-mock-01
+# 或带 reason：
+modelctl cluster events --node w-mock-01 --limit 30
 ```
 
-stage 顺序应该依次经过：
-`PENDING_PROFILE_SYNC → PROFILE_SYNCED → RUNTIME_OK → STARTING → READY`
+**stage 顺序应该**：
 
-如果直接跳到 `FAILED`：
-- 看 `reason` 列（如 `abandoned by previous launch` / `no healthy candidates` 等）；
-- 再看 `modelctl cluster events --node w-mock-01 --limit 30` 拿事件流；
-- 或 `modelctl cluster logs --node w-mock-01 <profile> --tail 200`（设计文档 §4.4：拉 worker 端 `_launch_stream`，docker 容器日志也在 WS 里回传，不必 SSH）；
-- 或 直接看 worker 的 `data\logs\launch-*.log` / `docker logs <container>`。
-
-**代码断言**：
-
-```powershell
-$modelIsUp = curl.exe -s http://127.0.0.1:18911/health
-if ($modelIsUp -notmatch '"status":\s*"ok"') { Write-Error "T5 model not healthy yet" } else { "T5 model healthy" }
+```
+PENDING_PROFILE_SYNC → PROFILE_SYNCED → RUNTIME_OK → STARTING → READY
+                                                  (或 FAILED：startup_timeout / launch_failed / ...)
 ```
 
-**人工验证**：
-- 浏览器 `http://localhost:4173/` → "模型" 页，若 center 配置了网关，应见 `qwen2.5-0.5b` 一行（在 worker w-mock-01:18910 上跑）；
-- 不归入 GET /v1（本轮 gateway 不跑），只看 webshell 管理面。
-
-## 8. T6 — 远程启停（代码）
-
-### T6a. 停
+### 5d. 健康检查（T-center 或 T-worker）
 
 ```powershell
-modelctl cluster stop qwen2.5-0.5b-vllm --node w-mock-01
-modelctl cluster goal list --node w-mock-01   # intent=stop, stage 应变 TO_DETERMINE 或停后回 RUNNING-FREE
+curl.exe -s http://127.0.0.1:18911/    # vllm 容器（worker 跑）
+# 例如返回 200 HTML 说明容器活着；/v1/models 返回可正确结构化 JSON
 ```
 
-模型 `18911/health` 应 500/超 时。
-
-### T6b. 启
+**自动化断言（T-center）**：
 
 ```powershell
-modelctl cluster launch qwen2.5-0.5b-vllm --node w-mock-01
-modelctl cluster goal list --node w-mock-01   # intent 回到 start, stage 推进
+$h = curl.exe -s http://127.0.0.1:18911/v1/models
+if ($h -notmatch '"id"') { Write-Error "T5 model not healthy" } else { "T5 healthy" }
 ```
 
-### T6c. 删（断托管，撤文件 + 停模型 + 删台账）
+### 5e. 故障排查（stage 卡住 / FAILED）
+
+- 看 reason：
+  ```powershell
+  modelctl cluster goal list --node w-mock-01 --json | ConvertFrom-Json | ForEach-Object { "{0:,-8} {1}" -f $_.stage, $_.reason }
+  ```
+- 看事件流：
+  ```powershell
+  modelctl cluster events --node w-mock-01 --kind launch --limit 50
+  ```
+- 看 worker 本地日志：
+  ```powershell
+  # T-worker
+  Get-Content D:\WorkPlace\Pycharm\modelctl\mock-worker\data\logs\launch-*.log -Tail 100
+  # 或 docker 容器日志
+  docker logs --tail 100 (docker ps --filter name=qwen2.5-0.5b --format "{{.ID}}")
+  ```
+
+> **cause 表**：
+> - `startup_timeout`（最常见）：分两种子原因——
+>   - **a. 超时不够长**（Windows Docker Desktop 冷启动 5-30min）：worker `.env` 升 `CLUSTER_START_TIMEOUT_S=1800` + `webui restart`。**remove+set** 重发新模式（FAILED 是终态，retry 不重置 状态机）。
+>   - **b. 权重复写/小卡规**：profile `--enforce-eager` + `gpu_memory_utilization` 在 6GB 卡上；改 `model: <本地权重目录>` 或降 `max_model_len`/`gpu_memory_utilization` 后 **remove+set**。
+> - `image_missing`：docker 镜像未拉；worker 侧 `docker pull` 完再 `modelctl cluster sync --node w-mock-01`。
+> - `workspace_full`：`<MODEL_ROOT>` 剩余 <5GB；清理旧镜像/模型。
+> - `profile_not_found`：center `goal list --profile qwen2.5-0.5b` 看 sha；center yaml 路径改过但 intent 未重新 set。
+
+## 6. 远程启停（**cloud-level API**，CLI：`launch` / `stop` / `remove`）
+
+> 设计文档 §4.2 把这三者统一为三个入口：`goal set --intent=...` 是"真身"，`launch`/`stop` 是别名（`cli.py` L282-285）。**没有** `goal stop` 这种嵌套——一字不差的命令在下面这几行。
+
+### 6a. 停（T-center）
 
 ```powershell
-modelctl cluster goal remove qwen2.5-0.5b-vllm --node w-mock-01
-modelctl cluster goal list --node w-mock-01   # 应空
+modelctl cluster stop qwen2.5-0.5b --node w-mock-01
+# 或等价的
+modelctl cluster goal set qwen2.5-0.5b --node w-mock-01 --intent stop
 ```
 
-`worker` 侧 `models/vllm/qwen2.5-0.5b.yaml` 应被 reconciler 剪掉（reconciler 在 goal 删的下拍 prune 中心授权的 profile 文件）。
-
-> 验证文件删除：**worker 侧**看 `D:\WorkPlace\Pycharm\modelctl-mock-worker\models\vllm\qwen2.5-0.5b.yaml`。
-
-## 9. T7 — 故障注入：worker webui 掉线 → 中心判 stale → offline
-
-### T7a. 杀 worker webui
+校验（**Both**）：
 
 ```powershell
-# worker 侧（终端 2）
-D:\WorkPlace\Pycharm\modelctl-mock-worker\venv\Scripts\modelctl.exe webui stop
+modelctl cluster goal list --node w-mock-01   # intent=stop, stage 可能会跳到 TO_DETERMINE 等同步态
+# T-worker
+curl.exe -s -o NUL -w "%{http_code}" http://127.0.0.1:18911/    # 期望非 200 / 超时
 ```
 
-或 `Stop-Process -Name python -Id <worker-webui-pid> -Force`。
-
-### T7b. 中心侧看心跳状态演化
-
-中心 `CLUSTER_HEARTBEAT_INTERVAL_S` 默认 10s、`CLUSTER_LEASE_S` 90s、stale 阈值 3×lease=270s。
-连续刷 `modelctl cluster nodes`：
+### 6b. 启（T-center）
 
 ```powershell
-# 每 30s 间隔看一次，~45s 配合 top5
-modelctl cluster nodes
-# ...
+modelctl cluster launch qwen2.5-0.5b --node w-mock-01
+# 或
+modelctl cluster goal set qwen2.5-0.5b --node w-mock-01 --intent start
 ```
 
-- 前 90s（lease 未过期）：仍 `online`（worker 没在发心跳，但 lease 还有效地覆盖 last_seen 推后期内）。
-- 90~270s：`stale`（lease 过期但 last_seen < 3×lease）。
-- `>` 270s：`offline`。
+观察 stage 从 `TO_DETERMINE`推回 `PENDING_PROFILE_SYNC → ... → READY`。
 
-**代码断言**（在 3 分钟后再跑）：
+### 6c. 撤托管（delete goal，删文件 + 停模型 + 删台账，T-center）
 
 ```powershell
-$r = (modelctl cluster nodes | Out-String | ForEach-Object { ConvertFrom-Json $_ })
-($r.node_status | Where-Object { $_.node_id -eq "w-mock-01" }).status
-# 期望："offline"
+modelctl cluster goal remove qwen2.5-0.5b --node w-mock-01
+modelctl cluster goal list --node w-mock-01     # 空
 ```
 
-### T7c. 恢复 worker，验 adopt（不重试启动）
+**T-worker 校验文件已剪枝**（reconciler 这一拍下来会删掉被 prune 的 yaml）：
 
 ```powershell
-# worker 侧
+Test-Path D:\WorkPlace\Pycharm\modelctl\mock-worker\models\vllm\qwen2.5-0.5b.yaml
+# 期望：False
+```
+
+## 7. 故障注入：worker webui 掉线 → center 判 stale → offline
+
+> 注释：这是测**心跳机制**，**不需要**touch goal 台账；center 保持 goal 不变。
+
+### 7a. 杀 worker webui（T-worker）
+
+```powershell
+modelctl webui stop
+# 或更暴力
+Stop-Process -Name python -Force    # 在同工作目录用它前先 modelctl status 看 pid
+```
+
+### 7b. 中心侧等心跳自愈（T-center，每 30s 一次，约 4-5 次）
+
+默认 `CLUSTER_HEARTBEAT_INTERVAL_S=10` / `CLUSTER_LEASE_S=90`，stale 阈值 = 3×lease = 270s：
+
+| 经过时间 | 期望 status |
+| --- | --- |
+| 0~90s（lease 还有效） | `online` |
+| 90~270s | `stale` |
+| `> 270s` | `offline` |
+
+```powershell
+modelctl cluster nodes     # 重复执行，直到看到 offline
+```
+
+**代码断言**（在 3 分钟后跑）：
+
+```powershell
+$r = (modelctl cluster nodes --json 2>$null) | ConvertFrom-Json
+($r.nodes | Where-Object { $_.node_id -eq "w-mock-01" }).status   # 期望 "offline"
+```
+
+### 7c. 恢复 worker + 验 adopt（T-worker + T-center）
+
+```powershell
+# T-worker
 modelctl webui start
 ```
 
-worker reconciler 启动时按 §A3（adopt on startup）：扫描 `*.pid` 活进程 + 健康目标 → 直接置为 running，**不**重走 start 状态机，避免双跑。
-
-center 再看：
+worker reconciler 启动时按 §A3（adopt on startup）：扫 `*.pid` 活进程 + 健康目标 → **直接**标记 running，不重走 STARTING 阶段。
 
 ```powershell
-modelctl cluster nodes            # 应回到 online
-modelctl cluster goal list        # stage 应直接 READY（adopt 跳过 STARTING）
+# T-center
+modelctl cluster nodes               # 应回 online
+modelctl cluster goal list --node w-mock-01
+# 期望：stage 直接回到 READY（不是 PENDING_PROFILE_SYNC / STARTING）
 ```
 
-> 如果 goal 重新经历 PENDING_PROFILE_SYNC → PROFILE_SYNCED 再到 STARTING：说明 adopt 没生效（环境异常）——查 worker `data\cache\*.pid` 是否健康。
+> 如果 goal 又重新走 PENDING → PROFILE_SYNCED → STARTING：说明 adopt 未生效——查 `D:\WorkPlace\Pycharm\modelctl\mock-worker\data\cache\*.pid` 进程是否还在。
 
-## 10. T8 — 节点治理（代码）
+## 8. 节点治理（T-center）
 
-### T8a. 禁用（goal 不动，但 hello/join 拒）
+### 8a. 禁用 + 解除
 
 ```powershell
 modelctl cluster node disable  --node w-mock-01
-# 视觉上立即：worker 下一次 hello 或重连被拒，节点标 disabled
-modelctl cluster nodes          # 状态应 disabled（不是 online）
-modelctl cluster node enable   --node w-mock-01   # 解除；状态由下次心跳自然决定
+modelctl cluster nodes          # 状态列 = disabled
+modelctl cluster node enable   --node w-mock-01
 ```
 
-### T8b. 轮换 token
+> 禁用只拒 hello/join，**goal 台账不动**——所以 disable 期间 stage 不变，worker 重连后自然恢复。
+
+### 8b. 轮换节点 token
 
 ```powershell
-modelctl cluster join-token --rotate-node w-mock-01
-# 新 token 回显一次；把 worker .env 的 CLUSTER_NODE_TOKEN 改成新值，重启 worker webui
-D:\WorkPlace\Pycharm\modelctl-mock-worker\venv\Scripts\modelctl.exe webui restart
+modelctl cluster join-token --rotate-node w-mock-01     # 打印新 token 一次
+# T-worker：把新 token 写到 .env CLUSTER_NODE_TOKEN=... 然后
+D:\WorkPlace\Pycharm\modelctl\mock-worker\venv\Scripts\modelctl.exe webui restart
 ```
 
-**代码断言**：`Get-Content D:\WorkPlace\Pycharm\modelctl-mock-worker\.env | Select-String "CLUSTER_NODE_TOKEN="` 应见新值（**只手动改一次**—— worker 不会自改 center 给的响应后 token）。
+代码断言（**T-worker**）：
 
-### T8c. 踢除（断 WS，worker 自动重连）
+```powershell
+Get-Content D:\WorkPlace\Pycharm\modelctl\mock-worker\.env | Select-String "CLUSTER_NODE_TOKEN="
+# 新值手工写过 → OK
+```
+
+> ⚠️ worker **不会**自改 token（设计文档 §2.1：rotate 响应一次性回显，必须人工 update `.env` 后重启）。
+
+### 8c. Kick（断 WS，worker 自动指数退避重连）
 
 ```powershell
 modelctl cluster node kick --node w-mock-01
 ```
 
-**人工/代码验证**：worker webui 日志应见 "ws drop, backoff ... reconnect 5s"；类似 10~30s 后回到 online（`modelctl cluster nodes`）。
+worker 日志（**T-worker**，约 5-30s 后回 online）：
 
-### T8d. 退役（删除节点 + 级联删 goal）
+```powershell
+Get-Content D:\WorkPlace\Pycharm\modelctl\mock-worker\data\logs\modelctl.log -Tail 50 | Select-String "kick|backoff|reconnect"
+modelctl cluster nodes       # T-center 验 online 已恢复
+```
+
+### 8d. 退役（级联删 goal + 删节点；**二次确认**）
 
 ```powershell
 modelctl cluster node retire --node w-mock-01 --yes
-modelctl cluster nodes
-modelctl cluster goal list
+modelctl cluster nodes        # w-mock-01 没了
+modelctl cluster goal list    # 该节点 goal 已级联删除
 ```
 
-**人工验证**：
-- center 台账里 `w-mock-01` 消失；
-- 该节点所有 goal 被级联撤销（worker 端 reconciler 下拍 prune + 停模型）。
+**T-worker 校验**（应该不再收到 sync，文件已 prune）：
 
-> T8d 之后，本组 mock 节点套件一次结束；可回 T4 重新 join 一个 lifecycle 跑。
+```powershell
+Test-Path D:\WorkPlace\Pycharm\modelctl\mock-worker\models\vllm\qwen2.5-0.5b.yaml     # 期望 False
+```
 
-## 11. T9 — 跨机复刻（可选；真实两电脑 LAN 链路）
+> T8d 之后，重新跑一轮：回 §2 重新 `cluster init`（或复用 token）→ §3 重 join。
 
-把本轮单机 mock 升成两台真机：
+## 9. 跨机复刻（可选；真实两电脑）
 
-1. 在**第二台 Windows** 上 `git clone` modelctl 或整目录拷（同版本）；
-2. 在其开发目录 `.env` 改：
+把 mock 升成两台 Windows：
+
+1. 第二台 clone/拷贝 modelctl 仓库（同版本）；
+2. 第二台 `.env`：
    ```
    CLUSTER_ROLE=worker
    CLUSTER_CENTER_URL=http://<第一台_IP>:4173
-   CLUSTER_NODE_ID=w-<LAN 内的真正编号>
+   CLUSTER_NODE_ID=w-<LAN 内真编号>
    CLUSTER_LAN=lan-a
-   API_KEY=<同 center>
-   UNSLOTH_API_KEY=<同 center>
-   WEBUI_PORT=4173       # 第二台也走 4173，本机对本机而言没冲突
-   MODEL_ROOT/<实际盘符>\models
+   WEBUI_PORT=4173          # 第二台对自己讲，无冲突
+   MODEL_ROOT=D:\models
    ```
-3. `envsetup docker` 装 docker（如未装）；
-4. 中心 `.env` 的 `WEBUI_HOST=0.0.0.0`（让第二台能从 LAN 访问 4173）；
+3. 第二台 `modelctl env setup docker --run`（如未装）；
+4. **第一台**（center）`WEBUI_HOST=0.0.0.0`，防火墙放行 4173；
 5. 第二台 `modelctl cluster join --center http://<第一台_IP>:4173 --token <TOKEN> --node-id <id> --lan lan-a`；
-6. 中心 `modelctl cluster nodes` 应见第二台 `online`；
-7. 后续走 T4–T8 同款路径。
+6. 第一台 `modelctl cluster nodes` 见第二台 online；
+7. 后续 §4–§8 同款路径。
 
-**安全提醒**：管理 API **没有细粒度鉴权**（只有 Bearer API_KEY），WEBUI_HOST=0.0.0.0 时 LAN 内任何拿到 key 的客户端都能操作所有节点。仅在内网 / OAuth 网关后放行。
+**安全提醒**：管理 API 仅 Bearer API_KEY，**无细粒度鉴权**；`WEBUI_HOST=0.0.0.0` 时 LAN 内任何拿到 key 的客户端都能操作所有节点——生产走 OAuth 网关或反向代理收紧。
 
-## 12. 单元测试 / pytest 不替代的部分
+## 10. 快速失败诊断表
 
-集群分布式测试 **没有单测**能完整覆盖（设计文档 §A1：错误注入等不能在同一进程里既当 worker 又当 center 自证——只能 e2e mock）。
-本路径已涵盖端到端：注册 → 心跳 → 状态推进 → 模型启停 → 故障恢复 → 治理 → 退役。
+| 现象 | 终端 | 第一反应 |
+| --- | --- | --- |
+| `cluster join` 报 `token mismatch` | T-worker ↔ T-center | T-center 先 `cluster join-token` 复看 token |
+| worker `webui start` 起不来 | T-worker | `Get-Content D:\WorkPlace\Pycharm\modelctl\mock-worker\data\logs\modelctl.log -Tail 100`；端口冲突 `Get-NetTCPConnection -State Listen` |
+| `cluster nodes` 看不到 worker | T-center | ① worker `.env` 的 `CLUSTER_NODE_TOKEN` 是否被 rotate 后未更新；② worker webui 是否跑着 |
+| worker online 但 goal stage 卡 `PENDING_PROFILE_SYNC` | Both | T-worker 看 `data\logs\profile*.log` / T-center 看 `cluster events --kind profile`；token 链断 |
+| goal `FAILED` + `reason=abandoned by previous launch` | T-center | T-center `cluster events --kind launch` 定位抢占；§SettleGate 单实例 |
+| `modelctl cluster node` 命令报 `invalid choice: 'kick'` 或 `invalid choice: 'stop'`（针对 goal） | T-center | **没有** `goal stop`，是 `cluster stop`（§6a）；`node` 子命令只有 disable/enable/rotate-token/kick/retire（§8） |
+| worker YAML 改了 port 不生效 | Both | **必须改 center 的 yaml**（§0 已说明：node 上文件由 sync 覆盖）；改完 `goal remove` + `goal set`（FAILED 是终态） |
+| 第二台 LAN 看不到 center | T-worker(2) | center `.env` 的 `WEBUI_HOST` 改 `0.0.0.0` + 防火墙 4173 |
 
-如有必要，可在 `tests/` 下用 FastAPI TestClient 起 mock center（`CLUSTER_ROLE=control-plane`）+ fixture 模拟 WS client 的 PR；但本轮交付以真实可观测的 e2e 为先。
+## 11. 完工检查清单
 
-## 13. 快速失败诊断表
+- [ ] 两份源码 `python -c "import modelctl"` 各自带完整 `PROJECT_ROOT`
+- [ ] 4173 / 4183 监听 OK（`Get-NetTCPConnection`）
+- [ ] worker `.env` 三项 `CLUSTER_*` 完整 + `CLUSTER_NODE_TOKEN` 由 join 写回
+- [ ] worker 侧 `models/vllm/qwen2.5-0.5b.yaml` 是 reconciler 推下来的（非本地 patch 痕迹）
+- [ ] stage 全跑过：`PENDING_PROFILE_SYNC → PROFILE_SYNCED → RUNTIME_OK → STARTING → READY`
+- [ ] `cluster nodes` 见 online；stale/offline 三态按 §7b 时间表演化
+- [ ] retire 后 `cluster nodes` 空、worker 本机无残留 `*.pid`、`models/vllm/*.yaml` 已 prune
 
-| 现象 | 第一反应 |
-| --- | --- |
-| `cluster join` 报 `token mismatch` | center 侧 `cluster join-token` 看的不是 token A，或 center 侧 `CLUSTER_ROLE` 不是 both/control-plane |
-| worker `webui start` 起不来 | 看 `D:\WorkPlace\Pycharm\modelctl-mock-worker\data\logs\modelctl.log`；端口冲突（4183/5005/18910）用 `Get-NetTCPConnection -State Listen` 验 |
-| `cluster nodes` 看不到 worker | worker .env 的 `CLUSTER_NODE_TOKEN` 是否被 pop（rotate-token 后未更新？）；worker webui 是否在跑；`Get-Content -Task data\logs\open-webui-4183.log 2>$null` |
-| worker 节点 online 但 goal stage 停在 `PENDING_PROFILE_SYNC` | worker webui WS 注册没成功——看 worker `logs/` 和 center `logs/` 同时段 profile.push 事件；或 worker `CLUSTER_NODE_TOKEN` 空导致 token 链断 |
-| goal `FAILED` + `reason=abandoned by previous launch` | center 侧同 profile 失活 period 内有新 launch 抢占（§SettleGate 单实例——旧进程心跳被判废弃；看 `events` 流定位） |
-| worker `models/vllm/qwen2.5-0.5b.yaml` 不见了，goal 仍在 | 中心 `goal remove` 已生效但 worker reconciler 还在跑；等一拍 |
-| 第二台 LAN 网络源 IP 中心看不到 | center `WEBUI_HOST=127.0.0.1` 改 `0.0.0.0` + 防火墙放行 4173 |
-
-## 14. 回退（回到 solo）
+## 12. 回退（回 solo）
 
 ```powershell
-# center 改回
-Set-Content D:\WorkPlace\Pycharm\modelctl\.env -Value ((Get-Content D:\WorkPlace\Pycharm\modelctl\.env) -replace "^CLUSTER_ROLE=both","CLUSTER_ROLE=solo" -replace "^CLUSTER_LAN=lan-a","") -Encoding UTF8
+# T-center
+(Get-Content D:\WorkPlace\Pycharm\modelctl\.env) |
+  ForEach-Object { $_ -replace "^CLUSTER_ROLE=both", "CLUSTER_ROLE=solo" } |
+  Set-Content D:\WorkPlace\Pycharm\modelctl\.env -Encoding UTF8
 
-# worker 删除
-Remove-Item -Recurse -Force D:\WorkPlace\Pycharm\modelctl-mock-worker
+# Both：删除 worker 整副本（含 .env、venv、models、data）
+Remove-Item -Recurse -Force D:\WorkPlace\Pycharm\modelctl\mock-worker
 ```
 
---- 
+---
 
-**收尾检查清单**
+## Appendix A：CLI 命令速查（按终端聚合）
 
-- [ ] 两份源码各对应自己的 `PROJECT_ROOT`（venv `python -c "import modelctl; print(modelctl.__file__)"`）
-- [ ] center 4173 / worker 4183 各监听起来
-- [ ] worker .env 三项 CLUSTER_* 正确 + CLUSTER_NODE_TOKEN 由 join 写回
-- [ ] worker webui 侧 `models/vllm/qwen2.5-0.5b.yaml` 是 reconciler 推下来的（**非**本地 patch）
-- [ ] stage 推进 PENDING → PROFILE_SYNCED → RUNTIME_OK → STARTING → READY 全跑过
-- [ ] `modelctl cluster nodes` 见 online + 三叶草；T7 故障注入 270s 后变 offline
-- [ ] worker webui stop 后 center 自动标 offline + recover 后 adopt 不重 STARTING
-- [ ] retire 后 cluster 验空、worker 本机无残留 *.pid
+### T-center 常用
+
+```powershell
+modelctl cluster init                     # 一次性；建 SQLite + join token
+modelctl cluster join-token               # 看 join token（中心本机）
+modelctl cluster join-token --rotate      # 轮换 join token
+modelctl cluster join-token --rotate-node w-mock-01
+modelctl cluster nodes                    # 节点列表
+modelctl cluster status                   # 摘要（角色 / 节点计数）
+modelctl cluster goal set <profile> --node <id> --create [--engine vllm] [--dry-run]
+modelctl cluster goal list [--node <id>] [--profile <name>] [--json]
+modelctl cluster goal remove <profile> --node <id>
+modelctl cluster goal retry <profile> --node <id>          # 只推 FAILED 状态机
+modelctl cluster stop <profile> --node <id>                # = goal set --intent stop
+modelctl cluster launch <profile> --node <id>              # = goal set --intent start
+modelctl cluster sync --node <id> | --all                   # 强制全量 profile sync
+modelctl cluster events --node <id> --kind launch --limit 50
+modelctl cluster node disable|enable|rotate-token|kick|retire --node <id> [--yes]
+modelctl cluster backup --to backup.tar                   # 热备份台账
+modelctl cluster restore --from backup.tar --yes          # 须先停 center
+modelctl status --cluster                               # 聚合视图（仅 center 可忽看）
+modelctl llm-map --node w-mock-01                         # 节点视角的 LLM url 表
+```
+
+### T-worker 常用
+
+```powershell
+modelctl cluster join --center http://127.0.0.1:4173 --token <tok> --node-id w-mock-01 --lan lan-a
+modelctl webui start|stop|restart
+modelctl status --port 18911    # 看 goal 在不在跑、chunks 推没推到
+modelctl cluster status         # 自身角色视角
+```
+
+### Both 都能跑（中心只影响走 REST；worker 也是同一个 REST 镜像）
+
+`cluster nodes`、`cluster events`、`cluster goal list` 对 center 和 worker 都能调——CLI 不区分，关键是**有 CLUSTER_API_KEY**（worker 经 join 写入 .env）。

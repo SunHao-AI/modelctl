@@ -1,19 +1,26 @@
-# modelctl mock worker copy script.
+# modelctl mock worker copy script.  (PURE ASCII on purpose: Windows PowerShell
+# 5.1 reads -File scripts with the ANSI codepage; UTF-8 CJK comments at line ends
+# can swallow the newline and break the NEXT line. Do not add CJK to this file.)
 #
 # usage: powershell -ExecutionPolicy Bypass -File docs\cluster-mock\worker_copy.ps1
-# run from any dir; paths are absolute.
 #
-# output dir: D:\WorkPlace\Pycharm\modelctl-mock-worker
+# output dir: D:\WorkPlace\Pycharm\modelctl\mock-worker
 #
-# note: modelctl uses PROJECT_ROOT = Path(__file__).parents[3] (resolved from
+# note: modelctl PROJECT_ROOT = Path(__file__).parents[3] (derived from the
 # installed source path, NOT overridable via env), so co-located center and
-# worker MUST live under two independent source trees. this script builds the
-# worker tree from the existing center source at D:\WorkPlace\Pycharm\modelctl.
+# worker MUST live under two independent source trees. The worker tree lives
+# INSIDE the center tree (sandbox allows writes only under the project);
+# PROJECT_ROOT isolation still holds (mock-worker resolves to its own root).
 
 $ErrorActionPreference = "Stop"
 
 $srcRoot = "D:\WorkPlace\Pycharm\modelctl"
-$dstRoot = "D:\WorkPlace\Pycharm\modelctl-mock-worker"
+$dstRoot = "D:\WorkPlace\Pycharm\modelctl\mock-worker"
+
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+function Read-Utf8($p)  { [System.IO.File]::ReadAllText($p, [System.Text.Encoding]::UTF8) }
+function Write-Utf8($p, $t) { [System.IO.File]::WriteAllText($p, $t, $script:utf8NoBom) }
 
 Write-Host "source: $srcRoot" -ForegroundColor Cyan
 Write-Host "target: $dstRoot" -ForegroundColor Cyan
@@ -25,8 +32,9 @@ if (Test-Path $dstRoot) {
 }
 New-Item -ItemType Directory -Path $dstRoot -Force | Out-Null
 
-# ---- 2. minimal copy (src/ + models/) ------------------------------------------
-$copyList = @("src", "models")
+# ---- 2. minimal copy (src/ + models/ + pyproject.toml) --------------------------
+# pyproject.toml is REQUIRED: pip install -e . needs the build definition.
+$copyList = @("src", "models", "pyproject.toml")
 foreach ($item in $copyList) {
     $from = Join-Path $srcRoot $item
     $to   = Join-Path $dstRoot $item
@@ -34,132 +42,112 @@ foreach ($item in $copyList) {
         Write-Host "skip: $item (not in source root)" -ForegroundColor Yellow
         continue
     }
-    Write-Host "copying $($item) ..." -ForegroundColor Cyan
+    Write-Host "copying $item ..." -ForegroundColor Cyan
     Copy-Item -Recurse -Force $from $to
 }
 
-# ---- 3. patch worker models/llamacpp/qwen2.5-0.5b.yaml and vllm ------------------
+# ---- 3. patch worker profile ports (avoid clash with the same profile on center)
+# NOTE: never write "$var:" inside double quotes - PS parses it as scope-qualified
+# variable and throws. Use ${var} or reorder the text.
 $llamaYaml = Join-Path $dstRoot "models\llamacpp\qwen2.5-0.5b.yaml"
 if (Test-Path $llamaYaml) {
-    (Get-Content $llamaYaml -Raw) -replace "port: 18897", "port: 18910" |
-        Set-Content $llamaYaml -NoNewline
-    Write-Host "patched $llamaYaml: port 18897 -> 18910" -ForegroundColor Green
+    $t = (Read-Utf8 $llamaYaml) -replace "port: 18897", "port: 18910"
+    Write-Utf8 $llamaYaml $t
+    Write-Host "patched llamacpp yaml port 18897 -> 18910" -ForegroundColor Green
 }
 
 $vllmYaml = Join-Path $dstRoot "models\vllm\qwen2.5-0.5b.yaml"
 if (Test-Path $vllmYaml) {
-    $v = Get-Content $vllmYaml -Raw
-    # vllm profile port = 8108 (vs llamacpp 18897); shift to 18911 to avoid
-    # collision with a center-side vllm of the same profile name (it would also bind 8108)
-    $v = $v -replace "port: 8108", "port: 18911"
-    $v = $v -replace "port: 18897", "port: 18911"   # 兜底：有些镜像版本默认还是 18897
-    # 6GB card + 0.5B model would OOM at 0.9; scale down so the docker run comes up
-    $v = $v -replace "gpu_memory_utilization: 0.9", "gpu_memory_utilization: 0.62"
-    Set-Content $vllmYaml $v -NoNewline
-    Write-Host "patched $vllmYaml: port -> 18911, gpu_mem_util 0.9 -> 0.62" -ForegroundColor Green
+    # vllm profile port is 8108 on center; shift so both can run at once.
+    # gpu_memory_utilization is already 0.5 (fine for a 6GB card) - leave as is.
+    $t = (Read-Utf8 $vllmYaml) -replace "port: 8108", "port: 18911"
+    Write-Utf8 $vllmYaml $t
+    Write-Host "patched vllm yaml port 8108 -> 18911" -ForegroundColor Green
 }
 
-# ---- 4. read API_KEY / UNSLOTH_API_KEY from center .env (the only shared secret)
+# ---- 4. read API_KEY / UNSLOTH_API_KEY from center .env --------------------------
 $centerEnv = Join-Path $srcRoot ".env"
 $centerKey = ""
 $centerUnsloth = ""
 if (Test-Path $centerEnv) {
-    foreach ($line in (Get-Content $centerEnv)) {
-        if ($line -match "^API_KEY=(.+)$")        { $centerKey     = $matches[1].Trim("'""") }
+    foreach ($line in [System.IO.File]::ReadAllLines($centerEnv, [System.Text.Encoding]::UTF8)) {
+        if ($line -match "^API_KEY=(.+)$")         { $centerKey     = $matches[1].Trim("'""") }
         if ($line -match "^UNSLOTH_API_KEY=(.+)$") { $centerUnsloth = $matches[1].Trim("'""") }
     }
 }
 if ($centerKey -eq "") { $centerKey = "fly@@see" }
 
-$envText = @"
-# ============================================================
-# modelctl MOCK WORKER .env (cluster-distributed management plane)
-#
-# generated by docs/cluster-mock/worker_copy.ps1.
-# for a single-host mock of two nodes: center = d:\WorkPlace\Pycharm\modelctl
-# (CLUSTER_ROLE=both, webui port 4173); worker = this dir
-# (CLUSTER_ROLE=worker, webui port 4183).
-#
-# to point the worker at a real second machine later, just change NODE_ID
-# and CLUSTER_CENTER_URL and copy this .env to that machine.
-# ============================================================
-
-# ---------- global ----------
-API_KEY=$centerKey
-UNSLOTH_API_KEY=$centerUnsloth
-
-# ---------- cluster (role: worker) ----------
-CLUSTER_ROLE=worker
-# loopback for single-host mock; use real IP across machines
-CLUSTER_CENTER_URL=http://127.0.0.1:4173
-# unique cluster id (do not collide with center)
-CLUSTER_NODE_ID=w-mock-01
-CLUSTER_LAN=lan-a
-# filled back by the center access after a successful join
-CLUSTER_NODE_TOKEN=
-
-# ---------- model storage (worker-local, independent from center) ----------
-MODEL_ROOT=$dstRoot\data\models
-MODELSCOPE_CACHE=$dstRoot\data\modelscope
-LLAMACPP_SOURCE_DIR=
-
-# ---------- webui (separate port from center 4173) ----------
-WEBUI_HOST=127.0.0.1
-WEBUI_PORT=4183
-GATEWAY_PORT=5005
-NODE_ID=210
-NODE_HOST=127.0.0.1
-GATEWAY_DEFAULT_MODEL=qwen2.5-0.5b-vllm
-"@
-
+# ---- 5. write worker .env (UTF-8 WITHOUT BOM, otherwise python sees \ufeffAPI_KEY)
+$envLines = @(
+    "# ============================================================"
+    "# modelctl MOCK WORKER .env (cluster-distributed management plane)"
+    "# generated by docs/cluster-mock/worker_copy.ps1"
+    "# center = D:\WorkPlace\Pycharm\modelctl (both, webui 4173)"
+    "# worker = D:\WorkPlace\Pycharm\modelctl\mock-worker (worker, webui 4183)"
+    "# to run on a real second machine: copy this whole tree there and"
+    "# change CLUSTER_CENTER_URL to the center's LAN IP."
+    "# ============================================================"
+    ""
+    "API_KEY=$centerKey"
+    "UNSLOTH_API_KEY=$centerUnsloth"
+    ""
+    "CLUSTER_ROLE=worker"
+    "CLUSTER_CENTER_URL=http://127.0.0.1:4173"
+    "CLUSTER_NODE_ID=w-mock-01"
+    "CLUSTER_LAN=lan-a"
+    "# filled by center after join/webui restart"
+    "CLUSTER_NODE_TOKEN="
+    ""
+    "MODEL_ROOT=$dstRoot\data\models"
+    "MODELSCOPE_CACHE=$dstRoot\data\modelscope"
+    "LLAMACPP_SOURCE_DIR="
+    "# Windows Docker Desktop cold-start (9P FUSE + wsl2 + nvidia 7.5 FA2 rejected) measured"
+    "# vllm weight load > 5min; raise to 1800s to match all_service.START_TIMEOUT_DOCKER."
+    "CLUSTER_START_TIMEOUT_S=1800"
+    ""
+    "WEBUI_HOST=127.0.0.1"
+    "WEBUI_PORT=4183"
+    "GATEWAY_PORT=5005"
+    "NODE_ID=210"
+    "NODE_HOST=127.0.0.1"
+    "GATEWAY_DEFAULT_MODEL=qwen2.5-0.5b-vllm"
+)
 $envFile = Join-Path $dstRoot ".env"
-Set-Content -Path $envFile -Value $envText -Encoding UTF8
+Write-Utf8 $envFile (($envLines -join "`r`n") + "`r`n")
 Write-Host "wrote $envFile" -ForegroundColor Green
 
-# ---- 5. copy web/dist/ if it exists (so worker webui has SPA) -------------------
+# ---- 6. copy web dist/ if built (optional SPA for the worker webui) -------------
 $srcDist = Join-Path $srcRoot "dist"
-$dstDist = Join-Path $dstRoot "dist"
 if (Test-Path $srcDist) {
     Write-Host "copying dist/ (built frontend)" -ForegroundColor Cyan
-    Copy-Item -Recurse -Force $srcDist $dstDist
+    Copy-Item -Recurse -Force $srcDist (Join-Path $dstRoot "dist")
 } else {
-    Write-Host "dist/ not built under center; worker webui will only expose /admin/api and /v1" -ForegroundColor Yellow
+    Write-Host "dist/ not built under center; worker webui serves /admin/api only" -ForegroundColor Yellow
 }
 
-# ---- 6. create an isolated venv and dev-install modelctl -----------------------
+# ---- 7. isolated venv + dev install (base = center venv python, >=3.12) ---------
+$centerPy = Join-Path $srcRoot ".venv\Scripts\python.exe"
+$basePy = if (Test-Path $centerPy) { $centerPy } else { "python" }
+Write-Host "venv base interpreter: $basePy" -ForegroundColor Cyan
+
 $venvPy = Join-Path $dstRoot "venv\Scripts\python.exe"
 if (-not (Test-Path $venvPy)) {
-    Write-Host "creating isolated venv under $dstRoot ..." -ForegroundColor Cyan
-    & python -m venv (Join-Path $dstRoot "venv")
+    Write-Host "creating isolated venv (takes ~30s) ..." -ForegroundColor Cyan
+    & $basePy -m venv (Join-Path $dstRoot "venv")
+    if ($LASTEXITCODE -ne 0) { throw "python -m venv failed" }
 }
-Write-Host "pip install -e . under worker venv (this may take a few minutes) ..." -ForegroundColor Cyan
+Write-Host "pip install -e .[dev] inside worker venv (downloads deps, may take minutes) ..." -ForegroundColor Cyan
+# [dev] extra carries websockets (required by the cluster WS agent); a bare
+# "pip install -e ." leaves worker nodes unable to heartbeat.
 & $venvPy -m pip install --quiet --upgrade pip
-& $venvPy -m pip install --quiet -e (Join-Path $dstRoot ".")
-if ($LASTEXITCODE -ne 0) {
-    Write-Warning "pip install -e . did not return 0; continuing (worker may still start; verify with venv python -c 'import modelctl')"
-} else {
-    Write-Host "venv + dev install done." -ForegroundColor Green
-}
+& $venvPy -m pip install --quiet -e ".[dev]"
+if ($LASTEXITCODE -ne 0) { throw "pip install -e .[dev] failed" }
+& $venvPy -c "import modelctl; print('worker modelctl ->', modelctl.__file__)"
+& $venvPy -c "import websockets; print('worker websockets ->', websockets.__version__)"
+Write-Host "venv + dev install done." -ForegroundColor Green
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "worker mock ready at $dstRoot" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "next steps (see docs/cluster-mock-test-steps.md):" -ForegroundColor White
-Write-Host "  center (terminal 1):" -ForegroundColor Cyan
-Write-Host "    cd d:\WorkPlace\Pycharm\modelctl" -ForegroundColor White
-Write-Host "    .\.venv\Scripts\Activate.ps1" -ForegroundColor White
-Write-Host "    modelctl cluster init" -ForegroundColor White
-Write-Host "    modelctl cluster join-token" -ForegroundColor White
-Write-Host ""
-Write-Host "  worker (terminal 2):" -ForegroundColor Cyan
-Write-Host "    cd d:\WorkPlace\Pycharm\modelctl-mock-worker" -ForegroundColor White
-Write-Host "    .\venv\Scripts\Activate.ps1" -ForegroundColor White
-Write-Host "    modelctl cluster join --center http://127.0.0.1:4173 --token <TOKEN> --node-id w-mock-01 --lan lan-a" -ForegroundColor White
-Write-Host "    modelctl webui start" -ForegroundColor White
-Write-Host ""
-Write-Host "  center (back in terminal 1):" -ForegroundColor Cyan
-Write-Host "    modelctl cluster nodes          # expect w-mock-01 online" -ForegroundColor White
-Write-Host "    modelctl cluster goal set qwen2.5-0.5b-vllm --node w-mock-01 --create" -ForegroundColor White
-Write-Host "    modelctl cluster goal list --node w-mock-01" -ForegroundColor White
+Write-Host "next: see docs/cluster-mock-test-steps.md (terminals T1/T2)" -ForegroundColor White
 Write-Host "============================================================" -ForegroundColor Cyan

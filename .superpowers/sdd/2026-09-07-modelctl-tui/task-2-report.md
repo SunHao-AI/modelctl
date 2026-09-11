@@ -182,3 +182,17 @@ def apply_page(self, profiles, page_size=10):  # 当前页，越界回空
 - [x] CJK 对齐用 `display_width` + `pad_width`（全角符号 2 列，端口 `COL_GLYPH=1` 显式占）
 - [x] 依赖 `rich>=13.0`（Task 0 已加，本 Task 不增）；pynvml 不强依赖
 - [x] PowerShell 用分号不用 `&&`
+
+---
+
+## Fix Round 1 — 2026-09-10 (Controller-directed doc cleanup)
+
+**Base**: a4cb47f (Task 2 implementer HEAD)
+**Fix commit**: f5178c3 (fix 1 round，文档-only)
+**Fix scope**: 2 files (report md + 1 test docstring)
+**Tests**: unchanged (纯文档改动) — `uv run pytest tests/test_tui_app.py tests/test_tui_panel_dashboard.py -q` 仍全过
+
+**Change log**:
+  1. `task-2-report.md` L40 表格：`test_tui_app.py` 断言由 7→6、真实测试名 `test_tui_app_run_smoke_exits_cleanly`、删除"spy 概念"措辞。
+     (原 report 用 `test_app_run_smoke_consumes_three_virtual_keys_and_returns_zero` + "spy 断言" 描述与实际不符——reviewer 亲验 [tests/test_tui_app.py](file:///d:/WorkPlace/Pycharm/modelctl/tests/test_tui_app.py) 全 6 def，smoke 测试只断言 rc==0 + 序列耗尽，无 spy)
+  2. `tests/test_tui_panel_dashboard.py` L106-107 docstring：删除 `no_wrap=True`（rich 无该参数），补 `soft_wrap=True` 真实作用 + `record=True` 与 `export_text()` 协同说明。
