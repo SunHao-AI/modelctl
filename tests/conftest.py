@@ -55,6 +55,12 @@ def isolated_runtime_dirs(tmp_path, monkeypatch):
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
     monkeypatch.delenv("GATEWAY_DEFAULT_MODEL", raising=False)
     monkeypatch.delenv("GATEWAY_CONTEXT_SWITCH", raising=False)
+    # GATEWAY_GROUP_ROUTE_TTL / GATEWAY_AVAIL_CACHE_TTL delenv：两层 TTL 决定 /health 探测
+    # 结果是否跨请求缓存＝**改变控制流**。开发者 .env 里设 0（排障口径）后，所有"第二次
+    # 请求应命中缓存"的断言会全量红、单跑绿（同 GATEWAY_DEFAULT_MODEL 的泄漏口径）；
+    # 用例需缓存时自己 setenv 对应的层（路由层/列表层各管各的）。
+    monkeypatch.delenv("GATEWAY_GROUP_ROUTE_TTL", raising=False)
+    monkeypatch.delenv("GATEWAY_AVAIL_CACHE_TTL", raising=False)
     # CLUSTER_* delenv：同 GATEWAY_* 口径——开发者 .env 里的 CLUSTER_ROLE 等经 load_env()
     # 注入后，solo 用例的 404 断言会被"意外启用"的集群角色破坏。cluster 用例在自己的
     # fixture/用例内 setenv，晚于本 autouse fixture 执行，不受影响。
