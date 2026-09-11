@@ -19,6 +19,7 @@ vllm:
   # 确需对外暴露时改为 0.0.0.0，并配合防火墙/白名单限制来源（非默认，风险自担）。
   bind_host: 127.0.0.1
   model: deepseek-ai/DeepSeek-V4-Flash-0731
+  docker_image: vllm/vllm-openai:deepseekv4-flash-vision
   # download：模型不存在时的自动下载配置（ModelScope，HF 格式仓库）
   download:
     # modelscope_id：ModelScope 仓库 ID（HF 格式）

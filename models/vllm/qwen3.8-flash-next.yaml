@@ -84,6 +84,36 @@ vllm:
   #   NotImplementedError: Qwen3.8-Flash-Next QSA requires a BF16 main KV cache
   # 必须留默认 BF16。等 vLLM 后续版本把 QSA FP8 路径跑了再恢复。
   # kv_cache_dtype: fp8
+  # 【硬约束】不要加 --kv-transfer-config（MooncakeStoreConnector / KV Offload）
+  # recipes.vllm.ai 的本模型页面有 "KV Offload → Mooncake (Distributed)" 选项，
+  # 那是给 2+ 实例 + RDMA + TB 级 DRAM 的集群用的**可选**配方；官方三条推荐命令
+  # （4×GB300 / 8×H200 / 4×H100）里均未启用。本环境四条独立否决理由：
+  #   1) 架构阻断：36 层 GDN + 12 层 QSA 属混合注意力，vLLM KV connector 尚不支持
+  #      GDN state 传输（MooncakeConnector 取首层 backend → GDNAttentionBackend 被
+  #      塞进 is_mamba=False 的 TransferTopology 即崩；NIXL 则报
+  #      "3-read conv transfer only supports Mamba2 models, got mamba_type='gdn_attention'"）。
+  #   2) 无物可共享：Mooncake 的池子装的是 prefix cache 命中的 KV block。本仓在 qwen3.8 上
+  #      实测混合模型 align mode 命中率 70~73%（见 known-pitfalls/backend/vllm-kv-cache-metrics.md），
+  #      但那是**单实例 GPU 内**命中；跨实例共享还要求 QSA 那 12 层的 block 能被 connector
+  #      序列化，而第 1) 条已说明 connector 连 backend 都取不对。
+  #   3) 内存不足：global_segment_size 是 **per GPU**，官方值 100GB/rank；本机系统内存仅
+  #      128GB（见 docs/rtx5880-optimization-guide.md），8 rank 连 8GB/rank 都勉强。
+  #   4) 无 RDMA + 单机：只有 protocol=tcp 可走，PCIe 4.0 无 NVLink 下搬运 KV 未必快过
+  #      重算 prefill；且 Mooncake 的卖点是跨实例共享池，本部署是每 profile 单实例。
+  # 结论：PD 分离（MooncakeConnector + MultiConnector）同样排除，理由同上。
+  # 详见 docs/known-pitfalls/backend/vllm-kv-offload-connector-support.md。
+  # kv_transfer_config: '{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both"}'
+  # docker_env：透传进容器内部的环境变量（`docker run -e`）。
+  # ⚠ build_command 返回的 env 只进 docker CLI 宿主进程，进不了容器——容器内变量必须走这里。
+  # 【VLLM_PLE_CPU_OFFLOAD=1】把 51B N-gram Embedding（PLE）查表内存卸载到 host RAM 并异步预取。
+  #   这是**权重表卸载**，与上面的 KV connector 是两回事，因此不受 GDN 限制。
+  #   官方定位：TP/TEP 在 80GB 级及以下卡上是"必须项"（embedding 表本身就超出每卡余量），
+  #   H200 以上才"可选"。本配置 48GB/卡属于必须侧，也正是上方"每卡可用 KV 仅 2.54 GiB"
+  #   profile 固定开销的主要来源之一——开启后有望把 max_model_len 推回更高分辨率档。
+  #   ⚠ 前置：宿主需 ≥51GB + 运行时余量（本机 128GB 可用但偏紧）；若宿主内存告急或
+  #     出现预取导致的吞吐下降，删掉本项回退。
+  docker_env:
+    VLLM_PLE_CPU_OFFLOAD: "1"
   # extra_args：透传给 `vllm serve` 的额外参数（空格分隔，由 shlex 拆分）
   # 【本配置 = H200 8 卡官方 recipe 1:1（triton MoE 后端在 Ada 上也支持）】
   #   --enable-expert-parallel         TEP8 必须项（plain TP8 与 128 宽量化块不兼容）

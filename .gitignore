@@ -50,3 +50,11 @@ gateway/uv.lock
 
 # dev/integration worktree 工作区
 .worktrees/
+mock-worker/
+
+# 健康检测 / 冒烟的临时产物：报告与 spec/plan 文本入库，raw/ 原始输出与运行时数据不入库
+docs/health-checks/raw/
+.coverage
+dev_alive.txt
+dev_ports.txt
+dev_ports_now.txt

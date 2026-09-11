@@ -18,7 +18,7 @@ group: qwen2.5-0.5b
 # 注意：本家族暂仅本 vllm 成员（其余引擎尚未建立），一律不写 alias。
 # name 自动推导为 qwen2.5-0.5b-vllm；若再写同名 alias 会触发 ProfileError 导致整条被跳过。
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
-port: 8108
+port: 18911
 # api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值
 api_key: ${API_KEY}
 
