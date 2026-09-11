@@ -150,12 +150,15 @@ def test_run_compat_checks_falls_back_to_current_env_when_no_venv(tmp_path, monk
     adapter = get_adapter("vllm")(p, Capabilities(gpu_count=0, compute_capability="", binaries={"vllm": True}))
     adapter.run_compat_checks()
     env = adapter._compat_env
-    # 回退到当前解释器 site-packages（与 _current_site_packages 同源：sys.path 含 "site-packages" 的条目）
+    # 回退到当前解释器 site-packages，取法与 _current_site_packages 同源：
+    # 按**目录名精确匹配** + **层级最浅**。旧写法取"第一个含 site-packages 的条目"
+    # 只在干净环境成立——`uv run --with ...` 会把临时 builds-v0/.tmp* 注入 sys.path
+    # 最前，子串式首取会命中该临时目录，而实现按最浅精确命中宿主 .venv，二者分歧
+    # 导致本地全量跑红、CI 单跑绿（用例断言口径 bug，非实现回归）。
     expected = None
-    for path in sys.path:
-        if "site-packages" in path:
-            expected = Path(path)
-            break
+    candidates = [Path(p) for p in sys.path if Path(p).name == "site-packages"]
+    if candidates:
+        expected = min(candidates, key=lambda p: len(p.parts))
     assert env.site_packages == expected
     # 回退后 site_packages 不是 venv 受控目录（与托管路径无关）
     assert env.site_packages != _venv_site_path(tmp_path / "missing-venvs", "vllm")
