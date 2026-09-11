@@ -167,6 +167,55 @@ def test_explicit_columns_cover_full_row(store: ClusterStore) -> None:
         "target_role", "traffic_weight", "stage", "stage_reason", "error_class",
         "created_by", "created_at", "updated_at"}
     assert set(ms) == {
-        "node_id", "profile", "state", "gpu", "port", "pid", "reason", "endpoint_url",
-        "endpoint_ready", "engine_version", "gpu_util", "metrics_p50_ms", "last_probe_ms",
-        "error_class", "updated_at"}
+        "node_id", "profile", "engine", "state", "gpu", "port", "pid", "reason",
+        "endpoint_url", "endpoint_ready", "engine_version", "gpu_util", "metrics_p50_ms",
+        "last_probe_ms", "error_class", "updated_at"}
+
+
+# ---- CLU-P1-2：events 表保留策略（纯 DML 裁剪） ----
+
+
+def test_append_event_trims_old_events(tmp_path):
+    """events 必须按时间保留窗口，旧实现无界增长（中心台账无 TTL）。"""
+    import time as _t
+
+    from modelctl.core.cluster.store import EVENTS_RETENTION_DAYS, ClusterStore
+
+    store = ClusterStore(tmp_path / "ledger.db")
+    store.init_db()
+    old_ts = _t.time() - (EVENTS_RETENTION_DAYS + 5) * 86400
+    for i in range(3):
+        store.append_event("audit.test", node_id="n1", payload={"i": i}, now=old_ts)
+    store.append_event("audit.test", node_id="n1", payload={"i": "fresh"})
+
+    cutoff = _t.time() - EVENTS_RETENTION_DAYS * 86400
+    before = store._db().execute(
+        "SELECT COUNT(*) FROM events WHERE ts < ?", (cutoff,)).fetchone()[0]
+    assert before == 3  # 未达 EVENTS_TRIM_EVERY 阈值时旧行仍在
+    assert store.trim_events(now=_t.time()) == 3
+    after = store._db().execute(
+        "SELECT COUNT(*) FROM events WHERE ts < ?", (cutoff,)).fetchone()[0]
+    assert after == 0, f"超保留期的 events 应被裁剪，仍余 {after} 条"
+    # 保留期内的新事件不受影响
+    fresh = store._db().execute(
+        "SELECT COUNT(*) FROM events WHERE ts >= ?", (cutoff,)).fetchone()[0]
+    assert fresh == 1
+
+
+def test_append_event_periodic_trim_triggers(tmp_path, monkeypatch):
+    """每 EVENTS_TRIM_EVERY 次 append 顺带清一次超期事件。"""
+    import time as _t
+
+    import modelctl.core.cluster.store as st
+
+    store = st.ClusterStore(tmp_path / "ledger2.db")
+    store.init_db()
+    old_ts = _t.time() - (st.EVENTS_RETENTION_DAYS + 5) * 86400
+    store.append_event("audit.test", node_id="n1", payload=None, now=old_ts)
+    # 直接把计数推到阈值边界：下一次 append 应触发裁剪
+    store._append_count = st.EVENTS_TRIM_EVERY - 1
+    store.append_event("audit.test", node_id="n1", payload=None)
+    cutoff = _t.time() - st.EVENTS_RETENTION_DAYS * 86400
+    left = store._db().execute(
+        "SELECT COUNT(*) FROM events WHERE ts < ?", (cutoff,)).fetchone()[0]
+    assert left == 0, "达 EVENTS_TRIM_EVERY 阈值应顺带裁掉超期事件"

@@ -102,25 +102,37 @@ def test_load_rules_sorted_desc_and_skips_invalid():
 def test_apply_switch_selects_high_balanced_light():
     reg = _registry()
     rules = _rules()
-    assert apply_context_switch(reg, rules, DS, 50000) is reg[DS_HIGH]
-    assert apply_context_switch(reg, rules, DS, 32768) is reg[DS_HIGH]  # 边界命中 high
-    assert apply_context_switch(reg, rules, DS, 9000) is reg[DS_BAL]
-    assert apply_context_switch(reg, rules, DS, 8192) is reg[DS_BAL]  # 边界命中 balanced
-    assert apply_context_switch(reg, rules, DS, 100) is reg[DS_LIGHT]
+    assert apply_context_switch(reg, rules, (DS,), 50000) is reg[DS_HIGH]
+    assert apply_context_switch(reg, rules, (DS,), 32768) is reg[DS_HIGH]  # 边界命中 high
+    assert apply_context_switch(reg, rules, (DS,), 9000) is reg[DS_BAL]
+    assert apply_context_switch(reg, rules, (DS,), 8192) is reg[DS_BAL]  # 边界命中 balanced
+    assert apply_context_switch(reg, rules, (DS,), 100) is reg[DS_LIGHT]
 
 
 def test_apply_switch_no_rule_or_unknown_model():
     reg = _registry()
     rules = _rules()
-    assert apply_context_switch(reg, {}, DS, 100) is None  # 无规则
-    assert apply_context_switch(reg, rules, "ghost-model", 100) is None  # 无匹配 base
-    assert apply_context_switch(reg, rules, None, 100) is None
+    assert apply_context_switch(reg, {}, (DS,), 100) is None  # 无规则
+    assert apply_context_switch(reg, rules, ("ghost-model",), 100) is None  # 无匹配 base
+    assert apply_context_switch(reg, rules, ("", None), 100) is None  # 空键跳过
 
 
 def test_apply_switch_target_missing_falls_back_to_none():
     reg = dict(_registry())
     reg.pop(DS_HIGH)  # 目标未注册 → 返回 None，调用方沿用原模型
-    assert apply_context_switch(reg, _rules(), DS, 50000) is None
+    assert apply_context_switch(reg, _rules(), (DS,), 50000) is None
+
+
+def test_apply_switch_matches_group_name_after_member_resolution():
+    """GW-P1-3：经 group 路由后 target.name 是成员名，规则 key 是 base/group 名
+    → 旧实现（只用 target.name 匹配）永不命中。"""
+    reg = _registry()
+    rules = _rules()  # key = DS（group/base 名）
+    member = "some-member-not-a-rule-key"
+    reg[member] = GatewayModel(member, "vllm", "http://127.0.0.1:9", member, None,
+                               "http://127.0.0.1:9/", group=DS)
+    hit = apply_context_switch(reg, rules, (member, DS, member), 50000)
+    assert hit is reg[DS_HIGH], "按 [请求原始名, group 名, 成员名] 依次匹配应命中 high"
 
 
 def _run(coro):
