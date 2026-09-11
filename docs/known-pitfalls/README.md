@@ -103,6 +103,13 @@
 | 2026-09-10 | 后端 / 引擎启动 | `VLLM_PLE_CPU_OFFLOAD` 与 KV offload 混为一谈而错判不可用 | 卸载对象是 N-gram Embedding **权重表**（纯 env + 宿主 RAM），不是 KV block，因此不受 GDN 限制；48/80GB 级卡上是必须项，走 yaml `docker_env` 注入。 | [backend/vllm-kv-offload-connector-support.md](backend/vllm-kv-offload-connector-support.md) |
 | 2026-09-10 | 后端 / 运行时 | 同步探测 N 个 /health 阻塞事件循环（家族路由 + 网关与 WebUI 两套列表） | 数据面 `_resolve_group` 与管理面 51 profile 列表都在 async 路径跑同步 urllib，执行期间全进程停摆且与引擎负载成正反馈；解法是 `GroupRouteCache` **两层独立 TTL**（route 2s 保路由正确性、avail 5s 须 > 前端 3s 轮询）+ 共享 `probe_availability` 让 overview/列表合流 + 502 与 stop 主动失效。**不是** to_thread 也不是加 worker。 | [backend/overview双进程64-worker-keepalive.md](backend/overview双进程64-worker-keepalive.md) |
 | 2026-09-10 | 前端 / TUI 终端对齐 | TUI Dashboard 80 列截断 + CJK 行右移 | 列宽常量只按 full 档一次性取值，行渲染各自 `f"{x:<N}"` 按 ASCII 列宽补齐，CJK 双宽字符让列位置逐行漂移；折列数也只在 line 级 if/elif——两条规则同时缺位。解法：列宽常量分档（FULL/MEDIUM/NARROW）+ 单一 adapter `_layout_for_width(width)` + 所有 f-string 走 `display_width`/`pad_width`；测试钉 `display_width(line) == width` 三档（200/120/100）+ `<=` 一档（80）不变量，数据含真实双宽字符。 | [backend/profile-config-drift.md](backend/profile-config-drift.md) |
+| 2026-09-11 | 测试 / 隔离 | monkeypatch 打不中 `from X import name` 的模块级绑定，护栏测试假绿 | patch 源模块属性对已绑定名字完全无效：对照组永远缺项、只读组因"没接上副作用通道"而假绿；须 patch 使用方模块的名字，且护栏测试必带 negative control。 | [backend/test-isolation.md](backend/test-isolation.md) |
+| 2026-09-11 | 测试 / 隔离 | 篡改 JWT 签名「末字符」测 401，1/16 概率假红 | base64url 43 字符比 256 bit 多 2 bit，末字符低 2 bit 是填充被丢弃；同一解码结果对应 4 个末字符，`A`/`B` 同组 → 4/64 概率验签通过。篡改点必须落在有效 bit 上（改首字符）。 | [backend/test-isolation.md](backend/test-isolation.md) |
+| 2026-09-11 | 后端 / TUI | detail/plan 预检在渲染路径清容器、抢 GPU 锁 | `check_requirements()` 一肩挑 CLI 预检与 UI 展示，浏览即改运行时状态；抽象签名扩 `readonly=True` 门控副作用，9 个引擎逐个落地。 | [backend/tui-交互与渲染.md](backend/tui-交互与渲染.md) |
+| 2026-09-11 | 后端 / TUI | `TUIApp.run()` 只渲染一帧，主循环与按键派发不存在 | keybar 文案先行、实现缺位；补 `render → read_key_block(timeout) → _dispatch_key` 循环逐条对齐文案，测试须断言按键被恰好吃满。 | [backend/tui-交互与渲染.md](backend/tui-交互与渲染.md) |
+| 2026-09-11 | 后端 / TUI | Windows `getwch()` 扩展键两字节，第二字节不消费会吞下一次按键 | 方向键/PgUp/PgDn 先返回 `0x00`/`0xE0` 前缀；必须立即消费扫描码拼 `b"\xe0<scan>"`，扫描码表以实现映射常量为准（计划文档示例就是错的）。 | [backend/tui-交互与渲染.md](backend/tui-交互与渲染.md) |
+| 2026-09-11 | 构建 / 工具链 | ruff 满屏 `wrong package cache for file` panic 被误诊为版本 bug | 根因是本地 `.ruff_cache` 损坏；`--no-cache`/`ruff clean` 后 panic 归零，真实告警 272（非 229）。未改 pyproject，无需升级或加 ignore。 | [build/lint-toolchain-ci-parity.md](build/lint-toolchain-ci-parity.md) |
+| 2026-09-11 | 构建 / 工具链 | 本地 3.13 与 CI 3.12 的 ruff/mypy 结果必然有差异 | CI 是 ubuntu + py312 + 浮动 dev 版本，`target-version`/`python_version` 均 py312；发布门口径以 CI 为准，本地以 pytest 全量 + 隔离端口冒烟为硬门禁。 | [build/lint-toolchain-ci-parity.md](build/lint-toolchain-ci-parity.md) |
 
 ## 目录约定
 

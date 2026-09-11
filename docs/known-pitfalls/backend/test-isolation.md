@@ -219,3 +219,85 @@ monkeypatch.setattr("modelctl.core.profile.PROJECT_ROOT", tmp_path)  # 同文件
 - 兜底 `except Exception` 会把测试桩的签名错误伪装成业务失败。看到分类码/exit_code
   断言莫名不对时，先把 task 的 error message 打全（本次即 `boom() got an unexpected
   keyword argument 'on_progress'`），根因往往就在那一行。
+
+## monkeypatch 打不中 `from X import name` 的模块级绑定，护栏测试"假绿"
+
+**日期**：2026-09-11
+**症状**：为"TUI 预检只读化"（`check_requirements(readonly=True)` 不得清容器/抢 GPU 锁）
+写的护栏测试，两个只读用例断言 `called == []` 恒绿；但**对照组**（`readonly=False`
+时应观察到 `["clear", "lock"]`）在全量跑里报 `['clear'] != ['clear', 'lock']`——
+`lock` 从来没被记录到。
+
+**根因**：`engines/vllm.py` 顶部是
+
+```python
+from modelctl.core.gpu_lock import acquire_gpu_lock   # 模块级名字绑定
+```
+
+测试里 `monkeypatch.setattr("modelctl.core.gpu_lock.acquire_gpu_lock", stub)` 改的是
+**源模块**的属性，而 `vllm` 模块命名空间里的那个名字早在 import 时就绑定了原函数对象，
+patch 源模块对已绑定的名字**完全无效**——桩根本没被调用，所以：
+
+- 对照组永远缺 `lock`（暴露了问题）；
+- 只读组则因为"副作用通道压根没接上"而 `called == []` **假绿**——它证明的是
+  "我没观察到副作用"，不是"readonly 真的门控住了副作用"。
+
+反例对照：同一次调用里的 `clear_stale_docker_container` 是**函数内延迟 import**，
+所以 patch `modelctl.core.process.clear_stale_docker_container` 生效——同一测试内
+一半桩生效、一半桩失效，极易误判成生产代码分支没走到。
+
+**解决方案**：patch **使用方模块**里的名字。
+
+```python
+monkeypatch.setattr("modelctl.engines.vllm.acquire_gpu_lock", stub)   # ✅
+monkeypatch.setattr("modelctl.core.process.clear_stale_docker_container", stub)  # 延迟 import，patch 源模块才对
+```
+
+并同步检查 `gpu_list` 之类的**前置条件**：profile 未配 `gpu_list` 时
+`selected_gpus()` 返回 None，抢锁分支根本不执行，对照组同样失去灵敏度。
+
+**教训**：
+
+- **护栏/防回归测试必须自带对照组**（negative control），断言"不加防护时副作用确实发生"。
+  只有正向断言"什么都没发生"的测试，在桩打不中时必然假绿——本次正是对照组先红才定位到根因。
+- 判据：**`from X import name` → patch `被导入模块.name`；`import X` 后 `X.name()` → patch `X.name`**。
+  拿不准就在被测模块里 `print(name.__module__)` 或直接 `grep -n "^from\|^import" <被测文件>`。
+- 同一个测试里混用两种 import 风格时，逐个桩确认 patch 目标；否则会出现"一半生效一半失效"
+  的误导性结果，让人往生产逻辑方向误诊。
+
+## 篡改 JWT 签名「末字符」测 401 —— base64url 末位有 2 bit 填充，1/16 概率假红
+
+**日期**：2026-09-11
+**症状**：`tests/test_webui_admin_accounts.py::test_self_jwt_tampered_401` 全量跑偶发失败
+（`assert 200 == 401`），单跑、换个时序又绿。属概率性 flake，理论复现率 **1/16**。
+
+**根因**：用例用"翻转签名末字符"制造非法签名——
+
+```python
+tampered = tok[:-1] + ("A" if tok[-1] != "A" else "B")   # ❌ 末字符
+```
+
+HS256 签名是 32 字节 = 256 bit，base64url 编码成 **43 字符**：`43 × 6 = 258 bit`，比 256 bit
+多出 **2 bit**，全落在**最后一个字符**上。因此解码时末字符的**低 2 bit 被丢弃**——同一个解码
+结果对应 **4 个**末字符（该组内相邻的 4 个 base64 符号）。用例把替换字符固定成 `A`/`B`
+（两者索引差 1，同在这一组里），于是"翻转末字符"有 `4/64 = 1/16` 的概率解出**完全相同**的
+32 字节签名 → PyJWT 验签通过 → 200。它翻转的是"编码噪声"，不是数据本身。
+
+实测（固定 secret、扫 769 个不同 `iat`）：**末字符**翻转 51 次解出同一签名（6.6%，贴近 1/16）；
+**首字符**翻转 0 次碰撞——首字符 6 bit 全部有效，翻转必然改变解码后的数据字节。
+
+**解决方案**：翻转签名**首字符**（或任一非末位字符）：
+
+```python
+hdr, payload, sig = tok.split(".")
+tampered = f"{hdr}.{payload}.{'A' if sig[0] != 'A' else 'B'}{sig[1:]}"
+```
+
+**教训**：
+
+- 测"签名/摘要被篡改必须拒绝"时，**篡改点必须落在有效 bit 上**。base64/base58 等编码的
+  首尾字符常带填充位，是最危险的篡改位置。
+- 概率性 flake 先怀疑"输入空间里存在合法反例"，而不是先怀疑并发/时序。这类用例的判别力
+  依赖一个未被断言的隐含前提（末字符翻转改变签名），前提为假时断言就失去意义——与本篇
+  monkeypatch 条目"恒真断言"是同一类失效，只是触发条件是概率而非必然。
+- 修完做**大样本统计验证**（几百个不同 iat 扫一遍），别只跑一遍绿就收工。
