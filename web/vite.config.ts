@@ -29,6 +29,11 @@ export default defineConfig(({ mode }) => {
           target: `http://127.0.0.1:${backendPort}`,
           changeOrigin: true,
         },
+        // 账号自助面板（JWT，与管理面 API_KEY 双信任域）走独立 baseURL '/api/account'
+        '/api/account': {
+          target: `http://127.0.0.1:${backendPort}`,
+          changeOrigin: true,
+        },
       },
     },
     build: {

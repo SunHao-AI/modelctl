@@ -3,6 +3,17 @@ import { defineStore } from 'pinia';
 
 /** 本地存 API Key 的 key（modelctl 独立命名空间） */
 const TOKEN_KEY = 'modelctl_token';
+/** 本地存账号 JWT 的 key（自账号面板登录签发；与管理面 API_KEY 完全独立） */
+const ACCOUNT_TOKEN_KEY = 'modelctl_account_token';
+/** 账号面板 profile 持久化（user 摘要）——登录一次就缓存，避免每次进自助面板再打 login */
+const ACCOUNT_PROFILE_KEY = 'modelctl_account_profile';
+
+export interface AccountProfile {
+  id: number;
+  username: string;
+  display_name: string;
+  is_admin: boolean;
+}
 
 /**
  * 鉴权 store：保存后端校验后的 API Key
@@ -40,11 +51,50 @@ export const useAuthStore = defineStore('auth', () => {
     localStorage.removeItem(TOKEN_KEY);
   }
 
+  /** 账号面板 JWT（自检用 require_account 的 Bearer）；与管理面 API_KEY 完全独立 */
+  const accountToken = ref<string>(localStorage.getItem(ACCOUNT_TOKEN_KEY) || '');
+  const accountProfile = ref<AccountProfile | null>(
+    (() => {
+      try {
+        const raw = localStorage.getItem(ACCOUNT_PROFILE_KEY);
+        return raw ? (JSON.parse(raw) as AccountProfile) : null;
+      } catch {
+        return null;
+      }
+    })(),
+  );
+
+  function setAccountSession(t: string, profile: AccountProfile) {
+    accountToken.value = t;
+    accountProfile.value = profile;
+    if (t) {
+      localStorage.setItem(ACCOUNT_TOKEN_KEY, t);
+      localStorage.setItem(ACCOUNT_PROFILE_KEY, JSON.stringify(profile));
+    } else {
+      localStorage.removeItem(ACCOUNT_TOKEN_KEY);
+      localStorage.removeItem(ACCOUNT_PROFILE_KEY);
+    }
+  }
+
+  function clearAccountSession() {
+    accountToken.value = '';
+    accountProfile.value = null;
+    localStorage.removeItem(ACCOUNT_TOKEN_KEY);
+    localStorage.removeItem(ACCOUNT_PROFILE_KEY);
+  }
+
+  const isAccountLoggedIn = computed(() => accountToken.value.trim() !== '');
+
   return {
     token,
     apiKey,
     isLoggedIn,
     persistToken,
     clear,
+    accountToken,
+    accountProfile,
+    isAccountLoggedIn,
+    setAccountSession,
+    clearAccountSession,
   };
 });

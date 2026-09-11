@@ -19,6 +19,8 @@ const menus: MenuItem[] = [
   { to: '/audit', label: '审计', icon: 'audit' },
   { to: '/cluster/goals', label: '集群目标', icon: 'goals' },
   { to: '/cluster/nodes', label: '集群', icon: 'cluster' },
+  { to: '/accounts', label: '账号管理', icon: 'accounts-admin' },
+  { to: '/account/self', label: '我的账号', icon: 'accounts-self' },
   { to: '/config', label: '配置', icon: 'config' },
   { to: '/settings', label: '设置', icon: 'settings' },
 ];
@@ -74,6 +76,10 @@ function isActive(item: MenuItem) {
           <template v-else-if="m.icon === 'cluster'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="8.5" y="14" width="7" height="7" rx="1" /><path d="M6.5 10v1.5h11V10M12 11.5V14" /></svg></template>
           <!-- goals -->
           <template v-else-if="m.icon === 'goals'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6h11M9 12h11M9 18h11" /><circle cx="4.5" cy="6" r="1.5" /><circle cx="4.5" cy="12" r="1.5" /><circle cx="4.5" cy="18" r="1.5" /></svg></template>
+          <!-- accounts-admin：盾牌 + 用户（管理视角） -->
+          <template v-else-if="m.icon === 'accounts-admin'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v5c0 5-3.5 9.5-8 10-4.5-.5-8-5-8-10V6l8-3z" /><circle cx="12" cy="10" r="2.5" /><path d="M8 16c0-2 2-3 4-3s4 1 4 3" /></svg></template>
+          <!-- accounts-self：单用户 -->
+          <template v-else-if="m.icon === 'accounts-self'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4" /><path d="M4 21c0-4 4-6 8-6s8 2 8 6" /></svg></template>
           <!-- fallback -->
           <svg v-else class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9" /></svg>
         </span>
