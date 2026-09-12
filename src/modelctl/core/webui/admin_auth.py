@@ -81,8 +81,12 @@ def is_valid_key(key: str) -> bool:
 
 
 def mask_key(key: str) -> str:
-    """密钥脱敏：返回 "***" + 末4位；短于4位时仅 "***"。"""
-    if not key:
+    """密钥脱敏：返回 "***" + 末4位；短于4位时仅 "***"。
+
+    长度守卫不可省：`"abc"[-4:] == "abc"`，缺守卫时短 key 会被原样贴进响应，
+    与本函数 docstring 承诺的契约相反（同 admin_config._mask_value 口径）。
+    """
+    if not key or len(key) <= _MASK_KEEP_TAIL:
         return "***"
     return "***" + key[-_MASK_KEEP_TAIL:]
 

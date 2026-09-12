@@ -5,14 +5,119 @@ on:
   pull_request:
 
 jobs:
+  # 后端：lint + 类型 + 全量 pytest（unit/integration/security，perf 显式排除）
+  # 兼容性维度由 OS matrix 承担：ubuntu（生产口径）+ windows（开发口径，
+  # 路径分隔符/进程探测/reconciler 等平台分支都依赖它）。
   test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --extra dev --extra test
+      - run: uv run ruff check src tests
+      - run: uv run mypy src/modelctl
+      # perf 基准不进常规门禁（runner CPU 波动大），显式排除。
+      # 覆盖率门槛不在此处：fail_under=80 已落 pyproject，由下方独立步骤把关。
+      - run: uv run pytest tests/ -q -m "not perf" --cov=modelctl --cov-report=xml --cov-report=term-missing
+      - uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-latest'
+        with:
+          name: coverage-xml
+          path: coverage.xml
+
+  # 覆盖率门槛独立成 job：fail_under=80 触发时给出**独立红叉**（混在 pytest
+  # 退出码里会和用例失败混淆，看不出是"回退"还是"测挂了"）。
+  coverage-gate:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
-      - run: uv sync --extra dev
-      - run: uv run ruff check src tests
-      - run: uv run mypy src/modelctl
-      - run: uv run pytest tests/ -q
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage-xml
+      - run: >
+          python -c "import xml.etree.ElementTree as ET;
+          r=float(ET.parse('coverage.xml').getroot().get('line-rate'));
+          print(f'total coverage: {r*100:.1f}% (gate 80%)');
+          exit(0 if r >= 0.80 else 1)"
+
+  # 安全：依赖漏洞扫描（pip-audit 走 PyPA 漏洞库）+ 密钥泄漏扫描。
+  # 代码内安全红线（鉴权/fail-closed/JWT 伪造）由 pytest -m security 承担。
+  security:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --extra dev --extra test
+      - name: pip-audit（三方依赖 CVE）
+        run: |
+          uv export --extra dev --extra test --no-emit-project --format requirements-txt > requirements-audit.txt
+          uv run pip-audit -r requirements-audit.txt --strict
+      - name: secret scan（凭据不得入库）
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 前端：类型检查 + vitest 单测（含覆盖率）
+  web-unit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test:coverage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-web
+          path: build/coverage-web
+
+  # E2E + 跨浏览器：构建产物 → uvicorn 生产拓扑起服 → Playwright 三内核 + 移动视口。
+  # OS 维度已由 test job matrix 覆盖，e2e 只在 ubuntu 跑（浏览器二进制下载便宜）。
+  e2e:
+    needs: web-unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --extra dev --extra test
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: 前端产物（E2E 测生产挂载形态，必须先 build）
+        run: npm ci && npm run build
+        working-directory: web
+      - name: 安装浏览器（chromium/firefox/webkit）
+        run: npx playwright install --with-deps
+        working-directory: web
+      - name: Playwright E2E（三桌面内核 + 两移动视口）
+        run: npx playwright test
+        working-directory: web
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: build/playwright-report

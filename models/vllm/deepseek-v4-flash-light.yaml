@@ -1,4 +1,4 @@
-# vllm/deepseek-v4-flash-light.yaml —— DeepSeek-V4-Flash（vLLM 引擎，HuggingFace 原始权重，轻量上下文）
+# vllm/deepseek-v4-flash-light.yaml —— DeepSeek-V4-Flash-Vision-Exp（vLLM 引擎，HuggingFace 原始权重，轻量上下文）
 # 学习要点：vLLM 使用 HF 格式权重（非 GGUF），支持张量并行与 FP8 量化，适合高吞吐在线服务。
 group: deepseek-v4-flash
 # alias：服务显示别名
@@ -12,17 +12,18 @@ api_key: ${API_KEY}
 vllm:
   # model：HuggingFace 模型 ID 或本地模型目录。
   # 为空/本地路径不存在时，按 download 段下载到 $MODEL_ROOT/<仓库名> 后直接使用（本文件不会被改写）
-  # 请替换为实际可用的 HF 模型 ID，如 deepseek-ai/DeepSeek-V4-Flash-0731
   # bind_host：服务绑定地址（安全加固，2026-09-08，所有引擎统一默认）
   # 默认 127.0.0.1 仅回环监听：外部（含 AI Agent / 其他内网主机）无法直连引擎端口，
   # 从而堵住绕过网关鉴权/账号/多 Key/token 限速/审计的“第二入口”。
   # 确需对外暴露时改为 0.0.0.0，并配合防火墙/白名单限制来源（非默认，风险自担）。
   bind_host: 127.0.0.1
-  model: deepseek-ai/DeepSeek-V4-Flash-0731
+  model: deepseek-ai/DeepSeek-V4-Flash-Vision-Exp
+  # docker_image：vision 支持未进稳定 vLLM（PR #54566），必须 pin 官方 recipe 镜像，NVIDIA 专属
+  docker_image: vllm/vllm-openai:deepseekv4-flash-vision
   # download：模型不存在时的自动下载配置（ModelScope，HF 格式仓库）
   download:
     # modelscope_id：ModelScope 仓库 ID（HF 格式）
-    modelscope_id: deepseek-ai/DeepSeek-V4-Flash-0731
+    modelscope_id: deepseek-ai/DeepSeek-V4-Flash-Vision-Exp
   # tensor_parallel_size：张量并行 GPU 数（不得超过实际 GPU 数）
   tensor_parallel_size: 4
   # max_model_len：最大上下文长度（token）
@@ -39,8 +40,8 @@ vllm:
   kv_cache_dtype: fp8
   # extra_args：透传给 `vllm serve` 的额外参数（空格分隔，按 shlex 拆分）
   # 默认启用 dspark 投机解码（与主配置 deepseek-v4-flash-vllm 一致）：
-  # 官方 recipe 推荐 num=7（EAGLE+MTP 混合，draft_sample_method=probabilistic 可选）
-  extra_args: "--reasoning-parser deepseek_v4 --tool-call-parser deepseek_v4 --enable-auto-tool-choice --speculative-config '{\"method\":\"dspark\",\"num_speculative_tokens\":7}'"
+  # vision recipe 推荐 num=3（0731 文本版为 7）；speculative-config 需带目标仓库名
+  extra_args: "--reasoning-parser deepseek_v4 --tool-call-parser deepseek_v4 --enable-auto-tool-choice --speculative-config '{\"method\":\"dspark\",\"model\":\"deepseek-ai/DeepSeek-V4-Flash-Vision-Exp\",\"num_speculative_tokens\":3,\"draft_sample_method\":\"probabilistic\",\"enable_adaptive_verification\":true}'"
 
 usage:
   # price_in：每千输入 token 计价（元），供 cc-switch 用量统计

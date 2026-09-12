@@ -19,10 +19,22 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from modelctl.core.envs import MANAGED_ENGINES, engine_bin, has_env
+from modelctl.core.envs import (
+    MANAGED_ENGINES,
+    engine_bin,
+    engine_python,
+    engine_site_packages,
+    has_env,
+)
 
 ENGINE_BINARIES = ["ollama", "vllm", "sglang", "unsloth", "llamacpp",
                    "aphrodite", "lmdeploy", "tensorrt_llm", "tokenspeed"]
+
+# 以 `venv/bin/python -m <module>` 启动的托管引擎 → site-packages 顶层包名。
+# 这类引擎的 venv/bin 下**没有**同名 console script（见 engines/{sglang,tensorrt_llm}.py
+# 的 build_command 用 engine_python），故可达性只能按 site-packages 内顶层包目录判定，
+# 直接对裸名做 is_file() 会把「装好了的 venv」误判成缺失。
+ENGINE_MODULES = {"sglang": "sglang", "tensorrt_llm": "tensorrt_llm"}
 
 # docker 可达性判定文案（与双 runtime 分流一致）：
 # _resolve_runtime 已把 docker_image 优先级提升到 venv 前（2026-09 反转），
@@ -83,12 +95,29 @@ class Capabilities:
 
 
 def _managed_binary_path(engine: str, name: str) -> Path | None:
-    """托管引擎可执行文件路径；引擎专用 venv 未创建时返回 None。"""
+    """托管引擎「venv 内实际可执行入口」路径；不可用时返回 None。
+
+    两层校验（旧实现只查 venv python 存在就拼路径返回，venv 建好但上游包
+    未装/装坏时会把不存在的路径当成事实展示到 UI/CLI）：
+
+    1. ``has_env(engine)`` —— venv 解释器在位；
+    2. 入口在位：``ENGINE_MODULES`` 内的引擎走 ``python -m <pkg>``，
+       venv/bin 下无同名 console script，改查 site-packages 顶层包目录；
+       其余引擎查 ``engine_bin`` 指向的可执行文件是否真是文件。
+    """
     if engine not in MANAGED_ENGINES:
         return None
     if not has_env(engine):
         return None
-    return engine_bin(engine, name)
+    top_pkg = ENGINE_MODULES.get(engine)
+    if top_pkg is not None:
+        sp = engine_site_packages(engine)
+        if sp is None or not (sp / top_pkg).is_dir():
+            return None
+        # 启动入口是解释器本身（build_command 用 engine_python），路径才有意义
+        return engine_python(engine)
+    path = engine_bin(engine, name)
+    return path if path.is_file() else None
 
 
 def which_binaries(names: list[str]) -> dict[str, bool]:

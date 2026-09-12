@@ -1,5 +1,7 @@
-# unsloth/deepseek-v4-flash.yaml —— DeepSeek-V4-Flash（Unsloth 引擎，无头 API）
+# unsloth/deepseek-v4-flash.yaml —— DeepSeek-V4-Flash-Vision-Exp（Unsloth 引擎，无头 API）
 # 学习要点：Unsloth 无头推理（unsloth studio run --api-only）支持 GGUF 动态量化；API key 运行时自动生成并打印到启动日志。
+# 注意：本模型为多模态（图+文），但 unsloth 引擎不支持 --mmproj 视觉投影，仅能提供文本推理；
+# 若需图片输入请改用 llamacpp / vllm 引擎的同名配置。
 group: deepseek-v4-flash
 # port：服务监听端口（健康检查 http://127.0.0.1:<port>/v1/models）
 port: 8001
@@ -13,8 +15,9 @@ unsloth:
   # 从而堵住绕过网关鉴权/账号/多 Key/token 限速/审计的“第二入口”。
   # 确需对外暴露时改为 0.0.0.0，并配合防火墙/白名单限制来源（非默认，风险自担）。
   bind_host: 127.0.0.1
-  model: unsloth/DeepSeek-V4-Flash-0731-GGUF
+  model: unsloth/DeepSeek-V4-Flash-Vision-Exp-GGUF
   # gguf_variant：Unsloth 动态量化后缀；model 为本地路径时忽略
+  # UD-Q8_K_XL 共 5 分片约 162GB；另有 UD-Q4_K_XL(205GB/5片)、UD-IQ2_XXS(91GB) 等可选
   gguf_variant: UD-Q8_K_XL
   # context_length：请求的上下文长度
   # 注意：单请求完整可用（与并发无关）；KV 显存 ≈ 并发 × context_length
@@ -33,7 +36,7 @@ unsloth:
   # download：ModelScope 自动下载配置（model 不存在本地路径时触发）
   download:
     # modelscope_id：ModelScope 仓库 ID（GGUF 格式）
-    modelscope_id: unsloth/DeepSeek-V4-Flash-0731-GGUF
+    modelscope_id: unsloth/DeepSeek-V4-Flash-Vision-Exp-GGUF
     # quant：仓库内实际量化名
     quant: UD-Q8_K_XL
   # extra_args：透传其他 unsloth 参数

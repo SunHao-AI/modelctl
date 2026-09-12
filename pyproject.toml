@@ -23,6 +23,22 @@ dev = [
     "mypy>=1.10",
     "types-PyYAML>=6.0",
     "websockets>=12",
+    # 测试覆盖度量（`uv run pytest --cov` + `--cov-fail-under` 门槛，见 [tool.coverage.*]）
+    "pytest-cov>=5.0",
+    # 性能基准（tests/test_perf_*.py，`--benchmark-enable` 显式开启，默认 skip 不拖慢常规跑）
+    "pytest-benchmark>=4.0",
+    # 依赖漏洞扫描（`uv run pip-audit`，CI 的 security job 使用）
+    "pip-audit>=2.7",
+]
+# 网关/webui 测试所需的数据面依赖（fastapi/httpx/bcrypt/PyJWT）刻意**不落**主包：
+# 生产口径由 gateway/ 子项目独立持有（见 gateway/pyproject.toml）。本地/CI 跑全量测试时用
+# `uv run --extra dev --with-http-deps ...` 不便书写，故单列一个 test extra 一次装齐。
+test = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "httpx>=0.27",
+    "bcrypt>=4.0",
+    "PyJWT>=2.8",
 ]
 
 [project.scripts]
@@ -37,6 +53,22 @@ packages = ["src/modelctl"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# 测试分层 marker（分层口径见 docs/health-checks/2026-09-11-test-coverage-report.md §2）：
+#   unit        — 单函数/单类，无外部依赖（不打网络、不起子进程、不写仓库 data/）
+#   integration — 模块间契约（HTTP 端点走 TestClient、CLI 走 cli.main、cluster WS/HTTP）
+#   e2e         — 跨进程/跨端全链路（webui 起服 + 前端产物 + 管理面调用）
+#   security    — 鉴权、fail-closed、注入、越权、凭据泄漏（见 tests/test_security_*.py）
+#   perf        — 性能基准（pytest-benchmark，显式 --benchmark-enable 才跑）
+#   slow        — 单例耗时 > 1s，常规开发可 -m "not slow" 跳过
+# addopts 刻意不加 --cov：覆盖率是有成本的（本地全量约 +20%），只在 CI/度量时显式 --cov。
+markers = [
+    "unit: 单元测试（单函数/单类，无外部依赖）",
+    "integration: 集成测试（模块间接口契约：HTTP/CLI/WS）",
+    "e2e: 端到端业务流程（跨进程/跨端）",
+    "security: 安全测试（鉴权/fail-closed/注入/越权/凭据泄漏）",
+    "perf: 性能基准测试（pytest-benchmark）",
+    "slow: 单例耗时 > 1s 的用例",
+]
 
 [tool.ruff]
 line-length = 120
@@ -50,3 +82,32 @@ ignore = ["UP009"]
 [tool.mypy]
 python_version = "3.12"
 packages = ["modelctl"]
+
+# ---------------------------------------------------------------------------
+# 覆盖率（`uv run pytest --cov=modelctl --cov-report=term-missing`）
+#
+# fail_under 的定标依据见 docs/health-checks/2026-09-11-test-coverage-report.md：
+# 全量口径实测落在 80% 上（2026-09-10 健康检查报告记录 81%，本次补测后复核）。
+# 门槛是**防回退**的下限，不是目标；提高前先跑一次无门槛全量确认真实水位。
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+source = ["modelctl"]
+branch = true
+# 只在跑测试时统计；site-packages 里若存在 gateway venv 安装的 modelctl 副本会污染归因
+omit = ["*/modelctl/__main__.py", "*/modelctl/core/tui/__main__.py"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+precision = 1
+skip_covered = false
+# 显式标注"由运行时环境决定、测试不可达"的行不计入分母（__main__ 守护、平台分支等）
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "@overload",
+]
+
+[tool.coverage.html]
+directory = "build/coverage-html"

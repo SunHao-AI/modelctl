@@ -64,15 +64,21 @@ export function openModelLogStream(url: string, hooks: LogStreamHooks = {}): Log
   /** 主动 close 后的 error 不再上抛(浏览器对 close() 也会 emit error,需要抑制) */
   let suppressedByClose = false;
 
-  /** log 事件的 data 已是纯 JSON 字符串，直接解析；解析异常走 onError */
+  /** log 事件的 data 已是纯 JSON 字符串，直接解析；解析异常走 onError。
+   *  必须先 parse 再 `hooks.onLine?.(parsed)`：写成 `hooks.onLine?.(JSON.parse(raw))`
+   *  时，调用方未注册 onLine 会让可选链**跳过参数求值**（JSON.parse 不执行），
+   *  畸形帧静默吞掉、onError 永不触发（BUG-FE-02）。 */
   const onLog: EventListener = (e) => {
     const raw = (e as MessageEvent).data as string | undefined;
     if (typeof raw !== 'string' || !raw) return;
+    let parsed: LogSseEvent;
     try {
-      hooks.onLine?.(JSON.parse(raw) as LogSseEvent);
+      parsed = JSON.parse(raw) as LogSseEvent;
     } catch {
       hooks.onError?.(new Error(`Malformed SSE data: ${raw}`) as unknown as Event);
+      return;
     }
+    hooks.onLine?.(parsed);
   };
 
   const onOpen: EventListener = () => hooks.onOpen?.();

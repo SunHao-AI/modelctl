@@ -18,8 +18,48 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
+
+# 测试分层判定口径（顺序即优先级，首个命中生效；全不命中落 unit）。
+# 口径与 pyproject [tool.pytest.ini_options].markers 一致，分层说明见
+# docs/health-checks/2026-09-11-test-coverage-report.md §2。
+_SECURITY_PREFIX = "test_security_"
+_PERF_PREFIX = "test_perf_"
+_E2E_PREFIX = "test_e2e_"
+
+# 「集成层」信号：文件名里出现即代表该文件跨越了模块边界——
+#   *_http        直接对 HTTP 端点断言（TestClient）
+#   *_cli         走 cli.main() 全链路（参数解析 → core 调用 → 输出）
+#   test_webui_* / test_cli_* / test_modelctl  同上两类的前缀形态
+#   test_gateway* / test_admin_* / test_accounts_gateway  网关与管理面路由契约
+#   test_all_service / test_audit / test_compat_flow  跨模块编排链路
+_INTEGRATION_PREFIXES = (
+    "test_webui_",
+    "test_cli_",
+    "test_modelctl",
+    "test_gateway",
+    "test_accounts_gateway",
+    "test_admin_",
+    "test_all_service",
+    "test_audit",
+    "test_compat_flow",
+)
+_INTEGRATION_TOKENS = ("_http", "_cli")
+
+
+def _layer_of(stem: str) -> str:
+    """测试文件名词干 → 分层 marker 名。"""
+    if stem.startswith(_SECURITY_PREFIX):
+        return "security"
+    if stem.startswith(_PERF_PREFIX):
+        return "perf"
+    if stem.startswith(_E2E_PREFIX):
+        return "e2e"
+    if stem.startswith(_INTEGRATION_PREFIXES) or any(t in stem for t in _INTEGRATION_TOKENS):
+        return "integration"
+    return "unit"
 
 
 @pytest.fixture(autouse=True)
@@ -69,6 +109,26 @@ def isolated_runtime_dirs(tmp_path, monkeypatch):
     for key in list(os.environ):
         if key.startswith("CLUSTER_"):
             monkeypatch.delenv(key, raising=False)
+
+
+def pytest_collection_modifyitems(config, items):
+    """按测试文件的**命名前缀**自动打分层 marker（unit/integration/e2e/security/perf）。
+
+    为什么不逐文件手写 `@pytest.mark.xxx`：tests/ 已有 110+ 文件、1800+ 用例，逐个加装饰器
+    是一次纯机械但极易漏的大改动，且"新文件忘了打 marker"会让 `-m unit` 静默少收用例——
+    分层筛选一旦不可信，"只跑快测试"的开发回路就会退回全量 37 分钟。
+    前缀→层的映射集中在 _LAYER_BY_PREFIX 一处，新文件按命名约定落地即自动分层。
+
+    判层优先级按 _LAYER_BY_PREFIX 顺序**首个命中**即生效；未命中的一律落 `unit`
+    （默认值取最轻的一层：宁可让一个真实集成测试被算进 unit，也不要让 `-m unit`
+    漏掉用例而让人误以为它没跑）。
+    """
+    for item in items:
+        marker = _layer_of(Path(str(item.fspath)).stem)
+        if marker == "unit":
+            item.add_marker(pytest.mark.unit)
+        else:
+            item.add_marker(getattr(pytest.mark, marker))
 
 
 @pytest.fixture(autouse=True)

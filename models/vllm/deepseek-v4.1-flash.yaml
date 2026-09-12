@@ -1,0 +1,75 @@
+# vllm/deepseek-v4.1-flash.yaml —— DeepSeek-V4.1-Flash（vLLM 引擎，HuggingFace 原始权重）
+# 学习要点：vLLM 使用 HF 格式权重（非 GGUF），支持张量并行与 FP8 量化，适合高吞吐在线服务。
+# 官方 recipe（recipes.vllm.ai，2026-09-10 更新）：DeepSeek 视觉语言 MoE ——
+# 522B 总参（每 prompt token 激活 8B / 每输出 token 16B），40 层 transformer（hidden 5120），
+# 32 层 ViT 视觉塔 + aligner；两级稀疏注意力（128-token 滑窗 + 压缩 KV latent + 小型 indexer）+
+# engram n-gram 记忆（2 张哈希表合计 196.6B 参数，占显存大头）+ hyper-connection（4 路并行残差）+
+# DSpark 多 token 草稿头（3 级 × 128 routed experts，激活 3，每 block 草稿 5 token）。
+# 原生 MXFP4/MXFP8 混合 checkpoint（experts MXFP4，其余 MXFP8 block-quantized，UE8M0 scales；
+# embedding/LM head 为 BF16），约 511GB / 476 GiB 磁盘；YaRN×16 支持 1M 上下文（训练窗口 65K）；
+# 最小显存 614GB，可部署硬件：8×H100(80G) / 8×H200(141G) / 8×B200(180G) / GB200 NVL4 / B300 等。
+# 注意：此架构无 pip wheel，必须用 pinned 镜像 vllm/vllm-openai:deepseekv41-flash-0909
+# （vLLM 0.30.0+），NVIDIA/AMD 均可；首次加载重量级（recipe 设 VLLM_ENGINE_READY_TIMEOUT_S=3600）。
+# 与 deepseek-v4-flash 差异：parser/tokenizer 为 deepseek_v41（V4 系为 deepseek_v4）；
+# 视觉塔建议 --mm-encoder-tp-mode data（ViT 32 层/hidden 1024 很小，TP 通信开销大于收益，
+# 多图请求 TTFT 显著下降；与 --language-model-only 互斥）；recipe 未强制 kv_cache_dtype fp8。
+
+group: deepseek-v4.1-flash
+# port：服务监听端口（健康检查 http://127.0.0.1:<port>/health）
+port: 8120
+# api_key：OpenAI 兼容 API 密钥；${VAR} 会从环境变量/.env 插值
+api_key: ${API_KEY}
+
+vllm:
+  # model：HuggingFace 模型 ID 或本地模型目录。
+  # 为空/本地路径不存在时，按 download 段下载到 $MODEL_ROOT/<仓库名> 后直接使用（本文件不会被改写）
+  # bind_host：服务绑定地址（安全加固，2026-09-08，所有引擎统一默认）
+  # 默认 127.0.0.1 仅回环监听：外部（含 AI Agent / 其他内网主机）无法直连引擎端口，
+  # 从而堵住绕过网关鉴权/账号/多 Key/token 限速/审计的“第二入口”。
+  # 确需对外暴露时改为 0.0.0.0，并配合防火墙/白名单限制来源（非默认，风险自担）。
+  bind_host: 127.0.0.1
+  model: deepseek-ai/DeepSeek-V4.1-Flash
+  # docker_image：必须 pin 官方 recipe 镜像（无 pip wheel 可用），vLLM 0.30.0+
+  docker_image: vllm/vllm-openai:deepseekv41-flash-0909
+  # download：模型不存在时的自动下载配置（ModelScope，HF 格式仓库）
+  download:
+    # modelscope_id：ModelScope 仓库 ID（HF 格式）
+    modelscope_id: deepseek-ai/DeepSeek-V4.1-Flash
+  # tensor_parallel_size：张量并行 GPU 数（不得超过实际 GPU 数）
+  tensor_parallel_size: 8
+  # max_model_len：最大上下文长度（token）。recipe 支持 1M（YaRN×16），
+  # 1M 全开需占用大量 KV 显存，默认 131K 覆盖日常场景；显存允许时可提到 1048576
+  max_model_len: 131072
+  # gpu_memory_utilization：显存利用率上限（0~1）
+  # recipe 推荐 0.95 压 KV；若共享 GPU/有其它服务则降到 0.92
+  gpu_memory_utilization: 0.95
+  # quantization：量化方式（留空）——权重为原生 MXFP4/MXFP8 混合 checkpoint，
+  # vLLM 会自动识别，无需显式声明
+  quantization: ""
+  # kv_cache_dtype：KV 缓存精度。V4 系因 fp8_ds_mla 布局强制 fp8；V4.1 为 class-MLA 风格，
+  # recipe 未强制 fp8，留空走默认；如需降 KV 显存可改 fp8（多模态模型 KV 占比高，fp8 有效）
+  kv_cache_dtype: ""
+  # docker_env：透传给 `docker run -e` 的环境变量（配方值，键=环境变量名）
+  docker_env:
+    # VLLM_USE_RUST_FRONTEND：启用 Rust OpenAI 前端（recipe 推荐默认）；
+    # 若遇兼容性问题可删除本行回退 Python 前端
+    VLLM_USE_RUST_FRONTEND: "1"
+    # VLLM_ENGINE_READY_TIMEOUT_S：首次加载 511GB 权重耗时很长，recipe 设 1 小时等待引擎就绪
+    VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+  # extra_args：透传给 `vllm serve` 的额外参数（空格分隔，按 shlex 拆分）
+  # 官方 recipe（GB200 NVL4 验证，vLLM 0.30.0+）参数：
+  #   --tokenizer-mode deepseek_v41 --tool-call-parser deepseek_v41 --enable-auto-tool-choice
+  #   --reasoning-parser deepseek_v41 --mm-encoder-tp-mode data
+  # 本项目补充（性能调优，配方“Advanced”小节推荐值）：
+  #   --max-num-batched-tokens 8192（批预算；降低 TTFT 可调小）
+  #   --max-num-seqs 256（并发序列上限；P/D 分离部署时 recipe 设为 32）
+  # 纯文本负载可追加 --language-model-only（跳过 ViT/aligner 释放显存，与 mm-encoder-tp-mode 互斥）
+  extra_args: "--tokenizer-mode deepseek_v41 --tool-call-parser deepseek_v41 --enable-auto-tool-choice --reasoning-parser deepseek_v41 --mm-encoder-tp-mode data --max-num-batched-tokens 8192 --max-num-seqs 256"
+
+usage:
+  # price_in：每千输入 token 计价（元），供 cc-switch 用量统计
+  price_in: 1.0
+  # price_out：每千输出 token 计价（元）
+  price_out: 2.0
+  # budget：预算上限（元，可选）；设置后 cc-switch 显示剩余金额并支持百分比徽章（?view=tier）
+  # budget: 50

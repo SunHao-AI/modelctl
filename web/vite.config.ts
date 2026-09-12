@@ -40,5 +40,22 @@ export default defineConfig(({ mode }) => {
       outDir: '../dist',
       emptyOutDir: true,
     },
+    // vitest 配置（`npm test` → vitest run）：单元测试跑在 jsdom（localStorage /
+    // EventSource 等浏览器 API 可用），只收 src/**\/*.test.ts，不碰 e2e/（Playwright 独立跑）。
+    test: {
+      environment: 'jsdom',
+      include: ['src/**/*.test.ts'],
+      clearMocks: true,
+      // 并行 worker 冷启动时，路由守卫测试的懒加载视图（dynamic import → esbuild
+      // 现场 transform）会顶穿默认 5s 超时；守卫断言本身 <100ms，放宽到 30s 只兜冷启动。
+      testTimeout: 30_000,
+      coverage: {
+        provider: 'v8',
+        include: ['src/**/*.{ts,vue}'],
+        exclude: ['src/**/*.test.ts', 'src/env.d.ts', 'src/main.ts'],
+        reporter: ['text', 'html'],
+        reportsDirectory: '../build/coverage-web',
+      },
+    },
   };
 });

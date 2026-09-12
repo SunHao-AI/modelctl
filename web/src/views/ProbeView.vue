@@ -95,10 +95,19 @@ function mbToGb(mb: number): string {
           <tbody>
             <tr v-for="b in data.engine_binaries" :key="b.name" class="border-b border-slate-800/40">
               <td class="w-2/5 px-3 py-1.5">
-                <span class="mr-2 inline-block size-2 rounded-full" :class="b.available ? 'bg-emerald-400' : 'bg-red-400'" />
-                <span :class="b.available ? 'text-emerald-300' : 'text-red-300'">{{ b.name }}</span>
+                <span class="mr-2 inline-block size-2 rounded-full" :class="b.available ? 'bg-emerald-400' : b.reachable ? 'bg-amber-400' : 'bg-red-400'" />
+                <span :class="b.available ? 'text-emerald-300' : b.reachable ? 'text-amber-300' : 'text-red-300'">{{ b.name }}</span>
               </td>
-              <td class="font-mono text-xs text-slate-500 break-all">{{ b.path || '—' }}</td>
+              <!-- 可达来源：venv 已装 / 仅 docker 旁路 / 不可达 -->
+              <td class="w-16 py-1.5 text-xs">
+                <span
+                  v-if="b.runtime === 'docker'"
+                  class="rounded border border-amber-500/40 bg-amber-600/10 px-1 py-px text-[10px] text-amber-300"
+                >docker</span>
+                <span v-else-if="b.runtime === 'venv'" class="text-[10px] text-emerald-300">venv</span>
+                <span v-else class="text-[10px] text-slate-500">—</span>
+              </td>
+              <td class="font-mono text-xs text-slate-500 break-all">{{ b.path || (b.runtime === 'docker' ? 'docker 旁路（venv 未装）' : '—') }}</td>
             </tr>
           </tbody>
         </table>

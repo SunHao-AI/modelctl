@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import dayjs from 'dayjs';
 import { overview } from '@/api/services';
-import type { OverviewResponse } from '@/api/types';
+import type { EngineBinary, OverviewResponse } from '@/api/types';
 import StatusBadge from '@/components/common/StatusBadge.vue';
 
 /**
@@ -73,12 +73,36 @@ function fmtProbedAt(): string {
   return v ? dayjs(v).format('YYYY-MM-DD HH:mm:ss') : '未知';
 }
 
-/** 按 name 排序的引擎二进制列表 */
-const engineBinaries = computed<Array<{ name: string; state: 'available' | 'missing' }>>(() => {
+/** 引擎可达性来源：venv 已装 / 仅 docker 旁路 / 不可达 */
+type EngineRuntime = 'venv' | 'docker' | 'none';
+
+function engineRuntime(b: EngineBinary): EngineRuntime {
+  if (b.runtime === 'venv' || b.available) return 'venv';
+  if (b.runtime === 'docker' || b.reachable) return 'docker';
+  return 'none';
+}
+
+/** 排序权重：venv 已装 > 仅 docker 旁路 > 不可达（同档按名字） */
+const RUNTIME_ORDER: Record<EngineRuntime, number> = { venv: 0, docker: 1, none: 2 };
+
+/** 悬浮说明：说清 ✓ 是 venv 还是仅 docker 旁路，避免与环境页「未安装」口径混淆 */
+function engineTitle(b: EngineBinary): string {
+  const rt = engineRuntime(b);
+  if (rt === 'venv') return b.path ? `venv 已安装：${b.path}` : 'venv 已安装';
+  if (rt === 'docker') return 'venv 未安装；docker 环境就绪，可在模型 yaml 配 docker_image 走容器';
+  return b.docker_capable
+    ? '不可用：venv 未安装，且 docker 环境未就绪'
+    : '不可用：该引擎不支持 docker 运行时，需 modelctl env setup';
+}
+
+/** 按「可达来源 → name」排序的引擎二进制列表 */
+const engineBinaries = computed<EngineBinary[]>(() => {
   if (!data.value) return [];
-  return Object.entries(data.value.hardware.engine_binaries ?? {})
-    .map(([name, state]) => ({ name, state }))
-    .sort((a, b) => (a.state === b.state ? a.name.localeCompare(b.name) : a.state === 'available' ? -1 : 1));
+  return [...(data.value.hardware.engine_binaries ?? [])].sort((a, b) => {
+    const ra = engineRuntime(a);
+    const rb = engineRuntime(b);
+    return ra === rb ? a.name.localeCompare(b.name) : RUNTIME_ORDER[ra] - RUNTIME_ORDER[rb];
+  });
 });
 </script>
 
@@ -173,21 +197,38 @@ const engineBinaries = computed<Array<{ name: string; state: 'available' | 'miss
           v-for="b in engineBinaries"
           :key="b.name"
           :class="[
-            'flex items-center justify-between rounded-lg border px-3 py-2 text-sm',
-            b.state === 'available'
+            'flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-sm',
+            engineRuntime(b) === 'venv'
               ? 'border-emerald-500/30 bg-emerald-600/5'
-              : 'border-red-500/30 bg-red-600/5',
+              : engineRuntime(b) === 'docker'
+                ? 'border-amber-500/30 bg-amber-600/5'
+                : 'border-red-500/30 bg-red-600/5',
           ]"
+          :title="engineTitle(b)"
         >
           <span class="font-mono text-slate-100">{{ b.name }}</span>
+          <!-- venv 已装：✓；仅 docker 旁路：docker 标记；不可达：✗ -->
           <span
-            :class="b.state === 'available' ? 'text-emerald-300' : 'text-red-300'"
-          >
-            {{ b.state === 'available' ? '✓' : '✗' }}
-          </span>
+            v-if="engineRuntime(b) === 'venv'"
+            class="text-emerald-300"
+          >✓</span>
+          <span
+            v-else-if="engineRuntime(b) === 'docker'"
+            class="rounded border border-amber-500/40 bg-amber-600/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-300"
+          >docker</span>
+          <span v-else class="text-red-300">✗</span>
         </div>
       </div>
       <div v-else class="text-sm text-slate-500">尚无数据</div>
+      <!-- 图例：区分「venv 已装」与「仅 docker 旁路（venv 未安装）」 -->
+      <div class="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
+        <span class="inline-flex items-center gap-1"><span class="text-emerald-300">✓</span>venv 已安装</span>
+        <span class="inline-flex items-center gap-1">
+          <span class="rounded border border-amber-500/40 bg-amber-600/10 px-1 py-px text-[10px] text-amber-300">docker</span>
+          venv 未装，可走 docker 旁路
+        </span>
+        <span class="inline-flex items-center gap-1"><span class="text-red-300">✗</span>不可用</span>
+      </div>
     </section>
 
     <!-- 错误提示 -->

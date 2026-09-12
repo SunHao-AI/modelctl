@@ -63,25 +63,18 @@ vllm:
   # gpu_list：物理 GPU 编号；长度必须等于 tensor_parallel_size
   gpu_list: "0,1,2,3,4,5,6,7"
   # max_model_len：最大上下文长度（token），原生 262144
-  # ★ 8 卡 RTX 5880 实测（含 MTP，且 PLE CPU offload 已生效）：单卡可用 KV 25.57 GiB，
-  #   GPU KV cache size 1,890,319 tokens，262144 全上下文下并发 7.21x（余量充裕）。
-  #   对比：未开 PLE 时每卡可用 KV 仅 2.54~3.69 GiB，才逼得降档到 131072。
-  #   降档阶梯（宿主内存/显存吃紧时）：262144（当前） → 131072 → 65536（多 agent 并发） → 32768（短问答）
+  # ★ 8 卡 RTX 5880 实测（含 MTP，gpu_memory_utilization 0.95）
+  #   每卡可用 KV 2.54 GiB < 需求 3.55 GiB（差 ~1.0 GiB），实测最大支持 ~185600。
+  #   MTP 草稿头 + draft KV 是挤占显存的主因；故降到首推档 131072（有充足余量）。
+  #   降档阶梯：131072（当前首推） → 65536（多 agent 并发） → 32768（短问答）
   # 改完此字段必须 modelctl stop + start 重新走 init_engine_core
   max_model_len: 262144
   # gpu_memory_utilization：显存利用率上限（0~1）
-  # ★ 8 卡 RTX 5880 实测（单卡可用 47.37 GiB，PLE CPU offload 已生效）：
-  #   0.97 → KV cache 被"按预算贪心分满"（25.57 GiB），紧接着 FULL CUDA Graph 捕获
-  #          只需再挤 ~50 MiB 却仅剩 38 MiB → OOM，EngineCore 崩：
-  #          `Capturing CUDA graphs (FULL): 0%| 0/26` 即挂，报 Engine core initialization failed。
-  #   0.92 → 释放约 2.37 GiB/卡，可稳定启动，但推理阶段 prefill 瞬时激活仍压穿
-  #          （2026-09-11 `_short_conv_dilated_prefill_batched` → `F.silu` 报 OOM）。
-  #   0.88（当前值）→ 释放 ~5.67 GiB/卡，覆盖 prefill 峰值激活 + PYTORCH_CUDA_ALLOC_CONF
-  #          expandable_segments 缓解碎片，实测可稳定运行。
-  #   ⚠ 关键：KV cache 是按预算**贪心分满**的，所以利用率不能贴着上限给——必须给
-  #     profiling / CUDA Graph 捕获 / 推理峰值激活留固定余量；这是本字段的职责，降 max_model_len 无效。
-  #   ⚠ 若仍告警 JIT/激活瞬时 OOM，优先减 max_num_batched_tokens（如 7168→6144→4096）而非回退 len。
-  gpu_memory_utilization: 0.88
+  # ★ 8 卡 RTX 5880 实测：0.85 时 profiling 固定开销（权重 23.52GiB/卡 + warmup activation）
+  #   已把预算吃穿，Available KV cache memory = -1.6 GiB（与 max_model_len 无关，降 len 无效）。
+  #   0.85→0.92 补 3.36 GiB（覆盖 -1.6 GiB + 1.7 GiB 余量），必须在 warmup 前预留。
+  #   ⚠ 若告警 JIT/激活瞬时 OOM，优先减 max_num_batched_tokens（如 8192→6144→4096）而非回退 len。
+  gpu_memory_utilization: 0.97
   # quantization：量化方式（FP8 块级）
   # 硬件要求：CC ≥ 8.9（A6000=8.6 不支持，本配置不用于 A6000）
   # 切换 BF16：删掉本字段，并把 model/modelscope_id 改回 Qwen/Qwen3.8-Flash-Next（335.28GiB，5880 装不下）
@@ -115,24 +108,18 @@ vllm:
   # 【VLLM_PLE_CPU_OFFLOAD=1】把 51B N-gram Embedding（PLE）查表内存卸载到 host RAM 并异步预取。
   #   这是**权重表卸载**，与上面的 KV connector 是两回事，因此不受 GDN 限制。
   #   官方定位：TP/TEP 在 80GB 级及以下卡上是"必须项"（embedding 表本身就超出每卡余量），
-  #   H200 以上才"可选"。本配置 48GB/卡属于必须侧——未开启时每卡可用 KV 仅 3.69 GiB，
-  #   开启后 25.57 GiB，`max_model_len` 得以从 131072 推回原生 262144。
-  #   ⚠ 前置：宿主需 ≥51GB + 运行时余量（实测本机 256GB，Available RAM 230.14 GiB，充裕）；
-  #     若宿主内存告急或出现预取导致的吞吐下降，删掉本项回退。
-  #   实测装载日志：`Found 1 PleOffloadLayer(s): [...ple_embedding]` →
-  #     `matched 132 checkpoint tensor(s), loaded 5 offload entries`（表落 host RAM，不占显存）。
+  #   H200 以上才"可选"。本配置 48GB/卡属于必须侧，也正是上方"每卡可用 KV 仅 2.54 GiB"
+  #   profile 固定开销的主要来源之一——开启后有望把 max_model_len 推回更高分辨率档。
+  #   ⚠ 前置：宿主需 ≥51GB + 运行时余量（本机 128GB 可用但偏紧）；若宿主内存告急或
+  #     出现预取导致的吞吐下降，删掉本项回退。
   docker_env:
     VLLM_PLE_CPU_OFFLOAD: "1"
-    # PYTORCH_CUDA_ALLOC_CONF：让 PyTorch 缓存分配器使用可扩展分段，缓解 VRAM 碎片。
-    # OOM 日志（2026-09-11）建议：reserved but unallocated 161 MiB + 分配 140 Mi 失败 →
-    # expandable_segments 可让已 reserve 但 unalloc 的块重新增长而避免碎片化。
-    PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
   # extra_args：透传给 `vllm serve` 的额外参数（空格分隔，由 shlex 拆分）
   # 【本配置 = H200 8 卡官方 recipe 1:1（triton MoE 后端在 Ada 上也支持）】
   #   --enable-expert-parallel         TEP8 必须项（plain TP8 与 128 宽量化块不兼容）
   #   --moe-backend triton             MoE kernel 走 triton（官方 8 卡 H200 推荐，RTX 5880 兼容）
-  #   --max-num-seqs 64                并发序列上限（官方 4 卡 GB300 用 256；本配置 8 卡显存更紧，降到 64）
-  #   --max-num-batched-tokens 7168    单步批 token 上限（当前采用 7168）
+  #   --max-num-seqs 256               官方默认值（4 卡 GB300 同值，本配置 8 卡按相同配方）
+  #   --max-num-batched-tokens 8192    单步批 token 上限（官方甜点位，当前采用 8192）
   #     vLLM 会将该值向上取整到 token_block_size(16) 的倍数，建议用 16 倍数。
   #     调小→显著降低峰值激活显存（warmup/前向瞬时 OOM 时优先调它，而非回退 len）；
   #     调大→吞吐更高，但显存峰值更高。低并发(≤64)下多数请求未触顶，性能基本无感。
@@ -148,7 +135,7 @@ vllm:
   #   --speculative-config '{"method":"mtp","num_speculative_tokens":2}'：模型自带 MTP 头，无需 draft。
   #   目标层数=2（官方推荐 3~5 接受率最高；此处按需求设为 2）。
   #   ⚠ 依赖 vLLM ≥0.9.x MTP 完整支持 + Day-0 镜像已注册 MTP 头；MTP 头/草稿 KV 额外占显存，
-  #     本配置 8×RTX 5880 的 gpu_memory_utilization 为 0.88，若启动 OOM 优先降 --max-num-seqs，
+  #     本配置 8×RTX 5880 已到 gpu_memory_utilization 0.95，若启动 OOM 优先降 --max-num-seqs，
   #     或从 extra_args 删除 "--speculative-config ..." 回退。
   extra_args: '--enable-expert-parallel --moe-backend triton --max-num-seqs 64 --max-num-batched-tokens 7168 --enable-prefix-caching --no-enable-flashinfer-autotune --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 --speculative-config ''{"method":"mtp","num_speculative_tokens":2}'''
 

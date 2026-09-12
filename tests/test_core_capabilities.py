@@ -49,6 +49,20 @@ def _venv_bin_name(engine: str, name: str) -> str:
     return exe
 
 
+def _make_bin(venv_root: Path, engine: str, name: str, windows: bool) -> None:
+    """在 venv bin 目录放置 console script（模拟上游包已装入 venv）。"""
+    bin_dir = "Scripts" if windows else "bin"
+    d = venv_root / engine / bin_dir
+    d.mkdir(parents=True, exist_ok=True)
+    (d / _venv_bin_name(engine, name)).write_bytes(b"fake")
+
+
+def _make_module(venv_root: Path, engine: str, windows: bool, top_pkg: str) -> None:
+    """在 venv site-packages 放置顶层包目录（模拟 python -m 型引擎已装入）。"""
+    sp = venv_root / engine / ("Lib/site-packages" if windows else "lib/python3.12/site-packages")
+    (sp / top_pkg).mkdir(parents=True, exist_ok=True)
+
+
 def test_engine_binaries_list_kept():
     """ENGINE_BINARIES 保持已注册引擎列表（新增 aphrodite/lmdeploy/tensorrt_llm/tokenspeed）。"""
     assert ENGINE_BINARIES == [
@@ -58,9 +72,10 @@ def test_engine_binaries_list_kept():
 
 
 def test_which_binaries_vllm_env_present(tmp_path, monkeypatch):
-    """has_env 为 True 时，which_binaries(["vllm"]) 返回 True。"""
+    """venv 解释器与 vllm console script 都在位时，which_binaries(["vllm"]) 返回 True。"""
     root = _redirect(tmp_path, monkeypatch)
     _make_env(root, "vllm", windows=(os.name == "nt"))
+    _make_bin(root, "vllm", "vllm", windows=(os.name == "nt"))
     result = which_binaries(["vllm"])
     assert result == {"vllm": True}
     assert result["vllm"] is True
@@ -73,18 +88,39 @@ def test_which_binaries_vllm_env_absent(tmp_path, monkeypatch):
     assert result == {"vllm": False}
 
 
-def test_which_binaries_sglang_env_present(tmp_path, monkeypatch):
-    """sglang 同样以 has_env 判定。"""
+def test_which_binaries_venv_without_package_is_unavailable(tmp_path, monkeypatch):
+    """venv 建好但上游包未装（bin 下无 vllm 可执行文件）→ 不可用。
+
+    旧实现只看 has_env 就拼路径，会把 setup 中途失败的半成品 venv 报成可用。
+    """
+    root = _redirect(tmp_path, monkeypatch)
+    _make_env(root, "vllm", windows=(os.name == "nt"))
+    assert which_binaries(["vllm"]) == {"vllm": False}
+    assert binary_paths(["vllm"]) == {"vllm": None}
+
+
+def test_which_binaries_module_engine_needs_site_packages(tmp_path, monkeypatch):
+    """sglang 走 python -m：site-packages 有顶层包才算可用（bin 下本就没有 sglang）。"""
     root = _redirect(tmp_path, monkeypatch)
     _make_env(root, "sglang", windows=(os.name == "nt"))
-    result = which_binaries(["sglang"])
-    assert result == {"sglang": True}
+    assert which_binaries(["sglang"]) == {"sglang": False}
+    _make_module(root, "sglang", windows=(os.name == "nt"), top_pkg="sglang")
+    assert which_binaries(["sglang"]) == {"sglang": True}
+
+
+def test_binary_paths_module_engine_returns_python(tmp_path, monkeypatch):
+    """python -m 型引擎的路径是 venv 解释器本身（build_command 用它启动）。"""
+    root = _redirect(tmp_path, monkeypatch)
+    _make_env(root, "tensorrt_llm", windows=(os.name == "nt"))
+    _make_module(root, "tensorrt_llm", windows=(os.name == "nt"), top_pkg="tensorrt_llm")
+    assert binary_paths(["tensorrt_llm"]) == {"tensorrt_llm": str(envs_mod.engine_python("tensorrt_llm"))}
 
 
 def test_binary_paths_vllm_env_present(tmp_path, monkeypatch):
     """has_env True 时，binary_paths 返回 venv 内路径（与 engine_bin 一致）。"""
     root = _redirect(tmp_path, monkeypatch)
     _make_env(root, "vllm", windows=(os.name == "nt"))
+    _make_bin(root, "vllm", "vllm", windows=(os.name == "nt"))
     expected = root / "vllm" / ("Scripts" if os.name == "nt" else "bin") / _venv_bin_name("vllm", "vllm")
     result = binary_paths(["vllm"])
     assert result == {"vllm": str(expected)}
@@ -193,9 +229,10 @@ def test_probe_managed_engines_absent_by_default(tmp_path, monkeypatch):
 
 
 def test_probe_managed_engine_present(tmp_path, monkeypatch):
-    """建设 venv 后，probe() 对托管引擎返回真实 venv 路径。"""
+    """建设 venv（含引擎包）后，probe() 对托管引擎返回真实 venv 路径。"""
     root = _redirect(tmp_path, monkeypatch)
     _make_env(root, "vllm", windows=(os.name == "nt"))
+    _make_bin(root, "vllm", "vllm", windows=(os.name == "nt"))
     monkeypatch.setattr("modelctl.core.capabilities.shutil.which", lambda n: None)
     caps = probe(nvidia_smi_output="")
     assert caps.binaries["vllm"] is True

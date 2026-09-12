@@ -230,7 +230,11 @@ def _registry_args() -> list[str]:
     """用户未自配 registry 时附加镜像源（不覆盖已有 .npmrc 的配置）。"""
     for scope in (web_root() / ".npmrc", Path.home() / ".npmrc"):
         try:
-            if scope.is_file() and "registry" in scope.read_text(encoding="utf-8"):
+            # errors="ignore"：中文 Windows 上用户级 .npmrc 常为 GBK 存储，
+            # 严格 utf-8 会抛 UnicodeDecodeError（ValueError 子类，OSError 捕不住）
+            # 导致 webui start 直接崩（BUG-FE-01）。ASCII 的 "registry=" 键名在
+            # ignore 模式下完好保留，用户已配 registry 仍能正确识别。
+            if scope.is_file() and "registry" in scope.read_text(encoding="utf-8", errors="ignore"):
                 return []
         except OSError:
             continue

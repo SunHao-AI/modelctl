@@ -1,4 +1,4 @@
-# vllm/deepseek-v4-flash-pp.yaml —— DeepSeek-V4-Flash（vLLM 引擎，TP4 + PP2 实验配置）
+# vllm/deepseek-v4-flash-pp.yaml —— DeepSeek-V4-Flash-Vision-Exp（vLLM 引擎，TP4 + PP2 实验配置）
 # 学习要点：无 NVLink 场景下，vLLM 组合张量并行（TP）与管线并行（PP）可减少跨卡
 # all-reduce 通信量（PP 仅在相邻阶段间传递激活，通信压力低于纯 TP8）。
 # 附录 B.2：本 profile 为实验变体，不改变既有主配置（balanced 仍为 TP8）。
@@ -22,11 +22,13 @@ vllm:
   # 从而堵住绕过网关鉴权/账号/多 Key/token 限速/审计的“第二入口”。
   # 确需对外暴露时改为 0.0.0.0，并配合防火墙/白名单限制来源（非默认，风险自担）。
   bind_host: 127.0.0.1
-  model: deepseek-ai/DeepSeek-V4-Flash-0731
+  model: deepseek-ai/DeepSeek-V4-Flash-Vision-Exp
+  # docker_image：vision 支持未进稳定 vLLM（PR #54566），必须 pin 官方 recipe 镜像，NVIDIA 专属
+  docker_image: vllm/vllm-openai:deepseekv4-flash-vision
   # download：模型不存在时的自动下载配置（ModelScope，HF 格式仓库）
   download:
     # modelscope_id：ModelScope 仓库 ID（HF 格式）
-    modelscope_id: deepseek-ai/DeepSeek-V4-Flash-0731
+    modelscope_id: deepseek-ai/DeepSeek-V4-Flash-Vision-Exp
   # tensor_parallel_size：张量并行 GPU 数（TP4）；与 PP2 组合共使用 8 卡
   # 注意：modelctl 校验要求 gpu_list 长度 == tensor_parallel_size，故本配置不设 gpu_list，
   # 默认使用全部 GPU；如需指定卡组请通过环境变量 MODELCTL_GPUS 或 CLI --gpus 控制
@@ -43,8 +45,8 @@ vllm:
   # extra_args：透传给 `vllm serve` 的额外参数（空格分隔，按 shlex 拆分）
   # 附录 B.2：管线并行大小（与 tensor_parallel_size 乘积 = 总 GPU 数 = 4×2=8）
   # 投机解码（默认启用）：dspark，与主配置 deepseek-v4-flash-vllm 一致；
-  #   官方 recipe 推荐 num=7（EAGLE+MTP 混合，draft_sample_method=probabilistic 可选）
-  extra_args: "--pipeline-parallel-size 2 --reasoning-parser deepseek_v4 --tool-call-parser deepseek_v4 --enable-auto-tool-choice --speculative-config '{\"method\":\"dspark\",\"num_speculative_tokens\":7}'"
+  #   vision recipe 推荐 num=3（0731 文本版为 7）；speculative-config 需带目标仓库名
+  extra_args: "--pipeline-parallel-size 2 --reasoning-parser deepseek_v4 --tool-call-parser deepseek_v4 --enable-auto-tool-choice --speculative-config '{\"method\":\"dspark\",\"model\":\"deepseek-ai/DeepSeek-V4-Flash-Vision-Exp\",\"num_speculative_tokens\":3,\"draft_sample_method\":\"probabilistic\",\"enable_adaptive_verification\":true}'"
 
 usage:
   # price_in：每千输入 token 计价（元），供 cc-switch 用量统计

@@ -31,7 +31,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from loguru import logger
 
-from modelctl.core.webui.admin_auth import require_auth
+from modelctl.core.webui.admin_auth import mask_key, require_auth
 
 router = APIRouter()
 
@@ -47,9 +47,14 @@ def _router() -> APIRouter:
 
 
 def _vram_gb(mb) -> float:
-    """MB → GB（int mb / 1024，保留 1 位）；异常 / 未命中返回 0.0。"""
+    """MB → GB（mb / 1024，保留 1 位）；异常 / 未命中返回 0.0。
+
+    用 float() 而非 int(str(x))：上游经 JSON 反序列化后 mb 可能是原生 float
+    （如 24576.7），int("24576.7") 抛 ValueError 会走兜底 0.0，UI 显存静默归零
+    （BUG-PRB-01）。float 对 int / 整数字符串 / 浮点字符串均兼容。
+    """
     try:
-        return round(int(str(mb).strip()) / 1024, 1)
+        return round(float(str(mb).strip()) / 1024, 1)
     except Exception:  # noqa: BLE001 — value 可能非数字（如 ''），统一兜底 0.0
         return 0.0
 
@@ -62,20 +67,24 @@ def _serialize_gpu_locks(locks: dict[int, str]) -> list[dict]:
     ]
 
 
-def _engine_binary_entry(name: str, available: bool, path: str | None) -> dict:
-    """单个引擎可达性条目（docker ∨ venv）。
+def _engine_binary_entry(name: str, available: bool, path: str | None, *, dready: bool | None = None) -> dict:
+    """单个引擎可达性条目（docker ∨ venv），并标出可达来源（runtime）。
 
     available（venv）按 caps.binaries 原值；reachable 加 docker 主路径维度——
     与 _resolve_runtime 的 docker_image > venv 规则对齐：docker_ready() 为真且
     引擎在 DOCKER_CAPABLE_ENGINES 中即可达标，避免 yaml 配 docker_image 的
     模型被 UI 误报 "需先 modelctl env setup <engine>"。
+
+    runtime 把「可达」拆成来源，前端据此区分展示：venv 已装 ≠ 仅有 docker 旁路。
+    dready 可由调用方传入以复用单次探测（overview 3s 轮询避免逐引擎重复 which）。
     """
     from modelctl.core.capabilities import docker_ready
     from modelctl.core.envs import DOCKER_CAPABLE_ENGINES
 
     venv_ok = bool(available)
     docker_capable = name in DOCKER_CAPABLE_ENGINES
-    dready = docker_ready()
+    if dready is None:
+        dready = docker_ready()
     reachable = venv_ok or (docker_capable and dready)
     return {
         "name": name,
@@ -83,16 +92,18 @@ def _engine_binary_entry(name: str, available: bool, path: str | None) -> dict:
         "path": path,
         "reachable": reachable,         # docker ∨ venv：真实可达性
         "runtime": "docker" if (reachable and not venv_ok) else ("venv" if venv_ok else None),
+        "docker_capable": docker_capable,
+        "docker_ready": bool(dready),
     }
 
 
-def _serialize_engine_binaries(caps) -> list[dict]:
+def _serialize_engine_binaries(caps, *, dready: bool | None = None) -> list[dict]:
     """Capabilities.binaries（bool）+ binary_paths（str|None）→ 统一列表。"""
     binaries = getattr(caps, "binaries", None) or {}
     paths = getattr(caps, "binary_paths", None) or {}
     out = []
     for name, available in binaries.items():
-        out.append(_engine_binary_entry(name, available, paths.get(name)))
+        out.append(_engine_binary_entry(name, available, paths.get(name), dready=dready))
     return out
 
 
@@ -215,14 +226,12 @@ async def overview(request: Request, _: None = Depends(require_auth)):
         total_vram_gb = _vram_gb(getattr(caps, "vram_total_mb", 0))
 
     from modelctl.core.capabilities import docker_ready
-    from modelctl.core.envs import DOCKER_CAPABLE_ENGINES
 
     dready = await asyncio.to_thread(docker_ready)
-    engine_binaries: dict[str, str] = {}
-    for name, path in (getattr(caps, "binary_paths", None) or {}).items():
-        venv_ok = bool(path)
-        reachable = venv_ok or (name in DOCKER_CAPABLE_ENGINES and dready)
-        engine_binaries[name] = "available" if reachable else "missing"
+    # 与 /probe 同一形态（含 runtime 来源），前端据此区分「venv 已装」与「仅 docker 旁路」；
+    # 旧实现只回 available/missing，docker 旁路会让 venv 未装的引擎在仪表板显示 ✓，
+    # 与环境页「未安装」自相矛盾。
+    engine_binaries = _serialize_engine_binaries(caps, dready=dready)
 
     services = {
         "stats": {"state": "running" if is_stats else "stopped", "port": USAGE_PORT},
@@ -262,7 +271,9 @@ async def probe_detail(request: Request, _: None = Depends(require_auth)):
     区块 5 路径与版本：project_root / cache_dir / models_dir / modelctl 版本
 
     GPU 锁结构 = [{gpu_index, owner}]，便于前端渲染占卡提示；
-    引擎二进制结构 = [{name, available, path}]，path 为绝对路径（venv 内或 PATH）。
+    引擎二进制结构 = [{name, available, path, reachable, runtime,
+    docker_capable, docker_ready}]，path 为绝对路径（venv 内或 PATH），
+    runtime 标出可达来源（venv / docker / null）。
     """
     import modelctl as mctl
 
@@ -274,8 +285,10 @@ async def probe_detail(request: Request, _: None = Depends(require_auth)):
     caps = await asyncio.to_thread(probe)
     gpu_locks = await asyncio.to_thread(list_gpu_locks)
 
-    api_key = os.environ.get("API_KEY", "")
-    api_key_masked = ("****" + api_key[-4:]) if api_key else ""
+    # 统一走 admin_auth.mask_key：短于 4 位时仅 "***"。原内联
+    # `"****" + api_key[-4:]` 对短 key 会输出全串（`"abc"[-4:]==全明文`），
+    # 且星号数/空值口径与其它掩码函数不一致（BUG-PRB-02）。
+    api_key_masked = mask_key(os.environ.get("API_KEY", ""))
 
     gpu_count = int(getattr(caps, "gpu_count", 0) or 0)
 
