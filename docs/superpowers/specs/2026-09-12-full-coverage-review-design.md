@@ -125,7 +125,7 @@
 | **T1** | chat 前端组件与视图**零测试**：`ChatHistoryList.vue`/`ChatParamsPanel.vue`/`ChatRawPanel.vue`/`ChatStatsPanel.vue`/`views/chat/index.vue` 均无用例（同目录 `ChatComposer`/`ChatMessage` 有） | 本轮 diff + `web/src` 用例分布 | P2 |
 | **T2** | chat SSE 代理跨层契约：`webui/admin_chat.py`（新文件）转发到网关数据面；SSE 分帧、上游 502 header 形状（`c06f556` I-1）、abort 语义（`9e699ee`）三处交叉 | commit `223c158`/`c06f556`/`9e699ee` | P1 |
 | **T3** | `webui/admin_models.py` 910 行，上轮行覆盖 **35.7%**，本轮又被改动；启停/日志流/启动进度 × 引擎状态矩阵 | 上轮 §9.1 + 本轮 diff | P2 |
-| **T4** | `core/gateway.py` 1747 行本轮改 2 次（`prepare_openai_upstream` 深拷贝 `0c58420`、状态导出 `5693222`）；`ENGINE_PRIORITY` 缺 4 个新引擎 | TODO.md §1.1 + 本轮 diff | P1 |
+| **T4** | `core/gateway.py` 1747 行本轮改 2 次（`prepare_openai_upstream` 深拷贝 `0c58420`、状态导出 `5693222`）。**注意**：TODO.md §1.1 所称「`ENGINE_PRIORITY` 缺 4 个新引擎」经核实**已过时**——[gateway.py:56-59](file:///d:/Workplace/modelctl-1/src/modelctl/core/gateway.py#L56-L59) 已登记全 9 引擎。本条改为「文档滞后」类缺口 + 补一条登记完整性断言钉 | TODO.md §1.1（过时）+ 本轮 diff | P3（文档）|
 | **T5** | TUI 重构：`tui/{app,keyboard}.py` + `panels/{detail,plan}.py`；上轮记录 `_SnapshotBase has no attribute` 系列与"渲染期副作用"类 P1 | 09-10 报告 §1.2 + 本轮 diff | P1 |
 | **T6** | 存量薄弱：`all_service.py` 65.5% · `cli.py` 1798 行 77.2% · `process.py` 79.8% · `colors.py` 40.1% · `engines/_download.py` 仅 1 用例 | 上轮 §9 + TODO.md §3/§4 | P2 |
 | **T7** | 本轮 14 个 `engines/*.py` 全被改动，需核对 `build_command` 参数与 `metrics_mapping` 在 9 个适配器间的一致性 | 本轮 diff | P2 |
