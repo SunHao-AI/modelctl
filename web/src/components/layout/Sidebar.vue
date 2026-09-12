@@ -14,6 +14,7 @@ const menus: MenuItem[] = [
   { to: '/dashboard', label: '仪表板', icon: 'dashboard' },
   { to: '/models', label: '模型', icon: 'models' },
   { to: '/services', label: '服务', icon: 'services' },
+  { to: '/chat', label: 'AI 对话', icon: 'chat' },
   { to: '/envs', label: '环境', icon: 'envs' },
   { to: '/probe', label: '体检', icon: 'probe' },
   { to: '/audit', label: '审计', icon: 'audit' },
@@ -64,6 +65,8 @@ function isActive(item: MenuItem) {
           <template v-else-if="m.icon === 'services'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2" /><rect x="2" y="14" width="20" height="8" rx="2" /><line x1="6" y1="6" x2="6.01" y2="6" /><line x1="6" y1="18" x2="6.01" y2="18" /></svg></template>
           <!-- envs -->
           <template v-else-if="m.icon === 'envs'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg></template>
+          <!-- chat：对话气泡 + 火花（调试台） -->
+          <template v-else-if="m.icon === 'chat'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5 8.7 8.7 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 8.5-8.5 8.38 8.38 0 0 1 8.5 8.5z" /><path d="M12 8.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z" /></svg></template>
           <!-- probe -->
           <template v-else-if="m.icon === 'probe'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2" /></svg></template>
           <!-- audit -->

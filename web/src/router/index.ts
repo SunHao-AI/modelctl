@@ -7,7 +7,7 @@ const AccountSelfLoginView = () => import('@/views/accounts/AccountSelfLoginView
 // 带 Layout 的容器路由（需鉴权）
 const Layout = () => import('@/components/layout/Layout.vue');
 
-const routes: RouteRecordRaw[] = [
+export const routes: RouteRecordRaw[] = [
   {
     path: '/login',
     name: 'login',
@@ -82,6 +82,13 @@ const routes: RouteRecordRaw[] = [
         name: 'settings',
         component: () => import('@/views/SettingsView.vue'),
         meta: { title: '设置' },
+      },
+      {
+        // AI 对话（模型调试台）：管理面 Bearer 鉴权，同 Layout 内其它资源路由
+        path: 'chat',
+        name: 'chat',
+        component: () => import('@/views/chat/index.vue'),
+        meta: { title: 'AI 对话' },
       },
       {
         path: 'cluster/goals',
