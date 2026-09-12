@@ -35,7 +35,12 @@ def test_load_env_no_override(tmp_path, monkeypatch):
 
 
 def test_project_root_points_at_repo_root():
-    """回归测试：PROJECT_ROOT 必须解析到仓库根目录（而非 src/）。"""
-    assert PROJECT_ROOT.name == "modelctl"
+    """回归测试：PROJECT_ROOT 必须解析到仓库根目录（而非 src/）。
+
+    不变量是"指向仓库根"，不是"目录名叫 modelctl"——仓库可能被克隆/复制成
+    modelctl-1 等任意目录名，按名字断言会在非默认检出路径上必然失败。
+    """
+    assert (PROJECT_ROOT / "pyproject.toml").is_file()
     assert (PROJECT_ROOT / "models").is_dir()
+    assert (PROJECT_ROOT / "src" / "modelctl").is_dir()
     assert (PROJECT_ROOT / ".env").parent == PROJECT_ROOT
