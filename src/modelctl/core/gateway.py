@@ -879,6 +879,13 @@ def prepare_openai_upstream(
             target = switched
             route_reason = "context_switch"
     body = dict(body)  # 不改调用方 dict：proxy 的审计与 UI 原文都要看改写后结果
+    # dict() 是浅拷贝，thinking/reasoning/output_config 仍与调用方共享引用；
+    # _normalize_reasoning_effort 会就地写这些 block 的 effort，故各复制一层断开
+    # 共享（内部值共享无妨，归一只换 block 自身持有的 effort 标量）。
+    for _effort_key in ("thinking", "reasoning", "output_config"):
+        _block = body.get(_effort_key)
+        if isinstance(_block, dict):
+            body[_effort_key] = dict(_block)
     body["model"] = target.upstream_model
     _normalize_reasoning_effort(body, target.reasoning_effort_map)
     should_disable = (

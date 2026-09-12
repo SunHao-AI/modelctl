@@ -1446,11 +1446,12 @@ def test_tpm_estimate_respects_valid_max_tokens():
 # ---- prepare_openai_upstream：从 proxy() 抽出的路由+改写等价性回归 ----
 
 
-def _gm(name, engine="llamacpp", group=None, api_key=None):
+def _gm(name, engine="llamacpp", group=None, api_key=None, reasoning_effort_map=None):
     return GatewayModel(
         name=name, engine=engine, backend_url="http://127.0.0.1:9999",
         upstream_model=f"{name}-up", api_key=api_key,
         health_url="http://127.0.0.1:9999/health", group=group,
+        reasoning_effort_map=reasoning_effort_map,
     )
 
 
@@ -1494,6 +1495,23 @@ def test_prepare_openai_upstream_group_route_reason():
                                       {"model": "fam", "messages": []}, "chat/completions")
     assert out.target.name == "a"
     assert out.route_reason == "group_route"
+
+
+def test_prepare_openai_upstream_does_not_mutate_nested_effort():
+    """嵌套 effort 归一不得污染调用方 dict：浅拷贝会共享 thinking 引用，
+    归一 low->medium 会写回原 dict，管理面端点随后回读 body 即看到被改值。"""
+    from modelctl.core.gateway import prepare_openai_upstream
+    reg = {"a": _gm("a", reasoning_effort_map={"low": "medium"})}
+    body = {
+        "model": "a",
+        "messages": [],
+        "thinking": {"type": "enabled", "effort": "low"},
+    }
+    out = prepare_openai_upstream(reg, {}, None, None, {}, body, "chat/completions")
+    # 归一在复制后的副本上生效
+    assert out.body["thinking"]["effort"] == "medium"
+    # 调用方原 dict 的嵌套对象不得被改写
+    assert body["thinking"]["effort"] == "low"
 
 
 def test_create_app_exposes_gateway_state():
