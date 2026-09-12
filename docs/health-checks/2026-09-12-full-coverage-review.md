@@ -48,7 +48,7 @@
 ### 1.3 依赖安全
 
 - 根环境 `pip-audit`：**No known vulnerabilities found**（需同时重定向 `--cache-dir` 与 `LOCALAPPDATA`）。
-- `gateway/` 子环境：**未跑成**（`uv export` 出 `gw-req.txt`，但 `pip-audit -r` 在 PyPI 查询上挂死 >10min 被停）。**记为 NOT RUN，不得当作"已确认干净"**。
+- `gateway/` 子环境：**两次尝试均未跑成**（`uv export` 出 170 行 `gw-req.txt`，但 `pip-audit -r` 在 PyPI JSON 查询上挂死；第二轮加 `--cache-dir .tmp\pa-cache` + 重定向 `LOCALAPPDATA` + `--no-deps`，12 分钟内缓存目录 0 文件、无任何输出）。**记为 NOT RUN ×2，不得当作"已确认干净"** —— 需换网络稳定窗口或内网镜像源（`--index-url`）。
 - `envs/*` 引擎 venv 属运行时构建，本轮明确排除在范围外。
 - 仓库无 `requirements.txt`，只有 pyproject（根 + `gateway/` + 6× `envs/`）。
 
@@ -232,7 +232,7 @@
 1. **管理面测试继续分桶推进**（P2-1）——本轮最强信号，`admin_config` / `admin_services` / `admin_router` 三个文件同时是类型最脏 + 覆盖最低。
 2. **anthropic SSE 4xx 审计对齐**（P2-2）——审计是合规资产，协议间不一致迟早成为对账黑洞。
 3. **registry/groups 单实例化**（§4 第 1 条）——从根上消灭 P1-4 这一类缺陷。
-4. **`gateway/` 子环境 pip-audit 未跑成**——需网络稳定窗口或镜像源，**不得记为"已确认干净"**。
+4. **`gateway/` 子环境 pip-audit 两次未跑成**（PyPI 查询挂死）——需网络稳定窗口或 `--index-url` 镜像源，**不得记为"已确认干净"**。
 5. **firefox/webkit E2E**——换可写 `%LOCALAPPDATA%` 的机器或设全局 `PLAYWRIGHT_BROWSERS_PATH` 后补跑。
 6. **unsloth `/metrics`、tensorrt_llm 首跑编译**——需真 key / 真 GPU 的移交验证项。
 7. **剩余 P3 清单**（§3 P3 1-9）随迭代顺带处理，其中 **`isValid` 语义**性价比最高但**需产品决策**：它有真实消费方（`cli.py:597` / `:643` 用 `isValid` 决定是否显示速率），把"任一 target 不可用即 false"改成"至少一个可用即 true"是**行为变更**，不宜由测试轮顺手改。
