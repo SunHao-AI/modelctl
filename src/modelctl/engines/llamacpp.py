@@ -79,15 +79,24 @@ def _on_off(value: object) -> str:
     return "on" if str(value).strip().lower() in ("on", "true", "1", "yes") else "off"
 
 
-def find_server(source: Path) -> Path:
-    """定位编译产物 llama-server。
+def _server_names() -> list[str]:
+    """按平台返回 llama-server 的候选文件名（Windows 预编译包带 .exe 后缀）。"""
+    return ["llama-server.exe", "llama-server"] if os.name == "nt" else ["llama-server"]
 
+
+def find_server(source: Path) -> Path:
+    """定位 llama-server 产物（build/bin 优先，回落到 source 根）。
+
+    覆盖两种布局：自编译（build/bin/llama-server）与 GitHub Release 预编译包
+    （产物直接位于 source 根，Windows 名为 llama-server.exe）。
     找不到时返回预期路径 source/build/bin/llama-server（pre_start 会真正编译），
     避免在未编译环境下直接失败。
     """
-    for candidate in (source / "build" / "bin" / "llama-server", source / "llama-server"):
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
+    for base in (source / "build" / "bin", source):
+        for name in _server_names():
+            candidate = base / name
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return candidate
     return source / "build" / "bin" / "llama-server"
 
 
@@ -441,12 +450,13 @@ class LlamaCppAdapter(EngineAdapter):
             if self._mmproj is None:
                 self.warnings.append("未获取到 mmproj 文件（*mmproj*.gguf），图片输入不可用（文本功能不受影响）")
         # git/cmake 仅在"需要 clone 源码"或"需要编译产物"时才必需；
-        # 产物已编译好时不校验，避免缺 cmake 的机器无法启动已就绪的 llama-server
+        # 产物已编译好（含 Windows 预编译包的根目录 llama-server.exe）时不校验，
+        # 避免缺 cmake 的机器无法启动已就绪的 llama-server
         if not source.exists():
             require("git")
             source.parent.mkdir(parents=True, exist_ok=True)
             run(["git", "clone", "--depth", "1", OFFICIAL_URL, str(source)])
-        if not (source / "build" / "bin" / "llama-server").is_file():
+        if not find_server(source).is_file():
             require("cmake")
             run(
                 [

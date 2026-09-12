@@ -428,6 +428,64 @@ def test_pre_start_skips_git_cmake_when_binary_exists(tmp_path, monkeypatch):
     adapter.pre_start()  # 不应抛 RequirementError
 
 
+# ---- Windows 预编译包布局（find_server / pre_start 必须按平台补 .exe 后缀）----
+
+
+def test_find_server_returns_platform_exe_name(tmp_path, monkeypatch):
+    """Windows：官方预编译包把 llama-server.exe 放在 source 根，find_server 必须命中。"""
+    from modelctl.engines import llamacpp
+
+    monkeypatch.setattr(llamacpp.os, "name", "nt")
+    source = tmp_path / "llama.cpp"
+    (source / "build" / "bin").mkdir(parents=True)
+    exe = source / "build" / "bin" / "llama-server.exe"
+    exe.write_bytes(b"MZ")
+    got = llamacpp.find_server(source)
+    assert got == exe
+    # 根目录布局（GitHub Release 预编译包）：build 下没有产物时应回落到根目录 exe
+    exe.unlink()
+    root_exe = source / "llama-server.exe"
+    root_exe.write_bytes(b"MZ")
+    assert llamacpp.find_server(source) == root_exe
+    # POSIX：不应要求 .exe 后缀
+    monkeypatch.setattr(llamacpp.os, "name", "posix")
+    plain = source / "llama-server"
+    plain.write_bytes(b"\x7fELF")
+    assert llamacpp.find_server(source) == plain
+
+
+def test_pre_start_windows_prebuilt_root_skips_cmake(tmp_path, monkeypatch):
+    """回归（冒烟 P1）：Windows 预编译包（根目录 llama-server.exe）+ 机器缺 git/cmake，
+
+    pre_start 不得误判"需要编译"而报缺 cmake —— find_server 找不到 .exe 时
+    会落入编译分支，这正是 start llamacpp/... 在 Windows 上失败并被误报为
+    "准备环境失败：缺少 cmake" 的根因。
+    """
+    from modelctl.engines import llamacpp
+
+    monkeypatch.setattr(llamacpp.os, "name", "nt")
+    (tmp_path / "m.gguf").write_bytes(b"0" * 1024)
+    source = tmp_path / "llama.cpp"
+    source.mkdir()
+    (source / "llama-server.exe").write_bytes(b"MZ")  # GitHub Release 预编译包布局
+    (tmp_path / "ds.yaml").write_text(
+        f"name: ds\nengine: llamacpp\nport: 18888\nllamacpp:\n"
+        f"  model: {tmp_path}/m.gguf\n  gpu_count: 8\n  source_dir: {source}\n",
+        encoding="utf-8",
+    )
+    caps = probe(nvidia_smi_output=SMI)
+    adapter = get_adapter("llamacpp")(load_profile("ds", tmp_path), caps)
+    adapter.check_requirements()
+
+    monkeypatch.setattr(llamacpp.shutil, "which", lambda _name: None)  # 无 git/cmake
+    monkeypatch.setattr(
+        llamacpp, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("产物已存在，不应执行编译"))
+    )
+    adapter.pre_start()  # 修复前在此抛 RequirementError("缺少 cmake")
+    cmd, _ = adapter.build_command()
+    assert cmd[0].endswith("llama-server.exe")
+
+
 def test_pre_start_requires_cmake_when_needing_build(tmp_path, monkeypatch):
     """源码存在但未编译且缺 cmake：应报缺少 cmake。"""
     from modelctl.engines import llamacpp
