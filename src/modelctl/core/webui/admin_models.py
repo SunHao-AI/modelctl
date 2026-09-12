@@ -67,12 +67,35 @@ def _read_pid_raw(name: str) -> int | None:
 
 
 def _mask_key(key: str | None) -> str | None:
-    """API key 脱敏：仅暴露末 4 位（***3876）；None 原样返回。"""
+    """API key 脱敏：仅暴露末 4 位（***3876）；None / 空原样返回 None（前端据此显示"未配置"）。
+
+    短于等于 4 位时整体掩成 "***"：`key[-4:]` 对短串等于**全文明**，旧实现
+    `f"***{key}"` 会输出 `***abc` 这种"星号打头反而更像已脱敏"的全串，比直出明文
+    更具迷惑性（同 admin_auth.mask_key / admin_config._mask_value 口径，见
+    known-pitfalls/backend/webui-边界与脱敏.md）。
+    """
     if not key:
         return None
     if len(key) <= 4:
-        return f"***{key}"
+        return "***"
     return f"***{key[-4:]}"
+
+
+def _vision_capability(p) -> bool | None:
+    """尽力推断视觉（多模态）能力——profile 层没有统一字段，只能按引擎猜。
+
+    仅 llamacpp 在 `engine_config.vision` 显式声明（见 engines/llamacpp.py 的
+    mmproj 判定，on/true/1 为开）。返回 None 表示"该引擎无权威字段"：前端据此
+    **不显示徽章但绝不禁用图片按钮**——把猜测当门禁会误杀 vLLM 等已起视觉模型
+    但 profile 未声明的情况。
+    """
+    if p.engine == "llamacpp":
+        raw = str(p.engine_config.get("vision", "")).lower()
+        if raw in ("on", "true", "1"):
+            return True
+        if raw in ("off", "false", "0"):
+            return False
+    return None
 
 
 def _model_summary(p, running: bool | None = None) -> dict:
@@ -127,6 +150,7 @@ def _model_summary(p, running: bool | None = None) -> dict:
         "api_key_masked": _mask_key(p.api_key),
         "pid": pid,
         "log_path": log_path,
+        "vision": _vision_capability(p),
     }
 
 

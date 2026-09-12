@@ -50,6 +50,8 @@ export interface ModelInfo {
   pid: number | null;
   /** 启动日志路径，可空 */
   log_path: string | null;
+  /** 视觉能力软徽章：true/false 为已声明，null 为引擎无权威字段（不禁用图片） */
+  vision: boolean | null;
 }
 
 /** 模型详情（含 engine 配置与 profile 字段） */
@@ -183,8 +185,10 @@ export interface OverviewResponse {
     gpu_count: number;
     gpu_name: string;
     total_vram_gb: number;
-    /** 引擎二进制：engine → "available"|"missing" */
-    engine_binaries: Record<string, 'available' | 'missing'>;
+    /** docker 环境是否就绪（docker CLI + nvidia-smi 均在 PATH） */
+    docker_ready?: boolean;
+    /** 引擎二进制列表（与 /probe 同形态，含 runtime 可达来源） */
+    engine_binaries: EngineBinary[];
   };
   /** 全部模型 */
   models: ModelInfo[];
@@ -197,14 +201,22 @@ export interface OverviewResponse {
   probed_at: string;
 }
 
-/** GPU 二进制 */
+/** 引擎二进制条目（/overview 与 /probe 共用形态） */
 export interface EngineBinary {
   /** 引擎名（vllm / sglang / ...） */
   name: string;
-  /** 是否可用 */
+  /** venv 口径是否可用（托管引擎=venv 内入口在位；非托管=PATH 二进制） */
   available: boolean;
   /** 绝对路径（venv 内或 PATH），无则 null */
   path: string | null;
+  /** docker ∨ venv 的真实可达性 */
+  reachable?: boolean;
+  /** 可达来源：venv 已装 / 仅 docker 旁路 / 不可达 null */
+  runtime?: 'venv' | 'docker' | null;
+  /** 适配器是否支持 docker 运行时 */
+  docker_capable?: boolean;
+  /** 探测时 docker 环境是否就绪 */
+  docker_ready?: boolean;
 }
 
 /** GPU 锁条目 */
