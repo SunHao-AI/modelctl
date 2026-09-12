@@ -139,7 +139,8 @@ async def chat_completions(request: Request, _: None = Depends(require_auth)):
         await client.aclose()
         logger.warning(f"chat 上游不可达 model={prepared.target.name}: {error}")
         return JSONResponse(status_code=502, content={"error": {
-            "message": f"后端不可达：{error}", "type": "upstream_error"}})
+            "message": f"后端不可达：{error}", "type": "upstream_error"}},
+            headers=route_headers)
 
     if upstream.status_code >= 400:
         content = await upstream.aread()

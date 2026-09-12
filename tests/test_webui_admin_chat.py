@@ -196,6 +196,21 @@ def test_oversized_body_413():
     assert resp.status_code == 413
 
 
+def test_upstream_unreachable_502_includes_route_headers(monkeypatch):
+    """上游不可达（连接失败）走 502，同样必须带 X-Chat-Routed-To（spec §4.1 line 77）。"""
+    reg = {"a": _gm("a", 8001)}
+    monkeypatch.setattr("modelctl.core.gateway.is_model_available", lambda m: True)
+    app = _app(reg)
+    app.state.chat_transport = httpx.MockTransport(
+        lambda req: (_ for _ in ()).throw(httpx.ConnectError("boom"))
+    )
+    resp = _post(app, {"model": "a", "route_mode": "direct",
+                       "messages": [{"role": "user", "content": "hi"}]})
+    assert resp.status_code == 502
+    assert resp.json()["error"]["type"] == "upstream_error"
+    assert resp.headers["x-chat-routed-to"] == "a"
+
+
 def test_requires_admin_auth():
     resp = _post(_app({}), {"model": "a", "messages": [{"role": "user", "content": "hi"}]}, headers={})
     assert resp.status_code == 401
