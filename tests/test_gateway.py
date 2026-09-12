@@ -1441,3 +1441,64 @@ def test_tpm_estimate_respects_valid_max_tokens():
     est = _accounts_tpm_estimate({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 512})
     # prompt("hi"=2 字符 //4=0) + completion 512；合法值必须原样进估算，不被夹取
     assert est == 512
+
+
+# ---- prepare_openai_upstream：从 proxy() 抽出的路由+改写等价性回归 ----
+
+
+def _gm(name, engine="llamacpp", group=None, api_key=None):
+    return GatewayModel(
+        name=name, engine=engine, backend_url="http://127.0.0.1:9999",
+        upstream_model=f"{name}-up", api_key=api_key,
+        health_url="http://127.0.0.1:9999/health", group=group,
+    )
+
+
+def test_prepare_openai_upstream_direct_uses_named_model():
+    from modelctl.core.gateway import prepare_openai_upstream
+    reg = {"a": _gm("a", api_key="sk-up")}
+    out = prepare_openai_upstream(reg, {}, None, None, {}, {"model": "a", "messages": []}, "chat/completions")
+    assert out.target.name == "a"
+    assert out.body["model"] == "a-up"                       # 改写为 upstream_model
+    assert out.headers["Authorization"] == "Bearer sk-up"
+    assert out.url == "http://127.0.0.1:9999/v1/chat/completions"
+    assert out.route_reason is None
+
+
+def test_prepare_openai_upstream_not_found():
+    from modelctl.core.gateway import PreparedError, prepare_openai_upstream
+    out = prepare_openai_upstream({}, {}, None, None, {}, {"model": "nope", "messages": []}, "chat/completions")
+    assert isinstance(out, PreparedError) and out.status_code == 404
+
+
+def test_prepare_openai_upstream_rewrites_like_proxy():
+    """同一 body 经 prepare 得到的 url/headers/改写后 body 与 proxy() 的判定一致。"""
+    from modelctl.core.gateway import prepare_openai_upstream
+    reg = {"qwen3.8": _gm("qwen3.8", engine="vllm", group="qwen3.8", api_key="k")}
+    body = {"model": "qwen3.8", "messages": [{"role": "user", "content": "hi"}], "reasoning_effort": "high"}
+    # group_cache=None → 家族解析每次实探（is_model_available），测试环境无 PID 恒 False
+    with patch("modelctl.core.gateway.is_running_any", return_value=True):
+        out = prepare_openai_upstream(reg, {"qwen3.8": [reg["qwen3.8"]]}, None, None, {}, body, "chat/completions")
+    assert out.target.name == "qwen3.8"
+    assert out.body["reasoning_effort"] == "xhigh"                       # vLLM 枚举映射
+    assert out.body["chat_template_kwargs"] == {"enable_thinking": False}  # group+引擎白名单注入
+    assert out.url == "http://127.0.0.1:9999/v1/chat/completions"
+    assert body.get("model") == "qwen3.8"   # 调用方 dict 不被就地改写
+
+
+def test_prepare_openai_upstream_group_route_reason():
+    from modelctl.core.gateway import prepare_openai_upstream
+    a = _gm("a", group="fam")
+    with patch("modelctl.core.gateway.is_running_any", return_value=True):
+        out = prepare_openai_upstream({"a": a}, {"fam": [a]}, None, None, {},
+                                      {"model": "fam", "messages": []}, "chat/completions")
+    assert out.target.name == "a"
+    assert out.route_reason == "group_route"
+
+
+def test_create_app_exposes_gateway_state():
+    app = create_app(registry={}, groups={})
+    assert app.state.gateway_registry == {}
+    assert app.state.gateway_groups == {}
+    assert app.state.gateway_default_model is None
+    assert app.state.gateway_context_rules == {}

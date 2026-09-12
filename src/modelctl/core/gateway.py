@@ -822,6 +822,80 @@ def resolve_model(
     return None
 
 
+@dataclass
+class PreparedUpstream:
+    """OpenAI 请求的上游转发要素（路由解析 + body 改写的结果）。"""
+
+    target: GatewayModel
+    body: dict
+    headers: dict
+    url: str
+    route_reason: str | None = None
+
+
+@dataclass
+class PreparedError:
+    """路由/改写失败：调用方直接按 status_code + payload 回响应。"""
+
+    status_code: int
+    payload: dict
+
+
+def prepare_openai_upstream(
+    registry: dict[str, GatewayModel],
+    groups: dict[str, list[GatewayModel]] | None,
+    group_cache: GroupRouteCache | None,
+    default_model: str | None,
+    context_rules: dict[str, list[ContextSwitchRule]] | None,
+    body: dict,
+    path: str,
+):
+    """把 OpenAI 请求体解析成「目标模型 + 改写后 body + 上游 headers + url」。
+
+    与 proxy() 的路由判定同源，四步：家族/名称解析 → 上下文长度切换 →
+    upstream_model 改写 + reasoning_effort 归一 + thinking 注入 → 上游认证
+    （**永不用调用方 key**，见 gateway 原注释）。失败返回 PreparedError。
+
+    从 proxy() 抽出是为了让管理面 `/admin/api/chat/completions` 复用同一份网关
+    语义；proxy() 的审计、accounts 限流、SSE 透传不在此职责内。
+    """
+    original_model = str(body.get("model") or "")
+    target = resolve_model(registry, body.get("model"), default_model, groups, group_cache)
+    if target is None:
+        return PreparedError(
+            404,
+            {"error": {"message": f"model not found: {body.get('model')}", "type": "invalid_request_error"}},
+        )
+    route_reason: str | None = None
+    # 请求名命中 group（家族）且落点是成员名 → 家族路由（供 UI 解释"为何不是它"）
+    if groups and original_model and original_model in groups and target.name != original_model:
+        route_reason = "group_route"
+    if context_rules:
+        prompt_tokens = estimate_prompt_tokens(body)
+        switched = apply_context_switch(
+            registry, context_rules, (original_model, target.group or "", target.name), prompt_tokens,
+        )
+        if switched is not None and switched.name != target.name:
+            target = switched
+            route_reason = "context_switch"
+    body = dict(body)  # 不改调用方 dict：proxy 的审计与 UI 原文都要看改写后结果
+    body["model"] = target.upstream_model
+    _normalize_reasoning_effort(body, target.reasoning_effort_map)
+    should_disable = (
+        target.thinking_disabled
+        if target.thinking_disabled is not None
+        else (target.group in _THINKING_DISABLED_GROUPS and target.engine in _THINKING_DISABLED_ENGINES)
+    )
+    if should_disable and "chat_template_kwargs" not in body:
+        body["chat_template_kwargs"] = {"enable_thinking": False}
+    headers = {"Content-Type": "application/json"}
+    up_key = target.upstream_api_key()
+    if up_key:
+        headers["Authorization"] = f"Bearer {up_key}"
+    return PreparedUpstream(target=target, body=body, headers=headers,
+                            url=f"{target.backend_url}/v1/{path}", route_reason=route_reason)
+
+
 def is_model_healthy(model: GatewayModel, timeout: float = 2.0) -> bool:
     """后端存活探测（单次探测，连接失败立即返回 False，不重试等待）。
 
@@ -957,6 +1031,13 @@ def create_app(
     app.state.audit_log = audit_log
     # 家族路由 TTL 缓存挂点（测试与排障可直接读取 ttl / 条目数）
     app.state.group_route_cache = group_cache
+    # 管理面 `/admin/api/chat/completions` 复用同一份路由判定（见 admin_chat.py）：
+    # 这些数据原本只活在闭包里，挂出来才能被同 app 的管理面子路由读到。
+    app.state.gateway_registry = registry
+    app.state.gateway_groups = groups
+    app.state.gateway_default_model = default_model
+    app.state.gateway_context_rules = context_rules
+    app.state.gateway_read_timeout = read_timeout
     # Task 6 accounts 挂点：accounts 启用时全部三件 instance 一并挂上；
     # 未启用时保持 None（gateway.accounts_gate 通过 app.state._accounts_enabled
     # 走 legacy verify_client 分支，绝不触碰空指）。
@@ -1558,70 +1639,44 @@ def create_app(
             )
         # 审计：请求体字节长度（从 body 计算，request.content 在 Starlette 里可能已被消费）
         body_char_len = len(json.dumps(body, ensure_ascii=False, separators=(",", ":")))
+        original_model = str(body.get("model") or "")
         logger.info(
             f"OpenAI 代理请求 {path} model={body.get('model')!r} stream={body.get('stream')} "
             f"max_tokens={body.get('max_tokens')} tools={'tools' in body} "
             f"resp_format={'response_format' in body} msgs={len(body.get('messages') or [])} "
             f"auth={label} stream_options={'stream_options' in body}"
         )
-        target = resolve_model(registry, body.get("model"), default_model, groups, group_cache)
-        if target is None:
+        # 路由解析 + body 改写 + 上游 headers/url 拼装（与 /admin/api/chat/completions
+        # 共用 prepare_openai_upstream；上下文切换、thinking 注入、上游认证语义见其 docstring）
+        prepared = prepare_openai_upstream(
+            registry, groups, group_cache, default_model, context_rules, body, path,
+        )
+        if isinstance(prepared, PreparedError):
             _release_if_acquired()
-            err_msg = f"model not found: {body.get('model')}"
-            # 审计：模型名写请求原始值（resolve 失败即无 profile 可参照），否则
-            # "调用方拼错模型名"这类高频错误在审计里完全无痕。
+            err_msg = prepared.payload["error"]["message"]
+            # 审计：模型名写请求原始值（resolve 失败即无 profile 可参照）
             if audit_log is not None:
                 audit_log.record(_build_audit_entry(
                     model_name=str(body.get("model") or ""), profile_name="", profile_engine="",
                     path=path, stream=bool(body.get("stream")),
                     native_metrics=None, usage=None, gateway_metrics=None,
-                    status_code=404, error=err_msg, finish_reason=None,
-                    input_char_len=len(json.dumps(body, ensure_ascii=False, separators=(",", ":"))),
-                    auth=label, client_ip=client_ip_of(request),
+                    status_code=prepared.status_code, error=err_msg, finish_reason=None,
+                    input_char_len=body_char_len, auth=label, client_ip=client_ip_of(request),
                     user_id=(identity.user_id if identity else None),
                     key_id=(identity.key_id if identity else None),
                 ))
-            return JSONResponse(
-                status_code=404,
-                content={"error": {"message": err_msg, "type": "invalid_request_error"}},
-            )
-        # 上下文切换（附录 B.3）：按估算输入长度路由到 high/balanced/light 变体
-        if context_rules:
-            prompt_tokens = estimate_prompt_tokens(body)
-            # 匹配键顺序：请求原始 model → group 名 → 解析后的成员名。
-            # 只传 target.name 会让"经 group 路由而来"的请求永远匹配不上规则。
-            switched = apply_context_switch(
-                registry, context_rules,
-                (str(body.get("model") or ""), target.group or "", target.name),
-                prompt_tokens,
-            )
-            if switched is not None and switched.name != target.name:
-                logger.info(f"上下文切换：{target.name} -> {switched.name}（估算输入 {prompt_tokens} tokens）")
-                target = switched
+            return JSONResponse(status_code=prepared.status_code, content=prepared.payload)
+        # 改写后的 body 供后续审计与转发使用（prepare 返回的是副本）
+        body = prepared.body
+        target = prepared.target
+        headers = prepared.headers
+        url = prepared.url
         # 审计：每次请求取目标模型的 audit_log（create_app 已统一注入）
         self_audit_log = target.audit_log
-        # 改写为后端期望的模型名（ollama 严格校验，llamacpp 忽略）
-        body["model"] = target.upstream_model
-        _normalize_reasoning_effort(body, target.reasoning_effort_map)
-        # 思考型模型家族默认关闭 thinking（见 _THINKING_DISABLED_GROUPS 注释）；
-        # §1.2 配置化：profile 顶层 gateway.thinking_disabled（True/False）优先；
-        # 缺省（None）时按 group 白名单判断；请求显式传 chat_template_kwargs 时尊重调用方意图，不覆盖。
-        _should_disable_thinking = (
-            target.thinking_disabled
-            if target.thinking_disabled is not None
-            else (target.group in _THINKING_DISABLED_GROUPS and target.engine in _THINKING_DISABLED_ENGINES)
+        logger.info(
+            f"OpenAI 上游路由 model={original_model!r} -> {target.name}"
+            + (f"（{prepared.route_reason}）" if prepared.route_reason else "")
         )
-        if _should_disable_thinking and "chat_template_kwargs" not in body:
-            body["chat_template_kwargs"] = {"enable_thinking": False}
-        headers = {"Content-Type": "application/json"}
-        up_key = target.upstream_api_key()
-        # 上游认证永远用 profile 有效 key（覆盖客户端自配 key：客户端如 Trae CN 配置的
-        # key 可能与后端不一致，透传会导致 vLLM 401；网关代劳认证更稳）。
-        # 无 key 引擎（Ollama 等）一律不带 Authorization：客户端准入 key 验完即丢，
-        # 绝不转发上游——否则皇冠密钥会溢入不校验该头、却把请求头写进日志的引擎进程。
-        if up_key:
-            headers["Authorization"] = f"Bearer {up_key}"
-        url = f"{target.backend_url}/v1/{path}"
         # 注意：不能用 `async with` 包裹后返回 StreamingResponse——客户端会在端点
         # 返回时立即关闭，而 SSE 是惰性迭代的，真实 uvicorn 下连接会被提前切断。
         # 因此手动管理生命周期：非流式读完即关；流式由生成器在迭代结束后关闭。
