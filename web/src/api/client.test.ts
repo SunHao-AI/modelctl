@@ -7,15 +7,17 @@
  * 走自定义 axios adapter，真实执行拦截器链，不发网络请求。
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { AxiosError, type AxiosRequestConfig, type AxiosResponse } from 'axios';
+import { AxiosError, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios';
 import { createPinia, setActivePinia } from 'pinia';
 import client, { dataOf } from './client';
 import { useAuthStore } from '@/stores/auth';
 
-type Adapter = (config: AxiosRequestConfig) => Promise<AxiosResponse>;
+// axios 的 adapter 收到的是拦截器链处理后的 InternalAxiosRequestConfig
+// （headers 必为 AxiosHeaders），用 AxiosRequestConfig 会让 vue-tsc 报 TS2322/TS2345。
+type Adapter = (config: InternalAxiosRequestConfig) => Promise<AxiosResponse>;
 
 const originalAdapter = client.defaults.adapter;
-let lastConfig: AxiosRequestConfig | undefined;
+let lastConfig: InternalAxiosRequestConfig | undefined;
 
 function ok(data: unknown, headers: Record<string, string> = {}): Adapter {
   return async (config) => {
