@@ -124,6 +124,7 @@
 | 2026-09-11 | 前端 / 双信任域 | 503 `accounts_disabled` 要在 UI 层做"缺依赖引导"，不是"报错" | `ACCOUNTS_ENABLED=false` 后端返 503 code；前端若 `ElMessage.error(detail.message)` 用户不知下一步；管理台顶部分派 code → 引导条展示所需 `.env` 项 `ACCOUNTS_ENABLED=true`，替代整个列表体。 | [frontend/dual-trust-token-interceptors.md](frontend/dual-trust-token-interceptors.md) |
 | 2026-09-11 | 前端 / 路由 | 登录页 `accountAuth` 死锁：`public` 必须是最早分水岭，`accountAuth` 分支返回前不 return | `/account/login` 若同时挂 `accountAuth` 与 `public`，JWT 过期 self 面板 401 跳 login → 守卫又发现 accountAuth 未登再跳 login → URL `?redirect=/account/login?redirect=...` 递归；login/register/forgot 页 meta 只应含 `{title, public: true}`。 | [frontend/dual-trust-token-interceptors.md](frontend/dual-trust-token-interceptors.md) |
 | 2026-09-11 | 前端 / 敏感串 | 一次性 Key 明文 modal 用 `v-if` 防 `v-show` 切换页签后剪贴板跨页粘 | `v-show` 仅 CSS hidden，DOM 常驻 `innerText` 可枚举、剪贴板可跨；`v-if="issuedKey"` 销毁 DOM + 明文与元数据拆两 ref 同 flush 写 null，切换 tabs 即丢 Secret 显示时长 == 用户决策时长。 | [frontend/dual-trust-token-interceptors.md](frontend/dual-trust-token-interceptors.md) |
+| 2026-09-12 | 前端 / 组件与流式渲染 | AI 对话调试台的组件声明、IME 回车、SSE 切帧与 markdown 消毒四类陷阱 | `<script setup name>` 在本仓是 no-op（无 setup-extend 插件）须改 `defineOptions`；IME 组合态回车误发送须查 `isComposing`；SSE 逐块替换 CRLF 会跨块丢流须累积 buffer 正则切帧；`html:false` 挡不住 `onerror` 字面量、安全边界要落 DOMPurify。 | [frontend/ai-chat-debugger.md](frontend/ai-chat-debugger.md) |
 
 ## 目录约定
 
