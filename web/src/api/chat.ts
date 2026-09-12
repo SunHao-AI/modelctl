@@ -29,37 +29,49 @@ async function consumeSse(res: Response, h: ChatHandlers, onRaw: (s: string) => 
   const reader = res.body!.getReader();
   const dec = new TextDecoder();
   let buf = '';
+
+  // 单帧解析：返回 true 表示命中 [DONE]，调用方应立即结束消费。
+  const handleFrame = (frame: string): boolean => {
+    for (const line of frame.split('\n')) {
+      const s = line.trim();
+      if (!s.startsWith('data:')) continue;
+      const data = s.slice(5).trim();
+      if (data === '[DONE]') {
+        h.onDone();
+        return true;
+      }
+      try {
+        const obj = JSON.parse(data);
+        const delta = obj.choices?.[0]?.delta;
+        if (delta?.content) h.onDelta(delta.content);
+        // vLLM/SGLang 的思考通道两种字段名都出现过
+        const reasoning = delta?.reasoning ?? delta?.reasoning_content;
+        if (reasoning) h.onReasoning(reasoning);
+        // include_usage 的帧 choices 为空：只取 usage，绝不当正文
+        if (obj.usage) h.onUsage(obj.usage);
+      } catch {
+        onRaw(data);
+      }
+    }
+    return false;
+  };
+
+  // 空行分隔兼容 `\n\n` / `\r\n\r\n` 及混合形式。必须对**累积后的 buf** 用正则匹配：
+  // 若只对单块做 `\r\n`→`\n` 替换，块边界正好落在 `\r` 与 `\n` 之间时会漏掉分隔符。
+  const delim = /\r?\n\r?\n/;
   for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
     buf += dec.decode(value, { stream: true });
-    let idx: number;
-    while ((idx = buf.indexOf('\n\n')) >= 0) {
-      const frame = buf.slice(0, idx);
-      buf = buf.slice(idx + 2);
-      for (const line of frame.split('\n')) {
-        const s = line.trim();
-        if (!s.startsWith('data:')) continue;
-        const data = s.slice(5).trim();
-        if (data === '[DONE]') {
-          h.onDone();
-          return;
-        }
-        try {
-          const obj = JSON.parse(data);
-          const delta = obj.choices?.[0]?.delta;
-          if (delta?.content) h.onDelta(delta.content);
-          // vLLM/SGLang 的思考通道两种字段名都出现过
-          const reasoning = delta?.reasoning ?? delta?.reasoning_content;
-          if (reasoning) h.onReasoning(reasoning);
-          // include_usage 的帧 choices 为空：只取 usage，绝不当正文
-          if (obj.usage) h.onUsage(obj.usage);
-        } catch {
-          onRaw(data);
-        }
-      }
+    let m: RegExpExecArray | null;
+    while ((m = delim.exec(buf))) {
+      const frame = buf.slice(0, m.index);
+      buf = buf.slice(m.index + m[0].length);
+      if (handleFrame(frame)) return;
     }
   }
+  // 上游可能以「最后一帧 + EOF」收尾而没有终止空行，残留 buf 也要当一帧解析。
+  if (buf && handleFrame(buf)) return;
   h.onDone();
 }
 
@@ -111,5 +123,16 @@ export async function streamChatCompletions(
     h.onError({ message: `HTTP ${res.status}`, raw: text });
     return;
   }
-  await consumeSse(res, h, onRaw);
+  try {
+    await consumeSse(res, h, onRaw);
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') {
+      // stop() 在 fetch 已返回后才 abort：reader.read() 抛 AbortError，属正常中断收尾，
+      // 不能让异常冒出去拒绝 store.send() 的 promise。
+      h.onDone();
+      return;
+    }
+    // 其余意外错误上报给调用方，而不是让 send() 的 promise 被拒绝。
+    h.onError({ message: `流式解析中断：${e}` });
+  }
 }

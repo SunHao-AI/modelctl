@@ -108,3 +108,67 @@ it('超限时先剥最旧会话图片，仍超再丢整会话', async () => {
   expect(saved.every((x: { messages: { images: unknown[] }[] }) =>
     x.messages.every((m) => Array.isArray(m.images)))).toBe(true);
 });
+
+it('CRLF 分隔的 SSE 帧仍能正确切分', async () => {
+  global.fetch = fakeFetch([
+    'data: {"choices":[{"delta":{"content":"Hel"}}]}\r\n\r\n',
+    'data: {"choices":[{"delta":{"content":"lo"}}]}\r\n\r\n',
+    'data: [DONE]\r\n\r\n',
+  ]) as never;
+  const { useChatStore } = await import('./chat');
+  const s = useChatStore();
+  s.setModel('a');
+  await s.send('hi', []);
+  expect(s.messages[s.messages.length - 1].content).toBe('Hello');
+});
+
+it('分隔符跨块到达（含 \\r 与 \\n 之间断块）仍能切帧', async () => {
+  global.fetch = fakeFetch([
+    'data: {"choices":[{"delta":{"content":"A"}}]}\r',
+    '\n\r',
+    '\ndata: {"choices":[{"delta":{"content":"B"}}]}\r\n\r\n',
+    'data: [DONE]\r\n\r\n',
+  ]) as never;
+  const { useChatStore } = await import('./chat');
+  const s = useChatStore();
+  s.setModel('a');
+  await s.send('hi', []);
+  expect(s.messages[s.messages.length - 1].content).toBe('AB');
+});
+
+it('末尾没有空行的最后一帧也要被消费', async () => {
+  global.fetch = fakeFetch([
+    'data: {"choices":[{"delta":{"content":"head"}}]}\n\n',
+    'data: {"choices":[{"delta":{"content":"tail"}}]}',
+  ]) as never;
+  const { useChatStore } = await import('./chat');
+  const s = useChatStore();
+  s.setModel('a');
+  await s.send('hi', []);
+  expect(s.messages[s.messages.length - 1].content).toBe('headtail');
+});
+
+it('流中途 abort 不会让 send() reject，且保留已收到的内容', async () => {
+  let signal: AbortSignal | undefined;
+  global.fetch = vi.fn(async (_url: string, init: { signal: AbortSignal }) => {
+    signal = init.signal;
+    const body = new ReadableStream<Uint8Array>({
+      start(c) { c.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"AB"}}]}\n\n')); },
+      pull() {
+        return new Promise<void>((_resolve, reject) => {
+          signal!.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+        });
+      },
+    });
+    return { ok: true, status: 200, body, headers: new Headers({ 'x-chat-routed-to': 'a' }) };
+  }) as never;
+  const { useChatStore } = await import('./chat');
+  const s = useChatStore();
+  s.setModel('a');
+  const p = s.send('hi', []);
+  await vi.waitFor(() => expect(s.messages[s.messages.length - 1].content).toBe('AB'));
+  s.stop();
+  await expect(p).resolves.toBeUndefined();
+  expect(s.streaming).toBe(false);
+  expect(s.messages[s.messages.length - 1].content).toBe('AB');
+});
