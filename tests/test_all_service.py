@@ -270,6 +270,117 @@ def test_start_profile_early_exit(monkeypatch):
     assert r.status == "error" and "提前退出" in r.detail
 
 
+# ---- GPU 锁归还（2026-09-12 全覆盖复核 P1 回归钉） ----
+#
+# 不变式：start_profile 失败返回/抛出时，若后端**没有**在持卡，`.gpu-lock` 必须已归还。
+# 锁内 pid 由 acquire 方写入（CLI/webui worker——常驻进程），docker 路径按设计不把
+# owner 重绑到容器（vllm.py:519 注释同族）；失败后不归还则 `is_pid_alive` 恒真、
+# stale 清理永不触发，该卡位对所有其它 profile **永久**不可用（README:377 承诺相反）。
+# 反向不变式：后端可能仍在持卡（起进程后健康超时但进程/容器活着）时**不得**归还——
+# 否则另一模型会撞进同一张卡。
+
+from modelctl.core.gpu_lock import acquire_gpu_lock, list_gpu_locks  # noqa: E402
+
+
+class _Locking(_FakeAdapter):
+    """模拟真实引擎：check_requirements 末步抢 GPU 锁（9 引擎一致的位置）。"""
+
+    def check_requirements(self):
+        acquire_gpu_lock(self.profile.name, [0])
+
+
+def test_start_pre_start_failure_releases_gpu_lock(monkeypatch, tmp_path):
+    """锁已到手、后端从未拉起（pre_start 失败）→ 必须归还，否则卡位被常驻 worker pid 永久占死。"""
+    from modelctl.core import all_service
+
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(all_service, "is_running_any", lambda name, p: False)
+
+    class A(_Locking):
+        def pre_start(self):
+            raise RequirementError("镜像拉取失败")
+
+    monkeypatch.setattr(all_service, "get_adapter", lambda engine: lambda p, c: A(p, c, ready=True))
+    with pytest.raises(RequirementError):
+        start_profile(_profile(), Capabilities(), 5.0)
+    assert list_gpu_locks() == {}, "pre_start 失败后 GPU 锁必须归还"
+
+
+def test_start_build_command_failure_releases_gpu_lock(monkeypatch, tmp_path):
+    """launch 段在 start_detached 之前抛（build_command 出错）→ 后端不存在，锁必须归还。"""
+    from modelctl.core import all_service
+
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(all_service, "is_running_any", lambda name, p: False)
+
+    class A(_Locking):
+        def build_command(self):
+            raise RuntimeError("参数拼装失败")
+
+    monkeypatch.setattr(all_service, "get_adapter", lambda engine: lambda p, c: A(p, c, ready=True))
+    with pytest.raises(RuntimeError):
+        start_profile(_profile(), Capabilities(), 5.0)
+    assert list_gpu_locks() == {}, "进程未拉起即失败时 GPU 锁必须归还"
+
+
+def test_start_dead_backend_releases_gpu_lock(monkeypatch, tmp_path):
+    """健康检查失败且 backend_dead() 确认后端已死（docker 容器退出的锁泄漏主路径）→ 归还。"""
+    from modelctl.core import all_service
+
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(all_service, "is_running_any", lambda name, p: False)
+    monkeypatch.setattr(all_service, "start_detached",
+                        lambda name, cmd, env, write_pid: (123, _FakeProc(1)))
+    monkeypatch.setattr(all_service, "launch_log", lambda name: None)
+
+    class A(_Locking):
+        def __init__(self, p, c):
+            super().__init__(p, c, ready=False)
+
+        def backend_dead(self):
+            return True
+
+    monkeypatch.setattr(all_service, "get_adapter", lambda engine: lambda p, c: A(p, c))
+    r = start_profile(_profile(), Capabilities(), 5.0)
+    assert r.status == "error"
+    assert list_gpu_locks() == {}, "后端确认已死时 GPU 锁必须归还"
+
+
+def test_start_health_timeout_alive_backend_keeps_gpu_lock(monkeypatch, tmp_path):
+    """反向钉：进程仍活只是没到期就绪 → 卡还被引擎占着，**不许**归还锁（否则互斥静默失效）。"""
+    from modelctl.core import all_service
+
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(all_service, "is_running_any", lambda name, p: False)
+    monkeypatch.setattr(all_service, "start_detached",
+                        lambda name, cmd, env, write_pid: (123, _FakeProc(None)))
+    monkeypatch.setattr(all_service, "launch_log", lambda name: None)
+
+    class A(_Locking):
+        def __init__(self, p, c):
+            super().__init__(p, c, ready=False)
+
+    monkeypatch.setattr(all_service, "get_adapter", lambda engine: lambda p, c: A(p, c))
+    r = start_profile(_profile(), Capabilities(), 5.0)
+    assert r.status == "error" and "超时" in r.detail
+    assert list_gpu_locks() == {0: "m"}, "后端可能仍在持卡时锁必须保留"
+
+
+def test_start_ok_keeps_gpu_lock(monkeypatch, tmp_path):
+    """成功路径锁保留（运行中的互斥凭据），由 stop 路径负责归还。"""
+    from modelctl.core import all_service
+
+    monkeypatch.setenv("CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(all_service, "is_running_any", lambda name, p: False)
+    monkeypatch.setattr(all_service, "start_detached",
+                        lambda name, cmd, env, write_pid: (123, _FakeProc(None)))
+    monkeypatch.setattr(all_service, "get_adapter",
+                        lambda engine: lambda p, c: _Locking(p, c, ready=True))
+    r = start_profile(_profile(), Capabilities(), 5.0)
+    assert r.status == "ok"
+    assert list_gpu_locks() == {0: "m"}
+
+
 # ---- 网关 / 统计原语 ----
 
 def test_start_gateway_skips_when_running(monkeypatch):

@@ -188,21 +188,36 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float,
     tracker.done("preflight")
 
     # ---- prepare_env：pre_start（docker 拉镜像子进度 / 模型下载 / 编译） ----
+    # GPU 锁归还约定：check_requirements 已把卡位锁落到本 profile 名下（owner=当前
+    # 常驻进程 pid）。此后任何"后端没有在持卡"的失败出口都必须归还，否则
+    # is_pid_alive 恒真、stale 清理永不触发，卡位对其他 profile 永久不可用。
+    # 与 stop 路径（process.stop_instance 无条件 release）同口径。
+    def _release_gpu_lock_if_idle() -> None:
+        try:
+            from modelctl.core.gpu_lock import release_gpu_lock
+
+            release_gpu_lock(profile.name)
+        except Exception:  # noqa: BLE001 —— 归还失败不得掩盖原始启动错误
+            logger.warning(f"启动失败后归还 GPU 锁失败（{profile.name}），需人工清理 .gpu-lock")
+
     tracker.begin("prepare_env")
     try:
         adapter.pre_start()
     except RequirementError as exc:
         tracker.fail("prepare_env", STAGE_LABELS_PREPARE_ENV, str(exc))
+        _release_gpu_lock_if_idle()
         raise
     tracker.done("prepare_env")
 
     # ---- launch：build_command + start_detached（docker 路径随后挂日志 tee） ----
     tracker.begin("launch")
+    launched = False
     try:
         cmd, env = adapter.build_command()
         # docker runtime（is_docker_runtime True）走 `docker run --detach`：容器在 daemon 后台续
         # 不会随 client 早退，PID 文件不写（write_pid=False）；venv runtime 维持默认 write_pid=True。
         pid, proc = start_detached(profile.name, cmd, env, write_pid=not is_docker)
+        launched = True
         adapter.spawned_proc = proc  # 供 wait_ready 在进程早退时 fail-fast
         if is_docker:
             tee_cmd = adapter.log_tee_cmd()
@@ -223,6 +238,10 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float,
     except Exception as exc:  # noqa: BLE001 —— 拉起段任何异常都要落 fail 事件，快照不能永停 running
         kill_log_tee(profile.name)  # tee 若已挂上则回收
         tracker.fail("launch", STAGE_LABELS_LAUNCH, str(exc))
+        # start_detached 之前抛 → 后端必然不存在，锁归还；之后抛（tee/锁重绑段）
+        # 进程可能已起并持卡，保守保留锁交给 stop 路径处理。
+        if not launched:
+            _release_gpu_lock_if_idle()
         raise
 
     # ---- loading：等待窗口内 tail 引擎日志按模式表推进 ----
@@ -259,6 +278,11 @@ def start_profile(profile: Profile, caps: Capabilities, timeout: float,
     died = adapter.backend_dead()
     detail = "引擎进程提前退出" if died else "健康检查超时"
     tracker.fail("loading", detail, detail)
+    # 后端确认已死 → 卡位必然空着，归还锁（docker 容器退出是主场景：容器秒退后
+    # daemon 会带走它，inspect 明确 not-found → backend_dead True）。
+    # "超时但进程/容器仍活"不归还——卡还被引擎占着，还了会让别的模型撞卡。
+    if died:
+        _release_gpu_lock_if_idle()
     if log is None:
         logger.warning("引擎未在时限内就绪，且未找到启动日志")
     elif died:
