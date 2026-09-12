@@ -63,6 +63,13 @@ function submit() {
   text.value = '';
   images.value = [];
 }
+
+/** 中文/日文输入法用回车确认候选时 key 仍是 'Enter'，此时不得发送（keyCode 229 为兼容兜底）。 */
+function onEnter(e: KeyboardEvent) {
+  if (e.isComposing || e.keyCode === 229) return;
+  e.preventDefault();
+  submit();
+}
 </script>
 
 <template>
@@ -85,7 +92,7 @@ function submit() {
       class="w-full resize-none rounded border border-slate-700 bg-slate-950 p-2 text-sm"
       placeholder="输入消息，可直接粘贴图片…"
       @paste="onPaste"
-      @keydown.enter.exact.prevent="submit"
+      @keydown.enter.exact="onEnter"
     ></textarea>
 
     <div class="mt-1 flex items-center justify-end gap-2">
