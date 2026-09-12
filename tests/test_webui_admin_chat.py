@@ -214,3 +214,92 @@ def test_upstream_unreachable_502_includes_route_headers(monkeypatch):
 def test_requires_admin_auth():
     resp = _post(_app({}), {"model": "a", "messages": [{"role": "user", "content": "hi"}]}, headers={})
     assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-12 全覆盖复核（T2）：补齐三条未覆盖分支 + 一条流式生命周期钉
+# ---------------------------------------------------------------------------
+
+
+def test_route_mode_invalid_400():
+    """route_mode 只认 direct/gateway；拼错必须 400，不能静默落默认路由。
+
+    校验发生在 messages 校验之前（admin_chat.py L73-77），所以 messages 合法与否都该 400。
+    """
+    resp = _post(_app({"a": _gm("a", 8001)}),
+                 {"model": "a", "route_mode": "bogus",
+                  "messages": [{"role": "user", "content": "hi"}]})
+    assert resp.status_code == 400
+    assert "route_mode" in resp.json()["error"]["message"]
+
+
+def test_json_array_body_400_not_500():
+    """合法 JSON 但非对象（数组）→ 400。裸 payload.get 会 AttributeError→500，须被守卫拦住。"""
+    async def go():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=_app({"a": _gm("a", 8001)})), base_url="http://t"
+        ) as c:
+            return await c.post("/admin/api/chat/completions", content=b"[1,2,3]",
+                                headers={"Authorization": f"Bearer {_ADMIN_KEY}",
+                                         "content-type": "application/json"})
+
+    resp = _run(go())
+    assert resp.status_code == 400
+    assert resp.json()["error"]["message"] == "请求体必须是 JSON 对象"
+
+
+def test_gateway_mode_unknown_model_404_from_prepared_error(monkeypatch):
+    """gateway 模式未命中 → 透传 PreparedError 的 404，既不是 500 也不该被 409 吞掉。"""
+    monkeypatch.setattr("modelctl.core.gateway.is_model_available", lambda m: True)
+    resp = _post(_app({"a": _gm("a", 8001)}),
+                 {"model": "nope", "route_mode": "gateway",
+                  "messages": [{"role": "user", "content": "hi"}]})
+    assert resp.status_code == 404
+    assert "model not found" in resp.json()["error"]["message"]
+
+
+class _TrackBody(httpx.AsyncByteStream):
+    """记录自身是否被 aclose()，用于钉住 relay() 的上游生命周期。"""
+
+    def __init__(self, chunks):
+        self._chunks = chunks
+        self.closed = False
+
+    async def __aiter__(self):
+        for c in self._chunks:
+            yield c
+
+    async def aclose(self):
+        self.closed = True
+
+
+def test_stream_close_propagates_to_upstream(monkeypatch):
+    """客户端消费完 SSE 后上游流必须被关闭，否则每次调试对话泄漏一条上游连接。
+
+    relay() 用的是 try/finally + aclose，而不是 `async with client`（后者会在端点
+    返回时提前掐断惰性迭代）——这个取舍只有一处注释、没有回归钉，这里补上。
+    """
+    body = _TrackBody([b'data: {"choices":[{"delta":{"content":"x"}}]}\n\n', b"data: [DONE]\n\n"])
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=body)
+
+    monkeypatch.setattr("modelctl.core.gateway.is_model_available", lambda m: True)
+    app = _app({"a": _gm("a", 8001)})
+    app.state.chat_transport = httpx.MockTransport(handler)
+
+    async def go():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://t", timeout=30
+        ) as c:
+            async with c.stream(
+                "POST", "/admin/api/chat/completions",
+                json={"model": "a", "route_mode": "direct",
+                      "messages": [{"role": "user", "content": "hi"}]},
+                headers={"Authorization": f"Bearer {_ADMIN_KEY}"},
+            ) as r:
+                return b"".join([chunk async for chunk in r.aiter_bytes()])
+
+    out = _run(go())
+    assert b"[DONE]" in out
+    assert body.closed is True
