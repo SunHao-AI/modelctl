@@ -1055,7 +1055,17 @@ def create_app(
 
     # 用量收集：为注册表中"引擎 metrics 不可精确轮询"（vLLM token 计数恒 0）的模型注入
     # 收集器，网关按真实请求累计；其余模型走引擎 /metrics 轮询（stats 服务），无需注入。
-    for model in registry.values():
+    # ⚠ 必须同时覆盖 registry 与 groups：自动构建路径（main()/webui 不传参）下，
+    # build_registry 与 build_groups 为同一 profile 各 new 一份 GatewayModel，而
+    # resolve_model 的 group_route 命中的是 groups 里的实例——只遍历 registry 会让
+    # 家族路由的成功请求因 audit_log=None 整条静默不落审计（冒烟 P1 回归）。
+    _inject_targets: list[GatewayModel] = []
+    _seen_ids: set[int] = set()
+    for _m in [*registry.values(), *(m for members in (groups or {}).values() for m in members)]:
+        if id(_m) not in _seen_ids:
+            _seen_ids.add(id(_m))
+            _inject_targets.append(_m)
+    for model in _inject_targets:
         if model.collector is None and model.adapter is not None:
             model.collector = get_collector(
                 model.adapter.profile,

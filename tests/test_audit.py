@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -782,4 +783,42 @@ def test_audit_passed_request_auth_label_is_ok(tmp_path, monkeypatch):
     assert rec["auth"] == "ok"
     assert rec["client_ip"] == "198.51.100.4"
     assert key not in json.dumps(rec, ensure_ascii=False)
+    audit.destroy()
+
+
+def test_group_route_success_writes_audit(tmp_path):
+    """回归（冒烟 P1）：生产 main() 自动构建 registry/groups 时，两个构建器为同一
+    profile 各 new 一个 GatewayModel；家族路由命中的成员也必须被注入 audit_log，
+    否则成功请求（200）整条不落审计——冒烟时只观测到 401 短包有审计、成功请求静默丢失。
+    """
+    audit = _new_audit_log(Path(tmp_path / "audit"))
+    member = GatewayModel("m-llamacpp", "llamacpp", "http://upstream", "m", None, "http://upstream/")
+    registry = {"m-llamacpp": GatewayModel("m-llamacpp", "llamacpp", "http://upstream", "m", None, "http://upstream/")}
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "id": "x", "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+        })
+
+    with (
+        patch("modelctl.core.gateway.build_registry", return_value=registry),
+        patch("modelctl.core.gateway.build_groups", return_value={"m": [member]}),
+        patch("modelctl.core.gateway.is_running_any", return_value=True),
+    ):
+        app = create_app(transport=httpx.MockTransport(upstream), audit_log=audit)
+
+        async def _go():
+            async with _client(app) as client:
+                resp = await client.post(
+                    "/v1/chat/completions",
+                    json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+                )
+                assert resp.status_code == 200
+
+        asyncio.run(_go())
+    rec = _first_audit_rec(tmp_path)
+    assert rec["status_code"] == 200
+    assert rec["model"] == "m-llamacpp"
+    assert rec["auth"] == "ok"
     audit.destroy()

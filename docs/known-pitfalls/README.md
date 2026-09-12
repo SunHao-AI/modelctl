@@ -126,6 +126,8 @@
 | 2026-09-11 | 前端 / 敏感串 | 一次性 Key 明文 modal 用 `v-if` 防 `v-show` 切换页签后剪贴板跨页粘 | `v-show` 仅 CSS hidden，DOM 常驻 `innerText` 可枚举、剪贴板可跨；`v-if="issuedKey"` 销毁 DOM + 明文与元数据拆两 ref 同 flush 写 null，切换 tabs 即丢 Secret 显示时长 == 用户决策时长。 | [frontend/dual-trust-token-interceptors.md](frontend/dual-trust-token-interceptors.md) |
 | 2026-09-12 | 前端 / 组件与流式渲染 | AI 对话调试台的组件声明、IME 回车、SSE 切帧与 markdown 消毒四类陷阱 | `<script setup name>` 在本仓是 no-op（无 setup-extend 插件）须改 `defineOptions`；IME 组合态回车误发送须查 `isComposing`；SSE 逐块替换 CRLF 会跨块丢流须累积 buffer 正则切帧；`html:false` 挡不住 `onerror` 字面量、安全边界要落 DOMPurify。 | [frontend/ai-chat-debugger.md](frontend/ai-chat-debugger.md) |
 | 2026-09-12 | 后端 / GPU 锁 | `start_profile` 启动失败不归还 GPU 锁，卡位对其它 profile 永久不可用 | 锁 owner 是常驻 worker pid、docker 路径按设计不改绑 → `is_pid_alive` 恒真、stale 清理永不触发；修复按"后端是否在持卡"分流三处出口归还，反向钉"超时但进程仍活"绝不归还（否则互斥静默失效）。 | [backend/gpu-lock-release-on-start-failure.md](backend/gpu-lock-release-on-start-failure.md) |
+| 2026-09-12 | 后端 / 引擎启动 | llama.cpp Windows 预编译包的 `llama-server.exe` 找不到，误报"缺少 cmake" | `find_server` 只找无扩展名文件名、且判据硬编码 `build/bin`，官方 Release 包是根目录 `.exe` → 落编译分支；Windows 上 prebuilt 是唯一可用路径。修复：平台后缀×布局两维枚举，存在性判定与路径解析共用同一函数。 | [backend/llamacpp-windows-prebuilt-exe-name.md](backend/llamacpp-windows-prebuilt-exe-name.md) |
+| 2026-09-12 | 后端 / 网关审计 | `create_app` 注入循环漏 groups 成员，家族路由成功请求整条不落审计 | 自动构建下 `build_registry`/`build_groups` 为同一 profile 各 new 一份实例，注入只遍历 registry；401 短包用闭包 `audit_log` 所以有、200 用 `target.audit_log` 所以无——症状不对称。修复：注入集合取 registry+groups 并集按 `id()` 去重。 | [backend/group-route-members-miss-audit-injection.md](backend/group-route-members-miss-audit-injection.md) |
 
 ## 目录约定
 
