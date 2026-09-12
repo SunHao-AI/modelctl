@@ -1520,3 +1520,14 @@ def test_create_app_exposes_gateway_state():
     assert app.state.gateway_groups == {}
     assert app.state.gateway_default_model is None
     assert app.state.gateway_context_rules == {}
+
+
+def test_engine_priority_covers_all_known_engines():
+    """家族路由按 ENGINE_PRIORITY 排序；新引擎进 KNOWN_ENGINES 却漏登记会被排到最后，
+    静默改变家族落点选择。TODO.md §1.1「缺 4 引擎」已于本轮核实过时，此钉固化现状。
+    """
+    from modelctl.core.gateway import ENGINE_PRIORITY
+    from modelctl.core.profile import KNOWN_ENGINES
+
+    assert set(KNOWN_ENGINES) <= set(ENGINE_PRIORITY), (
+        f"ENGINE_PRIORITY 未覆盖：{set(KNOWN_ENGINES) - set(ENGINE_PRIORITY)}")
