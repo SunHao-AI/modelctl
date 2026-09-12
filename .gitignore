@@ -58,6 +58,9 @@ docs/health-checks/raw/
 coverage.xml
 # uv 缓存重定向到仓库内（沙箱禁止写默认 E:\cache\uv，见 docs/health-checks 2026-09-12）
 .uv-cache/
+# npm 的 TMP/TEMP 与 cache 同理重定向（沙箱禁止写系统临时目录）
+.tmp/
+.npm-cache/
 dev_alive.txt
 dev_ports.txt
 dev_ports_now.txt
