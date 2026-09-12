@@ -1254,6 +1254,10 @@ def create_app(
             )
         # 审计：每次请求取目标模型的 audit_log（create_app 已统一注入；短路判断避免 502/404 无谓兜底）
         self_audit_log = target.audit_log
+        # 缺失即数据黑洞：成功请求会整条静默不落审计（日志一切正常，只有审计行数对不上）。
+        # 必须留一条可 grep 的痕迹，见 known-pitfalls/backend/group-route-members-miss-audit-injection.md
+        if self_audit_log is None:
+            logger.warning(f"审计跳过 target={target.name}：该模型实例未注入 audit_log，本次请求不会落审计")
         # Task 6 settle 依赖：请求 id / 上游最终 usage / 完成时刻
         _request_id = getattr(request.state, "accounts_request_id", None)
         _tpm_est = getattr(request.state, "accounts_tpm_est", _tpm_est)
@@ -1690,6 +1694,8 @@ def create_app(
         url = prepared.url
         # 审计：每次请求取目标模型的 audit_log（create_app 已统一注入）
         self_audit_log = target.audit_log
+        if self_audit_log is None:
+            logger.warning(f"审计跳过 target={target.name}：该模型实例未注入 audit_log，本次请求不会落审计")
         logger.info(
             f"OpenAI 上游路由 model={original_model!r} -> {target.name}"
             + (f"（{prepared.route_reason}）" if prepared.route_reason else "")
