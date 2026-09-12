@@ -25,7 +25,7 @@
 
 **总体判断**：主链路（profile 编排、网关代理、审计、用量、GPU 互斥、WebUI 边界）在真引擎 + 真模型下确实可用；本轮 4 个 P1 **全部当场修复并四步闭环**，收尾门禁较阶段 1 **零回退**（+51 用例、覆盖率 +0.47pt）。真正的系统性风险仍集中在 **webui 管理面测试最薄 + 类型最脏**（10 个低于门禁的模块里占 7 个）。
 
-**缺陷计数**：P0 **0** · P1 **4**（全修）· P2 **10**（记录）· P3 **10**（记录）。
+**缺陷计数**：P0 **0** · P1 **4**（全修）· P2 **10**（记录）· P3 **11**（其中 P3-10 / P3-11 已顺手修 `add2913`）。
 
 ---
 
@@ -159,7 +159,8 @@
 7. `F821` 字符串注解误报（`tests/test_stats_native.py:20`）。
 8. `test_stats_native.py` 等 3 个文件 `E402`（模块级导入位置）属既有风格。
 9. 本地 3.13 与 CI 3.12 的 ruff/mypy 必然有差异（口径以 CI 为准，见 known-pitfalls/build）。
-10. **`web/tsconfig.json` 缺 `noEmit: true`**：脚本层靠 `vue-tsc --noEmit` 传参兜住，但任何一次**裸跑 `vue-tsc`**（手工排查、外部工具调用）都会把 73 个编译产物 `web/src/**/*.js` 直接吐进源码树，污染 `git status`。本轮收尾时发现并已 `git clean -fd web/src` 清理（逐条核对每个 `.js` 都有对应 `.ts`/`.vue` 源、孤儿数 0）。修法：`compilerOptions.noEmit: true`（1 行，收益是"忘加参数也不再污染工作区"）。
+10. **`web/tsconfig.json` 缺 `noEmit: true`**：脚本层靠 `vue-tsc --noEmit` 传参兜住，但任何一次**裸跑 `vue-tsc`**（手工排查、外部工具调用）都会把 73 个编译产物 `web/src/**/*.js` 直接吐进源码树，污染 `git status`。本轮收尾时发现并已 `git clean -fd web/src` 清理（逐条核对每个 `.js` 都有对应 `.ts`/`.vue` 源、孤儿数 0）。**已修 `add2913`**：加 `compilerOptions.noEmit: true`，并实测裸跑 `npx vue-tsc`（不带 `--noEmit`）exit 0 且工作区零新增产物。
+11. **审计跳过无痕迹**（P1-4 的可观测性补丁）：**已修 `add2913`**——两条代理通道在 `target.audit_log is None` 时各加一条 `logger.warning("审计跳过 target=...")`，把"数据缺失但日志正常"变成可 grep 的信号。
 
 ---
 
@@ -234,7 +235,7 @@
 4. **`gateway/` 子环境 pip-audit 未跑成**——需网络稳定窗口或镜像源，**不得记为"已确认干净"**。
 5. **firefox/webkit E2E**——换可写 `%LOCALAPPDATA%` 的机器或设全局 `PLAYWRIGHT_BROWSERS_PATH` 后补跑。
 6. **unsloth `/metrics`、tensorrt_llm 首跑编译**——需真 key / 真 GPU 的移交验证项。
-7. **P3 清单**（§3 P3 1-10）随迭代顺带处理，其中 `isValid` 语义、"审计跳过降级日志"与 `noEmit` 性价比最高（各 ≤3 行）。
+7. **剩余 P3 清单**（§3 P3 1-9）随迭代顺带处理，其中 **`isValid` 语义**性价比最高但**需产品决策**：它有真实消费方（`cli.py:597` / `:643` 用 `isValid` 决定是否显示速率），把"任一 target 不可用即 false"改成"至少一个可用即 true"是**行为变更**，不宜由测试轮顺手改。
 
 ---
 
@@ -285,6 +286,8 @@ uv run modelctl stop qwen2.5-0.5b-llamacpp
 | `525aef8` | test(T4) | `ENGINE_PRIORITY ⊇ KNOWN_ENGINES` 完整性钉 |
 | `9071b50` | **fix(P1-3)** | llamacpp 定位 `.exe` 与根目录布局 + 2 钉 |
 | `53c38e9` | **fix(P1-4)** | 注入覆盖 registry+groups 并集 + 审计回归钉 + 2 篇 pitfall |
+| `56a1ff0` | docs | 本复核报告 |
+| `add2913` | fix(P3-10/11) | `web/tsconfig.json` 加 `noEmit`；两条代理通道在 `audit_log` 缺失时 warning |
 
 新增/更新 pitfall：`backend/gpu-lock-release-on-start-failure.md`、`backend/llamacpp-windows-prebuilt-exe-name.md`、`backend/group-route-members-miss-audit-injection.md`（索引 3 行已入 `docs/known-pitfalls/README.md`）。
 
