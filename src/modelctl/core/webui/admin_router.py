@@ -49,6 +49,8 @@ _SUBROUTER_MODULES: tuple[tuple[str, str], ...] = (
     # 前缀空串；与数据面 accounts 无关——本路由的 Bearer 走 API_KEY，
     # 空 store 时内部 503 accounts_disabled 兜底。
     ("modelctl.core.webui.admin_accounts", ""),
+    # AI 对话（模型调试台）：管理面 Bearer 鉴权，复用网关路由判定；相对路径需 "/chat"
+    ("modelctl.core.webui.admin_chat", "/chat"),
 )
 
 
