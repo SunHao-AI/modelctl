@@ -71,20 +71,20 @@ onBeforeUnmount(() => {
         aria-modal="true"
       >
         <!-- 标题 -->
-        <div class="flex items-center justify-between border-b border-slate-800 px-5 py-3">
-          <h3 :class="['text-base font-semibold', props.danger ? 'text-danger' : 'text-slate-100']">
+        <div class="flex items-center justify-between border-b border-sep px-5 py-3">
+          <h3 :class="['text-base font-semibold', props.danger ? 'text-danger' : 'text-label']">
             {{ props.title }}
           </h3>
-          <button class="text-slate-400 hover:text-slate-200 text-xl leading-none" aria-label="关闭" @click="close">
+          <button class="text-label3 hover:text-label text-xl leading-none" aria-label="关闭" @click="close">
             ×
           </button>
         </div>
         <!-- 主体 -->
         <div class="px-5 py-4">
-          <p class="text-sm text-slate-300 whitespace-pre-line">{{ props.message }}</p>
+          <p class="text-sm text-label2 whitespace-pre-line">{{ props.message }}</p>
         </div>
         <!-- 按钮 -->
-        <div class="flex items-center justify-end gap-3 border-t border-slate-800 px-5 py-3">
+        <div class="flex items-center justify-end gap-3 border-t border-sep px-5 py-3">
           <button class="btn-ghost" :disabled="props.loading" @click="close">{{ props.cancelText }}</button>
           <button
             :class="props.danger ? 'btn-danger' : 'btn-primary'"

@@ -1,10 +1,26 @@
-/* 全局基线：全部吃 tokens.css 的语义令牌，不出现具体色值 */
+/* 全局基线：全部吃 tokens.css 的语义令牌，不出现具体色值。
+   border 基线不可省：UnoCSS presetWind3 未注入 preflight 时，
+   border-* 工具类只给宽度/颜色而无 border-style → 全部不渲染，
+   且 button/input/select 会露出 UA 默认黑框（等价 Tailwind preflight 的这两行）。
+   通配符特异度 (0,0,0) 低于任何工具类 (0,1,0)，border-0 / border-dashed 等仍可覆盖。 */
 *,
 *::before,
 *::after {
   box-sizing: border-box;
+  border-width: 0;
+  border-style: solid;
   margin: 0;
   padding: 0;
+}
+
+/* UA 复位：button 默认带 buttonface 灰底（Tailwind preflight 同款）。
+   不给 bg-* 类的按钮（btn-ghost / 文字型按钮）会露灰底，深色主题下尤其刺眼。
+   元素选择器特异度 (0,0,1)，任何 bg-* 工具类 (0,1,0) 或内联样式都能覆盖。 */
+button {
+  font-family: inherit;
+  cursor: pointer;
+  background-color: transparent;
+  background-image: none;
 }
 
 html,
@@ -77,11 +93,6 @@ a {
   text-decoration: none;
 }
 
-button {
-  font-family: inherit;
-  cursor: pointer;
-}
-
 input,
 select,
 textarea {
@@ -103,11 +114,11 @@ textarea {
   background: transparent;
 }
 
-/* 31px 方形图标按钮（顶栏通用） */
+/* 31px 方形图标按钮（顶栏通用）。
+   不写 display/place-items：本文件在 UnoCSS 之后加载，.iconbtn 会压过
+   `md:hidden` 等响应式工具类；需要 grid 居中的地方在模板上补 `grid place-items-center`。 */
 .iconbtn {
   position: relative;
-  display: grid;
-  place-items: center;
   width: 31px;
   height: 31px;
   border-radius: var(--r-s);

@@ -34,7 +34,7 @@ describe('tokens.css', () => {
 
   it('代码面与形状令牌在 :root（不随主题变）', () => {
     const rootBlock = css.match(/:root\s*\{([\s\S]*?)\}/)?.[1] ?? '';
-    for (const v of ['--code-bg', '--code-fg', '--code-line', '--r-s', '--r-m', '--r-l', '--r-xl', '--ease', '--font', '--mono']) {
+    for (const v of ['--seg-knob-label', '--code-bg', '--code-fg', '--code-line', '--r-s', '--r-m', '--r-l', '--r-xl', '--ease', '--font', '--mono']) {
       expect(rootBlock, `缺少 ${v}`).toContain(`${v}:`);
     }
   });

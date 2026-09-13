@@ -145,22 +145,22 @@ function onDismiss(id: string) {
     v-if="open"
     class="glass fixed right-0 top-0 z-50 flex h-full w-full max-w-md flex-col border-l border-sep"
   >
-    <header class="flex items-center justify-between border-b border-slate-700 px-4 py-3">
-      <h2 class="text-sm font-semibold text-slate-100">后台任务</h2>
+    <header class="flex items-center justify-between border-b border-sep px-4 py-3">
+      <h2 class="text-sm font-semibold text-label">后台任务</h2>
       <button class="btn-ghost !px-2 !py-1 text-xs" @click="close">关闭</button>
     </header>
 
     <div class="flex-1 overflow-y-auto">
-      <p v-if="!tasks.length" class="p-4 text-sm text-slate-500">暂无任务</p>
+      <p v-if="!tasks.length" class="p-4 text-sm text-label3">暂无任务</p>
       <ul class="divide-y divide-sep-soft">
         <li v-for="t in tasks" :key="t.id" class="px-4 py-3">
           <div class="flex items-center gap-2">
             <span :class="['size-2 shrink-0 rounded-full', statusDot(t.status)]" />
-            <span class="min-w-0 flex-1 truncate font-mono text-sm text-slate-100">{{ t.target }}</span>
-            <span class="shrink-0 text-xs text-slate-400">{{ statusLabel(t.status) }}</span>
-            <span v-if="t.startedAt" class="shrink-0 text-xs text-slate-500">{{ duration(t) }}</span>
+            <span class="min-w-0 flex-1 truncate font-mono text-sm text-label">{{ t.target }}</span>
+            <span class="shrink-0 text-xs text-label2">{{ statusLabel(t.status) }}</span>
+            <span v-if="t.startedAt" class="shrink-0 text-xs text-label3">{{ duration(t) }}</span>
           </div>
-          <p v-if="t.detail" class="mt-1 truncate text-xs text-slate-400">{{ t.detail }}</p>
+          <p v-if="t.detail" class="mt-1 truncate text-xs text-label2">{{ t.detail }}</p>
 
           <!-- 操作行 -->
           <div class="mt-2 flex items-center gap-2">
@@ -185,7 +185,7 @@ function onDismiss(id: string) {
               >
                 {{ setupSubmitted.has(t.engine ?? '') ? '创建中…' : '创建环境' }}
               </button>
-              <span class="text-xs text-slate-500">环境创建成功后，回到模型详情页点击启动</span>
+              <span class="text-xs text-label3">环境创建成功后，回到模型详情页点击启动</span>
             </template>
             <button v-else class="btn-ghost !px-2 !py-1 text-xs" @click="gotoEnvs(t)">去环境页</button>
           </div>

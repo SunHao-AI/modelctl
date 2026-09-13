@@ -108,14 +108,14 @@ onMounted(() => { fetchVersion(); fetchSettings(); });
   <div class="space-y-4">
     <!-- 版本信息 -->
     <section class="card">
-      <h3 class="mb-3 text-sm font-semibold text-slate-100">版本</h3>
+      <h3 class="mb-3 text-sm font-semibold text-label">版本</h3>
       <div class="flex items-center gap-4">
         <div>
-          <span class="text-slate-400">modelctl 后端版本</span>
-          <div class="font-mono text-slate-100">{{ version || '加载中…' }}</div>
+          <span class="text-label2">modelctl 后端版本</span>
+          <div class="font-mono text-label">{{ version || '加载中…' }}</div>
         </div>
         <button class="btn-ghost" :disabled="!version" @click="fetchVersion">刷新</button>
-        <span v-if="lastFetchAt" class="text-xs text-slate-500">上次拉取：{{ lastFetchAt }}</span>
+        <span v-if="lastFetchAt" class="text-xs text-label3">上次拉取：{{ lastFetchAt }}</span>
       </div>
     </section>
 
@@ -133,61 +133,61 @@ onMounted(() => { fetchVersion(); fetchSettings(); });
 
     <!-- 后端端点 -->
     <section class="card">
-      <h3 class="mb-3 text-sm font-semibold text-slate-100">后端端点</h3>
-      <p class="text-sm text-slate-300">
+      <h3 class="mb-3 text-sm font-semibold text-label">后端端点</h3>
+      <p class="text-sm text-label2">
         管理 API 前缀：
-        <span class="font-mono text-slate-100">/admin/api</span>
+        <span class="font-mono text-label">/admin/api</span>
       </p>
-      <p class="mt-1 text-xs text-slate-500">
+      <p class="mt-1 text-xs text-label3">
         任务 SSE：<span class="font-mono">/admin/api/tasks/&#123;task_id&#125;/stream</span>
       </p>
-      <p class="mt-1 text-xs text-slate-500">
+      <p class="mt-1 text-xs text-label3">
         日志 SSE：<span class="font-mono">/admin/api/models/&#123;name&#125;/log/stream</span>
       </p>
     </section>
 
     <!-- 集群（M2：只读 + join token 轮换 + 备份下载） -->
     <section class="card">
-      <h3 class="mb-3 text-sm font-semibold text-slate-100">集群</h3>
-      <p v-if="clusterOff" class="text-xs text-slate-500">
+      <h3 class="mb-3 text-sm font-semibold text-label">集群</h3>
+      <p v-if="clusterOff" class="text-xs text-label3">
         当前节点未启用集群角色（solo/worker），无集群配置。
       </p>
       <template v-else>
         <dl v-if="settings" class="grid grid-cols-2 gap-x-8 gap-y-2 text-sm md:grid-cols-3">
-          <div><dt class="text-slate-500">角色</dt><dd class="text-slate-200">{{ settings.role }}</dd></div>
-          <div><dt class="text-slate-500">中心地址</dt><dd class="font-mono text-slate-200">{{ settings.center_url || '-' }}</dd></div>
-          <div><dt class="text-slate-500">心跳间隔</dt><dd class="text-slate-200">{{ settings.heartbeat_interval_s }}s</dd></div>
-          <div><dt class="text-slate-500">租约时长</dt><dd class="text-slate-200">{{ settings.lease_s }}s</dd></div>
-          <div><dt class="text-slate-500">reconcile 周期</dt><dd class="text-slate-200">{{ settings.reconcile_interval_s }}s</dd></div>
-          <div><dt class="text-slate-500">快照上限</dt><dd class="text-slate-200">{{ settings.max_snapshot_bytes }} 字节</dd></div>
-          <div><dt class="text-slate-500">join token</dt><dd class="font-mono text-slate-400">{{ settings.join_token_mask }}</dd></div>
+          <div><dt class="text-label3">角色</dt><dd class="text-label">{{ settings.role }}</dd></div>
+          <div><dt class="text-label3">中心地址</dt><dd class="font-mono text-label">{{ settings.center_url || '-' }}</dd></div>
+          <div><dt class="text-label3">心跳间隔</dt><dd class="text-label">{{ settings.heartbeat_interval_s }}s</dd></div>
+          <div><dt class="text-label3">租约时长</dt><dd class="text-label">{{ settings.lease_s }}s</dd></div>
+          <div><dt class="text-label3">reconcile 周期</dt><dd class="text-label">{{ settings.reconcile_interval_s }}s</dd></div>
+          <div><dt class="text-label3">快照上限</dt><dd class="text-label">{{ settings.max_snapshot_bytes }} 字节</dd></div>
+          <div><dt class="text-label3">join token</dt><dd class="font-mono text-label2">{{ settings.join_token_mask }}</dd></div>
         </dl>
-        <span v-else-if="!clusterError" class="text-xs text-slate-500">配置加载中…</span>
-        <p class="mt-2 text-xs text-slate-500">
+        <span v-else-if="!clusterError" class="text-xs text-label3">配置加载中…</span>
+        <p class="mt-2 text-xs text-label3">
           以上为进程启动时读取的 .env 现值，改配置请在中心机改 <span class="font-mono">.env</span> 后重启 webui（远程写可自断控制面，刻意不提供）。
         </p>
         <div class="mt-3 flex items-center gap-3">
           <button class="btn-danger" :disabled="clusterBusy" @click="onRotateJoin">轮换 join token</button>
           <button class="btn-ghost" :disabled="clusterBusy" @click="onBackup">下载数据库备份</button>
         </div>
-        <div v-if="joinTokenOnce" class="mt-3 rounded border border-amber-700 bg-amber-950/40 p-3 text-sm">
-          <div class="mb-1 text-xs font-semibold text-amber-300">新 join token（仅此一次显示）——旧 token 立即失效，所有未加入节点须改用新 token</div>
-          <code class="select-all break-all font-mono text-xs text-amber-200">{{ joinTokenOnce }}</code>
+        <div v-if="joinTokenOnce" class="mt-3 rounded-ctl border border-warn-line bg-warn-bg p-3 text-sm">
+          <div class="mb-1 text-xs font-semibold text-warn">新 join token（仅此一次显示）——旧 token 立即失效，所有未加入节点须改用新 token</div>
+          <code class="select-all break-all font-mono text-xs text-warn">{{ joinTokenOnce }}</code>
         </div>
-        <div v-if="backupTip" class="mt-2 text-xs text-emerald-400">{{ backupTip }}</div>
-        <div v-if="clusterError" class="mt-2 text-xs text-rose-400">{{ clusterError }}</div>
+        <div v-if="backupTip" class="mt-2 text-xs text-ok">{{ backupTip }}</div>
+        <div v-if="clusterError" class="mt-2 text-xs text-danger">{{ clusterError }}</div>
       </template>
     </section>
 
     <!-- 清除 token -->
     <section class="card">
-      <h3 class="mb-3 text-sm font-semibold text-slate-100">登录</h3>
-      <p class="mb-3 text-xs text-slate-500">
+      <h3 class="mb-3 text-sm font-semibold text-label">登录</h3>
+      <p class="mb-3 text-xs text-label3">
         后端无会话概念；「清除 token」仅清空本地 localStorage 的 API Key，并跳回登录页。
       </p>
       <div class="flex items-center gap-3">
         <button class="btn-danger" :disabled="clearBusy" @click="onClearToken">清除本地 token</button>
-        <span v-if="clearMessage" class="text-xs text-slate-400">{{ clearMessage }}</span>
+        <span v-if="clearMessage" class="text-xs text-label2">{{ clearMessage }}</span>
       </div>
     </section>
   </div>

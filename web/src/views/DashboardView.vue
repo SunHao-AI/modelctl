@@ -154,7 +154,7 @@ const engineBinaries = computed<EngineBinary[]>(() => {
         <div v-if="data" class="space-y-2 text-sm">
           <div class="flex items-center justify-between">
             <span class="text-label2">总数</span>
-            <span class="num font-semibold tracking-[-.028em] text-label">{{ data.model_count }}</span>
+            <span class="num text-[26px] leading-tight font-semibold tracking-[-.028em] text-label">{{ data.model_count }}</span>
           </div>
           <div class="flex items-center justify-between">
             <span class="text-label2">运行中</span>

@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { AxiosError } from 'axios';
+import dayjs from 'dayjs';
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue';
 import DataTable from '@/components/common/DataTable.vue';
 import {
@@ -50,6 +51,13 @@ const NODE_STATUS_STYLE: Record<string, string> = {
   offline: 'border-sep bg-surface3 text-label2',
   disabled: 'border-danger-line bg-danger-bg text-danger',
 };
+
+/** goal.updated_at 是后端拼好的时间串（可能为 ISO 或空串）：统一重排为项目规范格式 */
+function fmtTs(v: string | null | undefined): string {
+  if (!v) return '-';
+  const d = dayjs(v);
+  return d.isValid() ? d.format('YYYY-MM-DD HH:mm:ss') : v;
+}
 
 /** Axios 错误 → 后端 detail 原文（展示纪律：失败给人看的永远是后端原话） */
 function errText(e: unknown): string {
@@ -408,7 +416,7 @@ onBeforeUnmount(() => window.clearInterval(timer));
               </td>
               <td class="text-label2">{{ g.state || '-' }}</td>
               <td class="num text-label2">{{ g.gpu?.join(',') || '-' }}<span v-if="g.port"> :{{ g.port }}</span></td>
-              <td class="num text-label2">{{ g.updated_at }}</td>
+              <td class="num text-label2">{{ fmtTs(g.updated_at) }}</td>
               <td class="whitespace-nowrap">
                 <button v-if="g.intent === 'start'" class="btn-ghost mr-1" @click="rowStop(g)">stop</button>
                 <button v-if="g.stage === 'FAILED'" class="btn-ghost mr-1" @click="rowRetry(g)">retry</button>

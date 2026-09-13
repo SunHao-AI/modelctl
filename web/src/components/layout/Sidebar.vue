@@ -46,10 +46,12 @@ const sections = computed(() =>
 function isActive(item: MenuItem) {
   return route.path === item.to || route.path.startsWith(`${item.to}/`);
 }
+// 根上不写 display 工具类：UnoCSS 产物里 .flex 排在 .hidden 之后，
+// 会和 Layout 传入的 `hidden md:flex` 打架（<768px 侧栏关不掉）。display 全交给外部类。
 </script>
 
 <template>
-  <aside class="glass flex h-full w-56 flex-col border-r border-sep">
+  <aside class="glass h-full w-56 flex-col border-r border-sep">
     <!-- Logo -->
     <div class="flex items-center gap-2.5 px-4 pb-4 pt-4">
       <span

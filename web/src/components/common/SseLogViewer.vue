@@ -144,7 +144,7 @@ watch(
 <template>
   <div class="card !p-0">
     <!-- 顶部状态条 -->
-    <div class="flex items-center justify-between border-b border-slate-800 px-3 py-2">
+    <div class="flex items-center justify-between border-b border-sep px-3 py-2">
       <div class="flex items-center gap-2 text-xs">
         <span
           :class="[
@@ -154,13 +154,13 @@ watch(
             state === 'closed' && 'bg-danger',
           ]"
         />
-        <span class="text-slate-300">
+        <span class="text-label2">
           {{ state === 'connecting' ? '连接中…' : state === 'open' ? '已连接' : '已结束' }}
         </span>
       </div>
       <div class="flex items-center gap-2">
         <button
-          class="rounded-md px-2 py-1 text-xs text-slate-300 hover:bg-slate-800 hover:text-slate-100 transition-colors"
+          class="rounded-ctl px-2 py-1 text-xs text-label2 hover:bg-surface3 hover:text-label transition-colors"
           :title="autoFollow ? '已自动跟随，点击关闭' : '点击恢复跟随底部'"
           @click="autoFollow = !autoFollow"
         >

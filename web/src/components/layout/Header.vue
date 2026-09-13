@@ -65,7 +65,7 @@ function onLogout() {
   <header class="glass z-10 flex items-center justify-between gap-3 border-b border-sep px-4 py-3 md:px-6">
     <!-- 左侧：汉堡（仅移动端）+ 标题 -->
     <div class="flex min-w-0 items-center gap-2.5">
-      <button class="iconbtn md:hidden" type="button" aria-label="打开导航" @click="props.onToggleNav?.()">
+      <button class="iconbtn grid place-items-center md:hidden" type="button" aria-label="打开导航" @click="props.onToggleNav?.()">
         <Menu :size="15" :stroke-width="1.9" />
       </button>
       <h1 class="truncate text-lg font-semibold tracking-[-.022em] text-label md:text-xl">
@@ -75,7 +75,11 @@ function onLogout() {
 
     <!-- 右侧：主题 + 状态 + 身份 + 任务 + 退出 -->
     <div class="flex items-center gap-2.5">
-      <ThemeSwitch class="hidden lg:inline-flex" />
+      <!-- 包一层再响应式隐藏：ThemeSwitch 根节点自带 inline-flex，直接传
+           `hidden lg:inline-flex` 会被 UnoCSS 产物里排后的 .inline-flex 压掉 -->
+      <span class="hidden lg:inline-flex">
+        <ThemeSwitch />
+      </span>
 
       <!-- 后端状态 -->
       <span
@@ -103,7 +107,7 @@ function onLogout() {
       </span>
 
       <!-- 任务抽屉入口 -->
-      <button class="iconbtn" type="button" title="后台任务" @click="drawerRef?.toggle()">
+      <button class="iconbtn grid place-items-center" type="button" title="后台任务" @click="drawerRef?.toggle()">
         <ListChecks :size="15" :stroke-width="1.9" />
         <span
           v-if="runningCount > 0"

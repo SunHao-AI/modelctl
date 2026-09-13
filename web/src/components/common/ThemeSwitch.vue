@@ -5,6 +5,9 @@ import { useThemeStore, type ThemeMode } from '@/stores/theme';
 /**
  * 外观切换：苹果三段 Segmented Control。
  * 无 props —— 主题全站唯一真源是 store。
+ * 宿主需要响应式隐藏时请包一层 <span class="hidden lg:inline-flex">，
+ * 不要直接传 `hidden lg:inline-flex` 到根上：UnoCSS 产物里 .inline-flex
+ * 排在 .hidden 之后，组件自带类会压掉传入的 hidden（小屏关不掉）。
  */
 const theme = useThemeStore();
 
@@ -34,7 +37,7 @@ const OPTIONS: { value: ThemeMode; label: string; icon: LucideIcon }[] = [
       ]"
       :style="
         theme.mode === o.value
-          ? 'background: var(--seg-knob); box-shadow: 0 1px 3px rgba(0,0,0,.22), 0 0 0 .5px var(--separator)'
+          ? 'background: var(--seg-knob); color: var(--seg-knob-label); box-shadow: 0 1px 3px rgba(0,0,0,.22), 0 0 0 .5px var(--separator)'
           : ''
       "
       @click="theme.setMode(o.value)"

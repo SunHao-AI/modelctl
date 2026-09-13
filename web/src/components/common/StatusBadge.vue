@@ -18,7 +18,7 @@ interface Style {
   text: string;
   /** 主点颜色（用于小圆点） */
   dot: string;
-  /** 是否异常态（异常时副标也会变红） */
+  /** 是否异常态（副标「健康」恒为绿色） */
   isErr: boolean;
 }
 

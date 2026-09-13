@@ -18,7 +18,9 @@ export default defineConfig({
   presets: [presetWind3()],
   transformers: [transformerDirectives(), transformerVariantGroup()],
   shortcuts: {
-    card: 'bg-surface2 border border-sep rounded-card shadow-m',
+    // p-4 不可省：与重构前 card 语义一致，30+ 处裸用 class="card" 的内边距全靠它；
+    // 特例页用 !p-0 / !p-4 / !p-6 覆盖。
+    card: 'bg-surface2 border border-sep rounded-card shadow-m p-4',
     'btn-base':
       'inline-flex items-center justify-center gap-2 rounded-ctl px-4 py-2 text-sm font-medium transition-colors cursor-pointer select-none disabled:opacity-40 disabled:cursor-not-allowed',
     'btn-primary': 'btn-base bg-accent text-accent-fg hover:bg-accent-hover shadow-btn',
