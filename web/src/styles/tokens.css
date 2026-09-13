@@ -45,7 +45,10 @@
   --surface-4: rgba(255,255,255,.12);
   --label: #f1f4f9;
   --label-2: #a9b3c4;
-  --label-3: #78829a;
+  /* 旧值 #78829a 对画布 5.08:1 达标，但对「卡内再套 surface-3」的二次合成底
+     （chat 侧栏、dashboard 引擎磁贴等 ≈#292c31）仅 4.18:1；#8b96b2 对二次合成底
+     4.71、对画布 6.02，均 ≥4.5 且与 --label-2(#a9b3c4) 层级仍分明（QA 回归 R-01） */
+  --label-3: #8b96b2;
   --separator: rgba(255,255,255,.085);
   --separator-soft: rgba(255,255,255,.05);
   --accent: #4c9bff;

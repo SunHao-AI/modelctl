@@ -92,7 +92,7 @@ function textClass(i: number): string {
     <!-- 标题 + 状态徽标 -->
     <div class="flex items-baseline justify-between">
       <div>
-        <h3 class="text-sm font-medium text-label">启动进度</h3>
+        <h3 class="card-title !mb-0">启动进度</h3>
         <p class="mt-0.5 text-xs text-label3">
           运行时 <span class="font-mono text-label2">{{ snapshot.runtime }}</span> ·
           引擎 <span class="font-mono text-label2">{{ snapshot.engine }}</span> ·

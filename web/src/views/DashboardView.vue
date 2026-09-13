@@ -129,7 +129,7 @@ const engineBinaries = computed<EngineBinary[]>(() => {
     <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
       <!-- 硬件 -->
       <section class="card transition-transform duration-200 hover:-translate-y-0.5" style="box-shadow: var(--shadow-m)">
-        <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-label3">硬件</h3>
+        <h3 class="card-title">硬件</h3>
         <div v-if="data?.hardware" class="space-y-2 text-sm">
           <div class="flex items-center justify-between">
             <span class="text-label2">GPU 数</span>
@@ -151,7 +151,7 @@ const engineBinaries = computed<EngineBinary[]>(() => {
 
       <!-- 服务（gateway + stats） -->
       <section class="card transition-transform duration-200 hover:-translate-y-0.5" style="box-shadow: var(--shadow-m)">
-        <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-label3">服务</h3>
+        <h3 class="card-title">服务</h3>
         <div v-if="data?.services" class="space-y-2 text-sm">
           <div class="flex items-center justify-between">
             <span class="text-label2">gateway:<span class="num">:{{ data.services.gateway.port }}</span></span>
@@ -167,7 +167,7 @@ const engineBinaries = computed<EngineBinary[]>(() => {
 
       <!-- 模型 -->
       <section class="card transition-transform duration-200 hover:-translate-y-0.5" style="box-shadow: var(--shadow-m)">
-        <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-label3">模型</h3>
+        <h3 class="card-title">模型</h3>
         <div v-if="data" class="space-y-2 text-sm">
           <div class="flex items-center justify-between">
             <span class="text-label2">总数</span>
@@ -188,7 +188,7 @@ const engineBinaries = computed<EngineBinary[]>(() => {
 
       <!-- 系统 -->
       <section class="card transition-transform duration-200 hover:-translate-y-0.5" style="box-shadow: var(--shadow-m)">
-        <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-label3">系统</h3>
+        <h3 class="card-title">系统</h3>
         <div v-if="data" class="space-y-2 text-sm">
           <div class="flex items-center justify-between">
             <span class="text-label2">版本</span>
@@ -208,7 +208,7 @@ const engineBinaries = computed<EngineBinary[]>(() => {
 
     <!-- 引擎二进制 -->
     <section class="card">
-      <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-label3">引擎二进制</h3>
+      <h3 class="card-title">引擎二进制</h3>
       <div v-if="engineBinaries.length" class="grid grid-cols-1 gap-2 sm:grid-cols-2 md:grid-cols-2 lg:grid-cols-4">
         <div
           v-for="b in engineBinaries"

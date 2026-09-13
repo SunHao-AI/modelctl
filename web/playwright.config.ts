@@ -17,6 +17,10 @@ import { defineConfig, devices } from '@playwright/test';
  *   - Pixel 7 / iPhone 14 视口 + 触摸模拟覆盖移动端布局（侧栏折叠断点）
  * OS 维度由 CI matrix 承担（ubuntu + windows 双 runner，见 .github/workflows/ci.yml）。
  */
+// 端口可覆盖：本地已有 webui 占用默认 4173 时，用它复用正在跑的后端
+// （配合 E2E_ADMIN_KEY 指到该后端的密钥），避免为跑 E2E 而停掉开发服务。
+const PORT = process.env.E2E_PORT ?? '4173';
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: true,
@@ -25,7 +29,7 @@ export default defineConfig({
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? [['github'], ['html', { open: 'never', outputFolder: '../build/playwright-report' }]] : [['list']],
   use: {
-    baseURL: 'http://127.0.0.1:4173',
+    baseURL: `http://127.0.0.1:${PORT}`,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
   },
@@ -36,14 +40,14 @@ export default defineConfig({
     cwd: '..',
     // 就绪探针用 /admin/api/health（免鉴权）；根路径 `/` 是 SPA 兜底 HTML，
     // 只能证明 dist 已挂载，不能证明管理面就绪，故不用它。
-    url: 'http://127.0.0.1:4173/admin/api/health',
+    url: `http://127.0.0.1:${PORT}/admin/api/health`,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
     env: {
-      API_KEY: 'e2e_admin_key_0123456789',
+      API_KEY: process.env.E2E_ADMIN_KEY ?? 'e2e_admin_key_0123456789',
       GATEWAY_CLIENT_API_KEY: 'e2e_data_key_0123456789',
       ACCOUNTS_JWT_SECRET: 'e2e_jwt_secret_0123456789',
-      WEBUI_PORT: '4173',
+      WEBUI_PORT: PORT,
       // 钉死 solo：开发者 .env 若配了 worker/both，不能让 E2E 进程拉起集群后台线程
       CLUSTER_ROLE: 'solo',
     },

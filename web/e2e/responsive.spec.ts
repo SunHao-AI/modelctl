@@ -10,7 +10,7 @@
  */
 import { expect, test } from '@playwright/test';
 
-const ADMIN_KEY = 'e2e_admin_key_0123456789';
+const ADMIN_KEY = process.env.E2E_ADMIN_KEY ?? 'e2e_admin_key_0123456789';
 
 test.beforeEach(async ({ page }) => {
   await page.goto('/login');

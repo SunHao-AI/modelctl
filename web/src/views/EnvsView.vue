@@ -351,7 +351,7 @@ onMounted(async () => {
          platform 取自 diagData.platform（QA-A-02：诊断未回时不再假装 'linux' 误判平台，
          外层 v-if 分流：未知 → 占位卡片；面板组件本身不动（只认 linux/windows）。 -->
     <section v-if="hostPlatform === null" class="card">
-      <h2 class="text-sm font-semibold text-label">Docker 一键安装（Windows-only）</h2>
+      <h2 class="card-title">Docker 一键安装（Windows-only）</h2>
       <p class="mt-1 text-xs text-label3">
         {{ diagErr ? '平台检测失败，原因见上方「Docker 旁路」区块的红色提示；修复后可点「完整诊断」重试。' : '正在检测平台…' }}
       </p>
