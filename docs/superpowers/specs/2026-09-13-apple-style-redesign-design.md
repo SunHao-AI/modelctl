@@ -70,6 +70,8 @@
   --warn:#a15c07;   --warn-bg:rgba(161,92,7,.09);  --warn-line:rgba(161,92,7,.20);
   --danger:#d0331f; --danger-bg:rgba(208,51,31,.08); --danger-line:rgba(208,51,31,.20);
   --info:#0a6ed1;
+  --accent-bg:rgba(0,113,227,.10);  --accent-line:rgba(0,113,227,.22);
+  --muted:#c2c8d4;
   --shadow-s: 0 1px 2px rgba(16,24,40,.05);
   --shadow-m: 0 1px 2px rgba(16,24,40,.05), 0 10px 26px -14px rgba(16,24,40,.22);
   --shadow-l: 0 2px 6px rgba(16,24,40,.07), 0 24px 60px -24px rgba(16,24,40,.30);
@@ -91,6 +93,8 @@
   --warn:#f5c451; --warn-bg:rgba(245,196,81,.11); --warn-line:rgba(245,196,81,.22);
   --danger:#ff7a85; --danger-bg:rgba(255,122,133,.10); --danger-line:rgba(255,122,133,.22);
   --info:#6ab8ff;
+  --accent-bg:rgba(76,155,255,.14); --accent-line:rgba(76,155,255,.26);
+  --muted:#4c5771;
   --shadow-s: 0 2px 8px rgba(0,0,0,.28);
   --shadow-m: 0 4px 14px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.06);
   --shadow-l: 0 18px 50px -18px rgba(0,0,0,.70), inset 0 1px 0 rgba(255,255,255,.07);
@@ -124,22 +128,38 @@ theme: {
     surface2: 'var(--surface-2)', surface3: 'var(--surface-3)', surface4: 'var(--surface-4)',
     label: 'var(--label)', label2: 'var(--label-2)', label3: 'var(--label-3)',
     sep: 'var(--separator)', 'sep-soft': 'var(--separator-soft)',
-    accent: { DEFAULT: 'var(--accent)', hover: 'var(--accent-hover)', fg: 'var(--on-accent)' },
+    // 语义色：DEFAULT 给文字/圆点，bg/line 给彩底与描边（半透明值已由 -bg/-line 令牌固定，
+    // 因此不再依赖 UnoCSS 的 /20 透明度修饰符 —— 变量色配修饰符不可靠）
+    accent: { DEFAULT: 'var(--accent)', hover: 'var(--accent-hover)', fg: 'var(--on-accent)',
+              bg: 'var(--accent-bg)', line: 'var(--accent-line)' },
     ok:     { DEFAULT: 'var(--ok)',     bg: 'var(--ok-bg)',     line: 'var(--ok-line)' },
     warn:   { DEFAULT: 'var(--warn)',   bg: 'var(--warn-bg)',   line: 'var(--warn-line)' },
     danger: { DEFAULT: 'var(--danger)', bg: 'var(--danger-bg)', line: 'var(--danger-line)' },
     info: 'var(--info)',
+    muted: 'var(--muted)',
     code: { bg: 'var(--code-bg)', fg: 'var(--code-fg)', line: 'var(--code-line)' },
-    // §6.3 兼容垫片：把测试钉住的两个旧色名重映射成语义值
-    red: { 400: 'var(--danger)' },
-    slate: { 800: 'var(--surface-3)' },
+
+    // 全家族兼容别名：现存 35 个文件里共出现 55 个不同的旧色类名（见实施计划附录 A），
+    // 把整个家族一次映射到语义值，任何漏改的类名都会自动落到正确语义色，
+    // 而不是渲染成旧 Tailwind 色板导致主题脱节（浅色主题下尤其刺眼）。
+    red:     { 200:'var(--danger)', 300:'var(--danger)', 400:'var(--danger)', 500:'var(--danger)', 600:'var(--danger)', 800:'var(--danger)', 900:'var(--danger)' },
+    rose:    { 300:'var(--danger)', 400:'var(--danger)', 500:'var(--danger)', 800:'var(--danger)', 900:'var(--danger)' },
+    emerald: { 300:'var(--ok)', 400:'var(--ok)', 500:'var(--ok)', 600:'var(--ok)' },
+    amber:   { 200:'var(--warn)', 300:'var(--warn)', 400:'var(--warn)', 500:'var(--warn)', 700:'var(--warn)', 800:'var(--warn)', 900:'var(--warn)', 950:'var(--warn)' },
+    blue:    { 100:'var(--accent)', 300:'var(--accent)', 400:'var(--accent)', 500:'var(--accent)', 600:'var(--accent)', 700:'var(--accent)' },
+    sky:     { 300:'var(--info)' },
+    slate:   { 400:'var(--muted)', 500:'var(--muted)', 600:'var(--surface4)', 700:'var(--surface4)', 800:'var(--surface3)', 900:'var(--surface2)', 950:'var(--code-bg)' },
   },
   borderRadius: { ctl: 'var(--r-s)', card: 'var(--r-m)', panel: 'var(--r-l)', sheet: 'var(--r-xl)' },
   boxShadow: { s: 'var(--shadow-s)', m: 'var(--shadow-m)', l: 'var(--shadow-l)' },
 }
 ```
 
-`slate-800` 被顶掉后，preset 其余 `slate-*` 仍可用（`theme.colors` 与预设深合并），所以第 5–7 批迁移期间的残余旧类名仍能渲染，不会中途出现黑块。`red: { 400 }` 同理只覆盖 400 一档。
+**为什么用「整家族别名」而不是逐个改类名**：现存 55 个旧色类名散在 35 个文件，逐处替换必然漏；把家族整体指向语义变量后，**漏改 = 自动正确**，批量替换只是让代码可读性变好，不再是正确性前提。`slate-800 → var(--surface-3)` 同时充当 §6.3 的测试垫片，`red-400 → var(--danger)` 同理。
+
+**不要用透明度修饰符**：`bg-blue-600/20` 这类写法在值变成 `var(--x)` 后无法可靠合成 alpha（presetWind3 对变量色走 `color-mix`，Safari 16.4 以下静默失效）。所有"半透明彩底"一律改用显式的 `-bg` / `-line` 令牌类（`bg-ok-bg`、`border-ok-line`），这也是 §6.2 替换表把 `/15`、`/20` 后缀单独成行的原因。
+
+**`slate-400/500` 单列 `--muted`**：这两档在现存代码里 90% 是表格里的次要填充块（进度条底、矩阵空格子、分隔色块），不是文字，映射到 `--label-3` 会得到一条过亮的线。
 
 shortcuts 重写为语义版（键名保持不变，值全换）：
 
@@ -280,7 +300,7 @@ function setMode(next: ThemeMode) {
 | `Loading.vue` | 语义色 + `--accent`；**成为唯一 spinner 实现**，`ConfirmDialog`/`TaskButton`/`LoginView`/`DockerInstallPanel` 中复制的 4 份 spinner SVG 删除、改用本组件 |
 | `TaskButton.vue` | 只改类分派串的色名；**五相位状态机与 `computed-tick-timing` 记录的 tick 逻辑（L59-94，watch getter 内读 `now.value`）一行不动** |
 | `SseLogViewer.vue` | 恒深终端 `bg-code-bg text-code-fg`；连接态三色点走语义；`api/sse.ts` 一行不动 |
-| `DataTable.vue`（**新增**） | `table` + 表头（`bg-surface3`、11px、`letter-spacing:.055em`、uppercase）+ 行（`border-b sep-soft`、`hover:bg-surface3`）三件套集中定义，9 个表格页复用。列定义仍由各页自己写 `<template #cell>` 具名插槽，不抽象成配置式组件（YAGNI） |
+| `DataTable.vue`（**新增**） | **包裹式**组件：外层容器（`bg-surface2 border-sep rounded-card shadow-s`）+ scoped `:slotted()` 统一定义 `th`（11px、uppercase、`letter-spacing:.055em`、`--surface-3` 头底）、`td`（`--separator-soft` 分隔线）、行 hover（`--surface-3`）。各页保留自己现有的 `<table>` 标记，外面套一层 `<DataTable>` 即可，列定义零改动 |
 | `ThemeSwitch.vue`（**新增**） | §4.3 |
 | `StartupProgressCard.vue` | BEM 块保留（含 `prefers-reduced-motion` 降级），条纹渐变换成语义色变量 |
 | `ChatMessage.vue` | 气泡改 `bg-accent text-accent-fg` / `bg-surface3`；9 处 `:deep()` 色值换语义；markdown 排版微调（表格分隔线用 `--separator`） |
@@ -335,10 +355,8 @@ function setMode(next: ThemeMode) {
 
 三条硬红线，采用「**保留旧类名 + 重定义其值**」而非改测试，把回归面压到零：
 
-1. `smoke.spec.ts` 断言 `p.text-red-400` → 用 §3.2 的 `theme.colors.red = { 400: 'var(--danger)' }` 把该类名重映射成语义危险色。`LoginView` / `AccountSelfLoginView` 的错误段继续写 `text-red-400`，标签仍是 `<p>`。
-2. `ChatHistoryList.test.ts` 断言 active 条目 `classes()` 含 `bg-slate-800` → 用 §3.2 的 `theme.colors.slate = { 800: 'var(--surface-3)' }` 重映射。active/inactive 的差异仍然成立（inactive 不带这个类）。
-
-   **迁移第一批就要验证深合并**：写一个临时断言（或 `uno.config` 生成后 grep 产物 CSS），确认 `theme.colors` 与 presetWind3 内置色板是深合并 —— 即 `bg-slate-700`、`bg-red-500` 在迁移期仍能生成。若实测为浅合并（整块覆盖），则改为**只在 `tokens.css` 里补两条同名原语**：`.text-red-400{color:var(--danger)}` / `.bg-slate-800{background-color:var(--surface-3)}`，并在第 8 批清理时把其余 `slate-*` 残留全部替换干净（不依赖内置色板）。两种做法对视图层代码完全同形，切换成本仅在 §3.2。
+1. `smoke.spec.ts` 断言 `p.text-red-400` → §3.2 的 `theme.colors.red = { …, 400:'var(--danger)', … }` 使该类名成为语义危险色。`LoginView` / `AccountSelfLoginView` 的错误段继续写 `text-red-400`，标签仍是 `<p>`。
+2. `ChatHistoryList.test.ts` 断言 active 条目 `classes()` 含 `bg-slate-800` → §3.2 的 `slate: { 800:'var(--surface-3)' }` 重映射。active/inactive 的差异仍然成立（inactive 不带这个类）。注意：别名表**刻意不包含** preset 未列出的档位（如 `slate-100/200/300` 的文字档由替换任务显式改成 `text-label*`，不靠别名兜），若迁移期发现某旧类名渲染为无色，说明它不在 §3.2 别名表内且未被替换——按计划附录 A 的 grep 校验兜底找出。
 3. `ChatHistoryList` 条目继续用 `<div class="cursor-pointer">`（不换 `<button>`），且"新建"仍是模板中第一个 `<button>`。
 
 其余必须原样保留的契约：`aside`/`nav`/`h1`/`h2` 语义标签、真实 `<a>` 链接与"体检"文案、`#api-key`、768px `hidden md:flex`、登录按钮 disabled 语义、`localStorage['modelctl_token']`、一次性密钥弹窗的 `v-if`（**禁止改 `v-show`**，DOM 残留即密钥泄漏）、`AccountsView` 的 `accounts_disabled` 503 引导条分派、`EnvsView` 的 `id="env-row-{name}"` 与 `id="docker-bypass"` 锚点、IME 回车守卫（`e.isComposing || e.keyCode === 229`）、Dashboard 3s 轮询的 `pending` 防重叠。
