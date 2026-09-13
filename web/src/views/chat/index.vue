@@ -61,10 +61,10 @@ onMounted(refresh);
 
     <div class="flex min-w-0 flex-1 flex-col">
       <!-- 顶栏：模型选择 + 走网关开关 -->
-      <div class="flex items-center gap-2 border-b border-slate-800 bg-slate-900 px-3 py-2 text-sm">
+      <div class="flex items-center gap-2 border-b border-sep bg-surface2 px-3 py-2 text-sm">
         <select
           :value="chat.model"
-          class="rounded border border-slate-700 bg-slate-800 px-2 py-1 text-slate-100"
+          class="rounded border border-sep bg-surface3 px-2 py-1 text-label"
           @change="onModelChange"
         >
           <option v-if="!runnable.length" value="">（无已启动且健康的模型）</option>
@@ -76,22 +76,22 @@ onMounted(refresh);
           :class="[
             'rounded-full border px-2 py-1 text-xs',
             chat.routeMode === 'gateway'
-              ? 'border-blue-500 bg-blue-600/15 text-blue-300'
-              : 'border-slate-700 text-slate-400',
+              ? 'border-accent bg-accent-bg text-accent'
+              : 'border-sep text-label2',
           ]"
           :title="chat.routeMode === 'gateway' ? '复现网关家族路由/上下文切换' : '选谁打谁'"
           @click="chat.routeMode = chat.routeMode === 'gateway' ? 'direct' : 'gateway'"
         >
           走网关：{{ chat.routeMode === 'gateway' ? '开' : '关' }}
         </button>
-        <button class="ml-auto text-xs text-slate-400 hover:text-slate-200" :disabled="loading" @click="refresh">
+        <button class="ml-auto text-xs text-label2 hover:text-label" :disabled="loading" @click="refresh">
           {{ loading ? '刷新中…' : '刷新模型' }}
         </button>
       </div>
 
       <!-- 对话流 -->
       <div class="flex flex-1 flex-col gap-2 overflow-y-auto p-3">
-        <div v-if="!chat.active" class="m-auto text-sm text-slate-500">点左栏「新建」开始对话</div>
+        <div v-if="!chat.active" class="m-auto text-sm text-label3">点左栏「新建」开始对话</div>
         <ChatMessage v-for="m in chat.messages" :key="m.id" :msg="m" />
       </div>
 
@@ -99,7 +99,7 @@ onMounted(refresh);
     </div>
 
     <!-- 调试面板 -->
-    <div class="w-72 shrink-0 overflow-y-auto border-l border-slate-800 bg-slate-900/60 p-2 text-slate-300">
+    <div class="w-72 shrink-0 overflow-y-auto border-l border-sep bg-surface3 p-2 text-label2">
       <ChatParamsPanel />
       <ChatStatsPanel :msg="lastAssistant" />
       <ChatRawPanel :raw="chat.rawText" :payload="lastPayload" />

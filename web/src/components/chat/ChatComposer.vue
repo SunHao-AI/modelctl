@@ -73,12 +73,12 @@ function onEnter(e: KeyboardEvent) {
 </script>
 
 <template>
-  <div class="border-t border-slate-800 bg-slate-900 p-2">
+  <div class="border-t border-sep bg-surface2 p-2">
     <div v-if="images.length" class="mb-1 flex gap-1">
       <div v-for="(d, i) in images" :key="i" class="relative">
         <img :src="d" class="h-14 rounded" alt="待发送图片" />
         <button
-          class="absolute -top-1 -right-1 flex size-4 items-center justify-center rounded-full bg-slate-700 text-xs text-slate-200"
+          class="absolute -top-1 -right-1 flex size-4 items-center justify-center rounded-full bg-surface4 text-xs text-label"
           @click="images.splice(i, 1)"
         >
           ×
@@ -89,27 +89,27 @@ function onEnter(e: KeyboardEvent) {
     <textarea
       v-model="text"
       rows="2"
-      class="w-full resize-none rounded border border-slate-700 bg-slate-950 p-2 text-sm"
+      class="w-full resize-none rounded border border-sep bg-surface2 p-2 text-sm text-label focus:border-accent"
       placeholder="输入消息，可直接粘贴图片…"
       @paste="onPaste"
       @keydown.enter.exact="onEnter"
     ></textarea>
 
     <div class="mt-1 flex items-center justify-end gap-2">
-      <label class="mr-auto cursor-pointer rounded-full border border-slate-700 px-2 py-1 text-xs text-slate-400 hover:text-slate-200">
+      <label class="mr-auto cursor-pointer rounded-full border border-sep px-2 py-1 text-xs text-label2 hover:text-label">
         图片
         <input type="file" accept="image/*" multiple class="hidden" @change="onPick" />
       </label>
       <button
         v-if="streaming"
-        class="rounded-full bg-red-900 px-3 py-1 text-sm text-red-200"
+        class="rounded-full bg-danger-bg px-3 py-1 text-sm text-danger border border-danger-line"
         @click="emit('stop')"
       >
         停止
       </button>
       <button
         v-else
-        class="rounded-full bg-blue-600 px-3 py-1 text-sm text-white"
+        class="rounded-full bg-accent px-3 py-1 text-sm text-accent-fg hover:bg-accent-hover"
         @click="submit"
       >
         发送

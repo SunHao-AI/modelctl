@@ -20,25 +20,27 @@ const stats = computed(() => {
 <template>
   <div
     :class="[
-      'rounded-lg px-3 py-2 text-sm leading-relaxed',
-      msg.role === 'user' ? 'self-end max-w-[75%] bg-blue-600 text-slate-50' : 'self-start max-w-[90%] bg-slate-800',
+      'text-sm leading-relaxed',
+      msg.role === 'user'
+        ? 'self-end max-w-[75%] rounded-panel rounded-br-sm bg-accent text-accent-fg px-3.5 py-2.5'
+        : 'self-start max-w-[90%] rounded-panel rounded-bl-sm bg-surface3 text-label px-3.5 py-2.5',
     ]"
   >
     <div v-if="msg.images && msg.images.length" class="mb-1 flex gap-1">
       <img v-for="(d, i) in msg.images" :key="i" :src="d" class="h-16 rounded" alt="附件" />
     </div>
 
-    <details v-if="msg.reasoning" class="mb-1 text-slate-400">
+    <details v-if="msg.reasoning" class="mb-1 text-label2">
       <summary class="cursor-pointer select-none">思考过程</summary>
-      <div class="mt-1 whitespace-pre-wrap border-l-2 border-slate-600 pl-2">{{ msg.reasoning }}</div>
+      <div class="mt-1 whitespace-pre-wrap border-l-2 border-sep pl-2">{{ msg.reasoning }}</div>
     </details>
 
-    <div v-if="msg.error" class="mb-1 rounded border-l-2 border-red-500 bg-red-500/10 p-2 text-red-300">
+    <div v-if="msg.error" class="mb-1 rounded border-l-2 border-danger bg-danger-bg p-2 text-danger">
       {{ msg.error.message }}
     </div>
     <div
       v-if="msg.error && msg.error.raw"
-      class="mb-1 break-all rounded bg-slate-950 p-2 font-mono text-xs whitespace-pre-wrap"
+      class="mb-1 break-all rounded code-surface p-2 text-xs whitespace-pre-wrap"
     >
       {{ msg.error.raw }}
     </div>
@@ -49,10 +51,10 @@ const stats = computed(() => {
 
     <div
       v-if="stats.length || msg.interrupted"
-      class="mt-1 flex flex-wrap gap-2 border-t border-dashed border-slate-600 pt-1 text-xs text-slate-500"
+      class="mt-1 flex flex-wrap gap-2 border-t border-dashed border-sep pt-1 text-xs text-label3"
     >
       <span v-for="s in stats" :key="s">{{ s }}</span>
-      <span v-if="msg.interrupted" class="text-amber-400">已中断</span>
+      <span v-if="msg.interrupted" class="text-warn">已中断</span>
     </div>
   </div>
 </template>
@@ -68,10 +70,10 @@ const stats = computed(() => {
 .chat-md :deep(p) { margin: 0.25rem 0; }
 .chat-md :deep(ul), .chat-md :deep(ol) { padding-left: 1.25rem; margin: 0.25rem 0; }
 .chat-md :deep(code:not(.hljs code)) {
-  background: rgb(2 6 23 / 0.6);
+  background: var(--surface-4);
   padding: 0.05rem 0.25rem;
   border-radius: 0.25rem;
 }
 .chat-md :deep(table) { border-collapse: collapse; margin: 0.25rem 0; }
-.chat-md :deep(th), .chat-md :deep(td) { border: 1px solid rgb(51 65 85); padding: 0.2rem 0.4rem; }
+.chat-md :deep(th), .chat-md :deep(td) { border: 1px solid var(--separator); padding: 0.2rem 0.4rem; }
 </style>

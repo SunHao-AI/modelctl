@@ -16,12 +16,12 @@ function copy() {
 </script>
 
 <template>
-  <div class="mt-2 rounded border border-slate-800 p-2 text-xs">
+  <div class="mt-2 rounded border border-sep p-2 text-xs">
     <div class="mb-1 flex items-center justify-between">
-      <b class="uppercase tracking-wide text-slate-400">原文</b>
-      <button class="text-slate-500 hover:text-slate-300" @click="copy">{{ copied ? '已复制' : '复制' }}</button>
+      <b class="uppercase tracking-wide text-label2">原文</b>
+      <button class="text-label3 hover:text-label" @click="copy">{{ copied ? '已复制' : '复制' }}</button>
     </div>
-    <pre class="max-h-40 overflow-auto rounded bg-slate-950 p-2 font-mono text-[11px] leading-snug text-sky-300">{{ payload ? JSON.stringify(payload, null, 2) : '—' }}</pre>
-    <pre v-if="raw" class="mt-1 max-h-32 overflow-auto rounded bg-slate-950 p-2 font-mono text-[11px] leading-snug text-sky-300">{{ raw }}</pre>
+    <pre class="max-h-40 overflow-auto rounded bg-code-bg p-2 font-mono text-[11px] leading-snug text-info">{{ payload ? JSON.stringify(payload, null, 2) : '—' }}</pre>
+    <pre v-if="raw" class="mt-1 max-h-32 overflow-auto rounded bg-code-bg p-2 font-mono text-[11px] leading-snug text-info">{{ raw }}</pre>
   </div>
 </template>
