@@ -10,5 +10,5 @@
     "types": ["node"],
     "composite": true
   },
-  "include": ["vite.config.ts", "unocss.config.ts"]
+  "include": ["vite.config.ts"]
 }

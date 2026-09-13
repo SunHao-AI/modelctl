@@ -1,10 +1,19 @@
 <!DOCTYPE html>
-<html lang="zh-CN" class="dark">
+<html lang="zh-CN" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="modelctl 模型管控 Web UI" />
     <title>modelctl Web UI</title>
+    <script>
+      // 早于样式生效敲定主题，避免浅色用户首屏闪一下深色。
+      // 与 stores/theme.ts 共用同一 localStorage 键；缺省 = 跟随系统。
+      (function () {
+        var m = localStorage.getItem('modelctl_theme');
+        var dark = m ? m === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>

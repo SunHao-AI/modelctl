@@ -1,0 +1,79 @@
+/* 设计令牌唯一真源。语义命名，业务代码禁止引用具体色值。
+   浅色 = iOS 留白（靠阴影分层）；深色 = macOS 毛玻璃（靠半透明 + 内高光分层）。 */
+
+:root[data-theme="light"] {
+  --canvas: #f2f3f7;
+  --canvas-tint: radial-gradient(120% 80% at 100% 0%, rgba(0,113,227,.06) 0%, transparent 55%);
+  --chrome: rgba(255,255,255,.72);
+  --surface-2: #ffffff;
+  --surface-3: #f4f5f8;
+  --surface-4: #eceef3;
+  --label: #0f1219;
+  --label-2: #525b6b;
+  --label-3: #8790a0;
+  --separator: rgba(0,0,0,.075);
+  --separator-soft: rgba(0,0,0,.045);
+  --accent: #0071e3;
+  --accent-hover: #0077ed;
+  --on-accent: #ffffff;
+  --accent-bg: rgba(0,113,227,.10);
+  --accent-line: rgba(0,113,227,.22);
+  --ok: #0a8a4a;      --ok-bg: rgba(10,138,74,.09);     --ok-line: rgba(10,138,74,.20);
+  --warn: #a15c07;    --warn-bg: rgba(161,92,7,.09);    --warn-line: rgba(161,92,7,.20);
+  --danger: #d0331f;  --danger-bg: rgba(208,51,31,.08); --danger-line: rgba(208,51,31,.20);
+  --info: #0a6ed1;
+  --muted: #c2c8d4;
+  --shadow-s: 0 1px 2px rgba(16,24,40,.05);
+  --shadow-m: 0 1px 2px rgba(16,24,40,.05), 0 10px 26px -14px rgba(16,24,40,.22);
+  --shadow-l: 0 2px 6px rgba(16,24,40,.07), 0 24px 60px -24px rgba(16,24,40,.30);
+  --inset-hl: none;
+  --seg-bg: rgba(120,126,140,.14);
+  --seg-knob: #ffffff;
+  --blur: saturate(180%) blur(20px);
+}
+
+:root[data-theme="dark"] {
+  --canvas: #0a0c11;
+  --canvas-tint: radial-gradient(110% 75% at 12% -8%, rgba(59,130,246,.16) 0%, transparent 55%),
+                 radial-gradient(90% 70% at 96% -4%, rgba(16,185,129,.10) 0%, transparent 52%);
+  --chrome: rgba(26,30,40,.60);
+  --surface-2: rgba(255,255,255,.055);
+  --surface-3: rgba(255,255,255,.085);
+  --surface-4: rgba(255,255,255,.12);
+  --label: #f1f4f9;
+  --label-2: #a9b3c4;
+  --label-3: #78829a;
+  --separator: rgba(255,255,255,.085);
+  --separator-soft: rgba(255,255,255,.05);
+  --accent: #4c9bff;
+  --accent-hover: #66abff;
+  --on-accent: #04101f;
+  --accent-bg: rgba(76,155,255,.14);
+  --accent-line: rgba(76,155,255,.26);
+  --ok: #3ddc97;      --ok-bg: rgba(61,220,151,.11);    --ok-line: rgba(61,220,151,.22);
+  --warn: #f5c451;    --warn-bg: rgba(245,196,81,.11);  --warn-line: rgba(245,196,81,.22);
+  --danger: #ff7a85;  --danger-bg: rgba(255,122,133,.10); --danger-line: rgba(255,122,133,.22);
+  --info: #6ab8ff;
+  --muted: #4c5771;
+  --shadow-s: 0 2px 8px rgba(0,0,0,.28);
+  --shadow-m: 0 4px 14px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.06);
+  --shadow-l: 0 18px 50px -18px rgba(0,0,0,.70), inset 0 1px 0 rgba(255,255,255,.07);
+  --inset-hl: inset 0 1px 0 rgba(255,255,255,.07);
+  --seg-bg: rgba(255,255,255,.085);
+  --seg-knob: rgba(255,255,255,.96);
+  --blur: saturate(180%) blur(22px);
+}
+
+/* 不随主题变：代码面恒深（设计文档 D7）+ 形状 / 动效 / 字体 */
+:root {
+  --code-bg: #0d1117;
+  --code-fg: #c9d4e3;
+  --code-line: rgba(255,255,255,.07);
+  --r-s: 7px;
+  --r-m: 11px;
+  --r-l: 15px;
+  --r-xl: 20px;
+  --ease: cubic-bezier(.32,.72,0,1);
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", JetBrains Mono, Menlo, Consolas, monospace;
+}
