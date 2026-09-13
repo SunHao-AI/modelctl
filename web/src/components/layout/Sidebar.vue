@@ -1,30 +1,46 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import { useRoute } from 'vue-router';
+import {
+  Activity, Box, Boxes, Database, Layers, LayoutDashboard, MessageSquare,
+  Network, ScrollText, Server, Settings, ShieldCheck, Target, UserRound,
+  type LucideIcon,
+} from 'lucide-vue-next';
 
 const route = useRoute();
+
+type Group = '概览' | '运维' | '系统';
 
 interface MenuItem {
   to: string;
   label: string;
-  icon: string;
+  icon: LucideIcon;
+  group: Group;
 }
 
-// 侧边菜单（与 router 路由一一对应）
+/** 侧边菜单：与 router 路由一一对应。项 / 顺序 / 路径 / 文案不得改动（e2e 依赖）。 */
 const menus: MenuItem[] = [
-  { to: '/dashboard', label: '仪表板', icon: 'dashboard' },
-  { to: '/models', label: '模型', icon: 'models' },
-  { to: '/services', label: '服务', icon: 'services' },
-  { to: '/chat', label: 'AI 对话', icon: 'chat' },
-  { to: '/envs', label: '环境', icon: 'envs' },
-  { to: '/probe', label: '体检', icon: 'probe' },
-  { to: '/audit', label: '审计', icon: 'audit' },
-  { to: '/cluster/goals', label: '集群目标', icon: 'goals' },
-  { to: '/cluster/nodes', label: '集群', icon: 'cluster' },
-  { to: '/accounts', label: '账号管理', icon: 'accounts-admin' },
-  { to: '/account/self', label: '我的账号', icon: 'accounts-self' },
-  { to: '/config', label: '配置', icon: 'config' },
-  { to: '/settings', label: '设置', icon: 'settings' },
+  { to: '/dashboard', label: '仪表板', icon: LayoutDashboard, group: '概览' },
+  { to: '/models', label: '模型', icon: Boxes, group: '概览' },
+  { to: '/services', label: '服务', icon: Server, group: '概览' },
+  { to: '/chat', label: 'AI 对话', icon: MessageSquare, group: '概览' },
+  { to: '/envs', label: '环境', icon: Layers, group: '运维' },
+  { to: '/probe', label: '体检', icon: Activity, group: '运维' },
+  { to: '/cluster/goals', label: '集群目标', icon: Target, group: '运维' },
+  { to: '/cluster/nodes', label: '集群', icon: Network, group: '运维' },
+  { to: '/audit', label: '审计', icon: ScrollText, group: '系统' },
+  { to: '/accounts', label: '账号管理', icon: ShieldCheck, group: '系统' },
+  { to: '/account/self', label: '我的账号', icon: UserRound, group: '系统' },
+  { to: '/config', label: '配置', icon: Database, group: '系统' },
+  { to: '/settings', label: '设置', icon: Settings, group: '系统' },
 ];
+
+const GROUPS: Group[] = ['概览', '运维', '系统'];
+
+/** 按分组切分，组内保持 menus 原顺序 */
+const sections = computed(() =>
+  GROUPS.map((g) => ({ group: g, items: menus.filter((m) => m.group === g) })).filter((s) => s.items.length),
+);
 
 // 通过前缀匹配判定当前激活项（精确优先）
 function isActive(item: MenuItem) {
@@ -33,66 +49,60 @@ function isActive(item: MenuItem) {
 </script>
 
 <template>
-  <aside
-    class="flex h-full w-56 flex-col border-r border-slate-800 bg-slate-900/80 backdrop-blur"
-  >
+  <aside class="glass flex h-full w-56 flex-col border-r border-sep">
     <!-- Logo -->
-    <div class="flex items-center gap-2 px-4 py-4 border-b border-slate-800">
-      <svg class="size-6 text-blue-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h6l2-2h10v14H3z" /></svg>
-      <span class="text-base font-semibold tracking-wide">modelctl</span>
+    <div class="flex items-center gap-2.5 px-4 pb-4 pt-4">
+      <span
+        class="grid size-[22px] shrink-0 place-items-center rounded-[7px] text-white"
+        style="background: linear-gradient(160deg, var(--accent), #0a4fb0); box-shadow: 0 2px 7px rgba(0,113,227,.38)"
+      >
+        <Box :size="12" :stroke-width="2.6" />
+      </span>
+      <span class="text-[14.5px] font-semibold tracking-[-.015em] text-label">modelctl</span>
     </div>
 
-    <!-- 菜单 -->
-    <nav class="flex-1 overflow-y-auto px-2 py-3">
-      <router-link
-        v-for="m in menus"
-        :key="m.to"
-        :to="m.to"
-        :class="[
-          'group flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors',
-          isActive(m)
-            ? 'bg-blue-600/20 text-blue-300 border-l-2 border-blue-500'
-            : 'text-slate-300 hover:bg-slate-800 hover:text-slate-100',
-        ]"
-      >
-        <!-- 内联 SVG 图标 -->
-        <span class="size-5 flex items-center justify-center shrink-0">
-          <!-- dashboard -->
-          <template v-if="m.icon === 'dashboard'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" /><rect x="14" y="3" width="7" height="5" /><rect x="14" y="12" width="7" height="9" /><rect x="3" y="16" width="7" height="5" /></svg></template>
-          <!-- models -->
-          <template v-else-if="m.icon === 'models'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" /><path d="M3.27 6.96 12 12.01l8.73-5.05" /><path d="M12 22.08V12" /></svg></template>
-          <!-- services -->
-          <template v-else-if="m.icon === 'services'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2" /><rect x="2" y="14" width="20" height="8" rx="2" /><line x1="6" y1="6" x2="6.01" y2="6" /><line x1="6" y1="18" x2="6.01" y2="18" /></svg></template>
-          <!-- envs -->
-          <template v-else-if="m.icon === 'envs'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg></template>
-          <!-- chat：对话气泡 + 火花（调试台） -->
-          <template v-else-if="m.icon === 'chat'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5 8.7 8.7 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 8.5-8.5 8.38 8.38 0 0 1 8.5 8.5z" /><path d="M12 8.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z" /></svg></template>
-          <!-- probe -->
-          <template v-else-if="m.icon === 'probe'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2" /></svg></template>
-          <!-- audit -->
-          <template v-else-if="m.icon === 'audit'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /><line x1="10" y1="9" x2="8" y2="9" /></svg></template>
-          <!-- config -->
-          <template v-else-if="m.icon === 'config'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg></template>
-          <!-- settings -->
-          <template v-else-if="m.icon === 'settings'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20v-6" /><path d="M5 4h14l-2 4H7l-2-4z" /><path d="M19 8v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V8" /></svg></template>
-          <!-- cluster -->
-          <template v-else-if="m.icon === 'cluster'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="8.5" y="14" width="7" height="7" rx="1" /><path d="M6.5 10v1.5h11V10M12 11.5V14" /></svg></template>
-          <!-- goals -->
-          <template v-else-if="m.icon === 'goals'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6h11M9 12h11M9 18h11" /><circle cx="4.5" cy="6" r="1.5" /><circle cx="4.5" cy="12" r="1.5" /><circle cx="4.5" cy="18" r="1.5" /></svg></template>
-          <!-- accounts-admin：盾牌 + 用户（管理视角） -->
-          <template v-else-if="m.icon === 'accounts-admin'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v5c0 5-3.5 9.5-8 10-4.5-.5-8-5-8-10V6l8-3z" /><circle cx="12" cy="10" r="2.5" /><path d="M8 16c0-2 2-3 4-3s4 1 4 3" /></svg></template>
-          <!-- accounts-self：单用户 -->
-          <template v-else-if="m.icon === 'accounts-self'"><svg class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4" /><path d="M4 21c0-4 4-6 8-6s8 2 8 6" /></svg></template>
-          <!-- fallback -->
-          <svg v-else class="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9" /></svg>
-        </span>
-        <span class="truncate">{{ m.label }}</span>
-      </router-link>
+    <!-- 菜单（分组渲染，项序与旧版一致） -->
+    <nav class="flex-1 overflow-y-auto px-2 pb-3">
+      <template v-for="sec in sections" :key="sec.group">
+        <div class="px-2.5 pb-1.5 pt-3 text-[10.5px] font-semibold uppercase tracking-[.075em] text-label3">
+          {{ sec.group }}
+        </div>
+        <router-link
+          v-for="m in sec.items"
+          :key="m.to"
+          :to="m.to"
+          :class="[
+            'nav-item relative flex items-center gap-2.5 rounded-ctl px-2.5 py-[7px] text-[13.5px] transition-all duration-150',
+            isActive(m) ? 'nav-item-active font-medium text-label' : 'text-label2 hover:bg-surface3 hover:text-label',
+          ]"
+        >
+          <component :is="m.icon" :size="16" :stroke-width="1.75" class="shrink-0 opacity-90" />
+          <span class="truncate">{{ m.label }}</span>
+        </router-link>
+      </template>
     </nav>
 
     <!-- 底部 small 标签 -->
-    <div class="border-t border-slate-800 px-4 py-3 text-xs text-slate-500">
-      modelctl chainweb
-    </div>
+    <div class="border-t border-sep-soft px-4 py-3 text-[11px] text-label3">modelctl chainweb</div>
   </aside>
 </template>
+
+<style scoped>
+/* 选中项左侧 3px accent 竖条：画在容器外沿，等价旧版 border-l-2 的视觉位置，
+   但不占 padding，避免文字右移 2px */
+.nav-item-active {
+  background: var(--surface-3);
+  box-shadow: var(--inset-hl);
+}
+.nav-item-active::before {
+  content: '';
+  position: absolute;
+  left: -8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 15px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent);
+}
+</style>
