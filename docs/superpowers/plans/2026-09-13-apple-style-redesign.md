@@ -2044,9 +2044,11 @@ Expected：仅 `web/src/components/common/Loading.vue`。
 cd d:\Workplace\modelctl-1\web
 npm run build
 cd d:\Workplace\modelctl-1
-$css = Get-ChildItem dist\assets\*.css | Get-Content -Raw
+# 同时扫 CSS 与 JS：--seg-knob / --blur 这类只出现在组件内联 style 里的令牌，
+# 编译后进 JS 而非 CSS，只扫 *.css 会误报成「死令牌」
+$all = (Get-ChildItem dist\assets\* -Include *.css,*.js | Get-Content -Raw) -join "`n"
 foreach ($v in '--chrome','--surface-2','--surface-3','--label-2','--ok-bg','--danger-line','--warn-bg','--code-bg','--inset-hl','--seg-knob','--muted','--accent-bg') {
-  "$v => " + ([regex]::Matches($css, [regex]::Escape("var($v)")).Count)
+  "$v => " + ([regex]::Matches($all, [regex]::Escape("var($v)")).Count)
 }
 ```
 
