@@ -3,6 +3,8 @@ import { onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { health } from '@/api/services';
 import { useAuthStore } from '@/stores/auth';
+import ThemeSwitch from '@/components/common/ThemeSwitch.vue';
+import { useThemeStore } from '@/stores/theme';
 import { AxiosError } from 'axios';
 import {
   downloadClusterBackup,
@@ -24,8 +26,7 @@ const version = ref('');
 const lastFetchAt = ref('');
 const clearMessage = ref('');
 const clearBusy = ref(false);
-/** 主题标识（暂存；不做实际主题切换，仅占位） */
-const darkTheme = ref<boolean>(true);
+const theme = useThemeStore();
 
 /** 拉取版本（health 无鉴权，本页挂载时主动调用） */
 async function fetchVersion() {
@@ -118,17 +119,16 @@ onMounted(() => { fetchVersion(); fetchSettings(); });
       </div>
     </section>
 
-    <!-- 主题（占位） -->
+    <!-- 外观 -->
     <section class="card">
-      <h3 class="mb-3 text-sm font-semibold text-slate-100">主题</h3>
-      <label class="inline-flex items-center gap-2 text-sm text-slate-300">
-        <input
-          type="checkbox"
-          v-model="darkTheme"
-          class="size-4 accent-blue-500"
-        />
-        深色模式（占位，当前简历固定为深色）
-      </label>
+      <h3 class="mb-3 text-sm font-semibold text-label">外观</h3>
+      <div class="flex flex-wrap items-center gap-3">
+        <ThemeSwitch />
+        <span class="text-xs text-label3">当前生效：{{ theme.resolved === 'dark' ? '深色' : '浅色' }}</span>
+      </div>
+      <p class="mt-2 text-xs text-label3">
+        「跟随系统」随系统深浅色偏好实时切换；手动选择会记住并覆盖系统设置。
+      </p>
     </section>
 
     <!-- 后端端点 -->

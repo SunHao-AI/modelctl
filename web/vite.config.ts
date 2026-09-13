@@ -44,6 +44,7 @@ export default defineConfig(({ mode }) => {
     // EventSource 等浏览器 API 可用），只收 src/**\/*.test.ts，不碰 e2e/（Playwright 独立跑）。
     test: {
       environment: 'jsdom',
+      setupFiles: ['./src/test/setup.ts'],
       include: ['src/**/*.test.ts'],
       clearMocks: true,
       // 并行 worker 冷启动时，路由守卫测试的懒加载视图（dynamic import → esbuild
