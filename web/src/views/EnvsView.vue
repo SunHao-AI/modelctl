@@ -140,19 +140,19 @@ onMounted(async () => {
   <div class="space-y-4">
     <!-- 工具条 -->
     <div class="flex items-center justify-between">
-      <p class="text-sm text-slate-400">
+      <p class="num text-sm text-label2">
         共 {{ targets.length }} 个受管目标（managed engine + gateway 共用仓）
       </p>
       <button class="btn-ghost" :disabled="loading" @click="load">刷新</button>
     </div>
 
     <p v-if="errMsg" class="text-sm text-red-400">{{ errMsg }}</p>
-    <p v-if="notice" class="text-sm text-emerald-300">{{ notice }}</p>
+    <p v-if="notice" class="text-sm text-ok">{{ notice }}</p>
 
     <!-- 表格 -->
     <section class="card !p-0 overflow-x-auto">
       <table v-if="targets.length" class="w-full text-sm">
-        <thead class="bg-slate-800/40 text-left text-xs text-slate-400 uppercase tracking-wider">
+        <thead class="bg-surface3 text-left text-xs text-label2 uppercase tracking-wider">
           <tr>
             <th class="px-3 py-2">目标</th>
             <th class="px-3 py-2">状态</th>
@@ -165,22 +165,22 @@ onMounted(async () => {
             v-for="t in targets"
             :id="`env-row-${t.name}`"
             :key="t.name"
-            class="border-b border-slate-800/40 transition-colors"
-            :class="focusName === t.name ? 'bg-amber-500/10' : ''"
+            class="border-b border-sep transition-colors"
+            :class="focusName === t.name ? 'bg-warn-bg' : ''"
           >
-            <td class="px-3 py-2 font-mono text-slate-100">{{ t.name }}</td>
+            <td class="px-3 py-2 font-mono text-label">{{ t.name }}</td>
             <td class="px-3 py-2">
               <span
-                class="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs"
+                class="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs"
                 :class="t.installed
-                  ? 'bg-emerald-600/15 text-emerald-300 border border-emerald-500/30'
-                  : 'bg-slate-600/15 text-slate-400 border border-slate-500/30'"
+                  ? 'bg-ok-bg text-ok border-ok-line'
+                  : 'bg-surface3 text-label2 border-sep'"
               >
-                <span class="size-1.5 rounded-full" :class="t.installed ? 'bg-emerald-400' : 'bg-slate-500'" />
+                <span class="stonedot" :class="t.installed ? 'bg-ok' : 'bg-muted'" />
                 {{ t.installed ? '已安装' : '未安装' }}
               </span>
             </td>
-            <td class="px-3 py-2 text-xs text-slate-400">{{ t.detail }}</td>
+            <td class="px-3 py-2 text-xs text-label2">{{ t.detail }}</td>
             <td class="px-3 py-2 text-right">
               <div class="flex items-center justify-end gap-2">
                 <!-- 未安装可用 Setup（任务流，长耗时） -->
@@ -209,8 +209,8 @@ onMounted(async () => {
           </tr>
         </tbody>
       </table>
-      <div v-else-if="!loading" class="p-6 text-sm text-slate-500">尚无受管目标</div>
-      <div v-else class="p-6 text-sm text-slate-500">加载中…</div>
+      <div v-else-if="!loading" class="p-6 text-sm text-label3">尚无受管目标</div>
+      <div v-else class="p-6 text-sm text-label3">加载中…</div>
     </section>
 
     <!-- Docker 旁路：托管 venv 仅支持 Linux，已支持引擎可改用官方 docker 镜像 -->
@@ -219,24 +219,24 @@ onMounted(async () => {
     <section
       id="docker-bypass"
       class="card space-y-3 transition-shadow"
-      :class="focusNeedsBypass() ? 'ring-1 ring-amber-400/60' : ''"
+      :class="focusNeedsBypass() ? 'ring-2 ring-warn' : ''"
     >
       <div class="flex flex-wrap items-start justify-between gap-2">
         <div>
-          <h2 class="text-sm font-medium text-slate-200">Docker 旁路</h2>
-          <p class="mt-0.5 text-xs text-slate-500">
+          <h2 class="text-sm font-medium text-label">Docker 旁路</h2>
+          <p class="mt-0.5 text-xs text-label3">
             托管 venv 仅支持 Linux；下列引擎可改用官方 docker 镜像绕过 venv（编辑模型 yaml 后仍由 modelctl 启停）
           </p>
         </div>
         <div class="flex items-center gap-2">
           <span
-            class="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs"
+            class="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs"
             :class="dockerEnv?.ready
-              ? 'bg-emerald-600/15 text-emerald-300 border border-emerald-500/30'
-              : 'bg-red-600/15 text-red-300 border border-red-500/30'"
+              ? 'bg-ok-bg text-ok border-ok-line'
+              : 'bg-danger-bg text-danger border-danger-line'"
             :title="dockerEnv && !dockerEnv.ready ? dockerEnv.missing.join('；') : undefined"
           >
-            <span class="size-1.5 rounded-full" :class="dockerEnv?.ready ? 'bg-emerald-400' : 'bg-red-400'" />
+            <span class="stonedot" :class="dockerEnv?.ready ? 'bg-ok' : 'bg-danger'" />
             {{ dockerEnv?.ready ? 'Docker 环境就绪' : 'Docker 环境缺失' }}
           </span>
           <button class="btn-ghost !py-1 !px-2 text-xs" :disabled="diagBusy" @click="onDiagnose">
@@ -245,20 +245,20 @@ onMounted(async () => {
         </div>
       </div>
 
-      <p v-if="dockerEnv && !dockerEnv.ready" class="text-xs text-slate-500">{{ dockerEnv.guide }}</p>
+      <p v-if="dockerEnv && !dockerEnv.ready" class="text-xs text-label3">{{ dockerEnv.guide }}</p>
 
       <!-- 完整诊断：首次展开懒加载一次（后端含子进程探测） -->
-      <div v-if="diagOpen" class="space-y-1.5 border-t border-slate-800/40 pt-3">
+      <div v-if="diagOpen" class="space-y-1.5 border-t border-sep pt-3">
         <p v-if="diagErr" class="text-xs text-red-400">{{ diagErr }}</p>
         <template v-else-if="diagData">
           <div v-for="c in diagData.checks" :key="c.key" class="flex flex-wrap items-center gap-x-2 text-xs">
-            <span class="size-1.5 rounded-full" :class="c.ok ? 'bg-emerald-400' : 'bg-red-400'" />
-            <span class="text-slate-300">{{ c.label }}</span>
-            <span v-if="!c.ok" class="break-all text-slate-500">{{ c.detail }}</span>
+            <span class="stonedot" :class="c.ok ? 'bg-ok' : 'bg-danger'" />
+            <span class="text-label2">{{ c.label }}</span>
+            <span v-if="!c.ok" class="break-all text-label3">{{ c.detail }}</span>
           </div>
           <div class="mt-2">
             <div class="mb-1 flex items-center justify-between">
-              <span class="text-xs text-slate-500">
+              <span class="text-xs text-label3">
                 安装脚本（复制到部署机 root shell；WebUI 只展示不执行）
               </span>
               <button class="btn-ghost !py-1 !px-2 text-xs" @click="copyText('inst', diagData.instructions)">
@@ -266,47 +266,47 @@ onMounted(async () => {
               </button>
             </div>
             <pre
-              class="max-h-72 overflow-auto bg-[#0b1120] p-3 font-mono text-xs leading-6 whitespace-pre text-slate-300"
+              class="max-h-72 overflow-auto rounded-ctl bg-code-bg p-3 font-mono text-xs leading-6 whitespace-pre text-code-fg"
             >{{ diagData.instructions }}</pre>
           </div>
         </template>
-        <p v-else class="text-xs text-slate-500">诊断中…</p>
+        <p v-else class="text-xs text-label3">诊断中…</p>
       </div>
 
-      <p v-if="!dockerBypass.length" class="text-xs text-slate-500">
+      <p v-if="!dockerBypass.length" class="text-xs text-label3">
         当前无可用 Docker 镜像引擎（manifest 未加载或未声明引擎）；诊断按钮仍可用于探测 Docker 环境。
       </p>
 
       <!-- 逐引擎指引 -->
       <div v-if="dockerBypass.length" class="space-y-2">
-        <div v-for="b in dockerBypass" :key="b.name" class="space-y-1.5 border-t border-slate-800/40 pt-2.5">
+        <div v-for="b in dockerBypass" :key="b.name" class="space-y-1.5 border-t border-sep pt-2.5">
           <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-            <span class="font-mono text-slate-300">{{ b.name }}</span>
+            <span class="font-mono text-label2">{{ b.name }}</span>
             <span
-              class="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5"
+              class="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5"
               :class="b.docker_supported
-                ? 'bg-emerald-600/15 text-emerald-300 border border-emerald-500/30'
-                : 'bg-slate-600/15 text-slate-400 border border-slate-500/30'"
+                ? 'bg-ok-bg text-ok border-ok-line'
+                : 'bg-surface3 text-label2 border-sep'"
             >
-              <span class="size-1.5 rounded-full" :class="b.docker_supported ? 'bg-emerald-400' : 'bg-slate-500'" />
+              <span class="stonedot" :class="b.docker_supported ? 'bg-ok' : 'bg-muted'" />
               {{ b.docker_supported ? '支持 docker 运行时' : '暂不支持 docker' }}
             </span>
           </div>
-          <p v-if="!b.docker_supported" class="text-xs text-slate-500">{{ b.note }}</p>
+          <p v-if="!b.docker_supported" class="text-xs text-label3">{{ b.note }}</p>
           <template v-else>
             <div class="flex flex-wrap items-center gap-2 text-xs">
-              <span class="text-slate-500">yaml 片段</span>
-              <code class="break-all text-slate-300">{{ b.yaml_field_path }}: {{ b.image_example }}</code>
+              <span class="text-label3">yaml 片段</span>
+              <code class="break-all text-label2">{{ b.yaml_field_path }}: {{ b.image_example }}</code>
               <button
                 class="btn-ghost !py-0.5 !px-2 text-xs"
                 @click="copyText(b.name, `${b.yaml_field_path}: ${b.image_example}`)"
               >
                 {{ copiedKey === b.name ? '已复制' : '复制' }}
               </button>
-              <span class="text-slate-600">·</span>
-              <span class="break-all text-slate-500">示例 <code class="text-slate-400">{{ b.example_yaml }}</code></span>
+              <span class="text-label3">·</span>
+              <span class="break-all text-label3">示例 <code class="text-label2">{{ b.example_yaml }}</code></span>
             </div>
-            <ol class="ml-4 list-decimal space-y-0.5 text-xs text-slate-400">
+            <ol class="ml-4 list-decimal space-y-0.5 text-xs text-label2">
               <li v-for="(s, i) in b.steps" :key="i" class="break-all">{{ s }}</li>
             </ol>
           </template>
@@ -324,22 +324,22 @@ onMounted(async () => {
     <!-- 非托管引擎说明：原生二进制 / 官方安装器 / 源码编译，不建 venv 故不在上表 -->
     <section v-if="unmanaged.length" class="card space-y-2">
       <div class="flex items-baseline justify-between">
-        <h2 class="text-sm font-medium text-slate-200">非托管引擎</h2>
-        <span class="text-xs text-slate-500">原生或官方安装器，无需托管 venv</span>
+        <h2 class="text-sm font-medium text-label">非托管引擎</h2>
+        <span class="text-xs text-label3">原生或官方安装器，无需托管 venv</span>
       </div>
       <div v-for="u in unmanaged" :key="u.name" class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-        <span class="font-mono text-slate-300">{{ u.name }}</span>
+        <span class="font-mono text-label2">{{ u.name }}</span>
         <span
-          class="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5"
+          class="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5"
           :class="u.installed
-            ? 'bg-emerald-600/15 text-emerald-300 border border-emerald-500/30'
-            : 'bg-slate-600/15 text-slate-400 border border-slate-500/30'"
+            ? 'bg-ok-bg text-ok border-ok-line'
+            : 'bg-surface3 text-label2 border-sep'"
         >
-          <span class="size-1.5 rounded-full" :class="u.installed ? 'bg-emerald-400' : 'bg-slate-500'" />
+          <span class="stonedot" :class="u.installed ? 'bg-ok' : 'bg-muted'" />
           {{ u.installed ? '已安装' : '未安装' }}
         </span>
-        <span v-if="u.installed" class="break-all text-slate-500">{{ u.path }}</span>
-        <code v-else class="break-all whitespace-pre-line text-slate-400">{{ u.install_hint }}</code>
+        <span v-if="u.installed" class="break-all text-label3">{{ u.path }}</span>
+        <code v-else class="break-all whitespace-pre-line text-label2">{{ u.install_hint }}</code>
       </div>
     </section>
 

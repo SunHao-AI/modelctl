@@ -9,11 +9,12 @@ const disabled = ref(false); // 404 = 未启用集群角色（solo/worker）
 const error = ref('');
 let timer: number | undefined;
 
+/** 节点状态 → chip 类（卡片范式：状态在卡片头以 chip 呈现） */
 const STATUS_STYLE: Record<string, string> = {
-  online: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
-  stale: 'bg-amber-500/15 text-amber-400 border-amber-500/30',
-  offline: 'bg-slate-500/15 text-slate-400 border-slate-500/30',
-  disabled: 'bg-rose-500/15 text-rose-400 border-rose-500/30',
+  online: 'border-ok-line bg-ok-bg text-ok',
+  stale: 'border-warn-line bg-warn-bg text-warn',
+  offline: 'border-sep bg-surface3 text-label2',
+  disabled: 'border-danger-line bg-danger-bg text-danger',
 };
 
 // 轮询防重叠：pending 期间新的 tick 直接返回，避免同样的同 URL 请求被浏览器
@@ -64,53 +65,66 @@ onBeforeUnmount(() => window.clearInterval(timer));
 <template>
   <div class="p-6">
     <div class="mb-4 flex items-center justify-between">
-      <h1 class="text-lg font-semibold text-slate-100">集群节点</h1>
-      <div v-if="status" class="text-sm text-slate-400">
+      <h1 class="text-lg font-semibold text-label">集群节点</h1>
+      <div v-if="status" class="num text-sm text-label2">
         角色 {{ status.role }} · {{ status.nodes_online }}/{{ status.nodes_total }} online
       </div>
     </div>
 
-    <div v-if="disabled" class="rounded-lg border border-slate-700 bg-slate-800/50 p-6 text-sm text-slate-400">
+    <div v-if="disabled" class="rounded-ctl border border-sep bg-surface3 p-6 text-sm text-label2">
       当前节点未启用集群角色。中心机请在 .env 设置 CLUSTER_ROLE=both 后重启 webui，
-      并执行 <code class="text-blue-400">modelctl cluster init</code>。
+      并执行 <code class="text-accent">modelctl cluster init</code>。
     </div>
 
-    <div v-else-if="error" class="rounded-lg border border-rose-800 bg-rose-900/30 p-4 text-sm text-rose-300">
+    <div v-else-if="error" class="rounded-ctl border border-danger-line bg-danger-bg p-4 text-sm text-danger">
       {{ error }}
     </div>
 
-    <table v-else class="w-full text-left text-sm">
-      <thead class="text-slate-400">
-        <tr class="border-b border-slate-700">
-          <th class="py-2 pr-4">节点</th>
-          <th class="py-2 pr-4">LAN</th>
-          <th class="py-2 pr-4">角色</th>
-          <th class="py-2 pr-4">容量</th>
-          <th class="py-2 pr-4">状态</th>
-          <th class="py-2 pr-4">最后心跳</th>
-          <th class="py-2 pr-4">租约剩余</th>
-          <th class="py-2">主机</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-for="n in nodes" :key="n.node_id" class="border-b border-slate-800 text-slate-200">
-          <td class="py-2 pr-4 font-mono">{{ n.node_id }}</td>
-          <td class="py-2 pr-4 text-slate-400">{{ n.lan_id || '-' }}</td>
-          <td class="py-2 pr-4">{{ n.role }}</td>
-          <td class="py-2 pr-4 text-slate-400">{{ n.capacity_text }}</td>
-          <td class="py-2 pr-4">
-            <span class="rounded border px-2 py-0.5 text-xs" :class="STATUS_STYLE[n.status] || STATUS_STYLE.offline">
-              {{ n.status }}
-            </span>
-          </td>
-          <td class="py-2 pr-4">{{ fmtAge(n.since_seen_s) }}</td>
-          <td class="py-2 pr-4">{{ n.lease_left_s === null ? '-' : fmtAge(Math.max(n.lease_left_s, 0)) }}</td>
-          <td class="py-2 text-slate-400">{{ n.hostname || n.host_ip || '-' }}</td>
-        </tr>
-        <tr v-if="!nodes.length">
-          <td colspan="8" class="py-6 text-center text-slate-500">暂无节点，等待 worker join…</td>
-        </tr>
-      </tbody>
-    </table>
+    <!-- 卡片网格：原表格 8 列（节点/LAN/角色/容量/状态/最后心跳/租约剩余/主机）逐列搬入，一列不丢 -->
+    <div v-else class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+      <router-link
+        v-for="n in nodes"
+        :key="n.node_id"
+        :to="`/cluster/nodes/${encodeURIComponent(n.node_id)}`"
+        class="block rounded-card border border-sep bg-surface2 p-3.5 transition-all duration-200 hover:-translate-y-px"
+        style="box-shadow: var(--shadow-s)"
+      >
+        <div class="flex items-start gap-2">
+          <div class="min-w-0 flex-1">
+            <div class="truncate text-[13px] font-medium text-label" style="font-family: var(--mono)">{{ n.node_id }}</div>
+            <div class="num mt-0.5 truncate text-[11.5px] text-label3" style="font-family: var(--mono)">{{ n.lan_id || '-' }}</div>
+          </div>
+          <span
+            :class="[
+              'inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium',
+              STATUS_STYLE[n.status] || STATUS_STYLE.offline,
+            ]"
+          >
+            <span class="stonedot bg-current" />{{ n.status }}
+          </span>
+        </div>
+        <div class="mt-2.5 flex flex-wrap gap-x-3.5 gap-y-1">
+          <span class="text-[11.5px] text-label3">角色
+            <b class="font-medium text-label2">{{ n.role }}</b>
+          </span>
+          <span class="text-[11.5px] text-label3">容量
+            <b class="num font-medium text-label2">{{ n.capacity_text }}</b>
+          </span>
+          <span class="text-[11.5px] text-label3">最后心跳
+            <b class="num font-medium text-label2">{{ fmtAge(n.since_seen_s) }}</b>
+          </span>
+          <span class="text-[11.5px] text-label3">租约剩余
+            <b class="num font-medium text-label2">{{ n.lease_left_s === null ? '-' : fmtAge(Math.max(n.lease_left_s, 0)) }}</b>
+          </span>
+          <span class="text-[11.5px] text-label3">主机
+            <b class="num font-medium text-label2">{{ n.hostname || n.host_ip || '-' }}</b>
+          </span>
+        </div>
+      </router-link>
+
+      <div v-if="!nodes.length" class="col-span-full rounded-ctl border border-sep bg-surface3 p-6 text-center text-sm text-label3">
+        暂无节点，等待 worker join…
+      </div>
+    </div>
   </div>
 </template>

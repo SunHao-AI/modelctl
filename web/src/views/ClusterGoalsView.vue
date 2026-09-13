@@ -39,15 +39,15 @@ const filterNode = ref('');
 const filterProfile = ref('');
 
 const STAGE_STYLE: Record<string, string> = {
-  converged: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
-  converging: 'bg-blue-500/15 text-blue-400 border-blue-500/30',
-  failed: 'bg-rose-500/15 text-rose-400 border-rose-500/30',
+  converged: 'border-ok-line bg-ok-bg text-ok',
+  converging: 'border-accent-line bg-accent-bg text-accent',
+  failed: 'border-danger-line bg-danger-bg text-danger',
 };
 const NODE_STATUS_STYLE: Record<string, string> = {
-  online: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
-  stale: 'bg-amber-500/15 text-amber-400 border-amber-500/30',
-  offline: 'bg-slate-500/15 text-slate-400 border-slate-500/30',
-  disabled: 'bg-rose-500/15 text-rose-400 border-rose-500/30',
+  online: 'border-ok-line bg-ok-bg text-ok',
+  stale: 'border-warn-line bg-warn-bg text-warn',
+  offline: 'border-sep bg-surface3 text-label2',
+  disabled: 'border-danger-line bg-danger-bg text-danger',
 };
 
 /** Axios 错误 → 后端 detail 原文（展示纪律：失败给人看的永远是后端原话） */
@@ -292,38 +292,38 @@ onBeforeUnmount(() => window.clearInterval(timer));
 <template>
   <div class="p-6">
     <div class="mb-4 flex items-center justify-between">
-      <h1 class="text-lg font-semibold text-slate-100">集群目标</h1>
+      <h1 class="text-lg font-semibold text-label">集群目标</h1>
       <div class="flex items-center gap-3">
-        <span class="text-sm text-slate-400">{{ goals.length }} 个 goal · {{ nodes.length }} 节点</span>
+        <span class="num text-sm text-label2">{{ goals.length }} 个 goal · {{ nodes.length }} 节点</span>
         <button class="btn-primary" @click="openDrawer">新建下发</button>
       </div>
     </div>
 
-    <div v-if="disabled" class="rounded-lg border border-slate-700 bg-slate-800/50 p-6 text-sm text-slate-400">
+    <div v-if="disabled" class="rounded-ctl border border-sep bg-surface3 p-6 text-sm text-label2">
       当前节点未启用集群角色。中心机请在 .env 设置 CLUSTER_ROLE=both 后重启 webui。
     </div>
 
     <template v-else>
-      <div v-if="error" class="mb-4 rounded-lg border border-rose-800 bg-rose-900/30 p-4 text-sm text-rose-300">
+      <div v-if="error" class="mb-4 rounded-ctl border border-danger-line bg-danger-bg p-4 text-sm text-danger">
         {{ error }}
       </div>
-      <div v-if="actionError" class="mb-4 rounded-lg border border-amber-800 bg-amber-900/30 p-4 text-sm text-amber-300">
+      <div v-if="actionError" class="mb-4 rounded-ctl border border-warn-line bg-warn-bg p-4 text-sm text-warn">
         {{ actionError }}
       </div>
 
       <!-- 筛选器 -->
       <div class="mb-4 flex flex-wrap items-center gap-3 text-sm">
-        <select v-model="filterState" class="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-200">
+        <select v-model="filterState" class="rounded-ctl border border-sep bg-surface2 px-2 py-1 text-label">
           <option value="all">全部状态</option>
           <option value="converged">已收敛</option>
           <option value="converging">收敛中</option>
           <option value="failed">失败</option>
         </select>
-        <select v-model="filterNode" class="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-200">
+        <select v-model="filterNode" class="rounded-ctl border border-sep bg-surface2 px-2 py-1 text-label">
           <option value="">全部节点</option>
           <option v-for="n in nodes" :key="n.node_id" :value="n.node_id">{{ n.node_id }}</option>
         </select>
-        <select v-model="filterProfile" class="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-200">
+        <select v-model="filterProfile" class="rounded-ctl border border-sep bg-surface2 px-2 py-1 text-label">
           <option value="">全部 profile</option>
           <option v-for="p in [...new Set(goals.map((g) => g.profile))].sort()" :key="p" :value="p">{{ p }}</option>
         </select>
@@ -334,42 +334,42 @@ onBeforeUnmount(() => window.clearInterval(timer));
         >
           {{ mode === 'matrix' ? '切换列表' : '切换矩阵' }}
         </button>
-        <span v-else class="text-xs text-slate-500">profile 列超过 8 个，已降级为列表形态</span>
+        <span v-else class="text-xs text-label3">profile 列超过 8 个，已降级为列表形态</span>
       </div>
 
       <!-- 矩阵形态 -->
       <table v-if="effectiveMode === 'matrix' && filteredGoals.length" class="w-full text-left text-sm">
-        <thead class="text-slate-400">
-          <tr class="border-b border-slate-700">
+        <thead class="text-label2">
+          <tr class="border-b border-sep">
             <th class="py-2 pr-4">节点</th>
             <th v-for="p in matrixColumns" :key="p" class="py-2 pr-4">{{ p }}</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="n in nodes" :key="n.node_id" class="border-b border-slate-800">
+          <tr v-for="n in nodes" :key="n.node_id" class="border-b border-sep">
             <td class="py-2 pr-4">
               <router-link
                 :to="`/cluster/nodes/${n.node_id}`"
-                class="font-mono text-blue-400 hover:underline"
+                class="font-mono text-accent hover:underline"
               >{{ n.node_id }}</router-link>
-              <span class="ml-2 rounded border px-1.5 py-0.5 text-xs" :class="NODE_STATUS_STYLE[n.status] || NODE_STATUS_STYLE.offline">
+              <span class="ml-2 rounded-ctl border px-1.5 py-0.5 text-xs" :class="NODE_STATUS_STYLE[n.status] || NODE_STATUS_STYLE.offline">
                 {{ n.status }}
               </span>
             </td>
             <td v-for="p in matrixColumns" :key="p" class="py-2 pr-4 align-top">
               <div
                 v-if="goalAt(n.node_id, p)"
-                class="cursor-pointer rounded border px-2 py-1 text-xs"
+                class="cursor-pointer rounded-ctl border px-2 py-1 text-xs"
                 :class="STAGE_STYLE[classify(goalAt(n.node_id, p)!)]"
                 :title="`${goalAt(n.node_id, p)!.stage}${goalAt(n.node_id, p)!.reason ? ' · ' + goalAt(n.node_id, p)!.reason : ''}`"
                 @click="router.push(`/cluster/nodes/${n.node_id}`)"
               >
                 {{ goalAt(n.node_id, p)!.intent }} · {{ goalAt(n.node_id, p)!.stage }}
-                <div v-if="goalAt(n.node_id, p)!.gpu?.length" class="text-slate-400">
+                <div v-if="goalAt(n.node_id, p)!.gpu?.length" class="text-label2">
                   gpu {{ goalAt(n.node_id, p)!.gpu!.join(',') }}<span v-if="goalAt(n.node_id, p)!.port"> :{{ goalAt(n.node_id, p)!.port }}</span>
                 </div>
               </div>
-              <span v-else class="text-xs text-slate-600">-</span>
+              <span v-else class="text-xs text-label3">-</span>
             </td>
           </tr>
         </tbody>
@@ -377,8 +377,8 @@ onBeforeUnmount(() => window.clearInterval(timer));
 
       <!-- 列表形态（含 >8 列降级） -->
       <table v-else-if="filteredGoals.length" class="w-full text-left text-sm">
-        <thead class="text-slate-400">
-          <tr class="border-b border-slate-700">
+        <thead class="text-label2">
+          <tr class="border-b border-sep">
             <th class="py-2 pr-4">节点</th>
             <th class="py-2 pr-4">profile</th>
             <th class="py-2 pr-4">engine</th>
@@ -391,20 +391,20 @@ onBeforeUnmount(() => window.clearInterval(timer));
           </tr>
         </thead>
         <tbody>
-          <tr v-for="g in filteredGoals" :key="g.goal_id" class="border-b border-slate-800 text-slate-200">
+          <tr v-for="g in filteredGoals" :key="g.goal_id" class="border-b border-sep text-label">
             <td class="py-2 pr-4">
-              <router-link :to="`/cluster/nodes/${g.node_id}`" class="font-mono text-blue-400 hover:underline">{{ g.node_id }}</router-link>
+              <router-link :to="`/cluster/nodes/${g.node_id}`" class="font-mono text-accent hover:underline">{{ g.node_id }}</router-link>
             </td>
             <td class="py-2 pr-4 font-mono">{{ g.profile }}</td>
-            <td class="py-2 pr-4 text-slate-400">{{ g.engine }}</td>
+            <td class="py-2 pr-4 text-label2">{{ g.engine }}</td>
             <td class="py-2 pr-4">{{ g.intent }}</td>
             <td class="py-2 pr-4">
-              <span class="rounded border px-2 py-0.5 text-xs" :class="STAGE_STYLE[classify(g)]">{{ g.stage }}</span>
-              <div v-if="g.reason" class="max-w-64 truncate text-xs text-slate-500" :title="g.reason">{{ g.reason }}</div>
+              <span class="rounded-ctl border px-2 py-0.5 text-xs" :class="STAGE_STYLE[classify(g)]">{{ g.stage }}</span>
+              <div v-if="g.reason" class="max-w-64 truncate text-xs text-label3" :title="g.reason">{{ g.reason }}</div>
             </td>
-            <td class="py-2 pr-4 text-slate-400">{{ g.state || '-' }}</td>
-            <td class="py-2 pr-4 text-slate-400">{{ g.gpu?.join(',') || '-' }}<span v-if="g.port"> :{{ g.port }}</span></td>
-            <td class="py-2 pr-4 text-slate-400">{{ g.updated_at }}</td>
+            <td class="py-2 pr-4 text-label2">{{ g.state || '-' }}</td>
+            <td class="num py-2 pr-4 text-label2">{{ g.gpu?.join(',') || '-' }}<span v-if="g.port"> :{{ g.port }}</span></td>
+            <td class="num py-2 pr-4 text-label2">{{ g.updated_at }}</td>
             <td class="py-2 whitespace-nowrap">
               <button v-if="g.intent === 'start'" class="btn-ghost mr-1" @click="rowStop(g)">stop</button>
               <button v-if="g.stage === 'FAILED'" class="btn-ghost mr-1" @click="rowRetry(g)">retry</button>
@@ -415,84 +415,84 @@ onBeforeUnmount(() => window.clearInterval(timer));
         </tbody>
       </table>
 
-      <div v-else class="rounded-lg border border-slate-700 bg-slate-800/50 p-6 text-center text-sm text-slate-500">
+      <div v-else class="rounded-ctl border border-sep bg-surface3 p-6 text-center text-sm text-label3">
         暂无匹配的 goal
       </div>
     </template>
 
     <!-- 下发抽屉（两段式：预览成功才点亮提交，永不盲发） -->
-    <div v-if="drawer" class="fixed inset-0 z-40 flex justify-end bg-black/60" @click.self="closeDrawer">
-      <div class="h-full w-full max-w-lg overflow-y-auto border-l border-slate-700 bg-slate-900 p-5">
+    <div v-if="drawer" class="fixed inset-0 z-40 flex justify-end bg-black/40" @click.self="closeDrawer">
+      <div class="glass h-full w-full max-w-lg overflow-y-auto border-l border-sep p-5">
         <div class="mb-4 flex items-center justify-between">
-          <h2 class="text-base font-semibold text-slate-100">批量下发 goal</h2>
-          <button class="text-xl text-slate-400 hover:text-slate-200" @click="closeDrawer">×</button>
+          <h2 class="text-base font-semibold text-label">批量下发 goal</h2>
+          <button class="text-xl text-label2 hover:text-label" @click="closeDrawer">×</button>
         </div>
 
         <div class="space-y-3 text-sm">
           <label class="block">
-            <span class="text-slate-400">profile</span>
-            <select v-model="formName" class="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-slate-200" @change="formEngine = ''; resetPreview()">
+            <span class="text-label2">profile</span>
+            <select v-model="formName" class="mt-1 w-full rounded-ctl border border-sep bg-surface2 px-2 py-1.5 text-label" @change="formEngine = ''; resetPreview()">
               <option value="">请选择…</option>
               <option v-for="n in catalogNames" :key="n" :value="n">{{ n }}</option>
             </select>
           </label>
 
           <label v-if="needsEngine" class="block">
-            <span class="text-amber-400">engine（同名 YAML 多引擎，必须选边）</span>
-            <select v-model="formEngine" class="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-slate-200" @change="resetPreview">
+            <span class="text-warn">engine（同名 YAML 多引擎，必须选边）</span>
+            <select v-model="formEngine" class="mt-1 w-full rounded-ctl border border-sep bg-surface2 px-2 py-1.5 text-label" @change="resetPreview">
               <option value="">请选择…</option>
               <option v-for="e in engineOptions" :key="e" :value="e">{{ e }}</option>
             </select>
           </label>
 
           <div>
-            <label class="inline-flex items-center gap-2 text-slate-300">
-              <input v-model="allNodes" type="checkbox" class="size-4 accent-blue-500" @change="resetPreview" />
+            <label class="inline-flex items-center gap-2 text-label">
+              <input v-model="allNodes" type="checkbox" class="size-4 accent-accent" @change="resetPreview" />
               全部节点（--all）
             </label>
-            <div v-if="!allNodes" class="mt-2 max-h-40 overflow-y-auto rounded border border-slate-700 bg-slate-950 p-2">
-              <label v-for="n in nodes" :key="n.node_id" class="flex items-center gap-2 py-0.5 text-slate-300">
-                <input v-model="pickedNodes" type="checkbox" :value="n.node_id" class="size-4 accent-blue-500" @change="resetPreview" />
+            <div v-if="!allNodes" class="mt-2 max-h-40 overflow-y-auto rounded-ctl border border-sep bg-surface2 p-2">
+              <label v-for="n in nodes" :key="n.node_id" class="flex items-center gap-2 py-0.5 text-label">
+                <input v-model="pickedNodes" type="checkbox" :value="n.node_id" class="size-4 accent-accent" @change="resetPreview" />
                 <span class="font-mono">{{ n.node_id }}</span>
-                <span class="text-xs text-slate-500">{{ n.status }} · {{ n.capacity_text }}</span>
+                <span class="text-xs text-label3">{{ n.status }} · {{ n.capacity_text }}</span>
               </label>
             </div>
           </div>
 
           <div class="flex gap-4">
             <label class="flex-1">
-              <span class="text-slate-400">intent</span>
-              <select v-model="intent" class="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-slate-200" @change="resetPreview">
+              <span class="text-label2">intent</span>
+              <select v-model="intent" class="mt-1 w-full rounded-ctl border border-sep bg-surface2 px-2 py-1.5 text-label" @change="resetPreview">
                 <option value="start">start</option>
                 <option value="stop">stop</option>
               </select>
             </label>
-            <label class="mt-5 inline-flex items-center gap-2 text-slate-300">
-              <input v-model="create" type="checkbox" class="size-4 accent-blue-500" @change="resetPreview" />
+            <label class="mt-5 inline-flex items-center gap-2 text-label">
+              <input v-model="create" type="checkbox" class="size-4 accent-accent" @change="resetPreview" />
               允许新建（--create）
             </label>
           </div>
 
           <label class="block">
-            <span class="text-slate-400">env_overlay（JSON 对象，可空）</span>
+            <span class="text-label2">env_overlay（JSON 对象，可空）</span>
             <textarea
               v-model="envText"
               rows="3"
-              class="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-200"
+              class="mt-1 w-full rounded-ctl border border-sep bg-code-bg px-2 py-1.5 font-mono text-xs text-code-fg"
               placeholder='{"MODEL_ROOT": "/mnt/nas"}'
               @input="resetPreview"
             />
-            <span v-if="envOverlayError" class="text-xs text-rose-400">{{ envOverlayError }}</span>
+            <span v-if="envOverlayError" class="text-xs text-danger">{{ envOverlayError }}</span>
           </label>
 
-          <div v-if="drawerError" class="rounded border border-rose-800 bg-rose-900/30 p-3 text-xs text-rose-300">{{ drawerError }}</div>
+          <div v-if="drawerError" class="rounded-ctl border border-danger-line bg-danger-bg p-3 text-xs text-danger">{{ drawerError }}</div>
 
           <!-- 预览区：gate 逐项 verdict 报告原文 -->
-          <div v-if="preview" class="rounded border border-slate-700 bg-slate-950 p-3">
-            <div class="mb-1 text-xs text-slate-400">
+          <div v-if="preview" class="rounded-ctl border border-code-line bg-code-bg p-3">
+            <div class="mb-1 text-xs text-code-fg opacity-70">
               预览（dry-run）：预计 created {{ preview.created }} · skipped {{ preview.skipped }} · errors {{ preview.errors }}
             </div>
-            <pre class="max-h-56 overflow-auto whitespace-pre-wrap text-xs text-slate-300">{{ preview.report }}</pre>
+            <pre class="max-h-56 overflow-auto whitespace-pre-wrap text-xs text-code-fg">{{ preview.report }}</pre>
           </div>
 
           <div class="flex justify-end gap-3 pt-2">

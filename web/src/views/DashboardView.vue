@@ -111,58 +111,58 @@ const engineBinaries = computed<EngineBinary[]>(() => {
     <!-- 顶部 4 卡片 -->
     <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
       <!-- 硬件 -->
-      <section class="card">
-        <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-slate-400">硬件</h3>
+      <section class="card transition-transform duration-200 hover:-translate-y-0.5" style="box-shadow: var(--shadow-m)">
+        <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-label3">硬件</h3>
         <div v-if="data?.hardware" class="space-y-2 text-sm">
           <div class="flex items-center justify-between">
-            <span class="text-slate-400">GPU 数</span>
-            <span class="font-mono text-slate-100">{{ data.hardware.gpu_count }}</span>
+            <span class="text-label2">GPU 数</span>
+            <span class="num text-[26px] leading-tight font-semibold tracking-[-.028em] text-label">{{ data.hardware.gpu_count }}</span>
           </div>
           <div class="flex items-center justify-between">
-            <span class="text-slate-400">总显存</span>
-            <span class="font-mono text-slate-100">{{ data.hardware.total_vram_gb }} GB</span>
+            <span class="text-label2">总显存</span>
+            <span class="num text-[26px] leading-tight font-semibold tracking-[-.028em] text-label">{{ data.hardware.total_vram_gb }} GB</span>
           </div>
           <div class="flex items-start justify-between gap-2">
-            <span class="text-slate-400 shrink-0">型号</span>
-            <span class="truncate font-mono text-slate-100" :title="data.hardware.gpu_name || '未探测'">
+            <span class="shrink-0 text-label2">型号</span>
+            <span class="truncate font-mono text-label" :title="data.hardware.gpu_name || '未探测'">
               {{ data.hardware.gpu_name || '未探测' }}
             </span>
           </div>
         </div>
-        <div v-else class="text-sm text-slate-500">加载中…</div>
+        <div v-else class="text-sm text-label3">加载中…</div>
       </section>
 
       <!-- 服务（gateway + stats） -->
-      <section class="card">
-        <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-slate-400">服务</h3>
+      <section class="card transition-transform duration-200 hover:-translate-y-0.5" style="box-shadow: var(--shadow-m)">
+        <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-label3">服务</h3>
         <div v-if="data?.services" class="space-y-2 text-sm">
           <div class="flex items-center justify-between">
-            <span class="text-slate-400">gateway:<span class="font-mono">:{{ data.services.gateway.port }}</span></span>
+            <span class="text-label2">gateway:<span class="num">:{{ data.services.gateway.port }}</span></span>
             <StatusBadge :state="data.services.gateway.state" />
           </div>
           <div class="flex items-center justify-between">
-            <span class="text-slate-400">stats:<span class="font-mono">:{{ data.services.stats.port }}</span></span>
+            <span class="text-label2">stats:<span class="num">:{{ data.services.stats.port }}</span></span>
             <StatusBadge :state="data.services.stats.state" />
           </div>
         </div>
-        <div v-else class="text-sm text-slate-500">加载中…</div>
+        <div v-else class="text-sm text-label3">加载中…</div>
       </section>
 
       <!-- 模型 -->
-      <section class="card">
-        <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-slate-400">模型</h3>
+      <section class="card transition-transform duration-200 hover:-translate-y-0.5" style="box-shadow: var(--shadow-m)">
+        <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-label3">模型</h3>
         <div v-if="data" class="space-y-2 text-sm">
           <div class="flex items-center justify-between">
-            <span class="text-slate-400">总数</span>
-            <span class="font-mono text-slate-100">{{ data.model_count }}</span>
+            <span class="text-label2">总数</span>
+            <span class="num font-semibold tracking-[-.028em] text-label">{{ data.model_count }}</span>
           </div>
           <div class="flex items-center justify-between">
-            <span class="text-slate-400">运行中</span>
-            <span class="font-mono text-emerald-300">{{ runningCount }}</span>
+            <span class="text-label2">运行中</span>
+            <span class="num font-semibold tracking-[-.028em] text-ok">{{ runningCount }}</span>
           </div>
           <div class="flex items-start justify-between gap-2">
-            <span class="text-slate-400 shrink-0">默认</span>
-            <span class="truncate font-mono text-slate-100" :title="data.default_model || '未配置'">
+            <span class="shrink-0 text-label2">默认</span>
+            <span class="truncate font-mono text-label" :title="data.default_model || '未配置'">
               {{ data.default_model || '未配置' }}
             </span>
           </div>
@@ -170,20 +170,20 @@ const engineBinaries = computed<EngineBinary[]>(() => {
       </section>
 
       <!-- 系统 -->
-      <section class="card">
-        <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-slate-400">系统</h3>
+      <section class="card transition-transform duration-200 hover:-translate-y-0.5" style="box-shadow: var(--shadow-m)">
+        <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-label3">系统</h3>
         <div v-if="data" class="space-y-2 text-sm">
           <div class="flex items-center justify-between">
-            <span class="text-slate-400">版本</span>
-            <span class="font-mono text-slate-100">{{ data.version || '不可用' }}</span>
+            <span class="text-label2">版本</span>
+            <span class="num text-label">{{ data.version || '不可用' }}</span>
           </div>
           <div class="flex items-center justify-between">
-            <span class="text-slate-400">可用时间</span>
-            <span class="font-mono text-slate-100">{{ fmtUptime() }}</span>
+            <span class="text-label2">可用时间</span>
+            <span class="num text-label">{{ fmtUptime() }}</span>
           </div>
           <div class="flex items-center justify-between">
-            <span class="text-slate-400">探测于</span>
-            <span class="font-mono text-slate-100">{{ fmtProbedAt() }}</span>
+            <span class="text-label2">探测于</span>
+            <span class="num text-label">{{ fmtProbedAt() }}</span>
           </div>
         </div>
       </section>
@@ -191,43 +191,43 @@ const engineBinaries = computed<EngineBinary[]>(() => {
 
     <!-- 引擎二进制 -->
     <section class="card">
-      <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-slate-400">引擎二进制</h3>
+      <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-label3">引擎二进制</h3>
       <div v-if="engineBinaries.length" class="grid grid-cols-1 gap-2 sm:grid-cols-2 md:grid-cols-2 lg:grid-cols-4">
         <div
           v-for="b in engineBinaries"
           :key="b.name"
           :class="[
-            'flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-sm',
+            'flex items-center justify-between gap-2 rounded-ctl border px-3 py-2 text-sm',
             engineRuntime(b) === 'venv'
-              ? 'border-emerald-500/30 bg-emerald-600/5'
+              ? 'border-ok-line bg-ok-bg'
               : engineRuntime(b) === 'docker'
-                ? 'border-amber-500/30 bg-amber-600/5'
-                : 'border-red-500/30 bg-red-600/5',
+                ? 'border-warn-line bg-warn-bg'
+                : 'border-danger-line bg-danger-bg',
           ]"
           :title="engineTitle(b)"
         >
-          <span class="font-mono text-slate-100">{{ b.name }}</span>
+          <span class="font-mono text-label">{{ b.name }}</span>
           <!-- venv 已装：✓；仅 docker 旁路：docker 标记；不可达：✗ -->
           <span
             v-if="engineRuntime(b) === 'venv'"
-            class="text-emerald-300"
+            class="text-ok"
           >✓</span>
           <span
             v-else-if="engineRuntime(b) === 'docker'"
-            class="rounded border border-amber-500/40 bg-amber-600/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-300"
+            class="rounded-full border border-sep px-1.5 py-0.5 text-[10px] font-medium text-label3"
           >docker</span>
-          <span v-else class="text-red-300">✗</span>
+          <span v-else class="text-danger">✗</span>
         </div>
       </div>
-      <div v-else class="text-sm text-slate-500">尚无数据</div>
+      <div v-else class="text-sm text-label3">尚无数据</div>
       <!-- 图例：区分「venv 已装」与「仅 docker 旁路（venv 未安装）」 -->
-      <div class="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
-        <span class="inline-flex items-center gap-1"><span class="text-emerald-300">✓</span>venv 已安装</span>
+      <div class="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-label3">
+        <span class="inline-flex items-center gap-1"><span class="text-ok">✓</span>venv 已安装</span>
         <span class="inline-flex items-center gap-1">
-          <span class="rounded border border-amber-500/40 bg-amber-600/10 px-1 py-px text-[10px] text-amber-300">docker</span>
+          <span class="rounded-full border border-sep px-1 py-px text-[10px] text-label3">docker</span>
           venv 未装，可走 docker 旁路
         </span>
-        <span class="inline-flex items-center gap-1"><span class="text-red-300">✗</span>不可用</span>
+        <span class="inline-flex items-center gap-1"><span class="text-danger">✗</span>不可用</span>
       </div>
     </section>
 
