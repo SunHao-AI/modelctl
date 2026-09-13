@@ -2,6 +2,7 @@
 import { ref } from 'vue';
 import { nginxSnippet, staticConfig } from '@/api/config';
 import type { StaticConfigResponse } from '@/api/types';
+import Loading from '@/components/common/Loading.vue';
 
 /**
  * 配置：
@@ -68,10 +69,10 @@ async function copySnippet() {
   <div class="space-y-4">
     <!-- nginx snippet 生成器 -->
     <section class="card">
-      <h3 class="mb-3 text-sm font-semibold text-slate-100">nginx 路由片段</h3>
-      <p class="mb-3 text-xs text-slate-500">
-        后端 <code class="font-mono text-slate-400">build_llm_map(profiles, node, host, port)</code> 会生成 nginx
-        <code class="font-mono text-slate-400">map</code> 块；直接粘贴到 nginx 配置中使用。
+      <h3 class="mb-3 text-sm font-semibold text-label">nginx 路由片段</h3>
+      <p class="mb-3 text-xs text-label3">
+        后端 <code class="font-mono text-label2">build_llm_map(profiles, node, host, port)</code> 会生成 nginx
+        <code class="font-mono text-label2">map</code> 块；直接粘贴到 nginx 配置中使用。
       </p>
       <div class="flex flex-wrap items-end gap-3">
         <div>
@@ -95,10 +96,7 @@ async function copySnippet() {
           />
         </div>
         <button class="btn-primary" :disabled="genBusy" @click="onGenerate">
-          <svg v-if="genBusy" class="size-4 animate-spin" viewBox="0 0 24 24" fill="none">
-            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
-            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8v4a4 4 0 0 0-4 4H4z" />
-          </svg>
+          <Loading v-if="genBusy" inline label="" />
           {{ genBusy ? '生成中…' : '生成片段' }}
         </button>
       </div>
@@ -107,12 +105,12 @@ async function copySnippet() {
 
       <div v-if="snippet" class="mt-3">
         <div class="mb-1 flex items-center justify-between">
-          <span class="text-xs text-slate-500">已生成片段（{{ snippet.length }} 字符）</span>
+          <span class="text-xs text-label3">已生成片段（{{ snippet.length }} 字符）</span>
           <button class="btn-ghost !py-1 !px-2 text-xs" @click="copySnippet">
             {{ copied ? '已复制' : '复制' }}
           </button>
         </div>
-        <pre class="max-h-96 overflow-auto bg-[#0b1120] p-3 font-mono text-xs leading-6 text-slate-300 whitespace-pre">{{ snippet }}</pre>
+        <pre class="code-surface max-h-96 overflow-auto rounded-card border border-code-line p-3 text-xs leading-6 whitespace-pre">{{ snippet }}</pre>
       </div>
     </section>
 
@@ -120,20 +118,17 @@ async function copySnippet() {
     <section class="card">
       <div class="mb-3 flex items-center justify-between">
         <div>
-          <h3 class="text-sm font-semibold text-slate-100">后端静态配置</h3>
-          <p class="mt-1 text-xs text-slate-500">来自 <code class="font-mono text-slate-400">GET /admin/api/config/static</code></p>
+          <h3 class="text-sm font-semibold text-label">后端静态配置</h3>
+          <p class="mt-1 text-xs text-label3">来自 <code class="font-mono text-label2">GET /admin/api/config/static</code></p>
         </div>
         <button class="btn-ghost" :disabled="staticBusy" @click="onShowStatic">
-          <svg v-if="staticBusy" class="size-4 animate-spin" viewBox="0 0 24 24" fill="none">
-            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
-            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8v4a4 4 0 0 0-4 4H4z" />
-          </svg>
+          <Loading v-if="staticBusy" inline label="" />
           {{ staticBusy ? '加载中…' : '查看' }}
         </button>
       </div>
       <p v-if="staticErr" class="text-xs text-red-400">{{ staticErr }}</p>
-      <pre v-else-if="staticCfg" class="max-h-96 overflow-auto bg-[#0b1120] p-3 font-mono text-xs leading-6 text-slate-300 whitespace-pre">{{ JSON.stringify(staticCfg, null, 2) }}</pre>
-      <p v-else class="py-4 text-sm text-slate-500">点击「查看」拉取</p>
+      <pre v-else-if="staticCfg" class="code-surface max-h-96 overflow-auto rounded-card border border-code-line p-3 text-xs leading-6 whitespace-pre">{{ JSON.stringify(staticCfg, null, 2) }}</pre>
+      <p v-else class="py-4 text-sm text-label3">点击「查看」拉取</p>
     </section>
   </div>
 </template>

@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue';
 import { probe } from '@/api/services';
 import type { ProbeResponse } from '@/api/types';
+import Loading from '@/components/common/Loading.vue';
 
 /**
  * 体检：GET /admin/api/probe → 5 区块（GPU / GPU 锁 / 引擎二进制 / 环境变量 / 路径与版本）
@@ -44,10 +45,7 @@ function mbToGb(mb: number): string {
         <span v-if="probedAt" class="ml-2 text-label3">上次：{{ probedAt }}</span>
       </p>
       <button class="btn-primary" :disabled="busy" @click="load">
-        <svg v-if="busy" class="size-4 animate-spin" viewBox="0 0 24 24" fill="none">
-          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
-          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8v4a4 4 0 0 0-4 4H4z" />
-        </svg>
+        <Loading v-if="busy" inline label="" />
         {{ busy ? '体检中…' : '重新体检' }}
       </button>
     </div>

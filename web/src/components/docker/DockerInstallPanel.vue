@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { toast } from '@/utils/toast';
+import Loading from '@/components/common/Loading.vue';
 import {
   dockerDiagnose,
   fetchDockerInstallStatus,
@@ -355,20 +356,20 @@ onBeforeUnmount(closeSse);
     <!-- Linux 平台：降级 alert（不替操作系统） -->
     <div v-if="platform === 'linux'" class="card">
       <div class="flex items-start gap-3 text-sm">
-        <span class="mt-1 size-2 rounded-full bg-blue-400" />
+        <span class="mt-1 size-2 rounded-full bg-info" />
         <div>
-          <h2 class="font-medium text-slate-200">Docker 一键安装（Windows-only）</h2>
-          <p class="mt-1 text-xs leading-5 text-slate-400">
-            当前 WebUI 主机是 <span class="font-mono text-slate-300">Linux</span>，Docker
+          <h2 class="font-medium text-label">Docker 一键安装（Windows-only）</h2>
+          <p class="mt-1 text-xs leading-5 text-label2">
+            当前 WebUI 主机是 <span class="font-mono text-label2">Linux</span>，Docker
             一键安装仅 Windows。Linux 可直接执行
             <code
-              class="mt-1 inline-block rounded bg-[#0b1120] px-1.5 py-0.5 font-mono text-[11px] text-slate-300"
+              class="mt-1 inline-block rounded bg-code-bg px-1.5 py-0.5 font-mono text-[11px] text-code-fg"
             >
               modelctl env setup docker --os=linux --run
             </code>
             或在下方「Docker 旁路」区块走官方镜像 + daemon.json 合并（诊断接口
             可通过 <code
-              class="inline-block rounded bg-[#0b1120] px-1 py-0.5 font-mono text-[11px] text-slate-300"
+              class="inline-block rounded bg-code-bg px-1 py-0.5 font-mono text-[11px] text-code-fg"
             >?os=linux</code> 锁定平台）。
           </p>
         </div>
@@ -380,25 +381,25 @@ onBeforeUnmount(closeSse);
       <!-- 标题 + 状态徽标 -->
       <div class="flex items-baseline justify-between">
         <div>
-          <h2 class="text-sm font-medium text-slate-200">Docker 一键安装（Windows-only）</h2>
-          <p class="mt-0.5 text-xs text-slate-500">
+          <h2 class="text-sm font-medium text-label">Docker 一键安装（Windows-only）</h2>
+          <p class="mt-0.5 text-xs text-label3">
             winget + Docker Desktop + WSL2；阶段 A 自动，阶段 B 用户引导
           </p>
         </div>
         <!-- 成功徽标（仅 done 阶段） -->
         <span
           v-if="phase === 'done'"
-          class="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-600/15 px-2 py-0.5 text-xs text-emerald-300"
+          class="inline-flex items-center gap-1.5 rounded-full border border-ok-line bg-ok-bg px-2 py-0.5 text-xs text-ok"
         >
-          <span class="size-1.5 rounded-full bg-emerald-400" />
+          <span class="size-1.5 rounded-full bg-ok" />
           已就绪
         </span>
         <!-- 错误徽标（仅 error 阶段） -->
         <span
           v-else-if="phase === 'error'"
-          class="inline-flex items-center gap-1.5 rounded-full border border-red-500/30 bg-red-600/15 px-2 py-0.5 text-xs text-red-300"
+          class="inline-flex items-center gap-1.5 rounded-full border border-danger-line bg-danger-bg px-2 py-0.5 text-xs text-danger"
         >
-          <span class="size-1.5 rounded-full bg-red-400" />
+          <span class="size-1.5 rounded-full bg-danger" />
           失败
         </span>
       </div>
@@ -411,54 +412,54 @@ onBeforeUnmount(closeSse);
           :class="[
             'flex items-center gap-1.5',
             i === stepActive
-              ? 'text-emerald-300'
+              ? 'text-ok'
               : i < stepActive
-                ? 'text-emerald-400/70'
-                : 'text-slate-500',
+                ? 'text-ok opacity-70'
+                : 'text-label3',
           ]"
         >
           <span
             :class="[
               'size-1.5 rounded-full',
               i === stepActive
-                ? 'bg-emerald-400 animate-pulse'
+                ? 'bg-ok animate-pulse'
                 : i < stepActive
-                  ? 'bg-emerald-400/70'
-                  : 'bg-slate-600',
+                  ? 'bg-ok opacity-70'
+                  : 'bg-surface4',
             ]"
           />
           <span>{{ label }}</span>
-          <span v-if="i < 3" class="mx-1 text-slate-600">→</span>
+          <span v-if="i < 3" class="mx-1 text-label3">→</span>
         </li>
       </ol>
 
       <!-- 错误提示（error 阶段） -->
       <div
         v-if="phase === 'error' && errMsg"
-        class="rounded-md border border-red-500/30 bg-red-600/10 px-3 py-2 text-sm leading-5 whitespace-pre-line text-red-300"
+        class="rounded-ctl border border-danger-line bg-danger-bg px-3 py-2 text-sm leading-5 whitespace-pre-line text-danger"
       >
         {{ errMsg }}
       </div>
 
       <!-- 阶段 B 卡片：遍历 steps，每项含 label + action 按钮 + cmd_hint code -->
       <div v-if="phase === 'need_reboot'" class="space-y-2">
-        <p class="text-xs text-slate-400">
+        <p class="text-xs text-label2">
           阶段 A 已完成，请按顺序完成 Desktop 首次配置（WSL2 backend 需重启后生效）：
         </p>
         <div
           v-for="(s, idx) in steps"
           :key="s.id"
-          class="rounded-md border border-slate-700/60 bg-slate-900/60 p-3"
+          class="rounded-ctl border border-sep bg-surface3 p-3"
         >
           <div class="flex flex-wrap items-center justify-between gap-2">
-            <span class="text-sm text-slate-200">
-              <span class="mr-2 text-slate-500">{{ idx + 1 }}.</span>
+            <span class="text-sm text-label">
+              <span class="mr-2 text-label3">{{ idx + 1 }}.</span>
               {{ s.label }}
             </span>
             <div class="flex items-center gap-2">
               <span
                 v-if="s.optional"
-                class="rounded bg-slate-700/60 px-1.5 py-0.5 text-[10px] text-slate-400"
+                class="rounded bg-surface4 px-1.5 py-0.5 text-[10px] text-label2"
               >可选</span>
               <button
                 v-if="s.action === 'open_desktop'"
@@ -482,23 +483,15 @@ onBeforeUnmount(closeSse);
           </div>
           <code
             v-if="s.cmd_hint"
-            class="mt-2 block rounded bg-[#0b1120] p-2 font-mono text-[11px] leading-5 whitespace-pre-line break-all text-slate-300"
+            class="mt-2 block rounded bg-code-bg p-2 font-mono text-[11px] leading-5 whitespace-pre-line break-all text-code-fg"
           >{{ s.cmd_hint }}</code>
         </div>
       </div>
 
       <!-- 4 按钮矩阵（严格按 Task 4 spec 表格） -->
-      <div class="flex flex-wrap items-center gap-2 border-t border-slate-800/40 pt-3">
+      <div class="flex flex-wrap items-center gap-2 border-t border-sep-soft pt-3">
         <button class="btn-primary" :disabled="!canInstall" @click="startInstall">
-          <svg
-            v-if="phase === 'installing'"
-            class="size-4 animate-spin"
-            viewBox="0 0 24 24"
-            fill="none"
-          >
-            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
-            <path d="M4 12a8 8 0 0 1 8-8v4a4 4 0 0 0-4 4H4z" fill="currentColor" />
-          </svg>
+          <Loading v-if="phase === 'installing'" inline label="" />
           {{ phase === 'installing' ? '安装中…' : '一键安装' }}
         </button>
         <button class="btn-ghost" :disabled="!canOpenDesktop" @click="openDesktop">
@@ -510,15 +503,15 @@ onBeforeUnmount(closeSse);
         <button class="btn-primary" :disabled="!canVerify" @click="verify">
           已就绪点我验证
         </button>
-        <span class="ml-auto text-[11px] text-slate-500">
+        <span class="ml-auto text-[11px] text-label3">
           任务 ID：{{ taskId || '—' }}
         </span>
       </div>
 
       <!-- 日志折叠（限制高度，避免长安装期内存爆） -->
-      <div v-if="logs.length" class="rounded-md border border-slate-800/40">
+      <div v-if="logs.length" class="rounded-ctl border border-sep-soft">
         <button
-          class="flex w-full items-center justify-between px-3 py-1.5 text-xs text-slate-400 hover:bg-slate-800/40"
+          class="flex w-full items-center justify-between px-3 py-1.5 text-xs text-label2 hover:bg-surface3"
           @click="logExpanded = !logExpanded"
         >
           <span>安装日志（{{ logs.length }} 行）</span>
@@ -527,7 +520,7 @@ onBeforeUnmount(closeSse);
         <pre
           v-if="logExpanded"
           ref="logBox"
-          class="max-h-64 overflow-auto border-t border-slate-800/40 bg-[#0b1120] px-3 py-2 font-mono text-[11px] leading-5 whitespace-pre-wrap break-all text-slate-300"
+          class="max-h-64 overflow-auto border-t border-sep-soft bg-code-bg px-3 py-2 font-mono text-[11px] leading-5 whitespace-pre-wrap break-all text-code-fg"
         >{{ logs.join('\n') }}</pre>
       </div>
 
@@ -542,29 +535,29 @@ onBeforeUnmount(closeSse);
         >
           <div
             v-if="uacDialogShow"
-            class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+            class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
             @click.self="closeUac"
           >
             <div
-              class="w-full max-w-md rounded-lg border border-amber-500/30 bg-slate-900 shadow-2xl"
+              class="w-full max-w-md rounded-panel border border-warn-line bg-surface2 shadow-l"
               role="dialog"
               aria-modal="true"
             >
-              <div class="flex items-center justify-between border-b border-slate-800 px-5 py-3">
-                <h3 class="text-base font-semibold text-amber-300">需要授权</h3>
+              <div class="flex items-center justify-between border-b border-sep px-5 py-3">
+                <h3 class="text-base font-semibold text-warn">需要授权</h3>
                 <button
-                  class="text-2xl leading-none text-slate-400 hover:text-slate-200"
+                  class="text-2xl leading-none text-label2 hover:text-label"
                   aria-label="关闭"
                   @click="closeUac"
                 >×</button>
               </div>
               <div class="px-5 py-4">
-                <p class="whitespace-pre-line text-sm leading-6 text-slate-300">
+                <p class="whitespace-pre-line text-sm leading-6 text-label2">
                   Windows 已弹出 UAC 授权框——请在系统弹窗输入管理员密码并点"是"。
                   本安装任务未中断，授权后会自动继续。
                 </p>
               </div>
-              <div class="flex items-center justify-end border-t border-slate-800 px-5 py-3">
+              <div class="flex items-center justify-end border-t border-sep px-5 py-3">
                 <button class="btn-ghost" @click="closeUac">关闭（继续等待授权）</button>
               </div>
             </div>

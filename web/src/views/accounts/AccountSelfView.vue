@@ -10,6 +10,7 @@ import {
 import type { SelfKey, SelfSession, SelfUsage, SelfMessage } from '@/api/accountSelf';
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue';
 import DataTable from '@/components/common/DataTable.vue';
+import Loading from '@/components/common/Loading.vue';
 import { fmtEpoch, fmtTokens } from '@/utils/time';
 
 const auth = useAuthStore();
@@ -436,9 +437,7 @@ onBeforeUnmount(() => {
         <div class="flex gap-2 items-center mb-3">
           <input v-model="searchQ" class="input-base flex-1" placeholder="在历史消息里搜关键词" @keyup.enter="onSearch" />
           <button class="btn-primary !py-1.5 text-xs" :disabled="searchBusy" @click="onSearch">
-            <svg v-if="searchBusy" class="size-4 animate-spin" viewBox="0 0 24 24" fill="none">
-              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" /><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8v4a4 4 0 0 0-4 4H4z" />
-            </svg>
+            <Loading v-if="searchBusy" inline label="" />
             搜索
           </button>
         </div>
@@ -516,9 +515,7 @@ onBeforeUnmount(() => {
           <div class="flex items-center justify-end gap-3 border-t border-sep px-5 py-3">
             <button class="btn-ghost" :disabled="newKeyBusy" @click="showNewKey = false">取消</button>
             <button class="btn-primary" :disabled="newKeyBusy" @click="onIssue">
-              <svg v-if="newKeyBusy" class="size-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" /><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8v4a4 4 0 0 0-4 4H4z" />
-              </svg>
+              <Loading v-if="newKeyBusy" inline label="" />
               签发
             </button>
           </div>

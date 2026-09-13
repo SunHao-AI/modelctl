@@ -169,8 +169,8 @@ onMounted(load);
         </tbody>
       </table>
     </DataTable>
-    <div v-else-if="!loading" class="card text-sm text-label3">尚无模型</div>
-    <div v-else class="card text-sm text-label3">加载中…</div>
+    <div v-else-if="!loading" class="card p-6 text-sm text-label3">尚无模型</div>
+    <div v-else class="card p-6 text-sm text-label3">加载中…</div>
 
     <!-- 停止确认对话框 -->
     <ConfirmDialog

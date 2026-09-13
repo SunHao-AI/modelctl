@@ -73,17 +73,17 @@ const showEnvLink = computed(() =>
 
 function dotClass(i: number): string {
   const st = stages.value[i].status;
-  if (st === 'error') return 'bg-red-400';
-  if (st === 'done') return 'bg-emerald-400/70';
-  if (st === 'running') return 'bg-emerald-400 animate-pulse';
-  return 'bg-slate-600';
+  if (st === 'error') return 'bg-danger';
+  if (st === 'done') return 'bg-ok opacity-70';
+  if (st === 'running') return 'bg-ok animate-pulse';
+  return 'bg-surface4';
 }
 function textClass(i: number): string {
   const st = stages.value[i].status;
-  if (st === 'error') return 'text-red-300';
-  if (i === currentIndex.value) return 'text-emerald-300';
-  if (st === 'done') return 'text-emerald-400/70';
-  return 'text-slate-500';
+  if (st === 'error') return 'text-danger';
+  if (i === currentIndex.value) return 'text-ok';
+  if (st === 'done') return 'text-ok opacity-70';
+  return 'text-label3';
 }
 </script>
 
@@ -92,21 +92,21 @@ function textClass(i: number): string {
     <!-- 标题 + 状态徽标 -->
     <div class="flex items-baseline justify-between">
       <div>
-        <h3 class="text-sm font-medium text-slate-200">启动进度</h3>
-        <p class="mt-0.5 text-xs text-slate-500">
-          运行时 <span class="font-mono text-slate-300">{{ snapshot.runtime }}</span> ·
-          引擎 <span class="font-mono text-slate-300">{{ snapshot.engine }}</span> ·
+        <h3 class="text-sm font-medium text-label">启动进度</h3>
+        <p class="mt-0.5 text-xs text-label3">
+          运行时 <span class="font-mono text-label2">{{ snapshot.runtime }}</span> ·
+          引擎 <span class="font-mono text-label2">{{ snapshot.engine }}</span> ·
           更新于 {{ snapshot.updatedAt || '—' }}
         </p>
       </div>
       <span
         v-if="succeeded"
-        class="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-600/15 px-2 py-0.5 text-xs text-emerald-300"
-      ><span class="size-1.5 rounded-full bg-emerald-400" />已就绪</span>
+        class="inline-flex items-center gap-1.5 rounded-full border border-ok-line bg-ok-bg px-2 py-0.5 text-xs text-ok"
+      ><span class="size-1.5 rounded-full bg-ok" />已就绪</span>
       <span
         v-else-if="failed"
-        class="inline-flex items-center gap-1.5 rounded-full border border-red-500/30 bg-red-600/15 px-2 py-0.5 text-xs text-red-300"
-      ><span class="size-1.5 rounded-full bg-red-400" />启动失败</span>
+        class="inline-flex items-center gap-1.5 rounded-full border border-danger-line bg-danger-bg px-2 py-0.5 text-xs text-danger"
+      ><span class="size-1.5 rounded-full bg-danger" />启动失败</span>
     </div>
 
     <!-- 5 段时间轴 -->
@@ -114,22 +114,22 @@ function textClass(i: number): string {
       <li v-for="(s, i) in stages" :key="s.stage" :class="['flex items-center gap-1.5', textClass(i)]">
         <span :class="['size-1.5 rounded-full', dotClass(i)]" />
         <span>{{ LABELS[s.stage] }}</span>
-        <span v-if="i < stages.length - 1" class="mx-1 text-slate-600">→</span>
+        <span v-if="i < stages.length - 1" class="mx-1 text-label3">→</span>
       </li>
     </ol>
 
     <!-- 当前阶段进度条 -->
     <div class="space-y-1.5">
       <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
-        <span class="text-slate-300">{{ current.label }}</span>
-        <span v-if="current.status !== 'done'" class="text-slate-400">
+        <span class="text-label2">{{ current.label }}</span>
+        <span v-if="current.status !== 'done'" class="text-label2">
           {{ pctInt !== null ? `${pctInt}% · ${etaText}` : etaText }}
         </span>
       </div>
-      <div class="startup-card__track h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+      <div class="startup-card__track h-1.5 w-full overflow-hidden rounded-full bg-surface4">
         <div
           v-if="pctInt !== null"
-          class="h-full rounded-full bg-emerald-400/80 transition-[width] duration-500"
+          class="h-full rounded-full bg-ok opacity-80 transition-[width] duration-500"
           :style="{ width: `${pctInt}%` }"
         />
         <div v-else class="startup-card__stripes h-full w-full" />
@@ -138,7 +138,7 @@ function textClass(i: number): string {
 
     <!-- 错误态 -->
     <div v-if="failed && current.error" class="space-y-2">
-      <div class="rounded-md border border-red-500/30 bg-red-600/10 px-3 py-2 text-sm leading-5 whitespace-pre-line text-red-300">
+      <div class="rounded-ctl border border-danger-line bg-danger-bg px-3 py-2 text-sm leading-5 whitespace-pre-line text-danger">
         {{ current.error }}
       </div>
       <button v-if="showEnvLink && toEnvPage" class="btn-ghost !py-1 !px-2 text-xs" @click="toEnvPage">
@@ -153,12 +153,10 @@ function textClass(i: number): string {
 .startup-card__stripes {
   background-image: repeating-linear-gradient(
     45deg,
-    rgba(52, 211, 153, 0.45) 0,
-    rgba(52, 211, 153, 0.45) 8px,
-    rgba(52, 211, 153, 0.15) 8px,
-    rgba(52, 211, 153, 0.15) 16px
+    color-mix(in srgb, var(--ok) 45%, transparent) 0 6px,
+    color-mix(in srgb, var(--ok) 20%, transparent) 6px 12px
   );
-  background-size: 22.6px 100%;
+  background-size: 16.97px 100%;
   animation: startup-card-stripes 1.1s linear infinite;
 }
 @keyframes startup-card-stripes {
@@ -166,7 +164,7 @@ function textClass(i: number): string {
     background-position: 0 0;
   }
   to {
-    background-position: 22.6px 0;
+    background-position: 16.97px 0;
   }
 }
 @media (prefers-reduced-motion: reduce) {

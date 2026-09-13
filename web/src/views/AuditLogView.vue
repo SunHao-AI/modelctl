@@ -197,8 +197,8 @@ const maxDay = computed(() => {
         </tbody>
       </table>
     </DataTable>
-    <div v-else-if="!loading" class="card text-sm text-label3">无匹配记录</div>
-    <div v-else class="card text-sm text-label3">加载中…</div>
+    <div v-else-if="!loading" class="card p-6 text-sm text-label3">无匹配记录</div>
+    <div v-else class="card p-6 text-sm text-label3">加载中…</div>
     <!-- 底部：清理 + 路径 -->
     <section class="card flex flex-wrap items-center justify-between">
       <div class="break-all font-mono text-xs text-label3">审计目录: {{ auditDir || '—' }}</div>

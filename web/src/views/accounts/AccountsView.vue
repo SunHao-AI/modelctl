@@ -9,6 +9,7 @@ import {
 import type { AccountUser, AccountKey, AccountUsage } from '@/api/accounts';
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue';
 import DataTable from '@/components/common/DataTable.vue';
+import Loading from '@/components/common/Loading.vue';
 import { fmtEpoch, fmtTokens } from '@/utils/time';
 
 /**
@@ -543,9 +544,7 @@ onMounted(load);
           <div class="flex items-center justify-end gap-3 border-t border-sep px-5 py-3">
             <button class="btn-ghost" :disabled="formBusy" @click="showForm = false">取消</button>
             <button class="btn-primary" :disabled="formBusy" @click="onFormSubmit">
-              <svg v-if="formBusy" class="size-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" /><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8v4a4 4 0 0 0-4 4H4z" />
-              </svg>
+              <Loading v-if="formBusy" inline label="" />
               {{ editing ? '保存' : '创建' }}
             </button>
           </div>
@@ -576,9 +575,7 @@ onMounted(load);
           <div class="flex items-center justify-end gap-3 border-t border-sep px-5 py-3">
             <button class="btn-ghost" :disabled="issueKeyBusy" @click="showIssueKey = false">取消</button>
             <button class="btn-primary" :disabled="issueKeyBusy" @click="onIssueKey">
-              <svg v-if="issueKeyBusy" class="size-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" /><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8v4a4 4 0 0 0-4 4H4z" />
-              </svg>
+              <Loading v-if="issueKeyBusy" inline label="" />
               签发
             </button>
           </div>

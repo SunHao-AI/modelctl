@@ -234,19 +234,19 @@ function engineConfigEntries(): Array<{ key: string; value: string }> {
     <section class="card">
       <div v-if="detail" class="space-y-3">
         <div class="flex flex-wrap items-center gap-3">
-          <h2 class="text-lg font-semibold text-slate-100">{{ detail.name }}</h2>
+          <h2 class="text-lg font-semibold text-label">{{ detail.name }}</h2>
           <StatusBadge :state="detail.state" :health="detail.health" />
-          <span v-if="isUnsloth" class="rounded-full bg-blue-600/15 px-2 py-0.5 text-xs text-blue-300">unsloth</span>
+          <span v-if="isUnsloth" class="rounded-full bg-accent-bg px-2 py-0.5 text-xs text-accent">unsloth</span>
         </div>
         <div class="grid grid-cols-2 gap-x-8 gap-y-2 text-sm md:grid-cols-4">
-          <div><span class="text-slate-400">引擎</span><div class="font-mono text-slate-100">{{ detail.engine }}</div></div>
-          <div><span class="text-slate-400">端口</span><div class="font-mono text-slate-100">{{ detail.port || '—' }}</div></div>
-          <div><span class="text-slate-400">PID</span><div class="font-mono text-slate-100">{{ detail.pid ?? '—' }}</div></div>
+          <div><span class="text-label2">引擎</span><div class="font-mono text-label">{{ detail.engine }}</div></div>
+          <div><span class="text-label2">端口</span><div class="font-mono text-label">{{ detail.port || '—' }}</div></div>
+          <div><span class="text-label2">PID</span><div class="font-mono text-label">{{ detail.pid ?? '—' }}</div></div>
           <div>
-            <span class="text-slate-400">API Key</span>
-            <div class="flex items-center gap-2 font-mono text-slate-100">
+            <span class="text-label2">API Key</span>
+            <div class="flex items-center gap-2 font-mono text-label">
               {{ detail.api_key_masked || '未配置' }}
-              <button v-if="detail.api_key_masked" class="text-xs text-slate-500 hover:text-slate-300" @click="copyText(detail.api_key_masked!)">复制</button>
+              <button v-if="detail.api_key_masked" class="text-xs text-label3 hover:text-label2" @click="copyText(detail.api_key_masked!)">复制</button>
             </div>
           </div>
         </div>
@@ -257,16 +257,16 @@ function engineConfigEntries(): Array<{ key: string; value: string }> {
           <TaskButton label="重启" variant="ghost" :target="name" :task-target="() => restartModel(name)" @success="() => { refresh(); void refreshStartup(); }" />
           <!-- Unsloth Web 控制台（同步，仅 unsloth 引擎可启动） -->
           <template v-if="isUnsloth">
-            <span class="mx-1 h-4 w-px bg-slate-700" />
+            <span class="mx-1 h-4 w-px bg-surface4" />
             <button class="btn-ghost" :disabled="uiBusy" @click.stop="onUiStart">开启</button>
             <button class="btn-ghost" :disabled="uiBusy" @click.stop="onUiStop">关闭</button>
           </template>
           <button class="btn-ghost" @click.stop="refreshLog(); refresh()">刷新日志</button>
         </div>
-        <p v-if="stopNotice" class="text-xs text-slate-400">{{ stopNotice }}</p>
-        <p v-if="uiNotice" class="text-xs text-slate-400">{{ uiNotice }}</p>
+        <p v-if="stopNotice" class="text-xs text-label2">{{ stopNotice }}</p>
+        <p v-if="uiNotice" class="text-xs text-label2">{{ uiNotice }}</p>
       </div>
-      <div v-else class="py-4 text-sm text-slate-500">加载中…</div>
+      <div v-else class="py-4 text-sm text-label3">加载中…</div>
       <p v-if="errMsg" class="pt-2 text-sm text-red-400">{{ errMsg }}</p>
     </section>
     <!-- 启动进度卡片（启动中 / 启动失败时常驻） -->
@@ -277,10 +277,10 @@ function engineConfigEntries(): Array<{ key: string; value: string }> {
     />
     <!-- 中部 tab：工作日志 / YAML / 配置 -->
     <section class="card !p-0">
-      <div class="flex items-center gap-1 border-b border-slate-800 px-2">
+      <div class="flex items-center gap-1 border-b border-sep px-2">
         <button
           v-for="t in (['log', 'yaml', 'overview'] as const)" :key="t"
-          :class="['px-4 py-2.5 text-sm transition-colors', tab === t ? 'border-b-2 border-blue-500 text-blue-300' : 'text-slate-400 hover:text-slate-200']"
+          :class="['px-4 py-2.5 text-sm transition-colors', tab === t ? 'border-b-2 border-accent text-accent' : 'text-label2 hover:text-label']"
           @click="tab = t"
         >{{ t === 'log' ? '工作日志' : t === 'yaml' ? 'YAML' : '配置' }}</button>
       </div>
@@ -298,13 +298,13 @@ function engineConfigEntries(): Array<{ key: string; value: string }> {
       <!-- YAML tab（自动加载 + 可编辑；override 不影响源文件） -->
       <div v-else-if="tab === 'yaml'" class="space-y-3 p-3">
         <div v-if="yaml" class="flex flex-wrap items-center justify-between gap-2 text-xs">
-          <span class="font-mono text-slate-500">{{ yaml.path }}（源文件，仅展示；编辑不影响源）</span>
+          <span class="font-mono text-label3">{{ yaml.path }}（源文件，仅展示；编辑不影响源）</span>
           <div class="flex items-center gap-2">
-            <label class="flex items-center gap-1 text-slate-400">
+            <label class="flex items-center gap-1 text-label2">
               <input
                 type="checkbox"
                 :checked="yamlDirty"
-                class="h-3.5 w-3.5 accent-emerald-500"
+                class="h-3.5 w-3.5 accent-ok"
                 :title="yamlDirty ? '编辑态偏离源文件' : '与源文件一致'"
                 disabled
               >
@@ -321,25 +321,25 @@ function engineConfigEntries(): Array<{ key: string; value: string }> {
           </div>
         </div>
         <!-- 个性化启动通知 -->
-        <div v-if="yamlNotice" class="rounded-md bg-amber-600/10 border border-amber-600/40 px-3 py-2 text-xs text-amber-200 whitespace-pre-wrap">{{ yamlNotice }}</div>
+        <div v-if="yamlNotice" class="rounded-ctl bg-warn-bg border border-warn-line px-3 py-2 text-xs text-warn whitespace-pre-wrap">{{ yamlNotice }}</div>
         <!-- 可编辑 YAML（font-mono + 等宽行高；max-h 可控；不自动换行，横向滚动看长行） -->
         <textarea
           v-if="yaml && yamlEdit !== null"
           v-model="yamlEdit"
           spellcheck="false"
-          class="block w-full min-h-[460px] max-h-[640px] resize-y overflow-auto bg-[#0b1120] p-3 font-mono text-xs leading-6 text-slate-200 whitespace-pre rounded-md border border-slate-700"
+          class="code-surface block w-full min-h-[460px] max-h-[640px] resize-y overflow-auto rounded-card border border-code-line p-3 text-xs leading-6 whitespace-pre"
         ></textarea>
         <p v-else-if="yamlErr" class="text-sm text-red-400">{{ yamlErr }}</p>
-        <p v-else class="py-4 text-sm text-slate-500">加载中…</p>
+        <p v-else class="py-4 text-sm text-label3">加载中…</p>
       </div>
       <!-- 配置 tab（profile + engine_config 键值） -->
       <div v-else class="p-3">
-        <div class="mb-3 text-xs text-slate-500">来自 GET /models/{{ name }}（engine_config + profile 字段）</div>
+        <div class="mb-3 text-xs text-label3">来自 GET /models/{{ name }}（engine_config + profile 字段）</div>
         <table v-if="detail" class="w-full text-sm">
           <tbody>
-            <tr v-for="row in engineConfigEntries()" :key="row.key" class="border-b border-slate-800/50">
-              <td class="w-48 py-2 text-slate-400">engine_config.{{ row.key }}</td>
-              <td class="font-mono text-slate-200 break-all">{{ row.value || '—' }}</td>
+            <tr v-for="row in engineConfigEntries()" :key="row.key" class="border-b border-sep-soft">
+              <td class="w-48 py-2 text-label2">engine_config.{{ row.key }}</td>
+              <td class="font-mono text-label break-all">{{ row.value || '—' }}</td>
             </tr>
           </tbody>
         </table>
