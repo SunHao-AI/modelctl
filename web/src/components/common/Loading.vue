@@ -1,16 +1,14 @@
 <script setup lang="ts">
-defineProps<{
-  /** 加载提示文字 */
-  text?: string;
-}>();
+/** 全站唯一 spinner。其它组件不得再内联复制 spinner SVG。 */
+withDefaults(defineProps<{ label?: string; inline?: boolean }>(), { label: '加载中…', inline: false });
 </script>
 
 <template>
-  <div class="flex items-center justify-center gap-2 p-8">
-    <svg class="size-5 animate-spin text-blue-400" viewBox="0 0 24 24" fill="none">
-      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
-      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8v4a4 4 0 0 0-4 4H4z" />
+  <div :class="inline ? 'inline-flex items-center gap-2' : 'flex items-center justify-center gap-2 py-8'">
+    <svg class="size-5 shrink-0 animate-spin text-accent" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" opacity="0.22" />
+      <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" stroke-width="3" stroke-linecap="round" />
     </svg>
-    <span class="text-sm text-slate-400">{{ text || '加载中…' }}</span>
+    <span v-if="label" class="text-sm text-label2">{{ label }}</span>
   </div>
 </template>

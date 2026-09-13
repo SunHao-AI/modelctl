@@ -36,54 +36,14 @@ const props = withDefaults(
 );
 
 const STYLE_MAP: Record<string, Style> = {
-  running: {
-    cls: 'bg-emerald-600/15 text-emerald-300 border border-emerald-500/30',
-    text: '运行中',
-    dot: 'bg-emerald-400',
-    isErr: false,
-  },
-  stopped: {
-    cls: 'bg-slate-600/15 text-slate-300 border border-slate-500/30',
-    text: '已停止',
-    dot: 'bg-slate-400',
-    isErr: false,
-  },
-  skipped: {
-    cls: 'bg-slate-600/15 text-slate-300 border border-slate-500/30',
-    text: '已跳过',
-    dot: 'bg-slate-400',
-    isErr: false,
-  },
-  starting: {
-    cls: 'bg-blue-600/15 text-blue-300 border border-blue-500/30',
-    text: '启动中',
-    dot: 'bg-blue-400',
-    isErr: false,
-  },
-  stopping: {
-    cls: 'bg-amber-600/15 text-amber-300 border border-amber-500/30',
-    text: '停止中',
-    dot: 'bg-amber-400',
-    isErr: false,
-  },
-  queued: {
-    cls: 'bg-slate-600/15 text-slate-300 border border-slate-500/30',
-    text: '排队中',
-    dot: 'bg-slate-400',
-    isErr: false,
-  },
-  unknown: {
-    cls: 'bg-slate-600/15 text-slate-400 border border-slate-500/30',
-    text: '未知',
-    dot: 'bg-slate-500',
-    isErr: false,
-  },
-  error: {
-    cls: 'bg-red-600/15 text-red-300 border border-red-500/40',
-    text: '异常',
-    dot: 'bg-red-400',
-    isErr: true,
-  },
+  running: { cls: 'bg-ok-bg text-ok border border-ok-line', text: '运行中', dot: 'bg-ok', isErr: false },
+  stopped: { cls: 'bg-surface3 text-label2 border border-sep', text: '已停止', dot: 'bg-muted', isErr: false },
+  skipped: { cls: 'bg-surface3 text-label2 border border-sep', text: '已跳过', dot: 'bg-muted', isErr: false },
+  starting: { cls: 'bg-accent-bg text-accent border border-accent-line', text: '启动中', dot: 'bg-accent', isErr: false },
+  stopping: { cls: 'bg-warn-bg text-warn border border-warn-line', text: '停止中', dot: 'bg-warn', isErr: false },
+  queued: { cls: 'bg-surface3 text-label2 border border-sep', text: '排队中', dot: 'bg-muted', isErr: false },
+  unknown: { cls: 'bg-surface3 text-label3 border border-sep', text: '未知', dot: 'bg-muted', isErr: false },
+  error: { cls: 'bg-danger-bg text-danger border border-danger-line', text: '异常', dot: 'bg-danger', isErr: true },
 };
 
 /** 取样式：先精确命中，再用 contains('error') 兜底 */
@@ -103,12 +63,12 @@ const healthySuffix = computed(() => (showHealthy.value ? '· 健康' : ''));
 <template>
   <span :class="['inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium', style.cls]">
     <span
-      :class="['size-1.5 rounded-full', style.dot, style.isErr ? '' : 'animate-pulse']"
+      :class="['stonedot', style.dot, style.isErr ? '' : 'animate-pulse']"
       :aria-hidden="true"
     />
-    <span :class="style.isErr ? 'text-red-300' : ''">
+    <span>
       {{ style.text }}
-      <span v-if="healthySuffix" :class="style.isErr ? 'text-red-300' : 'text-emerald-300'">{{ healthySuffix }}</span>
+      <span v-if="healthySuffix" class="text-ok">{{ healthySuffix }}</span>
     </span>
   </span>
 </template>

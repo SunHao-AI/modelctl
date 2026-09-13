@@ -3,6 +3,7 @@ import { computed, onScopeDispose, ref, watch } from 'vue';
 import { toast } from '@/utils/toast';
 import { useTasksStore } from '@/stores/tasks';
 import type { TaskRef } from '@/api/types';
+import Loading from './Loading.vue';
 
 /**
  * 任务式按钮：点击 → 调 taskTarget() 拿 TaskRef → 交给 tasksStore 跟踪。
@@ -162,15 +163,7 @@ async function onClick() {
     @click="onClick"
   >
     <!-- 等待 spinner -->
-    <svg
-      v-if="phase === 'submitting' || phase === 'running'"
-      class="size-3.5 animate-spin"
-      viewBox="0 0 24 24"
-      fill="none"
-    >
-      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
-      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8v4a4 4 0 0 0-4 4H4z" />
-    </svg>
+    <Loading v-if="phase === 'submitting' || phase === 'running'" inline label="" />
     <span>{{ text }}</span>
   </button>
 </template>

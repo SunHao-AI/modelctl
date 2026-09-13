@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref, watch } from 'vue';
+import Loading from './Loading.vue';
 
 const props = withDefaults(
   defineProps<{
@@ -61,17 +62,17 @@ onBeforeUnmount(() => {
   <Teleport to="body">
     <div
       v-if="visible"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
       @click.self="close"
     >
       <div
-        class="w-full max-w-md rounded-lg border border-slate-700 bg-slate-900 shadow-xl"
+        class="w-full max-w-md rounded-panel border border-sep bg-surface2 shadow-l"
         role="dialog"
         aria-modal="true"
       >
         <!-- 标题 -->
         <div class="flex items-center justify-between border-b border-slate-800 px-5 py-3">
-          <h3 :class="['text-base font-semibold', props.danger ? 'text-red-300' : 'text-slate-100']">
+          <h3 :class="['text-base font-semibold', props.danger ? 'text-danger' : 'text-slate-100']">
             {{ props.title }}
           </h3>
           <button class="text-slate-400 hover:text-slate-200 text-xl leading-none" aria-label="关闭" @click="close">
@@ -90,10 +91,7 @@ onBeforeUnmount(() => {
             :disabled="props.loading"
             @click="emit('confirm')"
           >
-            <svg v-if="props.loading" class="size-4 animate-spin" viewBox="0 0 24 24" fill="none">
-              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
-              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8v4a4 4 0 0 0-4 4H4z" />
-            </svg>
+            <Loading v-if="props.loading" inline label="" />
             {{ props.confirmText }}
           </button>
         </div>

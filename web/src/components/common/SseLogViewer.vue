@@ -149,9 +149,9 @@ watch(
         <span
           :class="[
             'size-2 rounded-full',
-            state === 'connecting' && 'bg-amber-400 animate-pulse',
-            state === 'open' && 'bg-emerald-400',
-            state === 'closed' && 'bg-red-400',
+            state === 'connecting' && 'bg-warn animate-pulse',
+            state === 'open' && 'bg-ok',
+            state === 'closed' && 'bg-danger',
           ]"
         />
         <span class="text-slate-300">
@@ -176,7 +176,7 @@ watch(
     <!-- 终端 body（暗色，monospace） -->
     <pre
       ref="box"
-      class="max-h-96 overflow-y-auto bg-[#0b1120] px-4 py-3 font-mono text-xs leading-6 text-slate-300 whitespace-pre-wrap break-all"
+      class="max-h-96 overflow-y-auto bg-code-bg px-4 py-3 font-mono text-xs leading-6 text-code-fg whitespace-pre-wrap break-all"
       @scroll.passive="onScroll"
     >
 {{ lines.length === 0 ? '（暂无日志）' : lines.join('\n') }}

@@ -105,15 +105,15 @@ function statusLabel(s: TaskRecord['status']): string {
 function statusDot(s: TaskRecord['status']): string {
   switch (s) {
     case 'queued':
-      return 'bg-amber-400';
+      return 'bg-warn';
     case 'running':
-      return 'bg-blue-400 animate-pulse';
+      return 'bg-info animate-pulse';
     case 'success':
-      return 'bg-emerald-400';
+      return 'bg-ok';
     case 'skipped':
-      return 'bg-slate-400';
+      return 'bg-muted';
     case 'error':
-      return 'bg-red-400';
+      return 'bg-danger';
   }
 }
 
@@ -138,12 +138,12 @@ function onDismiss(id: string) {
 
 <template>
   <!-- 遮罩 -->
-  <div v-if="open" class="fixed inset-0 z-40 bg-black/50" @click="close" />
+  <div v-if="open" class="fixed inset-0 z-40 bg-black/40" @click="close" />
 
   <!-- 抽屉本体：右侧滑出 -->
   <aside
     v-if="open"
-    class="fixed right-0 top-0 z-50 flex h-full w-full max-w-md flex-col border-l border-slate-700 bg-slate-900 shadow-2xl"
+    class="glass fixed right-0 top-0 z-50 flex h-full w-full max-w-md flex-col border-l border-sep"
   >
     <header class="flex items-center justify-between border-b border-slate-700 px-4 py-3">
       <h2 class="text-sm font-semibold text-slate-100">后台任务</h2>
@@ -152,7 +152,7 @@ function onDismiss(id: string) {
 
     <div class="flex-1 overflow-y-auto">
       <p v-if="!tasks.length" class="p-4 text-sm text-slate-500">暂无任务</p>
-      <ul class="divide-y divide-slate-800">
+      <ul class="divide-y divide-sep-soft">
         <li v-for="t in tasks" :key="t.id" class="px-4 py-3">
           <div class="flex items-center gap-2">
             <span :class="['size-2 shrink-0 rounded-full', statusDot(t.status)]" />
@@ -193,7 +193,7 @@ function onDismiss(id: string) {
           <!-- 日志面板（数据源 = store，只读渲染） -->
           <pre
             v-if="expandedId === t.id"
-            class="mt-2 max-h-64 overflow-y-auto rounded bg-[#0b1120] px-3 py-2 font-mono text-xs leading-5 text-slate-300 whitespace-pre-wrap break-all"
+            class="mt-2 max-h-64 overflow-y-auto rounded bg-code-bg px-3 py-2 font-mono text-xs leading-5 text-code-fg whitespace-pre-wrap break-all"
           >{{ t.logs.length ? t.logs.join('\n') : '（暂无日志）' }}</pre>
         </li>
       </ul>

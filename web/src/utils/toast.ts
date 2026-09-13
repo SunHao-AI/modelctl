@@ -20,9 +20,9 @@ const items = ref<ToastItem[]>([]);
 let seq = 0;
 
 const KIND_CLASS: Record<ToastKind, string> = {
-  success: 'border-emerald-500/40 bg-emerald-600/15 text-emerald-200',
-  error: 'border-red-500/40 bg-red-600/15 text-red-200',
-  warning: 'border-amber-500/40 bg-amber-600/15 text-amber-200',
+  success: 'border-ok-line bg-ok-bg text-ok',
+  error: 'border-danger-line bg-danger-bg text-danger',
+  warning: 'border-warn-line bg-warn-bg text-warn',
 };
 
 /** 渲染宿主用：拿到响应式 items 与样式映射 */
