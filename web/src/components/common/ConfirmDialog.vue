@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref, watch } from 'vue';
+import { X } from 'lucide-vue-next';
 import Loading from './Loading.vue';
 
 const props = withDefaults(
@@ -75,8 +76,12 @@ onBeforeUnmount(() => {
           <h3 :class="['text-base font-semibold', props.danger ? 'text-danger' : 'text-label']">
             {{ props.title }}
           </h3>
-          <button class="text-label3 hover:text-label text-xl leading-none" aria-label="关闭" @click="close">
-            ×
+          <button
+            class="grid size-8 shrink-0 place-items-center rounded-ctl text-label3 transition-colors hover:bg-surface3 hover:text-label"
+            aria-label="关闭"
+            @click="close"
+          >
+            <X :size="18" :stroke-width="1.9" />
           </button>
         </div>
         <!-- 主体 -->

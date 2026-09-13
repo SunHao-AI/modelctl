@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import dayjs from 'dayjs';
-import { overview } from '@/api/services';
+import { health, overview } from '@/api/services';
 import type { EngineBinary, OverviewResponse } from '@/api/types';
 import StatusBadge from '@/components/common/StatusBadge.vue';
 
@@ -23,6 +23,19 @@ let timer: number | undefined;
  * / ECONNABORTED）。后端慢一拍时本帧自然顺延而不堆积，UI 保留旧 data。
  */
 let pending: Promise<void> | null = null;
+
+/**
+ * /health 的 uptime_s（QA-A-12）：overview 的 uptime_s 恒 null 是后端遗留
+ * （admin_probe.py 注释「留空由前端覆盖」），这里并行拉免鉴权且极快（~15ms）
+ * 的 /health 覆盖系统卡「可用时间」。
+ */
+const healthUptime = ref<number | null>(null);
+
+function refreshHealth(): void {
+  void health()
+    .then((r) => (healthUptime.value = r.uptime_s ?? null))
+    .catch(() => undefined); // 静默：保留旧值，fmtUptime 兜底「未知」
+}
 
 function refresh(): Promise<void> {
   if (pending) return pending;
@@ -48,7 +61,11 @@ function refresh(): Promise<void> {
 
 onMounted(() => {
   refresh();
-  timer = window.setInterval(() => void refresh(), 3000);
+  refreshHealth();
+  timer = window.setInterval(() => {
+    void refresh();
+    refreshHealth();
+  }, 3000);
 });
 onBeforeUnmount(() => {
   if (timer !== undefined) clearInterval(timer);
@@ -60,9 +77,9 @@ const runningCount = computed(() => {
   return data.value.models.filter((m) => m.state === 'running').length;
 });
 
-/** uptime 秒 → 可读字符串 */
+/** uptime 秒 → 可读字符串（优先 /health 的 uptime_s，overview 恒 null 时兜底） */
 function fmtUptime(): string {
-  const u = data.value?.uptime_s;
+  const u = healthUptime.value ?? data.value?.uptime_s;
   if (u === null || u === undefined) return '未知';
   return Math.round(u) >= 0 ? `${Math.round(u)}s` : '未知';
 }
@@ -158,7 +175,7 @@ const engineBinaries = computed<EngineBinary[]>(() => {
           </div>
           <div class="flex items-center justify-between">
             <span class="text-label2">运行中</span>
-            <span class="num font-semibold tracking-[-.028em] text-ok">{{ runningCount }}</span>
+            <span class="num text-[26px] leading-tight font-semibold tracking-[-.028em] text-ok">{{ runningCount }}</span>
           </div>
           <div class="flex items-start justify-between gap-2">
             <span class="shrink-0 text-label2">默认</span>

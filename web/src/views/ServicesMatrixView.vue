@@ -126,7 +126,7 @@ const familyRows = computed<Array<{ group: string; members: Array<{ name: string
         :class="['card', data.stats.state === 'running' ? 'border-ok-line' : '']"
       >
         <div class="mb-3 flex items-center justify-between">
-          <h3 class="text-base font-semibold text-label">stats</h3>
+          <h3 class="text-sm font-semibold text-label">stats</h3>
           <StatusBadge :state="data.stats.state" />
         </div>
         <div class="space-y-1 text-sm">
@@ -147,7 +147,7 @@ const familyRows = computed<Array<{ group: string; members: Array<{ name: string
         :class="['card', data.gateway.state === 'running' ? 'border-ok-line' : '']"
       >
         <div class="mb-3 flex items-center justify-between">
-          <h3 class="text-base font-semibold text-label">gateway</h3>
+          <h3 class="text-sm font-semibold text-label">gateway</h3>
           <StatusBadge :state="data.gateway.state" />
         </div>
         <div class="space-y-1 text-sm">
@@ -178,15 +178,15 @@ const familyRows = computed<Array<{ group: string; members: Array<{ name: string
           <table class="w-full text-sm">
             <tbody>
               <tr v-for="m in row.members" :key="m.name" class="border-b border-sep-soft last:border-b-0">
-                <td class="w-1/2 py-1">
+                <td class="w-1/2 py-1 pl-3">
                   <span
                     class="mr-2 inline-block size-2 rounded-full"
                     :class="m.running ? 'bg-ok' : 'bg-muted'"
                   />
                   <span class="inline-block max-w-56 truncate align-bottom font-medium text-label" :title="m.name">{{ m.name }}</span>
                 </td>
-                <td class="w-1/4 text-right font-mono text-label3">{{ m.engine }}</td>
-                <td class="num w-1/4 text-right font-mono text-label3">prio={{ m.priority }}</td>
+                <td class="min-w-16 whitespace-nowrap py-1 pl-3 text-right font-mono text-label3">{{ m.engine }}</td>
+                <td class="num min-w-16 whitespace-nowrap py-1 pl-3 text-right font-mono text-label3">prio={{ m.priority }}</td>
               </tr>
             </tbody>
           </table>
@@ -197,7 +197,7 @@ const familyRows = computed<Array<{ group: string; members: Array<{ name: string
 
     <!-- 全家启停 -->
     <section class="card">
-      <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-label3">一键启停</h3>
+      <h3 class="mb-3 text-sm font-semibold text-label">一键启停</h3>
       <div class="flex flex-wrap items-center gap-3">
         <button class="btn-primary" :disabled="allBusy || pendingAll !== null" @click="pendingAll = 'start'">全家启动</button>
         <button class="btn-danger" :disabled="allBusy || pendingAll !== null" @click="pendingAll = 'stop'">全家停止</button>

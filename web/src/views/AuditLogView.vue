@@ -5,6 +5,7 @@ import { auditCleanup, auditList, auditPath, auditStats } from '@/api/audit';
 import type { AuditEntry, AuditListResponse, AuditStatsResponse } from '@/api/types';
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue';
 import DataTable from '@/components/common/DataTable.vue';
+import { auditBarHeights } from '@/utils/auditChart';
 
 /**
  * 审计日志：工具条（since/level/keyword + 搜索）+ 统计卡（总量/错误数/近14天）+
@@ -109,12 +110,8 @@ async function doCleanup() {
 }
 /** 近 14 天（取 by_day 末 14 天） */
 const recentDays = computed(() => (stats.value?.by_day ?? []).slice(-14));
-/** 柱状图归一化最大值 */
-const maxDay = computed(() => {
-  const arr = recentDays.value;
-  if (!arr.length) return 1;
-  return Math.max(...arr.map((d) => Math.max(d.total, d.error))) || 1;
-});
+/** 柱高按容器实际高度归一（QA B-03：任何数据下不越出 h-16 图表容器） */
+const barHeights = computed(() => auditBarHeights(recentDays.value));
 </script>
 
 <template>
@@ -145,20 +142,20 @@ const maxDay = computed(() => {
     <!-- 统计卡 -->
     <div v-if="stats" class="grid grid-cols-1 gap-4 md:grid-cols-3">
       <section class="card">
-        <h3 class="mb-2 text-xs font-medium uppercase tracking-wider text-label3">总量</h3>
-        <div class="num text-2xl font-semibold text-label">{{ stats.total }}</div>
+        <h3 class="mb-3 text-sm font-semibold text-label">总量</h3>
+        <div class="num text-[26px] font-semibold leading-tight tracking-[-0.028em] text-label">{{ stats.total }}</div>
       </section>
       <section class="card">
-        <h3 class="mb-2 text-xs font-medium uppercase tracking-wider text-label3">错误数</h3>
-        <div class="num text-2xl font-semibold text-red-400">{{ list?.error_count ?? 0 }}</div>
+        <h3 class="mb-3 text-sm font-semibold text-label">错误数</h3>
+        <div class="num text-[26px] font-semibold leading-tight tracking-[-0.028em] text-red-400">{{ list?.error_count ?? 0 }}</div>
         <p v-if="stats.by_model && Object.keys(stats.by_model).length" class="mt-1 text-xs text-label3">涉及 {{ Object.keys(stats.by_model).length }} 个模型</p>
       </section>
       <section class="card !p-4">
-        <h3 class="mb-2 text-xs font-medium uppercase tracking-wider text-label3">近 14 天</h3>
-        <div v-if="recentDays.length" class="flex h-16 items-end gap-1">
-          <div v-for="d in recentDays" :key="d.date" :title="`${d.date}: ${d.total} req / ${d.error} err`" class="flex flex-1 flex-col-reverse gap-0.5">
-            <div class="rounded-t-sm" :style="{ height: `${(d.total / maxDay) * 60}px`, background: 'var(--accent)' }" />
-            <div class="rounded-b-sm" :style="{ height: `${(d.error / maxDay) * 24}px`, background: 'var(--danger)' }" />
+        <h3 class="mb-3 text-sm font-semibold text-label">近 14 天</h3>
+        <div v-if="recentDays.length" class="flex h-16 items-end gap-1 overflow-hidden">
+          <div v-for="(d, i) in recentDays" :key="d.date" :title="`${d.date}: ${d.total} req / ${d.error} err`" class="flex flex-1 flex-col-reverse gap-0.5">
+            <div class="rounded-t-sm" :style="{ height: `${barHeights[i]?.totalPx ?? 0}px`, background: 'var(--accent)' }" />
+            <div class="rounded-b-sm" :style="{ height: `${barHeights[i]?.errorPx ?? 0}px`, background: 'var(--danger)' }" />
           </div>
         </div>
         <p v-else class="text-sm text-label3">无数据</p>

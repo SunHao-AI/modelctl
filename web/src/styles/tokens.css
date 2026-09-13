@@ -10,7 +10,8 @@
   --surface-4: #eceef3;
   --label: #0f1219;
   --label-2: #525b6b;
-  --label-3: #8790a0;
+  /* 旧值 #8790a0 对画布仅 2.90:1（QA B-01）；#636d7e 对 canvas/白/表头底均 ≥4.5 */
+  --label-3: #636d7e;
   --separator: rgba(0,0,0,.075);
   --separator-soft: rgba(0,0,0,.045);
   --accent: #0071e3;
@@ -18,7 +19,9 @@
   --on-accent: #ffffff;
   --accent-bg: rgba(0,113,227,.10);
   --accent-line: rgba(0,113,227,.22);
-  --ok: #0a8a4a;      --ok-bg: rgba(10,138,74,.09);     --ok-line: rgba(10,138,74,.20);
+  /* 旧值 #0a8a4a 在 --ok-bg 上 12px 文字仅 3.99:1（QA B-09）；#0a6f3c 压深后
+     ok/ok-bg ≥4.9、白字(--on-accent) on ok = 6.27，均达 AA */
+  --ok: #0a6f3c;      --ok-bg: rgba(10,111,60,.09);     --ok-line: rgba(10,111,60,.20);
   --warn: #a15c07;    --warn-bg: rgba(161,92,7,.09);    --warn-line: rgba(161,92,7,.20);
   --danger: #d0331f;  --danger-bg: rgba(208,51,31,.08); --danger-line: rgba(208,51,31,.20);
   --info: #0a6ed1;

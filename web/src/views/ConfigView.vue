@@ -17,6 +17,7 @@ const snippetErr = ref('');
 const staticCfg = ref<StaticConfigResponse | null>(null);
 const staticErr = ref('');
 const copied = ref(false);
+const copyErr = ref('');
 const genBusy = ref(false);
 const staticBusy = ref(false);
 
@@ -106,8 +107,8 @@ async function copySnippet() {
       <div v-if="snippet" class="mt-3">
         <div class="mb-1 flex items-center justify-between">
           <span class="text-xs text-label3">已生成片段（{{ snippet.length }} 字符）</span>
-          <button class="btn-ghost !py-1 !px-2 text-xs" @click="copySnippet">
-            {{ copied ? '已复制' : '复制' }}
+          <button class="btn-ghost !py-1 !px-2 text-xs" :class="copyErr ? 'text-red-400' : ''" @click="copySnippet">
+            {{ copied ? '已复制' : copyErr ? '复制失败' : '复制' }}
           </button>
         </div>
         <pre class="code-surface max-h-96 overflow-auto rounded-card border border-code-line p-3 text-xs leading-6 whitespace-pre">{{ snippet }}</pre>
@@ -117,7 +118,7 @@ async function copySnippet() {
     <!-- 后端静态配置 -->
     <section class="card">
       <div class="mb-3 flex items-center justify-between">
-        <div>
+        <div class="mr-3">
           <h3 class="text-sm font-semibold text-label">后端静态配置</h3>
           <p class="mt-1 text-xs text-label3">来自 <code class="font-mono text-label2">GET /admin/api/config/static</code></p>
         </div>

@@ -153,12 +153,14 @@ onMounted(load);
                   :disabled="stopBusy"
                   @click="pendingStop = m"
                 >停止</button>
-                <button
+                <!-- A-10：启动走任务流（仅详情页可发）；这里不再放永久禁用的假按钮，
+                     直接给同族样式的链接跳详情，消除 52 行点击试错死区 -->
+                <router-link
                   v-else
                   class="btn-ghost !py-1 !px-2 text-xs"
-                  disabled
-                  title="详见模型详情页（启动走任务流）"
-                >启动</button>
+                  :to="{ name: 'models-detail', params: { name: m.name } }"
+                  title="启动走任务流，详见模型详情页"
+                >启动</router-link>
                 <router-link
                   class="btn-ghost !py-1 !px-2 text-xs"
                   :to="{ name: 'models-detail', params: { name: m.name } }"

@@ -109,7 +109,8 @@ function onEnter(e: KeyboardEvent) {
       </button>
       <button
         v-else
-        class="rounded-full bg-accent px-3 py-1 text-sm text-accent-fg hover:bg-accent-hover"
+        class="rounded-full bg-accent px-3 py-1 text-sm text-accent-fg hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-accent"
+        :disabled="!text.trim() && !images.length"
         @click="submit"
       >
         发送

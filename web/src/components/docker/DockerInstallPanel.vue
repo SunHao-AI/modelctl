@@ -358,7 +358,7 @@ onBeforeUnmount(closeSse);
       <div class="flex items-start gap-3 text-sm">
         <span class="mt-1 size-2 rounded-full bg-info" />
         <div>
-          <h2 class="font-medium text-label">Docker 一键安装（Windows-only）</h2>
+          <h2 class="text-sm font-semibold text-label">Docker 一键安装（Windows-only）</h2>
           <p class="mt-1 text-xs leading-5 text-label2">
             当前 WebUI 主机是 <span class="font-mono text-label2">Linux</span>，Docker
             一键安装仅 Windows。Linux 可直接执行
@@ -381,7 +381,7 @@ onBeforeUnmount(closeSse);
       <!-- 标题 + 状态徽标 -->
       <div class="flex items-baseline justify-between">
         <div>
-          <h2 class="text-sm font-medium text-label">Docker 一键安装（Windows-only）</h2>
+          <h2 class="text-sm font-semibold text-label">Docker 一键安装（Windows-only）</h2>
           <p class="mt-0.5 text-xs text-label3">
             winget + Docker Desktop + WSL2；阶段 A 自动，阶段 B 用户引导
           </p>

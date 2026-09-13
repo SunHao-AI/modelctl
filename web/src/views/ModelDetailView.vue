@@ -105,7 +105,12 @@ function resetYamlEdit() {
   if (yaml.value) yamlEdit.value = yaml.value.content;
   yamlNotice.value = '';
 }
-/** 拉一次启动进度快照（仅无记录 404 → 清空卡片；其它故障保留上一帧防闪烁） */
+/**
+ * 拉一次启动进度快照（仅无记录 404 → 清空卡片；其它故障保留上一帧防闪烁）。
+ *
+ * A-11：未启动过的模型首次进详情页这条 404 是预期内的「无记录」语义，
+ * catch 内对 404 完全静默（不打 console.error/warn），其它错误照旧静默保帧。
+ */
 async function refreshStartup() {
   try {
     startup.value = await getStartup(name.value);

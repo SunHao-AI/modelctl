@@ -90,6 +90,8 @@ function refresh(): Promise<void> {
       }
       if (err?.response?.status === 404) {
         disabled.value = true;
+        // A-18：已判定未启用集群角色后停止轮询，不再反复打注定 404 的接口
+        stopTimer();
         return;
       }
       error.value = errText(e);
@@ -98,6 +100,13 @@ function refresh(): Promise<void> {
     }
   })();
   return pending;
+}
+
+function stopTimer(): void {
+  if (timer !== undefined) {
+    window.clearInterval(timer);
+    timer = undefined;
+  }
 }
 
 async function loadCatalog() {
@@ -295,17 +304,15 @@ onMounted(() => {
   loadCatalog();
   timer = window.setInterval(refresh, 5000);
 });
-onBeforeUnmount(() => window.clearInterval(timer));
+onBeforeUnmount(stopTimer);
 </script>
 
 <template>
   <div class="p-6">
     <div class="mb-4 flex items-center justify-between">
-      <h1 class="text-lg font-semibold text-label">集群目标</h1>
-      <div class="flex items-center gap-3">
-        <span class="num text-sm text-label2">{{ goals.length }} 个 goal · {{ nodes.length }} 节点</span>
-        <button class="btn-primary" @click="openDrawer">新建下发</button>
-      </div>
+      <!-- B-14：正文不再重复页题（Header 是唯一页题源） -->
+      <span class="num text-sm text-label2">{{ goals.length }} 个 goal · {{ nodes.length }} 节点</span>
+      <button class="btn-primary" @click="openDrawer">新建下发</button>
     </div>
 
     <div v-if="disabled" class="rounded-ctl border border-sep bg-surface3 p-6 text-sm text-label2">

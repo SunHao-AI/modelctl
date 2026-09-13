@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref } from 'vue';
+import { computed, nextTick, onMounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { dockerDiagnose, envRemove, envSetup, envTargets } from '@/api/envs';
 import type { DockerBypassEntry, DockerDiagnose, DockerEnv, EnvTarget, UnmanagedTarget } from '@/api/types';
 import TaskButton from '@/components/common/TaskButton.vue';
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue';
+import DataTable from '@/components/common/DataTable.vue';
 import DockerInstallPanel from '@/components/docker/DockerInstallPanel.vue';
+import { toast } from '@/utils/toast';
 
 const route = useRoute();
 const router = useRouter();
@@ -36,8 +38,17 @@ const diagOpen = ref(false);
 const diagData = ref<DockerDiagnose | null>(null);
 const diagErr = ref('');
 const diagBusy = ref(false);
+/** 在飞诊断 promise：页面入口平台探测与手动「完整诊断」共用，避免重复慢请求 */
+let diagInflight: Promise<void> | null = null;
 /** 复制反馈的当前 key（'inst' 或引擎名） */
 const copiedKey = ref('');
+
+/**
+ * 宿主平台（QA-A-02）：不再在诊断未跑时假装 'linux'（会把 Windows 主机
+ * 误判成 Linux 并隐藏「一键安装」入口）。诊断结果到达前返回 null，
+ * 模板用「正在检测平台…」占位；DockerInstallPanel 只认 linux/windows，不动它。
+ */
+const hostPlatform = computed(() => diagData.value?.platform ?? null);
 
 async function load() {
   loading.value = true;
@@ -79,23 +90,38 @@ function onSetupError(name: string, msg: string) {
   }
 }
 
-/** 展开/收起完整诊断；首次展开懒加载一次 */
+/** 展开/收起完整诊断；首次展开懒加载一次（与入口平台探测共用 inflight） */
 async function onDiagnose() {
   diagOpen.value = !diagOpen.value;
-  if (!diagOpen.value || diagData.value || diagBusy.value) return;
-  diagBusy.value = true;
-  diagErr.value = '';
-  try {
-    diagData.value = await dockerDiagnose();
-  } catch (err) {
-    console.warn('dockerDiagnose 失败:', err);
-    diagErr.value = (err as { message?: string })?.message || '诊断失败';
-  } finally {
-    diagBusy.value = false;
-  }
+  if (!diagOpen.value || diagData.value) return;
+  await runDiagnose();
 }
 
-/** 复制任意文本（ConfigView copySnippet 同款 1.5s 反馈） */
+/**
+ * 实际执行诊断（QA-A-02）：进入页面即异步拉一次，用其 platform 字段决定
+ * DockerInstallPanel 的分支；该接口含子进程探测本身慢，结果只落 diagData，
+ * 面板在结果到达前显示「正在检测平台…」占位。
+ */
+function runDiagnose(): Promise<void> {
+  if (diagInflight) return diagInflight;
+  diagBusy.value = true;
+  diagErr.value = '';
+  diagInflight = (async () => {
+    try {
+      diagData.value = await dockerDiagnose();
+    } catch (err) {
+      console.warn('dockerDiagnose 失败:', err);
+      // QA-A-07：失败必须可见（模板红字渲染 diagErr），按钮保持可点以重试
+      diagErr.value = (err as { message?: string })?.message || '诊断失败';
+    } finally {
+      diagBusy.value = false;
+      diagInflight = null;
+    }
+  })();
+  return diagInflight;
+}
+
+/** 复制任意文本（ConfigView copySnippet 同款 1.5s 反馈；失败 toast 可见化，QA-A-16） */
 async function copyText(key: string, text: string) {
   try {
     await navigator.clipboard.writeText(text);
@@ -103,6 +129,7 @@ async function copyText(key: string, text: string) {
     setTimeout(() => (copiedKey.value = ''), 1500);
   } catch (err) {
     console.warn('复制失败:', err);
+    toast.error('复制失败：浏览器拒绝了剪贴板写入');
   }
 }
 
@@ -120,6 +147,8 @@ function focusNeedsBypass(): boolean {
 }
 
 onMounted(async () => {
+  // 进入页面即异步探测宿主平台（QA-A-02：诊断接口慢，结果到达前面板显示占位）
+  void runDiagnose();
   await load();
   const f = route.query.focus;
   if (typeof f !== 'string' || !f) return;
@@ -149,15 +178,15 @@ onMounted(async () => {
     <p v-if="errMsg" class="text-sm text-red-400">{{ errMsg }}</p>
     <p v-if="notice" class="text-sm text-ok">{{ notice }}</p>
 
-    <!-- 表格 -->
-    <section class="card !p-0 overflow-x-auto">
-      <table v-if="targets.length" class="w-full text-sm">
-        <thead class="bg-surface3 text-left text-xs text-label2 uppercase tracking-wider">
+    <!-- 表格（B-15：并入 DataTable 统一表格容器，用法同 ModelsListView） -->
+    <DataTable v-if="targets.length">
+      <table class="min-w-[42rem] text-sm">
+        <thead>
           <tr>
-            <th class="px-3 py-2">目标</th>
-            <th class="px-3 py-2">状态</th>
-            <th class="px-3 py-2">说明</th>
-            <th class="px-3 py-2 text-right">操作</th>
+            <th>目标</th>
+            <th>状态</th>
+            <th>说明</th>
+            <th class="text-right">操作</th>
           </tr>
         </thead>
         <tbody>
@@ -165,11 +194,10 @@ onMounted(async () => {
             v-for="t in targets"
             :id="`env-row-${t.name}`"
             :key="t.name"
-            class="border-b border-sep transition-colors"
             :class="focusName === t.name ? 'bg-warn-bg' : ''"
           >
-            <td class="px-3 py-2 font-mono text-label">{{ t.name }}</td>
-            <td class="px-3 py-2">
+            <td class="font-mono text-label">{{ t.name }}</td>
+            <td>
               <span
                 class="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs"
                 :class="t.installed
@@ -180,8 +208,8 @@ onMounted(async () => {
                 {{ t.installed ? '已安装' : '未安装' }}
               </span>
             </td>
-            <td class="px-3 py-2 text-xs text-label2">{{ t.detail }}</td>
-            <td class="px-3 py-2 text-right">
+            <td class="text-xs text-label2">{{ t.detail }}</td>
+            <td class="text-right">
               <div class="flex items-center justify-end gap-2">
                 <!-- 未安装可用 Setup（任务流，长耗时） -->
                 <TaskButton
@@ -209,9 +237,9 @@ onMounted(async () => {
           </tr>
         </tbody>
       </table>
-      <div v-else-if="!loading" class="p-6 text-sm text-label3">尚无受管目标</div>
-      <div v-else class="p-6 text-sm text-label3">加载中…</div>
-    </section>
+    </DataTable>
+    <div v-else-if="!loading" class="card p-6 text-sm text-label3">尚无受管目标</div>
+    <div v-else class="card p-6 text-sm text-label3">加载中…</div>
 
     <!-- Docker 旁路：托管 venv 仅支持 Linux，已支持引擎可改用官方 docker 镜像 -->
     <!-- focus 命中非托管引擎（platform 不支持）或纯 docker 语境 focus 时高亮本区块； -->
@@ -223,7 +251,7 @@ onMounted(async () => {
     >
       <div class="flex flex-wrap items-start justify-between gap-2">
         <div>
-          <h2 class="text-sm font-medium text-label">Docker 旁路</h2>
+          <h2 class="mb-3 text-sm font-semibold text-label">Docker 旁路</h2>
           <p class="mt-0.5 text-xs text-label3">
             托管 venv 仅支持 Linux；下列引擎可改用官方 docker 镜像绕过 venv（编辑模型 yaml 后仍由 modelctl 启停）
           </p>
@@ -246,6 +274,11 @@ onMounted(async () => {
       </div>
 
       <p v-if="dockerEnv && !dockerEnv.ready" class="text-xs text-label3">{{ dockerEnv.guide }}</p>
+
+      <!-- 诊断失败可见化（QA-A-07）：面板收起时（含入口平台探测失败）也要在按钮下方看到原因 -->
+      <p v-if="diagErr && !diagOpen" class="text-xs text-red-400">
+        {{ diagErr }}（可点「完整诊断」重试）
+      </p>
 
       <!-- 完整诊断：首次展开懒加载一次（后端含子进程探测） -->
       <div v-if="diagOpen" class="space-y-1.5 border-t border-sep pt-3">
@@ -315,16 +348,20 @@ onMounted(async () => {
     </section>
 
     <!-- Docker 一键安装（Windows-only）：放在「Docker 旁路」section 之后，构成"Docker 环境补齐"入口。
-         platform 取自 diagData.platform（Task 3 后端新增顶层字段；诊断未跑时默认为 linux，
-         面板会降级为引导 alert 而非假装 Windows）。 -->
-    <DockerInstallPanel
-      :platform="diagData ? diagData.platform : 'linux'"
-    />
+         platform 取自 diagData.platform（QA-A-02：诊断未回时不再假装 'linux' 误判平台，
+         外层 v-if 分流：未知 → 占位卡片；面板组件本身不动（只认 linux/windows）。 -->
+    <section v-if="hostPlatform === null" class="card">
+      <h2 class="text-sm font-semibold text-label">Docker 一键安装（Windows-only）</h2>
+      <p class="mt-1 text-xs text-label3">
+        {{ diagErr ? '平台检测失败，原因见上方「Docker 旁路」区块的红色提示；修复后可点「完整诊断」重试。' : '正在检测平台…' }}
+      </p>
+    </section>
+    <DockerInstallPanel v-else :platform="hostPlatform" />
 
     <!-- 非托管引擎说明：原生二进制 / 官方安装器 / 源码编译，不建 venv 故不在上表 -->
     <section v-if="unmanaged.length" class="card space-y-2">
       <div class="flex items-baseline justify-between">
-        <h2 class="text-sm font-medium text-label">非托管引擎</h2>
+        <h2 class="mb-3 text-sm font-semibold text-label">非托管引擎</h2>
         <span class="text-xs text-label3">原生或官方安装器，无需托管 venv</span>
       </div>
       <div v-for="u in unmanaged" :key="u.name" class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">

@@ -1,3 +1,11 @@
+<script lang="ts">
+/**
+ * A-18：solo 角色下 cluster/settings 注定 404。模块级（非实例级）记忆判定结果，
+ * SPA 会话内再次进入本页不再重复打这条注定失败的请求（刷新文档才重试）。
+ */
+let clusterOffOnce = false;
+</script>
+
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
@@ -57,19 +65,25 @@ function onClearToken() {
 
 // ---------------- 集群块（M2，只读 + 轮换 + 备份） ----------------
 const settings = ref<ClusterSettings | null>(null);
-const clusterOff = ref(false); // 404 = 非中心角色，整块降级为一行提示
+const clusterOff = ref(clusterOffOnce); // 404 = 非中心角色，整块降级为一行提示
 const joinTokenOnce = ref(''); // 一次性明文：只存内存，离开页面即丢
 const clusterBusy = ref(false);
 const backupTip = ref('');
 const clusterError = ref('');
 
 async function fetchSettings() {
+  if (clusterOffOnce) {
+    clusterOff.value = true;
+    return;
+  }
   try {
     settings.value = await getClusterSettings();
     clusterOff.value = false;
   } catch (e) {
-    if ((e as AxiosError).response?.status === 404) clusterOff.value = true;
-    else clusterError.value = (e as Error).message;
+    if ((e as AxiosError).response?.status === 404) {
+      clusterOff.value = true;
+      clusterOffOnce = true;
+    } else clusterError.value = (e as Error).message;
   }
 }
 

@@ -37,3 +37,30 @@ describe('ChatComposer 输入法（IME）回车处理', () => {
     expect(emitted?.[0]).toEqual(['你好', []]);
   });
 });
+
+// QA-A-13：空输入时「发送」必须禁用，不给用户"点了没反应"的体感
+describe('ChatComposer 发送按钮禁用态（QA-A-13）', () => {
+  it('空输入（无文本无图片）时发送按钮 disabled', () => {
+    const wrapper = mount(ChatComposer);
+    const buttons = wrapper.findAll('button');
+    const send = buttons[buttons.length - 1];
+    expect(send.text()).toBe('发送');
+    expect((send.element as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('仅空格视同空输入，仍 disabled', async () => {
+    const wrapper = mount(ChatComposer);
+    await wrapper.find('textarea').setValue('   ');
+    const buttons = wrapper.findAll('button');
+    const send = buttons[buttons.length - 1];
+    expect((send.element as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('输入文本后发送按钮恢复可用', async () => {
+    const wrapper = mount(ChatComposer);
+    await wrapper.find('textarea').setValue('hi');
+    const buttons = wrapper.findAll('button');
+    const send = buttons[buttons.length - 1];
+    expect((send.element as HTMLButtonElement).disabled).toBe(false);
+  });
+});

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import { AxiosError } from 'axios';
+import { X } from 'lucide-vue-next';
 import {
   listAccounts, createAccount, updateAccount, deleteAccount,
   listAccountKeys, createAccountKey, updateAccountKey, deleteAccountKey,
@@ -298,18 +299,17 @@ onMounted(load);
 
 <template>
   <div class="max-w-5xl mx-auto pb-12">
-    <div class="flex items-center justify-between mb-5">
-      <div>
-        <h2 class="text-xl font-semibold text-label">账号管理</h2>
-        <p class="text-xs text-label3 mt-0.5">管理用户账号 / 签发 API Key / 查看用量</p>
-      </div>
-      <button class="btn-primary !py-1.5 text-xs" @click="openCreate">
+    <div class="mb-5 flex items-center justify-between">
+      <!-- B-14：正文不再重复页题（Header 是唯一页题源），只留功能按钮 -->
+      <p class="text-xs text-label3">管理用户账号 / 签发 API Key / 查看用量</p>
+      <button class="btn-primary !py-1.5 text-xs" :disabled="isAccountsDisabled" @click="openCreate">
         <svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
         新建账号
       </button>
     </div>
 
-    <div v-if="errMsg" class="mb-3 rounded-ctl border border-danger-line bg-danger-bg px-3 py-2 text-sm text-danger">{{ errMsg }}</div>
+    <!-- A-15：errMsg 与引导块互斥，同义提示只出现一条 -->
+    <div v-if="errMsg && !isAccountsDisabled" class="mb-3 rounded-ctl border border-danger-line bg-danger-bg px-3 py-2 text-sm text-danger">{{ errMsg }}</div>
     <div v-if="isAccountsDisabled" class="mb-3 rounded-ctl border border-warn-line bg-warn-bg px-4 py-3 text-sm text-warn">
       <p class="text-label font-medium mb-1">账号体系未启用</p>
       <p class="text-xs">
@@ -476,7 +476,10 @@ onMounted(load);
         <div class="w-full max-w-lg rounded-panel border border-sep bg-surface2 shadow-l">
           <div class="flex items-center justify-between border-b border-sep px-5 py-3">
             <h3 class="text-base font-semibold text-label">{{ editing ? `编辑账号 ${editing.username}` : '新建账号' }}</h3>
-            <button class="text-label3 hover:text-label text-xl leading-none" @click="showForm = false">×</button>
+            <!-- B-12：与 ConfirmDialog 同型关闭钮（lucide X + size-8） -->
+            <button class="flex size-8 items-center justify-center rounded-ctl text-label3 hover:bg-surface3 hover:text-label" aria-label="关闭" @click="showForm = false">
+              <X class="size-4" />
+            </button>
           </div>
           <form class="px-5 py-4 space-y-3" @submit.prevent="onFormSubmit">
             <div>

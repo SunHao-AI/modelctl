@@ -55,7 +55,7 @@ function mbToGb(mb: number): string {
     <div v-if="data" class="grid grid-cols-1 gap-4 lg:grid-cols-2">
       <!-- 区块 1：GPU -->
       <section class="card">
-        <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-label3">GPU</h3>
+        <h3 class="mb-3 text-sm font-semibold text-label">GPU</h3>
         <div class="space-y-2 text-sm">
           <div class="grid grid-cols-2 gap-x-4 gap-y-2">
             <div><span class="text-label3">数量</span><div class="num font-mono text-label">{{ data.gpu_count }}</div></div>
@@ -71,7 +71,7 @@ function mbToGb(mb: number): string {
 
       <!-- 区块 2：GPU 锁 -->
       <section class="card">
-        <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-label3">GPU 锁</h3>
+        <h3 class="mb-3 text-sm font-semibold text-label">GPU 锁</h3>
         <div v-if="data.gpu_locks.length" class="flex flex-wrap gap-2">
           <span
             v-for="l in data.gpu_locks"
@@ -86,7 +86,7 @@ function mbToGb(mb: number): string {
 
       <!-- 区块 3：引擎二进制 -->
       <section class="card !p-0">
-        <div class="border-b border-sep px-3 py-2 text-xs font-medium uppercase tracking-wider text-label3">
+        <div class="border-b border-sep px-3 py-2 text-sm font-semibold text-label">
           引擎二进制
         </div>
         <table v-if="data.engine_binaries.length" class="w-full text-sm">
@@ -114,7 +114,7 @@ function mbToGb(mb: number): string {
 
       <!-- 区块 4：环境变量 -->
       <section class="card !p-0">
-        <div class="border-b border-sep px-3 py-2 text-xs font-medium uppercase tracking-wider text-label3">
+        <div class="border-b border-sep px-3 py-2 text-sm font-semibold text-label">
           环境变量
         </div>
         <table class="w-full text-sm">
@@ -129,7 +129,7 @@ function mbToGb(mb: number): string {
 
       <!-- 区块 5：路径与版本 -->
       <section class="card">
-        <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-label3">路径与版本</h3>
+        <h3 class="mb-3 text-sm font-semibold text-label">路径与版本</h3>
         <div class="space-y-2 text-sm">
           <div><span class="text-label3">项目根</span><div class="break-all font-mono text-xs text-label2">{{ data.paths.project_root }}</div></div>
           <div><span class="text-label3">缓存目录</span><div class="break-all font-mono text-xs text-label2">{{ data.paths.cache_dir }}</div></div>

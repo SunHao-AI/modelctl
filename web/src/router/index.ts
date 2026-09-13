@@ -180,4 +180,29 @@ router.afterEach((to) => {
   }
 });
 
+/**
+ * 路由 chunk 预取（QA-A-04/A-17 缓解）：首屏就绪后，利用空闲时间预拉
+ * 全部懒加载视图组件，消除「首次导航 5~8s 无响应」。预取失败静默
+ * （导航本身仍会重试真实 import）。仅在浏览器环境调度，测试/SSR 不触发。
+ */
+const lazyViews = import.meta.glob(['../views/**/*.vue', '../components/layout/Layout.vue']);
+
+function prefetchRoutes(): void {
+  for (const path in lazyViews) void lazyViews[path]!().catch(() => undefined);
+}
+
+// vitest（MODE=test）下不预取：懒加载视图会把整棵依赖图拉进 jsdom，白耗转换时间
+if (typeof window !== 'undefined' && import.meta.env.MODE !== 'test') {
+  void router.isReady().then(() => {
+    const w = window as Window & {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout?: number }) => number;
+    };
+    if (typeof w.requestIdleCallback === 'function') {
+      w.requestIdleCallback(() => prefetchRoutes(), { timeout: 2000 });
+    } else {
+      window.setTimeout(prefetchRoutes, 1500);
+    }
+  });
+}
+
 export default router;

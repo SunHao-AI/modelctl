@@ -41,6 +41,8 @@ function refresh(): Promise<void> {
       }
       if (err?.response?.status === 404) {
         disabled.value = true;
+        // A-18：已判定未启用集群角色后停止轮询，不再反复打注定 404 的接口
+        stopTimer();
         return;
       }
       error.value = (e as Error).message;
@@ -51,6 +53,13 @@ function refresh(): Promise<void> {
   return pending;
 }
 
+function stopTimer(): void {
+  if (timer !== undefined) {
+    window.clearInterval(timer);
+    timer = undefined;
+  }
+}
+
 function fmtAge(s: number | null): string {
   return s === null ? '-' : s < 60 ? `${s.toFixed(0)}s` : `${(s / 60).toFixed(1)}m`;
 }
@@ -59,14 +68,14 @@ onMounted(() => {
   refresh();
   timer = window.setInterval(refresh, 5000);
 });
-onBeforeUnmount(() => window.clearInterval(timer));
+onBeforeUnmount(stopTimer);
 </script>
 
 <template>
   <div class="p-6">
-    <div class="mb-4 flex items-center justify-between">
-      <h1 class="text-lg font-semibold text-label">集群节点</h1>
-      <div v-if="status" class="num text-sm text-label2">
+    <!-- B-14：正文不再重复页题（Header 是唯一页题源）；仅在拿到状态时显示角色行 -->
+    <div v-if="status" class="mb-4 flex items-center justify-end">
+      <div class="num text-sm text-label2">
         角色 {{ status.role }} · {{ status.nodes_online }}/{{ status.nodes_total }} online
       </div>
     </div>

@@ -20,8 +20,14 @@
   width: 100%;
   border-collapse: collapse;
 }
-:slotted(table) th {
+/* QA B-04：默认左对齐必须包 :where() 归零特异度（scoped 编译为
+   `:where(table[data-v-x] th)`，特异度 0），否则本规则 (0,1,1) 稳压模板
+   `.text-right` (0,1,0)，右对齐列的表头被拉左、与右对齐单元格错位。
+   未写对齐类的 th 仍吃到这里的 left（作者样式恒胜 UA 的 center）。 */
+:where(:slotted(table) th) {
   text-align: left;
+}
+:slotted(table) th {
   font-size: 11px;
   font-weight: 620;
   letter-spacing: 0.055em;

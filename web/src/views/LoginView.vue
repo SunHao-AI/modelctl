@@ -2,7 +2,8 @@
 import { onBeforeMount, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAuthStore } from '@/stores/auth';
-import { logout, login } from '@/api/auth';
+import { login, logout } from '@/api/auth';
+import { health } from '@/api/services';
 import Loading from '@/components/common/Loading.vue';
 
 const auth = useAuthStore();
@@ -12,14 +13,39 @@ const route = useRoute();
 const apiKey = ref('');
 const submitting = ref(false);
 const error = ref('');
+/** 后端版本（QA-A-09：不再硬编码 v0.1.0）；health 拉取失败则只显示 modelctl */
+const version = ref('');
 
 /** 已鉴权用户进入 /login 时，直接重定向回主应用 */
 onBeforeMount(() => {
   if (auth.isLoggedIn) {
     const redirect = (route.query.redirect as string) || '/';
     router.replace(redirect);
+    return;
   }
+  // /health 免鉴权，登录前即可取版本号；失败静默降级为不带版本
+  void health()
+    .then((r) => (version.value = r.version || ''))
+    .catch(() => undefined);
 });
+
+/**
+ * 从登录异常提取用户可见文案（QA-A-01）。
+ * 后端 401 错误体形状是 { error: { code, message } }（无 detail）；
+ * 按序取 error.message → detail.message（兼容其它形状）→ e.message。
+ */
+function loginErrorMessage(e: unknown): string {
+  const err = e as {
+    response?: { data?: { error?: { message?: string }; detail?: { message?: string } } };
+    message?: string;
+  };
+  return (
+    err?.response?.data?.error?.message ??
+    err?.response?.data?.detail?.message ??
+    err?.message ??
+    '网络错误，无法连接后端'
+  );
+}
 
 async function onSubmit() {
   const key = apiKey.value.trim();
@@ -39,9 +65,8 @@ async function onSubmit() {
     }
     error.value = res.message || '登录失败，请检查 API Key';
   } catch (e) {
-    // 后端 401 响应体：{ detail: { code, message } }
-    const detail = (e as { response?: { data?: { detail?: { message?: string } } } })?.response?.data?.detail;
-    error.value = detail?.message || (e as { message?: string })?.message || '网络错误，无法连接后端';
+    // 后端 401 响应体：{ error: { code, message } }（无 detail；QA-A-01）
+    error.value = loginErrorMessage(e);
   } finally {
     submitting.value = false;
   }
@@ -101,7 +126,7 @@ async function onLogout() {
         </button>
       </div>
 
-      <p class="mt-6 text-center text-xs text-label3">modelctl v0.1.0</p>
+      <p class="mt-6 text-center text-xs text-label3">modelctl{{ version ? ` v${version}` : '' }}</p>
     </div>
   </div>
 </template>

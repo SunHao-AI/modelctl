@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
-import { ListChecks, Menu } from 'lucide-vue-next';
+import { ListChecks, LogOut, Menu } from 'lucide-vue-next';
 import { useAuthStore } from '@/stores/auth';
 import { health } from '@/api/services';
 import TaskDrawer from '@/components/common/TaskDrawer.vue';
@@ -68,7 +68,7 @@ function onLogout() {
       <button class="iconbtn grid place-items-center md:hidden" type="button" aria-label="打开导航" @click="props.onToggleNav?.()">
         <Menu :size="15" :stroke-width="1.9" />
       </button>
-      <h1 class="truncate text-lg font-semibold tracking-[-.022em] text-label md:text-xl">
+      <h1 class="truncate text-lg font-semibold tracking-[-.022em] text-label md:text-xl" :title="props.title || 'modelctl'">
         {{ props.title || 'modelctl' }}
       </h1>
     </div>
@@ -81,10 +81,10 @@ function onLogout() {
         <ThemeSwitch />
       </span>
 
-      <!-- 后端状态 -->
+      <!-- 后端状态（QA B-05：窄屏收成"仅圆点"，文案隐藏但不换行） -->
       <span
         :class="[
-          'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium',
+          'inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-1 text-xs font-medium',
           healthState === 'loading' && 'border-sep bg-surface3 text-label2',
           healthState === 'ok' && 'border-ok-line bg-ok-bg text-ok',
           healthState === 'bad' && 'border-danger-line bg-danger-bg text-danger',
@@ -98,7 +98,7 @@ function onLogout() {
             healthState === 'bad' && 'bg-danger',
           ]"
         />
-        {{ healthState === 'loading' ? '检测中' : healthState === 'ok' ? '后端正常' : '后端异常' }}
+        <span class="max-md:hidden">{{ healthState === 'loading' ? '检测中' : healthState === 'ok' ? '后端正常' : '后端异常' }}</span>
       </span>
 
       <!-- 脱敏 apiKey 前缀 -->
@@ -118,16 +118,24 @@ function onLogout() {
         </span>
       </button>
 
-      <!-- 身份头像 -->
+      <!-- 身份头像（QA B-08：两端均压至 #5b6980 及更深，白字全段 ≥4.5:1） -->
       <div
         class="grid size-[29px] shrink-0 place-items-center rounded-full text-[11.5px] font-semibold text-white"
-        style="background: linear-gradient(150deg, #8e9bb5, #5b6980)"
+        style="background: linear-gradient(150deg, #5b6980, #3f4a5e)"
       >
         {{ who }}
       </div>
 
-      <!-- 退出登录 -->
-      <button class="btn-ghost !py-1.5 text-xs" @click="onLogout">退出登录</button>
+      <!-- 退出登录（QA B-05：<md 收成图标钮；aria-label 保底可访问名仍为「退出登录」） -->
+      <button
+        class="btn-ghost !py-1.5 text-xs max-md:!px-2.5"
+        aria-label="退出登录"
+        title="退出登录"
+        @click="onLogout"
+      >
+        <span class="whitespace-nowrap max-md:hidden">退出登录</span>
+        <LogOut class="md:hidden" :size="14" :stroke-width="1.9" />
+      </button>
     </div>
   </header>
 
