@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { AxiosError } from 'axios';
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue';
+import DataTable from '@/components/common/DataTable.vue';
 import {
   createClusterGoal,
   deleteClusterGoal,
@@ -338,82 +339,86 @@ onBeforeUnmount(() => window.clearInterval(timer));
       </div>
 
       <!-- 矩阵形态 -->
-      <table v-if="effectiveMode === 'matrix' && filteredGoals.length" class="w-full text-left text-sm">
-        <thead class="text-label2">
-          <tr class="border-b border-sep">
-            <th class="py-2 pr-4">节点</th>
-            <th v-for="p in matrixColumns" :key="p" class="py-2 pr-4">{{ p }}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="n in nodes" :key="n.node_id" class="border-b border-sep">
-            <td class="py-2 pr-4">
-              <router-link
-                :to="`/cluster/nodes/${n.node_id}`"
-                class="font-mono text-accent hover:underline"
-              >{{ n.node_id }}</router-link>
-              <span class="ml-2 rounded-ctl border px-1.5 py-0.5 text-xs" :class="NODE_STATUS_STYLE[n.status] || NODE_STATUS_STYLE.offline">
-                {{ n.status }}
-              </span>
-            </td>
-            <td v-for="p in matrixColumns" :key="p" class="py-2 pr-4 align-top">
-              <div
-                v-if="goalAt(n.node_id, p)"
-                class="cursor-pointer rounded-ctl border px-2 py-1 text-xs"
-                :class="STAGE_STYLE[classify(goalAt(n.node_id, p)!)]"
-                :title="`${goalAt(n.node_id, p)!.stage}${goalAt(n.node_id, p)!.reason ? ' · ' + goalAt(n.node_id, p)!.reason : ''}`"
-                @click="router.push(`/cluster/nodes/${n.node_id}`)"
-              >
-                {{ goalAt(n.node_id, p)!.intent }} · {{ goalAt(n.node_id, p)!.stage }}
-                <div v-if="goalAt(n.node_id, p)!.gpu?.length" class="text-label2">
-                  gpu {{ goalAt(n.node_id, p)!.gpu!.join(',') }}<span v-if="goalAt(n.node_id, p)!.port"> :{{ goalAt(n.node_id, p)!.port }}</span>
+      <DataTable v-if="effectiveMode === 'matrix' && filteredGoals.length">
+        <table class="min-w-[36rem] text-left text-sm">
+          <thead>
+            <tr>
+              <th class="min-w-40">节点</th>
+              <th v-for="p in matrixColumns" :key="p" class="min-w-32">{{ p }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="n in nodes" :key="n.node_id">
+              <td>
+                <router-link
+                  :to="`/cluster/nodes/${n.node_id}`"
+                  class="font-mono text-accent hover:underline"
+                >{{ n.node_id }}</router-link>
+                <span class="ml-2 rounded-ctl border px-1.5 py-0.5 text-xs" :class="NODE_STATUS_STYLE[n.status] || NODE_STATUS_STYLE.offline">
+                  {{ n.status }}
+                </span>
+              </td>
+              <td v-for="p in matrixColumns" :key="p" class="align-top">
+                <div
+                  v-if="goalAt(n.node_id, p)"
+                  class="cursor-pointer rounded-ctl border px-2 py-1 text-xs"
+                  :class="STAGE_STYLE[classify(goalAt(n.node_id, p)!)]"
+                  :title="`${goalAt(n.node_id, p)!.stage}${goalAt(n.node_id, p)!.reason ? ' · ' + goalAt(n.node_id, p)!.reason : ''}`"
+                  @click="router.push(`/cluster/nodes/${n.node_id}`)"
+                >
+                  {{ goalAt(n.node_id, p)!.intent }} · {{ goalAt(n.node_id, p)!.stage }}
+                  <div v-if="goalAt(n.node_id, p)!.gpu?.length" class="num text-label2">
+                    gpu {{ goalAt(n.node_id, p)!.gpu!.join(',') }}<span v-if="goalAt(n.node_id, p)!.port"> :{{ goalAt(n.node_id, p)!.port }}</span>
+                  </div>
                 </div>
-              </div>
-              <span v-else class="text-xs text-label3">-</span>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+                <span v-else class="text-xs text-label3">-</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </DataTable>
 
       <!-- 列表形态（含 >8 列降级） -->
-      <table v-else-if="filteredGoals.length" class="w-full text-left text-sm">
-        <thead class="text-label2">
-          <tr class="border-b border-sep">
-            <th class="py-2 pr-4">节点</th>
-            <th class="py-2 pr-4">profile</th>
-            <th class="py-2 pr-4">engine</th>
-            <th class="py-2 pr-4">intent</th>
-            <th class="py-2 pr-4">stage</th>
-            <th class="py-2 pr-4">实际</th>
-            <th class="py-2 pr-4">gpu/端口</th>
-            <th class="py-2 pr-4">更新时间</th>
-            <th class="py-2">动作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="g in filteredGoals" :key="g.goal_id" class="border-b border-sep text-label">
-            <td class="py-2 pr-4">
-              <router-link :to="`/cluster/nodes/${g.node_id}`" class="font-mono text-accent hover:underline">{{ g.node_id }}</router-link>
-            </td>
-            <td class="py-2 pr-4 font-mono">{{ g.profile }}</td>
-            <td class="py-2 pr-4 text-label2">{{ g.engine }}</td>
-            <td class="py-2 pr-4">{{ g.intent }}</td>
-            <td class="py-2 pr-4">
-              <span class="rounded-ctl border px-2 py-0.5 text-xs" :class="STAGE_STYLE[classify(g)]">{{ g.stage }}</span>
-              <div v-if="g.reason" class="max-w-64 truncate text-xs text-label3" :title="g.reason">{{ g.reason }}</div>
-            </td>
-            <td class="py-2 pr-4 text-label2">{{ g.state || '-' }}</td>
-            <td class="num py-2 pr-4 text-label2">{{ g.gpu?.join(',') || '-' }}<span v-if="g.port"> :{{ g.port }}</span></td>
-            <td class="num py-2 pr-4 text-label2">{{ g.updated_at }}</td>
-            <td class="py-2 whitespace-nowrap">
-              <button v-if="g.intent === 'start'" class="btn-ghost mr-1" @click="rowStop(g)">stop</button>
-              <button v-if="g.stage === 'FAILED'" class="btn-ghost mr-1" @click="rowRetry(g)">retry</button>
-              <button class="btn-ghost mr-1" @click="rowSync(g.node_id)">sync</button>
-              <button class="btn-danger" @click="removeTarget = g">remove</button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+      <DataTable v-else-if="filteredGoals.length">
+        <table class="min-w-[68rem] text-left text-sm">
+          <thead>
+            <tr>
+              <th class="min-w-32">节点</th>
+              <th class="min-w-28">profile</th>
+              <th class="min-w-20">engine</th>
+              <th class="min-w-16">intent</th>
+              <th class="min-w-24">stage</th>
+              <th class="min-w-20">实际</th>
+              <th class="min-w-24">gpu/端口</th>
+              <th class="min-w-40">更新时间</th>
+              <th class="min-w-56">动作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="g in filteredGoals" :key="g.goal_id">
+              <td>
+                <router-link :to="`/cluster/nodes/${g.node_id}`" class="font-mono text-accent hover:underline">{{ g.node_id }}</router-link>
+              </td>
+              <td class="font-mono">{{ g.profile }}</td>
+              <td class="text-label2">{{ g.engine }}</td>
+              <td>{{ g.intent }}</td>
+              <td>
+                <span class="rounded-ctl border px-2 py-0.5 text-xs" :class="STAGE_STYLE[classify(g)]">{{ g.stage }}</span>
+                <div v-if="g.reason" class="max-w-64 truncate text-xs text-label3" :title="g.reason">{{ g.reason }}</div>
+              </td>
+              <td class="text-label2">{{ g.state || '-' }}</td>
+              <td class="num text-label2">{{ g.gpu?.join(',') || '-' }}<span v-if="g.port"> :{{ g.port }}</span></td>
+              <td class="num text-label2">{{ g.updated_at }}</td>
+              <td class="whitespace-nowrap">
+                <button v-if="g.intent === 'start'" class="btn-ghost mr-1" @click="rowStop(g)">stop</button>
+                <button v-if="g.stage === 'FAILED'" class="btn-ghost mr-1" @click="rowRetry(g)">retry</button>
+                <button class="btn-ghost mr-1" @click="rowSync(g.node_id)">sync</button>
+                <button class="btn-danger" @click="removeTarget = g">remove</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </DataTable>
 
       <div v-else class="rounded-ctl border border-sep bg-surface3 p-6 text-center text-sm text-label3">
         暂无匹配的 goal

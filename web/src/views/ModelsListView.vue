@@ -5,6 +5,7 @@ import { listModels, stopModel } from '@/api/models';
 import type { ModelInfo, ModelsGroup } from '@/api/types';
 import StatusBadge from '@/components/common/StatusBadge.vue';
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue';
+import DataTable from '@/components/common/DataTable.vue';
 
 /**
  * 模型列表：拉 groups + 默认模型高亮；行内启停走 TaskButton（start/restart）/
@@ -80,71 +81,71 @@ onMounted(load);
   <div class="space-y-4">
     <!-- 工具条 -->
     <div class="flex items-center justify-between">
-      <p class="text-sm text-slate-400">
-        <span class="text-slate-200">共 {{ flat.length }} 个模型 · {{ groups.length }} 个家族</span>
-        <span v-if="defaultModel" class="ml-2 text-emerald-300">默认：{{ defaultModel }}</span>
+      <p class="text-sm text-label3">
+        <span class="text-label2">共 {{ flat.length }} 个模型 · {{ groups.length }} 个家族</span>
+        <span v-if="defaultModel" class="ml-2 text-ok">默认：{{ defaultModel }}</span>
       </p>
       <button class="btn-ghost" :disabled="loading" @click="load">刷新</button>
     </div>
 
     <!-- 错误提示 -->
     <p v-if="errMsg" class="text-sm text-red-400">{{ errMsg }}</p>
-    <p v-if="notice" class="text-sm text-emerald-300">{{ notice }}</p>
+    <p v-if="notice" class="text-sm text-ok">{{ notice }}</p>
 
     <!-- 表格 -->
-    <section class="card overflow-x-auto !p-0">
-      <table v-if="flat.length" class="w-full text-sm">
-        <thead class="bg-slate-800/40 text-left text-xs text-slate-400 uppercase tracking-wider">
+    <DataTable v-if="flat.length">
+      <table class="min-w-[52rem] text-sm">
+        <thead>
           <tr>
-            <th class="px-3 py-2">状态</th>
-            <th class="px-3 py-2">模型</th>
-            <th class="px-3 py-2">家族</th>
-            <th class="px-3 py-2">引擎</th>
-            <th class="px-3 py-2 text-right">端口</th>
-            <th class="px-3 py-2">健康</th>
-            <th class="px-3 py-2 text-right">操作</th>
+            <th>状态</th>
+            <th class="min-w-56">模型</th>
+            <th>家族</th>
+            <th>引擎</th>
+            <th class="text-right">端口</th>
+            <th>健康</th>
+            <th class="text-right">操作</th>
           </tr>
         </thead>
         <tbody>
           <tr
             v-for="m in flat"
             :key="m.name"
-            :class="[
-              'border-b border-slate-800/40 transition-colors hover:bg-slate-800/30 cursor-pointer',
-              isDefault(m) && 'bg-emerald-600/10',
-            ]"
+            class="cursor-pointer"
+            :class="isDefault(m) ? 'bg-ok-bg' : ''"
             @click="goDetail(m)"
           >
-            <td class="px-3 py-2"><StatusBadge :state="m.state" /></td>
-            <td class="px-3 py-2">
+            <td><StatusBadge :state="m.state" /></td>
+            <td>
               <div class="flex items-center gap-2">
-                <span class="font-medium text-slate-100">{{ m.name }}</span>
+                <span class="max-w-72 truncate font-medium text-label" :title="m.name">{{ m.name }}</span>
                 <span
                   v-if="isDefault(m)"
-                  class="rounded-full bg-emerald-600/20 px-1.5 py-0.5 text-[10px] text-emerald-300"
+                  class="shrink-0 rounded-full border border-ok-line bg-ok-bg px-1.5 py-0.5 text-[10px] text-ok"
                 >默认</span>
               </div>
-              <div class="mt-0.5 text-xs text-slate-500 font-mono">
-                <span v-if="m.aliases.length">aliases: {{ m.aliases.join(', ') }}</span>
+              <div v-if="m.aliases.length" class="mt-0.5 max-w-72 truncate font-mono text-xs text-label3" :title="m.aliases.join(', ')">
+                aliases: {{ m.aliases.join(', ') }}
               </div>
             </td>
-            <td class="px-3 py-2 text-slate-300">{{ m.group }}</td>
-            <td class="px-3 py-2 font-mono text-slate-300">{{ m.engine }}</td>
-            <td class="px-3 py-2 text-right font-mono text-slate-300">{{ m.port || '—' }}</td>
-            <td class="px-3 py-2">
+            <td class="text-label2">{{ m.group }}</td>
+            <td class="font-mono text-label2">{{ m.engine }}</td>
+            <td class="num text-right font-mono text-label2">{{ m.port || '—' }}</td>
+            <td>
               <span
-                :class="[
-                  'text-xs',
-                  m.health === 'healthy' && 'text-emerald-300',
-                  m.health === 'unhealthy' && 'text-red-300',
-                  (!m.health || m.health === 'unknown') && 'text-slate-500',
-                ]"
+                class="text-xs"
+                :class="
+                  m.health === 'healthy'
+                    ? 'text-ok'
+                    : m.health === 'unhealthy'
+                      ? 'text-danger'
+                      : 'text-label3'
+                "
               >
                 {{ m.health || '—' }}
               </span>
             </td>
             <!-- 操作：stop 用确认，start/restart 用详情（详见 ModelDetailView） -->
-            <td class="px-3 py-2 text-right" @click.stop>
+            <td class="text-right whitespace-nowrap" @click.stop>
               <div class="flex items-center justify-end gap-2">
                 <button
                   v-if="m.state === 'running'"
@@ -167,9 +168,9 @@ onMounted(load);
           </tr>
         </tbody>
       </table>
-      <div v-else-if="!loading" class="p-6 text-sm text-slate-500">尚无模型</div>
-      <div v-else class="p-6 text-sm text-slate-500">加载中…</div>
-    </section>
+    </DataTable>
+    <div v-else-if="!loading" class="card text-sm text-label3">尚无模型</div>
+    <div v-else class="card text-sm text-label3">加载中…</div>
 
     <!-- 停止确认对话框 -->
     <ConfirmDialog

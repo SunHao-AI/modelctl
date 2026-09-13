@@ -39,9 +39,9 @@ function mbToGb(mb: number): string {
   <div class="space-y-4">
     <!-- 顶部：重新体检 + 时间戳 -->
     <div class="flex items-center justify-between">
-      <p class="text-sm text-slate-400">
+      <p class="text-sm text-label3">
         完整硬件体检（5 区块）
-        <span v-if="probedAt" class="ml-2 text-slate-500">上次：{{ probedAt }}</span>
+        <span v-if="probedAt" class="ml-2 text-label3">上次：{{ probedAt }}</span>
       </p>
       <button class="btn-primary" :disabled="busy" @click="load">
         <svg v-if="busy" class="size-4 animate-spin" viewBox="0 0 24 24" fill="none">
@@ -57,73 +57,73 @@ function mbToGb(mb: number): string {
     <div v-if="data" class="grid grid-cols-1 gap-4 lg:grid-cols-2">
       <!-- 区块 1：GPU -->
       <section class="card">
-        <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-slate-400">GPU</h3>
+        <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-label3">GPU</h3>
         <div class="space-y-2 text-sm">
           <div class="grid grid-cols-2 gap-x-4 gap-y-2">
-            <div><span class="text-slate-400">数量</span><div class="font-mono text-slate-100">{{ data.gpu_count }}</div></div>
-            <div><span class="text-slate-400">型号</span><div class="font-mono text-slate-100">{{ data.gpu_name || '未知' }}</div></div>
-            <div><span class="text-slate-400">显存总量</span><div class="font-mono text-slate-100">{{ data.vram_total_gb }} GB</div></div>
-            <div><span class="text-slate-400">空闲（每卡）</span><div class="font-mono text-slate-100">{{ data.vram_free_mb.map(mbToGb).join(' / ') || '—' }} GB</div></div>
-            <div><span class="text-slate-400">CUDA 驱动</span><div class="font-mono text-slate-100">{{ data.cuda_driver || '未知' }}</div></div>
-            <div><span class="text-slate-400">计算能力（CC）</span><div class="font-mono text-slate-100">{{ data.compute_capability || '未知' }}</div></div>
+            <div><span class="text-label3">数量</span><div class="num font-mono text-label">{{ data.gpu_count }}</div></div>
+            <div><span class="text-label3">型号</span><div class="font-mono text-label">{{ data.gpu_name || '未知' }}</div></div>
+            <div><span class="text-label3">显存总量</span><div class="num font-mono text-label">{{ data.vram_total_gb }} GB</div></div>
+            <div><span class="text-label3">空闲（每卡）</span><div class="num font-mono text-label">{{ data.vram_free_mb.map(mbToGb).join(' / ') || '—' }} GB</div></div>
+            <div><span class="text-label3">CUDA 驱动</span><div class="num font-mono text-label">{{ data.cuda_driver || '未知' }}</div></div>
+            <div><span class="text-label3">计算能力（CC）</span><div class="num font-mono text-label">{{ data.compute_capability || '未知' }}</div></div>
           </div>
-          <p v-if="data.vram_total_mb" class="text-xs text-slate-500">原始 MB：{{ data.vram_total_mb }}</p>
+          <p v-if="data.vram_total_mb" class="num text-xs text-label3">原始 MB：{{ data.vram_total_mb }}</p>
         </div>
       </section>
 
       <!-- 区块 2：GPU 锁 -->
       <section class="card">
-        <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-slate-400">GPU 锁</h3>
+        <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-label3">GPU 锁</h3>
         <div v-if="data.gpu_locks.length" class="flex flex-wrap gap-2">
           <span
             v-for="l in data.gpu_locks"
             :key="l.gpu_index"
-            class="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-600/10 px-2.5 py-1 text-xs text-amber-300"
+            class="inline-flex items-center gap-1.5 rounded-full border border-warn-line bg-warn-bg px-2.5 py-1 text-xs text-warn"
           >
             GPU {{ l.gpu_index }} ← {{ l.owner || 'unknown' }}
           </span>
         </div>
-        <p v-else class="text-sm text-slate-500">无占用</p>
+        <p v-else class="text-sm text-label3">无占用</p>
       </section>
 
       <!-- 区块 3：引擎二进制 -->
       <section class="card !p-0">
-        <div class="border-b border-slate-800 px-3 py-2 text-xs font-medium uppercase tracking-wider text-slate-400">
+        <div class="border-b border-sep px-3 py-2 text-xs font-medium uppercase tracking-wider text-label3">
           引擎二进制
         </div>
         <table v-if="data.engine_binaries.length" class="w-full text-sm">
           <tbody>
-            <tr v-for="b in data.engine_binaries" :key="b.name" class="border-b border-slate-800/40">
+            <tr v-for="b in data.engine_binaries" :key="b.name" class="border-b border-sep-soft last:border-b-0">
               <td class="w-2/5 px-3 py-1.5">
-                <span class="mr-2 inline-block size-2 rounded-full" :class="b.available ? 'bg-emerald-400' : b.reachable ? 'bg-amber-400' : 'bg-red-400'" />
-                <span :class="b.available ? 'text-emerald-300' : b.reachable ? 'text-amber-300' : 'text-red-300'">{{ b.name }}</span>
+                <span class="mr-2 inline-block size-2 rounded-full" :class="b.available ? 'bg-ok' : b.reachable ? 'bg-warn' : 'bg-danger'" />
+                <span :class="b.available ? 'text-ok' : b.reachable ? 'text-warn' : 'text-danger'">{{ b.name }}</span>
               </td>
               <!-- 可达来源：venv 已装 / 仅 docker 旁路 / 不可达 -->
               <td class="w-16 py-1.5 text-xs">
                 <span
                   v-if="b.runtime === 'docker'"
-                  class="rounded border border-amber-500/40 bg-amber-600/10 px-1 py-px text-[10px] text-amber-300"
+                  class="rounded border border-warn-line bg-warn-bg px-1 py-px text-[10px] text-warn"
                 >docker</span>
-                <span v-else-if="b.runtime === 'venv'" class="text-[10px] text-emerald-300">venv</span>
-                <span v-else class="text-[10px] text-slate-500">—</span>
+                <span v-else-if="b.runtime === 'venv'" class="text-[10px] text-ok">venv</span>
+                <span v-else class="text-[10px] text-label3">—</span>
               </td>
-              <td class="font-mono text-xs text-slate-500 break-all">{{ b.path || (b.runtime === 'docker' ? 'docker 旁路（venv 未装）' : '—') }}</td>
+              <td class="break-all font-mono text-xs text-label3">{{ b.path || (b.runtime === 'docker' ? 'docker 旁路（venv 未装）' : '—') }}</td>
             </tr>
           </tbody>
         </table>
-        <p v-else class="p-3 text-sm text-slate-500">尚无数据</p>
+        <p v-else class="p-3 text-sm text-label3">尚无数据</p>
       </section>
 
       <!-- 区块 4：环境变量 -->
       <section class="card !p-0">
-        <div class="border-b border-slate-800 px-3 py-2 text-xs font-medium uppercase tracking-wider text-slate-400">
+        <div class="border-b border-sep px-3 py-2 text-xs font-medium uppercase tracking-wider text-label3">
           环境变量
         </div>
         <table class="w-full text-sm">
           <tbody>
-            <tr v-for="([k, v]) in Object.entries(data.env_vars)" :key="k" class="border-b border-slate-800/40">
-              <td class="w-2/5 px-3 py-1.5 font-mono text-slate-300">{{ k }}</td>
-              <td class="font-mono text-xs text-slate-400 break-all">{{ v || '—' }}</td>
+            <tr v-for="([k, v]) in Object.entries(data.env_vars)" :key="k" class="border-b border-sep-soft last:border-b-0">
+              <td class="w-2/5 px-3 py-1.5 font-mono text-label2">{{ k }}</td>
+              <td class="break-all font-mono text-xs text-label3">{{ v || '—' }}</td>
             </tr>
           </tbody>
         </table>
@@ -131,17 +131,17 @@ function mbToGb(mb: number): string {
 
       <!-- 区块 5：路径与版本 -->
       <section class="card">
-        <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-slate-400">路径与版本</h3>
+        <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-label3">路径与版本</h3>
         <div class="space-y-2 text-sm">
-          <div><span class="text-slate-400">项目根</span><div class="font-mono text-xs text-slate-200 break-all">{{ data.paths.project_root }}</div></div>
-          <div><span class="text-slate-400">缓存目录</span><div class="font-mono text-xs text-slate-200 break-all">{{ data.paths.cache_dir }}</div></div>
-          <div><span class="text-slate-400">模型目录</span><div class="font-mono text-xs text-slate-200 break-all">{{ data.paths.models_dir }}</div></div>
-          <div><span class="text-slate-400">版本</span><div class="font-mono text-slate-100">{{ data.version || '未知' }}</div></div>
+          <div><span class="text-label3">项目根</span><div class="break-all font-mono text-xs text-label2">{{ data.paths.project_root }}</div></div>
+          <div><span class="text-label3">缓存目录</span><div class="break-all font-mono text-xs text-label2">{{ data.paths.cache_dir }}</div></div>
+          <div><span class="text-label3">模型目录</span><div class="break-all font-mono text-xs text-label2">{{ data.paths.models_dir }}</div></div>
+          <div><span class="text-label3">版本</span><div class="num font-mono text-label">{{ data.version || '未知' }}</div></div>
         </div>
       </section>
     </div>
 
-    <p v-else-if="!busy" class="text-sm text-slate-500">尚未体检</p>
-    <p v-else class="text-sm text-slate-500">体检中…</p>
+    <p v-else-if="!busy" class="text-sm text-label3">尚未体检</p>
+    <p v-else class="text-sm text-label3">体检中…</p>
   </div>
 </template>

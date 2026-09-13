@@ -9,6 +9,7 @@ import {
 } from '@/api/accountSelf';
 import type { SelfKey, SelfSession, SelfUsage, SelfMessage } from '@/api/accountSelf';
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue';
+import DataTable from '@/components/common/DataTable.vue';
 import { fmtEpoch, fmtTokens } from '@/utils/time';
 
 const auth = useAuthStore();
@@ -277,27 +278,27 @@ onBeforeUnmount(() => {
     <!-- 页头 -->
     <div class="flex items-center justify-between mb-5">
       <div>
-        <h2 class="text-xl font-semibold text-slate-100">我的账号</h2>
-        <p class="text-xs text-slate-400 mt-0.5">
-          身份：<span class="font-mono text-slate-200">{{ displayName }}</span>
-          <span v-if="profile?.is_admin" class="ml-2 text-xs text-amber-300 border border-amber-400/40 rounded px-1.5 py-0.5">管理员</span>
+        <h2 class="text-xl font-semibold text-label">我的账号</h2>
+        <p class="text-xs text-label3 mt-0.5">
+          身份：<span class="font-mono text-label2">{{ displayName }}</span>
+          <span v-if="profile?.is_admin" class="ml-2 text-xs border border-warn-line bg-warn-bg text-warn rounded-ctl px-1.5 py-0.5">管理员</span>
         </p>
       </div>
       <button class="btn-ghost !py-1.5 text-xs" @click="onLogout">退出账号</button>
     </div>
 
     <!-- 全局提示 -->
-    <div v-if="errMsg" class="mb-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">{{ errMsg }}</div>
-    <div v-if="notice" class="mb-3 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300">{{ notice }}</div>
+    <div v-if="errMsg" class="mb-3 rounded-ctl border border-danger-line bg-danger-bg px-3 py-2 text-sm text-danger">{{ errMsg }}</div>
+    <div v-if="notice" class="mb-3 rounded-ctl border border-ok-line bg-ok-bg px-3 py-2 text-sm text-ok">{{ notice }}</div>
 
     <!-- Tabs -->
-    <nav class="flex gap-1 mb-4 border-b border-slate-800">
+    <nav class="flex gap-1 mb-4 border-b border-sep">
       <button
         v-for="t in ([['keys', 'API Keys'], ['usage', '用量'], ['sessions', '会话']] as [TabKey, string][])"
         :key="t[0]"
         :class="[
           'px-4 py-2 text-sm border-b-2 -mb-px transition-colors',
-          tab === t[0] ? 'text-blue-300 border-blue-500' : 'text-slate-400 border-transparent hover:text-slate-200',
+          tab === t[0] ? 'text-accent border-accent' : 'text-label3 border-transparent hover:text-label',
         ]"
         @click="tab = t[0]"
       >
@@ -308,49 +309,49 @@ onBeforeUnmount(() => {
     <!-- ==================== Keys Tab ==================== -->
     <section v-if="tab === 'keys'" class="space-y-4">
       <div class="flex items-center justify-between">
-        <h3 class="text-base font-medium text-slate-100">API Keys</h3>
+        <h3 class="text-base font-medium text-label">API Keys</h3>
         <button class="btn-primary !py-1.5 text-xs" @click="showNewKey = true">
           <svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
           签发新 Key
         </button>
       </div>
 
-      <div class="card !p-0 overflow-hidden">
-        <table class="w-full text-sm">
-          <thead class="bg-slate-800/60 text-slate-400 text-xs">
+      <DataTable>
+        <table class="min-w-[52rem] text-sm">
+          <thead>
             <tr>
-              <th class="px-3 py-2 text-left">前缀</th>
-              <th class="px-3 py-2 text-left">名称</th>
-              <th class="px-3 py-2 text-left">状态</th>
-              <th class="px-3 py-2 text-left">创建</th>
-              <th class="px-3 py-2 text-left">过期</th>
-              <th class="px-3 py-2 text-left">最近使用</th>
-              <th class="px-3 py-2 text-right">操作</th>
+              <th class="min-w-24">前缀</th>
+              <th class="min-w-28">名称</th>
+              <th class="min-w-20">状态</th>
+              <th class="min-w-36">创建</th>
+              <th class="min-w-36">过期</th>
+              <th class="min-w-36">最近使用</th>
+              <th class="min-w-40 text-right">操作</th>
             </tr>
           </thead>
-          <tbody class="divide-y divide-slate-800">
+          <tbody>
             <tr v-if="keysLoading">
-              <td colspan="7" class="px-3 py-6 text-center text-slate-500">加载中…</td>
+              <td colspan="7" class="!py-6 text-center text-label3">加载中…</td>
             </tr>
             <tr v-else-if="keys.length === 0">
-              <td colspan="7" class="px-3 py-6 text-center text-slate-500">暂无 Key</td>
+              <td colspan="7" class="!py-6 text-center text-label3">暂无 Key</td>
             </tr>
-            <tr v-for="k in keys" :key="k.id" class="hover:bg-slate-800/30">
-              <td class="px-3 py-2 font-mono text-xs text-slate-200">{{ k.key_prefix || '-' }}</td>
-              <td class="px-3 py-2">{{ k.name || '-' }}</td>
-              <td class="px-3 py-2">
+            <tr v-for="k in keys" :key="k.id">
+              <td class="font-mono text-xs">{{ k.key_prefix || '-' }}</td>
+              <td class="max-w-40 truncate" :title="k.name || ''">{{ k.name || '-' }}</td>
+              <td>
                 <span :class="[
                   'inline-flex items-center rounded-full px-2 py-0.5 text-xs border',
-                  k.status === 'active' && 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
-                  k.status === 'disabled' && 'bg-amber-500/15 text-amber-300 border-amber-500/30',
-                  k.status === 'revoked' && 'bg-red-500/15 text-red-300 border-red-500/30',
-                  !['active','disabled','revoked'].includes(k.status) && 'bg-slate-700 text-slate-300 border-slate-600',
+                  k.status === 'active' && 'border-ok-line bg-ok-bg text-ok',
+                  k.status === 'disabled' && 'border-warn-line bg-warn-bg text-warn',
+                  k.status === 'revoked' && 'border-danger-line bg-danger-bg text-danger',
+                  !['active','disabled','revoked'].includes(k.status) && 'border-sep bg-surface3 text-label2',
                 ]">{{ k.status }}</span>
               </td>
-              <td class="px-3 py-2 text-xs text-slate-400">{{ fmtEpoch(k.created_at) }}</td>
-              <td class="px-3 py-2 text-xs text-slate-400">{{ fmtEpoch(k.expires_at) === '-' ? '永不过期' : fmtEpoch(k.expires_at) }}</td>
-              <td class="px-3 py-2 text-xs text-slate-400">{{ fmtEpoch(k.last_used_at) }}</td>
-              <td class="px-3 py-2 text-right whitespace-nowrap">
+              <td class="num text-xs text-label3">{{ fmtEpoch(k.created_at) }}</td>
+              <td class="num text-xs text-label3">{{ fmtEpoch(k.expires_at) === '-' ? '永不过期' : fmtEpoch(k.expires_at) }}</td>
+              <td class="num text-xs text-label3">{{ fmtEpoch(k.last_used_at) }}</td>
+              <td class="text-right whitespace-nowrap">
                 <button
                   v-if="k.status === 'active'" class="btn-ghost !py-0.5 !px-2 text-xs mr-1"
                   @click="pendingKeyOp = { kind: 'status', key: k, status: 'disabled' }"
@@ -360,59 +361,59 @@ onBeforeUnmount(() => {
                   @click="pendingKeyOp = { kind: 'status', key: k, status: 'active' }"
                 >启用</button>
                 <button
-                  v-if="k.status !== 'revoked'" class="btn-ghost !py-0.5 !px-2 text-xs mr-1 text-amber-300"
+                  v-if="k.status !== 'revoked'" class="btn-ghost !py-0.5 !px-2 text-xs mr-1 text-warn"
                   @click="pendingKeyOp = { kind: 'status', key: k, status: 'revoked' }"
                 >吊销</button>
-                <button class="btn-ghost !py-0.5 !px-2 text-xs text-red-300"
+                <button class="btn-ghost !py-0.5 !px-2 text-xs text-danger"
                   @click="pendingKeyOp = { kind: 'delete', key: k, status: undefined }"
                 >删除</button>
               </td>
             </tr>
           </tbody>
         </table>
-      </div>
+      </DataTable>
     </section>
 
     <!-- ==================== Usage Tab ==================== -->
     <section v-else-if="tab === 'usage'" class="space-y-4">
       <div class="card" v-if="usageLoading">
-        <p class="text-slate-400 text-sm">加载中…</p>
+        <p class="text-label3 text-sm">加载中…</p>
       </div>
       <div v-else-if="usage" class="grid gap-4 md:grid-cols-2">
         <!-- 用量 4 键 -->
         <div class="card">
-          <h4 class="text-sm font-semibold text-slate-100 mb-3">累计用量</h4>
+          <h4 class="text-sm font-semibold text-label mb-3">累计用量</h4>
           <dl class="grid grid-cols-2 gap-y-3">
-            <div class="flex justify-between text-sm"><dt class="text-slate-400">请求数</dt><dd class="font-mono text-slate-200">{{ fmtTokens(usage.requests) }}</dd></div>
-            <div class="flex justify-between text-sm"><dt class="text-slate-400">Prompt Tokens</dt><dd class="font-mono text-slate-200">{{ fmtTokens(usage.prompt_tokens) }}</dd></div>
-            <div class="flex justify-between text-sm"><dt class="text-slate-400">Completion Tokens</dt><dd class="font-mono text-slate-200">{{ fmtTokens(usage.completion_tokens) }}</dd></div>
-            <div class="flex justify-between text-sm"><dt class="text-slate-400">Total Tokens</dt><dd class="font-mono text-slate-200">{{ fmtTokens(usage.total_tokens) }}</dd></div>
+            <div class="flex justify-between text-sm"><dt class="text-label3">请求数</dt><dd class="num font-mono text-label2">{{ fmtTokens(usage.requests) }}</dd></div>
+            <div class="flex justify-between text-sm"><dt class="text-label3">Prompt Tokens</dt><dd class="num font-mono text-label2">{{ fmtTokens(usage.prompt_tokens) }}</dd></div>
+            <div class="flex justify-between text-sm"><dt class="text-label3">Completion Tokens</dt><dd class="num font-mono text-label2">{{ fmtTokens(usage.completion_tokens) }}</dd></div>
+            <div class="flex justify-between text-sm"><dt class="text-label3">Total Tokens</dt><dd class="num font-mono text-label2">{{ fmtTokens(usage.total_tokens) }}</dd></div>
           </dl>
         </div>
         <!-- 预算 -->
         <div class="card">
-          <h4 class="text-sm font-semibold text-slate-100 mb-3">Token 预算</h4>
+          <h4 class="text-sm font-semibold text-label mb-3">Token 预算</h4>
           <dl class="grid grid-cols-2 gap-y-3">
             <div class="flex justify-between text-sm">
-              <dt class="text-slate-400">预算</dt>
-              <dd class="font-mono text-slate-200">{{ usage.token_budget === null ? '无限额' : fmtTokens(usage.token_budget) }}</dd>
+              <dt class="text-label3">预算</dt>
+              <dd class="num font-mono text-label2">{{ usage.token_budget === null ? '无限额' : fmtTokens(usage.token_budget) }}</dd>
             </div>
             <div class="flex justify-between text-sm">
-              <dt class="text-slate-400">已消耗</dt>
-              <dd class="font-mono text-slate-200">{{ fmtTokens(usage.budget_consumed) }}</dd>
+              <dt class="text-label3">已消耗</dt>
+              <dd class="num font-mono text-label2">{{ fmtTokens(usage.budget_consumed) }}</dd>
             </div>
             <div class="flex justify-between text-sm">
-              <dt class="text-slate-400">周期</dt>
-              <dd class="text-slate-200">{{ usage.budget_period || '—' }}</dd>
+              <dt class="text-label3">周期</dt>
+              <dd class="text-label2">{{ usage.budget_period || '—' }}</dd>
             </div>
             <div class="flex justify-between text-sm">
-              <dt class="text-slate-400">重置</dt>
-              <dd class="font-mono text-xs text-slate-200">{{ fmtEpoch(usage.budget_reset_at) }}</dd>
+              <dt class="text-label3">重置</dt>
+              <dd class="num font-mono text-xs text-label2">{{ fmtEpoch(usage.budget_reset_at) }}</dd>
             </div>
           </dl>
         </div>
       </div>
-      <div v-else class="card"><p class="text-slate-500">暂无用量数据</p></div>
+      <div v-else class="card"><p class="text-label3">暂无用量数据</p></div>
     </section>
 
     <!-- ==================== Sessions Tab ==================== -->
@@ -443,21 +444,21 @@ onBeforeUnmount(() => {
         </div>
         <p v-if="searchErr" class="text-xs text-red-400 mb-2">{{ searchErr }}</p>
         <div v-if="searchRes" class="space-y-2 max-h-96 overflow-y-auto">
-          <p v-if="searchRes.length === 0" class="text-xs text-slate-500">未命中任何消息</p>
-          <div v-for="m in searchRes" :key="m.id" class="rounded border border-slate-800 bg-slate-800/30 p-2 text-sm">
-            <div class="flex items-center gap-2 text-xs text-slate-400 mb-1">
+          <p v-if="searchRes.length === 0" class="text-xs text-label3">未命中任何消息</p>
+          <div v-for="m in searchRes" :key="m.id" class="rounded-ctl border border-sep bg-surface3 p-2 text-sm">
+            <div class="flex items-center gap-2 text-xs text-label3 mb-1">
               <span :class="[
-                'rounded px-1.5 py-0.5 border',
-                m.role === 'user' && 'bg-blue-500/15 text-blue-300 border-blue-500/30',
-                m.role === 'assistant' && 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
-                m.role === 'system' && 'bg-slate-600/40 text-slate-300 border-slate-500/30',
-                !['user','assistant','system'].includes(m.role) && 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+                'rounded-ctl px-1.5 py-0.5 border',
+                m.role === 'user' && 'border-accent-line bg-accent-bg text-accent',
+                m.role === 'assistant' && 'border-ok-line bg-ok-bg text-ok',
+                m.role === 'system' && 'border-sep bg-surface4 text-label2',
+                !['user','assistant','system'].includes(m.role) && 'border-warn-line bg-warn-bg text-warn',
               ]">{{ m.role }}</span>
               <span class="truncate max-w-[200px]" :title="m.title || ''">{{ m.title || `会话 #${m.session_id}` }}</span>
-              <span class="font-mono text-[11px]">{{ fmtEpoch(m.created_at) }}</span>
+              <span class="num font-mono text-[11px]">{{ fmtEpoch(m.created_at) }}</span>
             </div>
-            <p class="text-slate-200 text-xs whitespace-pre-wrap break-words">{{ m.content }}</p>
-            <button class="mt-2 text-xs text-blue-300 hover:underline" @click="openSessionDetail({ id: m.session_id, user_id: profile?.id ?? 0, key_id: null, model: m.model ?? null, session_key: null, title: m.title ?? null, message_count: 0, created_at: null, last_active_at: null })">
+            <p class="text-label2 text-xs whitespace-pre-wrap break-words">{{ m.content }}</p>
+            <button class="mt-2 text-xs text-accent hover:underline" @click="openSessionDetail({ id: m.session_id, user_id: profile?.id ?? 0, key_id: null, model: m.model ?? null, session_key: null, title: m.title ?? null, message_count: 0, created_at: null, last_active_at: null })">
               打开该会话 →
             </button>
           </div>
@@ -465,44 +466,44 @@ onBeforeUnmount(() => {
       </div>
 
       <!-- 会话列表 -->
-      <div class="card !p-0 overflow-hidden">
-        <table class="w-full text-sm">
-          <thead class="bg-slate-800/60 text-slate-400 text-xs">
+      <DataTable>
+        <table class="min-w-[52rem] text-sm">
+          <thead>
             <tr>
-              <th class="px-3 py-2 text-left">标题</th>
-              <th class="px-3 py-2 text-left">模型</th>
-              <th class="px-3 py-2 text-right">消息数</th>
-              <th class="px-3 py-2 text-left">首次</th>
-              <th class="px-3 py-2 text-left">最近</th>
-              <th class="px-3 py-2 text-right">操作</th>
+              <th class="min-w-40">标题</th>
+              <th class="min-w-28">模型</th>
+              <th class="text-right">消息数</th>
+              <th class="min-w-36">首次</th>
+              <th class="min-w-36">最近</th>
+              <th class="min-w-28 text-right">操作</th>
             </tr>
           </thead>
-          <tbody class="divide-y divide-slate-800">
-            <tr v-if="sessionsLoading"><td colspan="6" class="px-3 py-6 text-center text-slate-500">加载中…</td></tr>
-            <tr v-else-if="sessions.length === 0"><td colspan="6" class="px-3 py-6 text-center text-slate-500">会话列表为空</td></tr>
-            <tr v-for="s in sessions" :key="s.id" class="hover:bg-slate-800/30">
-              <td class="px-3 py-2 max-w-xs truncate" :title="s.title || ''">{{ s.title || `#${s.id}` }}</td>
-              <td class="px-3 py-2 font-mono text-xs">{{ s.model || '-' }}</td>
-              <td class="px-3 py-2 text-right font-mono text-xs">{{ s.message_count }}</td>
-              <td class="px-3 py-2 text-xs text-slate-400">{{ fmtEpoch(s.created_at) }}</td>
-              <td class="px-3 py-2 text-xs text-slate-400">{{ fmtEpoch(s.last_active_at) }}</td>
-              <td class="px-3 py-2 text-right whitespace-nowrap">
+          <tbody>
+            <tr v-if="sessionsLoading"><td colspan="6" class="!py-6 text-center text-label3">加载中…</td></tr>
+            <tr v-else-if="sessions.length === 0"><td colspan="6" class="!py-6 text-center text-label3">会话列表为空</td></tr>
+            <tr v-for="s in sessions" :key="s.id">
+              <td class="max-w-xs truncate" :title="s.title || ''">{{ s.title || `#${s.id}` }}</td>
+              <td class="font-mono text-xs">{{ s.model || '-' }}</td>
+              <td class="num text-right font-mono text-xs">{{ s.message_count }}</td>
+              <td class="num text-xs text-label3">{{ fmtEpoch(s.created_at) }}</td>
+              <td class="num text-xs text-label3">{{ fmtEpoch(s.last_active_at) }}</td>
+              <td class="text-right whitespace-nowrap">
                 <button class="btn-ghost !py-0.5 !px-2 text-xs mr-1" @click="openSessionDetail(s)">查看</button>
-                <button class="btn-ghost !py-0.5 !px-2 text-xs text-red-300" @click="pendingDeleteSession = s">删除</button>
+                <button class="btn-ghost !py-0.5 !px-2 text-xs text-danger" @click="pendingDeleteSession = s">删除</button>
               </td>
             </tr>
           </tbody>
         </table>
-      </div>
+      </DataTable>
     </section>
 
     <!-- 签发新 Key 弹窗 -->
     <Teleport to="body">
       <div v-if="showNewKey" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" @click.self="showNewKey = false">
-        <div class="w-full max-w-md rounded-lg border border-slate-700 bg-slate-900 shadow-xl">
-          <div class="flex items-center justify-between border-b border-slate-800 px-5 py-3">
-            <h3 class="text-base font-semibold text-slate-100">签发新 Key</h3>
-            <button class="text-slate-400 hover:text-slate-200 text-xl leading-none" @click="showNewKey = false">×</button>
+        <div class="w-full max-w-md rounded-panel border border-sep bg-surface2 shadow-l">
+          <div class="flex items-center justify-between border-b border-sep px-5 py-3">
+            <h3 class="text-base font-semibold text-label">签发新 Key</h3>
+            <button class="text-label3 hover:text-label text-xl leading-none" @click="showNewKey = false">×</button>
           </div>
           <div class="px-5 py-4">
             <label class="label-base">名称</label>
@@ -510,9 +511,9 @@ onBeforeUnmount(() => {
             <label class="label-base mt-3">有效期（天，留空 = 永不过期）</label>
             <input v-model="newKeyExpireDays" type="number" min="0" step="1" class="input-base" placeholder="例如：30" />
             <p v-if="newKeyErr" class="mt-2 text-xs text-red-400">{{ newKeyErr }}</p>
-            <p class="mt-3 text-xs text-amber-300/80">注意：Key 明文仅签发瞬间展示一次，请妥善保存。</p>
+            <p class="mt-3 text-xs text-warn">注意：Key 明文仅签发瞬间展示一次，请妥善保存。</p>
           </div>
-          <div class="flex items-center justify-end gap-3 border-t border-slate-800 px-5 py-3">
+          <div class="flex items-center justify-end gap-3 border-t border-sep px-5 py-3">
             <button class="btn-ghost" :disabled="newKeyBusy" @click="showNewKey = false">取消</button>
             <button class="btn-primary" :disabled="newKeyBusy" @click="onIssue">
               <svg v-if="newKeyBusy" class="size-4 animate-spin" viewBox="0 0 24 24" fill="none">
@@ -528,19 +529,19 @@ onBeforeUnmount(() => {
     <!-- 一次性 Key 明文弹窗 -->
     <Teleport to="body">
       <div v-if="issuedKey" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 backdrop-blur p-4">
-        <div class="w-full max-w-xl rounded-lg border border-amber-500/40 bg-slate-900 shadow-xl">
-          <div class="flex items-center justify-between border-b border-slate-800 px-5 py-3">
-            <h3 class="text-base font-semibold text-amber-300">Key 已签发 — 请立即保存</h3>
-            <button class="text-slate-400 hover:text-slate-200 text-xl leading-none" @click="closeIssued">×</button>
+        <div class="w-full max-w-xl rounded-panel border border-warn-line bg-surface2 shadow-l">
+          <div class="flex items-center justify-between border-b border-sep px-5 py-3">
+            <h3 class="text-base font-semibold text-warn">Key 已签发 — 请立即保存</h3>
+            <button class="text-label3 hover:text-label text-xl leading-none" @click="closeIssued">×</button>
           </div>
           <div class="px-5 py-4">
-            <p class="text-xs text-amber-300/90 mb-3">明文仅此次可见，关闭窗口后将无法再查看（后端仅存 hash）。</p>
-            <div class="rounded bg-slate-800 border border-slate-700 p-3 font-mono text-sm break-all select-all">{{ issuedKey }}</div>
-            <p v-if="issuedKeyCtx" class="mt-3 text-xs text-slate-400">
+            <p class="text-xs text-warn mb-3">明文仅此次可见，关闭窗口后将无法再查看（后端仅存 hash）。</p>
+            <div class="rounded-ctl code-surface border border-code-line p-3 font-mono text-sm break-all select-all">{{ issuedKey }}</div>
+            <p v-if="issuedKeyCtx" class="mt-3 text-xs text-label3">
               名称：{{ issuedKeyCtx.name }} · ID：{{ issuedKeyCtx.id }}
             </p>
           </div>
-          <div class="flex items-center justify-end gap-3 border-t border-slate-800 px-5 py-3">
+          <div class="flex items-center justify-end gap-3 border-t border-sep px-5 py-3">
             <button class="btn-danger" @click="closeIssued">我已保存，关闭</button>
           </div>
         </div>
@@ -550,28 +551,28 @@ onBeforeUnmount(() => {
     <!-- 会话详情 -->
     <Teleport to="body">
       <div v-if="openSession" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur p-4" @click.self="closeSession">
-        <div class="w-full max-w-2xl h-[80vh] rounded-lg border border-slate-700 bg-slate-900 shadow-xl flex flex-col">
-          <div class="flex items-center justify-between border-b border-slate-800 px-5 py-3">
-            <h3 class="text-base font-semibold text-slate-100 truncate" :title="openSession.title || ''">
+        <div class="w-full max-w-2xl h-[80vh] rounded-panel border border-sep bg-surface2 shadow-l flex flex-col">
+          <div class="flex items-center justify-between border-b border-sep px-5 py-3">
+            <h3 class="text-base font-semibold text-label truncate" :title="openSession.title || ''">
               {{ openSession.title || `会话 #${openSession.id}` }}
             </h3>
-            <button class="text-slate-400 hover:text-slate-200 text-xl leading-none" @click="closeSession">×</button>
+            <button class="text-label3 hover:text-label text-xl leading-none" @click="closeSession">×</button>
           </div>
           <div class="flex-1 overflow-y-auto px-5 py-4 space-y-3">
-            <p v-if="sessionDetailBusy" class="text-slate-400 text-sm">加载消息…</p>
+            <p v-if="sessionDetailBusy" class="text-label3 text-sm">加载消息…</p>
             <template v-else-if="messages">
-              <p v-if="messages.length === 0" class="text-slate-500 text-sm text-center py-4">（无消息）</p>
+              <p v-if="messages.length === 0" class="text-label3 text-sm text-center py-4">（无消息）</p>
               <div v-for="m in messages" :key="m.id" class="max-w-[85%]" :class="m.role === 'user' ? 'ml-auto text-right' : ''">
-                <div class="text-[11px] text-slate-500 mb-0.5">{{ m.role }} · {{ fmtEpoch(m.created_at) }}</div>
+                <div class="num text-[11px] text-label3 mb-0.5">{{ m.role }} · {{ fmtEpoch(m.created_at) }}</div>
                 <div :class="[
-                  'inline-block rounded-lg px-3 py-2 text-sm whitespace-pre-wrap break-words',
-                  m.role === 'user' ? 'bg-blue-500/20 text-blue-100' : (m.role === 'assistant' ? 'bg-slate-800 text-slate-200' : 'bg-slate-800/60 text-slate-300'),
+                  'inline-block rounded-ctl px-3 py-2 text-sm whitespace-pre-wrap break-words',
+                  m.role === 'user' ? 'bg-accent-bg text-label' : (m.role === 'assistant' ? 'bg-surface3 text-label' : 'bg-surface4 text-label2'),
                 ]">{{ m.content || '（空）' }}</div>
               </div>
             </template>
           </div>
-          <div class="flex items-center justify-end gap-2 border-t border-slate-800 px-5 py-3">
-            <button class="btn-ghost !py-1.5 text-xs text-red-300" @click="pendingDeleteSession = openSession; closeSession()">删除该会话</button>
+          <div class="flex items-center justify-end gap-2 border-t border-sep px-5 py-3">
+            <button class="btn-ghost !py-1.5 text-xs text-danger" @click="pendingDeleteSession = openSession; closeSession()">删除该会话</button>
             <button class="btn-ghost !py-1.5 text-xs" @click="closeSession">关闭</button>
           </div>
         </div>

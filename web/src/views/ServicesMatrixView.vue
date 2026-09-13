@@ -117,24 +117,24 @@ const familyRows = computed<Array<{ group: string; members: Array<{ name: string
   <div class="space-y-4">
     <!-- 错误提示 -->
     <p v-if="errMsg" class="text-sm text-red-400">{{ errMsg }}</p>
-    <p v-if="stopNotice" class="text-sm text-emerald-300">{{ stopNotice }}</p>
+    <p v-if="stopNotice" class="text-sm text-ok">{{ stopNotice }}</p>
 
     <!-- 上部分：stats / gateway -->
     <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
       <section
         v-if="data"
-        :class="['card', data.stats.state === 'running' ? 'border-emerald-500/30' : '']"
+        :class="['card', data.stats.state === 'running' ? 'border-ok-line' : '']"
       >
         <div class="mb-3 flex items-center justify-between">
-          <h3 class="text-base font-semibold text-slate-100">stats</h3>
+          <h3 class="text-base font-semibold text-label">stats</h3>
           <StatusBadge :state="data.stats.state" />
         </div>
         <div class="space-y-1 text-sm">
           <div class="flex items-center justify-between">
-            <span class="text-slate-400">端口</span>
-            <span class="font-mono text-slate-100">:{{ data.stats.port }}</span>
+            <span class="text-label3">端口</span>
+            <span class="num font-mono text-label">:{{ data.stats.port }}</span>
           </div>
-          <div v-if="data.stats.detail" class="break-all text-xs text-slate-400">{{ data.stats.detail }}</div>
+          <div v-if="data.stats.detail" class="break-all text-xs text-label3">{{ data.stats.detail }}</div>
         </div>
         <div class="mt-4 flex items-center gap-2">
           <TaskButton label="启动" variant="ghost" :target="'stats'" :task-target="taskTargetFor('stats', 'start')" @success="() => load()" />
@@ -144,18 +144,18 @@ const familyRows = computed<Array<{ group: string; members: Array<{ name: string
       </section>
       <section
         v-if="data"
-        :class="['card', data.gateway.state === 'running' ? 'border-emerald-500/30' : '']"
+        :class="['card', data.gateway.state === 'running' ? 'border-ok-line' : '']"
       >
         <div class="mb-3 flex items-center justify-between">
-          <h3 class="text-base font-semibold text-slate-100">gateway</h3>
+          <h3 class="text-base font-semibold text-label">gateway</h3>
           <StatusBadge :state="data.gateway.state" />
         </div>
         <div class="space-y-1 text-sm">
           <div class="flex items-center justify-between">
-            <span class="text-slate-400">端口</span>
-            <span class="font-mono text-slate-100">:{{ data.gateway.port }}</span>
+            <span class="text-label3">端口</span>
+            <span class="num font-mono text-label">:{{ data.gateway.port }}</span>
           </div>
-          <div v-if="data.gateway.detail" class="break-all text-xs text-slate-400">{{ data.gateway.detail }}</div>
+          <div v-if="data.gateway.detail" class="break-all text-xs text-label3">{{ data.gateway.detail }}</div>
         </div>
         <div class="mt-4 flex items-center gap-2">
           <TaskButton label="启动" variant="ghost" :target="'gateway'" :task-target="taskTargetFor('gateway', 'start')" @success="() => load()" />
@@ -163,41 +163,41 @@ const familyRows = computed<Array<{ group: string; members: Array<{ name: string
           <button class="btn-danger" :disabled="data.gateway.state !== 'running'" @click="stopSVC('gateway')">停止</button>
         </div>
       </section>
-      <div v-else class="card text-sm text-slate-500">加载中…</div>
+      <div v-else class="card text-sm text-label3">加载中…</div>
     </div>
 
     <!-- 家族路由预览 -->
     <section class="card !p-0">
-      <div class="flex items-center justify-between border-b border-slate-800 px-3 py-2">
-        <h3 class="text-sm font-semibold text-slate-100">家族路由预览</h3>
+      <div class="flex items-center justify-between border-b border-sep px-3 py-2">
+        <h3 class="text-sm font-semibold text-label">家族路由预览</h3>
         <button class="btn-ghost !py-1 !px-2 text-xs" :disabled="allBusy" @click="load">刷新</button>
       </div>
-      <div v-if="familyRows.length" class="divide-y divide-slate-800/50">
+      <div v-if="familyRows.length" class="divide-y divide-sep-soft">
         <div v-for="row in familyRows" :key="row.group" class="space-y-1 px-3 py-2">
-          <div class="text-xs font-semibold uppercase tracking-wider text-blue-300">{{ row.group }}</div>
+          <div class="text-xs font-semibold uppercase tracking-wider text-accent">{{ row.group }}</div>
           <table class="w-full text-sm">
             <tbody>
-              <tr v-for="m in row.members" :key="m.name" class="border-b border-slate-800/30">
+              <tr v-for="m in row.members" :key="m.name" class="border-b border-sep-soft last:border-b-0">
                 <td class="w-1/2 py-1">
                   <span
                     class="mr-2 inline-block size-2 rounded-full"
-                    :class="m.running ? 'bg-emerald-400' : 'bg-slate-600'"
+                    :class="m.running ? 'bg-ok' : 'bg-muted'"
                   />
-                  <span class="font-medium text-slate-100">{{ m.name }}</span>
+                  <span class="inline-block max-w-56 truncate align-bottom font-medium text-label" :title="m.name">{{ m.name }}</span>
                 </td>
-                <td class="w-1/4 text-right font-mono text-slate-400">{{ m.engine }}</td>
-                <td class="w-1/4 text-right font-mono text-slate-500">prio={{ m.priority }}</td>
+                <td class="w-1/4 text-right font-mono text-label3">{{ m.engine }}</td>
+                <td class="num w-1/4 text-right font-mono text-label3">prio={{ m.priority }}</td>
               </tr>
             </tbody>
           </table>
         </div>
       </div>
-      <div v-else class="py-6 text-sm text-slate-500">尚无家族数据</div>
+      <div v-else class="py-6 text-sm text-label3">尚无家族数据</div>
     </section>
 
     <!-- 全家启停 -->
     <section class="card">
-      <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-slate-400">一键启停</h3>
+      <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-label3">一键启停</h3>
       <div class="flex flex-wrap items-center gap-3">
         <button class="btn-primary" :disabled="allBusy || pendingAll !== null" @click="pendingAll = 'start'">全家启动</button>
         <button class="btn-danger" :disabled="allBusy || pendingAll !== null" @click="pendingAll = 'stop'">全家停止</button>
@@ -210,15 +210,15 @@ const familyRows = computed<Array<{ group: string; members: Array<{ name: string
           v-for="c in allStatusData.components"
           :key="c.component"
           :class="[
-            'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs',
-            c.status === 'ok' && 'bg-emerald-600/15 text-emerald-300 border border-emerald-500/30',
-            c.status === 'skipped' && 'bg-slate-600/15 text-slate-300 border border-slate-500/30',
-            c.status === 'error' && 'bg-red-600/15 text-red-300 border border-red-500/30',
+            'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs',
+            c.status === 'ok' && 'border-ok-line bg-ok-bg text-ok',
+            c.status === 'skipped' && 'border-sep bg-surface3 text-label2',
+            c.status === 'error' && 'border-danger-line bg-danger-bg text-danger',
           ]"
         >
           <span
             class="size-1.5 rounded-full"
-            :class="c.status === 'ok' ? 'bg-emerald-400' : c.status === 'skipped' ? 'bg-slate-400' : 'bg-red-400'"
+            :class="c.status === 'ok' ? 'bg-ok' : c.status === 'skipped' ? 'bg-muted' : 'bg-danger'"
           />
           {{ c.component }}
         </span>
