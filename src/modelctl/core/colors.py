@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from dataclasses import dataclass
 from typing import TextIO
@@ -296,6 +297,11 @@ def _apply_scheme(scheme: ColorScheme) -> None:
     _active_scheme = scheme
 
 
+# 颜色 token 切分：扩展色序（38;5;N / 38;2;r;g;b 及 48 系背景）整体成单 token，
+# 其余按 | , ; 分隔（"32;1" 仍是 fg=32 + bold 两个 token，维持既有语义）。
+_COLOR_TOKEN_RE = re.compile(r"(?:38|48);(?:5;\d+|2;\d+;\d+;\d+)|[^|,;]+")
+
+
 def _parse_color_spec(spec: str) -> Color:
     """解析 "STATUS_RUNNING=green|bold" 形式的颜色规格。
 
@@ -303,8 +309,7 @@ def _parse_color_spec(spec: str) -> Color:
     支持：fg 色号（30-37/90-97/38;5;N/38;2;r;g;b）、bg 色号（40-47/100-107）、
          命名颜色（black/red/green/yellow/blue/magenta/cyan/white/gray 及 bright 前缀）、
          样式名（bold/dim/italic/underline）。
-    """
-    # 命名颜色 → 标准 ANSI 前景/背景色号
+    """    # 命名颜色 → 标准 ANSI 前景/背景色号
     _NAMED_FG = {
         "black": "30", "red": "31", "green": "32", "yellow": "33",
         "blue": "34", "magenta": "35", "cyan": "36", "white": "37",
@@ -330,9 +335,11 @@ def _parse_color_spec(spec: str) -> Color:
         base = _STYLE_MAP[key.upper()]
     else:
         base = Color(key)
-    # 解析 value：按 | 或 , 或 分号 分割
-    for part in value.replace(",", "|").replace(";", "|").split("|"):
-        part = part.strip()
+    # 解析 value：按 | 或 , 或 分号 分割；扩展色序（38;5;N / 38;2;r;g;b 及 48 系背景）
+    # 先整体保护成单 token——旧实现先把所有分号全切成分隔符，38;5;N / TrueColor
+    # 永远拼不成完整序列，与 docstring 承诺相悖（2026-09-14 真实盲区补测发现的真缺陷）。
+    for match in _COLOR_TOKEN_RE.finditer(value):
+        part = match.group(0).strip()
         low = part.lower()
         if not part:
             continue
