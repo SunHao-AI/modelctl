@@ -27,7 +27,12 @@ import os
 import sys
 import time
 from enum import Enum
+from typing import Any, cast
 
+# 条件导入三件套：模块级 Any 预声明。mypy 会把 try 内 import 的名字推断为 Module，
+# except 分支赋 None 会报 [assignment]；Any 占位让"模块对象 / None"两种运行时形态共存。
+select: Any = None
+tty: Any = None
 try:  # pragma: no cover - 平台特定：Unix 专属
     import select
     import tty
@@ -35,6 +40,7 @@ except ImportError:  # pragma: no cover - Windows 下无 tty/select
     select = None
     tty = None
 
+msvcrt: Any = None
 try:  # pragma: no cover - 平台特定：Windows 专属
     import msvcrt  # type: ignore[import-not-found]
 except ImportError:  # pragma: no cover
@@ -154,6 +160,21 @@ def _is_windows() -> bool:
     )
 
 
+def _to_byte(value: object) -> int:
+    """msvcrt.getch() 返回值 → 单字节码。
+
+    typeshed 声明 `getch() -> bytes`（与 Windows 实际一致：普通键返回 1 字节
+    byte string），但跨平台测试里的 msvcrt mock 用 int（ASCII 码）表达同一语义，
+    历史实现也按 int 读取。这里把 bytes / bytearray / str / int 四种形态统一
+    收敛为 0..255 的整数，避免 `bytes & int` 在真实 Windows 上抛 TypeError。
+    """
+    if isinstance(value, (bytes, bytearray)):
+        return value[0]
+    if isinstance(value, str):
+        return ord(value[0])
+    return int(cast(Any, value)) & 0xFF
+
+
 # ---------------------------------------------------------------------------
 # Windows 输入路径
 # ---------------------------------------------------------------------------
@@ -193,11 +214,12 @@ def _read_windows(timeout: float) -> bytes | None:
                 code = int(ch) & 0xFF
             if code in _WIN_EXTENDED_CODES:
                 # 扩展键前缀（方向键/PgUp/PgDn）：再取扫描码字节，拼 2 字节供解码
+                # （typeshed: getch()->bytes；测试 mock 用 int——_to_byte 统一收敛）
                 code2 = msvcrt.getch()
-                return bytes([0xE0, code2 & 0xFF])
+                return bytes([0xE0, _to_byte(code2)])
             if code < 0x20 or code in (0x1B, 0x7F):
                 # 组合键 / ESC / 控制字：getwch 只返回单字符，需明确要求 getch() 取真实码
-                code = msvcrt.getch()  # int（0x12=Ctrl-R / 0x02-0x19 Ctrl 组合键 等）
+                code = _to_byte(msvcrt.getch())  # int（0x12=Ctrl-R / 0x02-0x19 Ctrl 组合键 等）
             return bytes([code & 0xFF])
         except Exception:  # pragma: no cover - 防御 msvcrt 异常
             return None

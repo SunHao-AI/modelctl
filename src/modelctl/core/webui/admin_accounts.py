@@ -162,7 +162,7 @@ async def create_account(request: Request, payload: dict,
                                 detail={"code": "conflict",
                                         "message": f"username {username!r} 已存在"}) from exc
         raise
-    _ = except_e
+    assert except_e is None  # 走到这里 create_user 必已成功（异常路径均已 raise）
     row = store.get_user_by_id(uid)
     return _user_public(row)
 

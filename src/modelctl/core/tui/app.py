@@ -26,6 +26,7 @@ Task 6 追加：
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from rich.console import Console
 
@@ -35,7 +36,6 @@ from modelctl.core.tui.data import (
     LogsSnapshot,
     ModelsSnapshot,
     MonitorSnapshot,
-    _SnapshotBase,
 )
 from modelctl.core.tui.keyboard import Key, KeyboardInput
 from modelctl.core.tui.panels.cluster import render as render_cluster
@@ -74,8 +74,10 @@ class TuiApp:
         # 主题：从持久化文件读取（损坏回落 "dark"），后续 T 键走 cycle_theme()
         self._theme = load_theme(theme_file)
         # 快照缓存（先 create-空实例，render 时 revalidate_if_expired 触发 fetch）；
-        # T2 起 5 个 Snapshot 全初始化：hw / models / cluster / logs / monitor
-        self._snap: dict[str, _SnapshotBase] = {
+        # T2 起 5 个 Snapshot 全初始化：hw / models / cluster / logs / monitor。
+        # 值类型标 Any：各 view 分支按 key 消费具体 Snapshot 类型（hw→HardwareSnapshot
+        # 等），key→类型映射由初始化字典字面量保证，静态层以 Any 打通分派。
+        self._snap: dict[str, Any] = {
             "hw": HardwareSnapshot(),
             "models": ModelsSnapshot(),
             "cluster": ClusterSnapshot(),

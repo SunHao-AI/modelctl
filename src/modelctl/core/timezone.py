@@ -79,7 +79,12 @@ def apply_timezone() -> str:
         return ""
 
     os.environ["TZ"] = effective
-    time.tzset()
+    # typeshed 只在 POSIX 声明 time.tzset，Windows 上静态检查报 attr-defined；
+    # 上面 tzset_available()（hasattr）已保证此处属性存在。getattr 与直接
+    # `time.tzset()` 同为调用期属性查找，monkeypatch 注入的假 tzset 同样命中。
+    tzset = getattr(time, "tzset", None)
+    if tzset is not None:
+        tzset()
     if raw and raw != effective:
         logger.warning(f"TZ={raw} 不是合法 IANA 时区名，已回退 {effective}")
     return effective

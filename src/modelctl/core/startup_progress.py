@@ -208,6 +208,9 @@ class StartupTiming:
             prev_avg = prev.get("ema_s", 0.0) if prev else 0.0
             avg = ((prev_avg * (n - 1)) + elapsed_s) / n
         else:
+            # 走到这里 n >= _MIN_SAMPLES_EMA(5)，而 prev 缺失时 n 只会是 1，
+            # 故 prev 必非 None；显式断言把该不变式告知类型检查器。
+            assert prev is not None
             avg = _EMA_ALPHA * elapsed_s + (1 - _EMA_ALPHA) * prev["ema_s"]
         self._data[key] = {"ema_s": round(avg, 1), "n": n, "updated_at": _now_str()}
         self._flush()

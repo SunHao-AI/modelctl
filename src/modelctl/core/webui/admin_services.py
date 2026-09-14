@@ -24,12 +24,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+from typing import cast
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from loguru import logger
 
 from modelctl.core.webui.admin_auth import require_auth
+from modelctl.core.webui.admin_tasks import TaskManager
 
 router = APIRouter()
 
@@ -154,7 +156,7 @@ async def service_action(svc: str, action: str, request: Request, _: None = Depe
         return {"ok": result.status != "error", "detail": result.detail}
 
     # start / restart —— 走 TaskManager 异步任务（202 + stream_url）
-    tm: object = request.app.state.task_manager
+    tm = cast(TaskManager, request.app.state.task_manager)
     lock = await tm.acquire(svc, action)
     if lock is None:
         return JSONResponse(
@@ -238,7 +240,7 @@ async def all_start(
     load_env()
 
     thru = {"model": model, "timeout": timeout, "gpus": gpus}
-    tm: object = request.app.state.task_manager
+    tm = cast(TaskManager, request.app.state.task_manager)
     lock = await tm.acquire("all", "start")
     if lock is None:
         return JSONResponse(
@@ -312,7 +314,7 @@ async def all_restart(
     load_env()
 
     thru = {"model": model, "timeout": timeout, "gpus": gpus}
-    tm: object = request.app.state.task_manager
+    tm = cast(TaskManager, request.app.state.task_manager)
     lock = await tm.acquire("all", "restart")
     if lock is None:
         return JSONResponse(

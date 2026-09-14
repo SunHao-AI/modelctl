@@ -231,7 +231,8 @@ class UnslothAdapter(EngineAdapter):
 
     def wait_ready(self, timeout: float) -> bool:
         """先等启动日志出现 API Key 行（即模型加载完成），再用该 key 探测 /v1/models；进程早退立即失败。"""
-        alive_check = (lambda: self.spawned_proc.poll() is None) if self.spawned_proc else None
+        proc = self.spawned_proc  # 局部绑定：三元守卫无法收窄 lambda 内的属性访问（mypy）
+        alive_check = (lambda: proc.poll() is None) if proc else None
         deadline = time.time() + timeout
         while True:
             if alive_check is not None and not alive_check():

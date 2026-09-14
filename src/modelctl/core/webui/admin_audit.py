@@ -284,7 +284,9 @@ async def audit_stats(
     """
     since_dt = _parse_since(since)
 
-    def _collect() -> tuple[int, int, list[dict[str, int]], dict[str, int]]:
+    # by_day 元素是 {"date": str, "total": int, "error": int}（date 为日期串），
+    # 值类型混合 str/int，故用 dict[str, Any]；调用方仅透传进 JSON 响应。
+    def _collect() -> tuple[int, int, list[dict[str, Any]], dict[str, int]]:
         total = 0
         errors = 0
         by_model: dict[str, int] = {}

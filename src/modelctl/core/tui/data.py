@@ -31,6 +31,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from modelctl.core.capabilities import probe
 from modelctl.core.process import is_running_any, launch_log
@@ -52,6 +53,16 @@ class _SnapshotBase:
 
     ttl: float = 30.0
     _fetched_at: float | None = field(default=None, repr=False, compare=False)
+
+    @classmethod
+    def fetch(cls, *, now: float | None = None) -> Any:
+        """抽象占位：子类必须实现自己的 `fetch()`（返回各自 Snapshot 类型）。
+
+        基类骨架没有数据字段，运行时不存在合法调用路径（revalidate 只在
+        子类实例上触发）；声明在此仅为让 `revalidate_if_expired` 的
+        `type(self).fetch(...)` 通过类型检查。
+        """
+        raise NotImplementedError
 
     def is_expired(self, now: float | None = None) -> bool:
         """缓存是否过期（未采集过视为过期）。
@@ -187,6 +198,7 @@ class ModelsSnapshot(_SnapshotBase):
     @classmethod
     def fetch(cls, *, now: float | None = None) -> ModelsSnapshot:
         snap = cls()
+        _cli: Any
         try:
             import modelctl.cli as _cli  # 延后 import 避免循环依赖
         except Exception:  # pragma: no cover
@@ -329,6 +341,7 @@ class MonitorSnapshot(_SnapshotBase):
     @classmethod
     def fetch(cls, *, now: float | None = None) -> MonitorSnapshot:
         snap = cls()
+        _cli: Any
         try:
             import modelctl.cli as _cli
         except Exception:  # pragma: no cover

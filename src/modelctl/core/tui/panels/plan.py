@@ -43,6 +43,8 @@ fallback 默认值路径，仍**不**在 panel 内 `probe()`。
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 from rich.console import Group, RenderableType
 from rich.panel import Panel
 from rich.text import Text
@@ -286,7 +288,9 @@ def _render_precheck(profile, width: int, theme: dict, caps: object | None = Non
             width=width, border_style=theme["warning"],
         )
     try:
-        adapter = adapter_cls(profile, caps)
+        # caps 契约（docstring）：host 经 hw.caps 注入 core.capabilities.Capabilities
+        # 或 None；None 时 adapter 内部走 fallback 默认值路径，静态层以 Any 打通。
+        adapter = adapter_cls(profile, cast(Any, caps))
         # 渲染路径只读：严禁清容器 / 抢 GPU 锁等写副作用（TUI-P1-1）
         adapter.check_requirements(readonly=True)
     except Exception as e:  # noqa: BLE001

@@ -89,8 +89,17 @@ def _sweep_if_due() -> None:
 
 
 def _goals() -> GoalService:
-    """goal 唯一写入口（与 WS 共用同一 NodeRegistry.store，台账才一致）。"""
-    return get_registry().goals
+    """goal 唯一写入口（与 WS 共用同一 NodeRegistry.store，台账才一致）。
+
+    get_registry() 构造单例时恒传 goals=GoalService(store)，且测试仅通过
+    `admin_cluster._REGISTRY = None` 触发重建（不会塞进无 goals 的实例），
+    故此处 None 分支在生产与测试路径下均不可达；保留显式守卫仅为类型收窄，
+    不改变现有对外行为。
+    """
+    goals = get_registry().goals
+    if goals is None:
+        raise RuntimeError("NodeRegistry 单例缺少 GoalService（get_registry 构造保证非 None）")
+    return goals
 
 
 def _fmt_ts(value: Any) -> str:

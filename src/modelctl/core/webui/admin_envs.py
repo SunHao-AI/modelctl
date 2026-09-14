@@ -27,6 +27,8 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -243,15 +245,19 @@ async def docker_diagnose(
             content={"error": {"code": "bad_os", "message": f"未知 os: {os!r}"}},
         )
     try:
+        # windows_setup 与 docker_setup 各有一个同名 Check dataclass（结构相似但
+        # 类型不同，mypy 判为互不兼容）；实际返回元素类型取决于运行时平台分支，
+        # 统一 cast 成 Callable[[], list[Any]] 消除 to_thread 的两分支结构冲突。
+        checks: list[Any]
         if target_os == "windows":
             from modelctl.core import windows_setup
-            checks = await asyncio.to_thread(windows_setup.diagnose)
+            checks = await asyncio.to_thread(cast("Callable[[], list[Any]]", windows_setup.diagnose))
             checks_out = [{"key": c.key, "label": c.label, "ok": c.ok,
                            "detail": c.detail, "hint": c.hint} for c in checks]
             instructions = ""  # Windows 分支不返回 shell 脚本（走 winget 弹窗）
         else:
             from modelctl.core import docker_setup
-            checks = await asyncio.to_thread(docker_setup.diagnose)
+            checks = await asyncio.to_thread(cast("Callable[[], list[Any]]", docker_setup.diagnose))
             checks_out = [{"key": c.key, "label": c.label, "ok": c.ok, "detail": c.detail}
                           for c in checks]
             instructions = docker_setup.render_instructions()
@@ -566,7 +572,7 @@ async def setup_env(
             content={"error": {"code": "not_found", "message": f"target {target} 不受管"}},
         )
 
-    tm: object = request.app.state.task_manager
+    tm = cast(TaskManager, request.app.state.task_manager)
     lock = await tm.acquire(target, "setup")
     if lock is None:
         return JSONResponse(

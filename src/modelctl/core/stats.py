@@ -40,6 +40,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 from modelctl.core.envfile import load_env
 from modelctl.core.paths import usage_data_dir
@@ -337,10 +338,14 @@ def _engine_metrics_suffix(em: dict | None) -> str:
     return "".join(parts)
 
 
-def build_usage_payload(tokens: dict[str, float], usage_cfg: dict, start_time: float, now: float) -> dict:
+def build_usage_payload(tokens: dict[str, Any], usage_cfg: dict, start_time: float, now: float) -> dict:
     """由用量折算构造 cc-switch 可识别的 /api/usage 响应。
 
     tokens 键：prompt_total / predicted_total / prompt_rate / predicted_rate。
+    实参是 collector 快照，值类型天生混合（ok=bool、rate_source=str、
+    engine_metrics=子 dict），故值类型标 Any；若沿用 dict[str, float]，
+    `tokens.get("engine_metrics")` 会被推成 float 并传给下面的
+    `_engine_metrics_suffix(em: dict | None)`。
     usage_cfg 键：price_in / price_out / budget（均可选，缺省 price_in=1.0、price_out=2.0、无预算）。
     输出字段：isValid/used/unit/planName/extra/prompt_rate/predicted_rate/total/remaining。
     """

@@ -120,6 +120,7 @@ def engine_site_packages(target: str) -> Path | None:
     if not has_env(target):
         return None
     root = VENV_ROOT / target
+    sp: Path | None
     if _is_windows():
         sp = root / "Lib/site-packages"
     else:

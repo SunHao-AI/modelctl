@@ -206,7 +206,10 @@ class Accountant:
         completion = max(0, int(job.get("completion_tokens") or 0))
         total = prompt + completion
         now = float(job.get("now") or 0.0)
-        user_id = int(job.get("user_id"))
+        # `user_id` 是 `settle()` 必写入的键（入队即 int 化），取值用 [] 直取：
+        # 缺键属调用方违约，让它抛 KeyError 由 worker 统一 cap log，
+        # 而不是 `.get()` 把 None 喂给 int() 变成更难归因的 TypeError。
+        user_id = int(job["user_id"])
         key_id = job.get("key_id")
 
         store.insert_usage(

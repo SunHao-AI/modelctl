@@ -136,12 +136,17 @@ class RequestAuditLog:
         try:
             with self._lock:
                 d = self._today()
-                if self._cur_day != d:
-                    self._cur_path = self._today_path()
+                # 不变式：`_cur_day == d` 必然蕴含 `_cur_path` 已赋值（两者在
+                # 同一分支成对写入）；`or path is None` 只是把该不变式显式化，
+                # 兼做类型收窄，不改变任何运行时分支。
+                path = self._cur_path
+                if self._cur_day != d or path is None:
+                    path = self._today_path()
+                    self._cur_path = path
                     self._cur_day = d
                 line = json.dumps(entry, ensure_ascii=False, default=str)
                 # O_APPEND 原子追加
-                fd = os.open(self._cur_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
                 try:
                     os.write(fd, line.encode("utf-8") + b"\n")
                 finally:

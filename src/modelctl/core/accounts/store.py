@@ -289,6 +289,8 @@ class AccountsStore:
                  retention_days, now, now),
             )
             self._db().commit()
+        # stub 里 lastrowid 是 int | None；INSERT 成功后 sqlite3 必已回填自增 id
+        assert cur.lastrowid is not None
         return int(cur.lastrowid)
 
     def get_user_by_id(self, user_id: int) -> dict | None:
@@ -403,6 +405,8 @@ class AccountsStore:
                 (user_id, key_prefix, key_hash, name, expires_at, now),
             )
             self._db().commit()
+        # stub 里 lastrowid 是 int | None；INSERT 成功后 sqlite3 必已回填自增 id
+        assert cur.lastrowid is not None
         return int(cur.lastrowid)
 
     def get_key_by_hash(self, key_hash: str) -> dict | None:
@@ -454,6 +458,8 @@ class AccountsStore:
                  latency_ms, status, now),
             )
             self._db().commit()
+        # stub 里 lastrowid 是 int | None；INSERT 成功后 sqlite3 必已回填自增 id
+        assert cur.lastrowid is not None
         return int(cur.lastrowid)
 
     def sum_usage_for_user(self, user_id: int, since: float | None = None) -> dict[str, int]:
@@ -516,6 +522,8 @@ class AccountsStore:
                    VALUES(?,?,?,?,?, 0, ?, ?)""",
                 (user_id, key_id, model, session_key, clip_title, now, now))
             conn.commit()
+            # stub 里 lastrowid 是 int | None；INSERT 成功后 sqlite3 必已回填自增 id
+            assert cur.lastrowid is not None
             return self._row_to_session(conn.execute(
                 _SESSION_SELECT + " WHERE id=?", (int(cur.lastrowid),)).fetchone())
 
@@ -546,6 +554,8 @@ class AccountsStore:
                 (session_id, role, content, max(0, int(prompt_tokens)),
                  max(0, int(completion_tokens)), now))
             self._db().commit()
+        # stub 里 lastrowid 是 int | None；INSERT 成功后 sqlite3 必已回填自增 id
+        assert cur.lastrowid is not None
         return int(cur.lastrowid)
 
     def get_session(self, session_id: int, *, user_id: int) -> dict | None:
@@ -557,7 +567,10 @@ class AccountsStore:
 
     def list_sessions(self, user_id: int, q: str = "", limit: int = 200) -> list[dict]:
         """会话列表（活跃倒序）；`q` 命中标题**或消息内容**。"""
-        sql, params = _SESSION_SELECT + " WHERE user_id=?", [user_id]
+        sql = _SESSION_SELECT + " WHERE user_id=?"
+        # 参数混合类型（user_id/limit 是 int，LIKE 模式是 str），
+        # 与 sum_usage_for_user 同口径显式标注 list[Any]
+        params: list[Any] = [user_id]
         if q:
             pattern = _like_pattern(q)
             sql += (""" AND (title LIKE ? ESCAPE '\\' OR EXISTS (

@@ -88,6 +88,11 @@ def read_model_arch(config_path: Path) -> dict[str, int] | None:
             head_dim = hidden / heads
     if not all(isinstance(x, (int, float)) and x > 0 for x in (n_layers, kv_heads, head_dim)):
         return None
+    # 上面的 isinstance 校验运行时已保证三者是正数，但它是循环表达式，mypy
+    # 无法据此收窄；显式断言把该运行时事实告知类型检查器（失败即前述 return）。
+    assert isinstance(n_layers, (int, float))
+    assert isinstance(kv_heads, (int, float))
+    assert isinstance(head_dim, (int, float))
     return {"n_layers": int(n_layers), "kv_heads": int(kv_heads), "head_dim": int(head_dim)}
 
 

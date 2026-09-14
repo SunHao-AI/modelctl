@@ -79,6 +79,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Protocol
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -122,8 +123,26 @@ def is_unlimited(limit: int | float | None) -> bool:
     一元哨兵：调用方只需 `if is_unlimited(limit): return` 跳过判定点。
     负数按 0 处理是防御编程（数据面偶有脏数据，不应因配置错误 block 全部
     流量）。
+
+    本函数不做类型收窄（返回值是普通 bool），所以"哨兵为真即可继续比较"的
+    调用点仍需自行排除 `None`（`limit is None or ...`），否则 mypy 无法证明
+    后续的 `>=` / `int()` 拿到的是数值。
     """
     return limit is None or limit <= 0
+
+
+# ---------------------------------------------------------------------------
+# 持久化协议
+# ---------------------------------------------------------------------------
+
+class BudgetResetStore(Protocol):
+    """`reset_budget_if_needed` 唯一需要的 store 能力（结构化协议）。
+
+    真实实现是 `AccountsStore.reset_budget`；测试传 fake。签名与 store 侧
+    保持一致：`(user_id, *, next_reset_at, now)`。
+    """
+
+    def reset_budget(self, user_id: int, *, next_reset_at: float, now: float) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -189,9 +208,11 @@ class LimitGuard:
     def check_budget(self, policy: UserPolicy) -> None:
         """`budget_consumed < token_budget` 通过，否则抛
         `budget_exceeded`。`token_budget` None/0 视为不限、直接 return。"""
-        if is_unlimited(policy.token_budget):
+        # `is None` 只为给下游比较做类型收窄；判定口径仍由 is_unlimited 单点持有
+        budget = policy.token_budget
+        if budget is None or is_unlimited(budget):
             return
-        if policy.budget_consumed >= policy.token_budget:
+        if policy.budget_consumed >= budget:
             raise UsageLimitError(
                 status=429,
                 type="budget_exceeded",
@@ -205,7 +226,7 @@ class LimitGuard:
         policy: UserPolicy,
         *,
         now: float | None = None,
-        store: object | None = None,
+        store: BudgetResetStore | None = None,
         user_id: int | None = None,
     ) -> None:
         """惰性预算重置：`now >= budget_reset_at` 时把 `budget_consumed` 归零
@@ -219,7 +240,9 @@ class LimitGuard:
         具体签名：`(user_id: int, now: float)`，无返回值。
         """
         now = self._wall() if now is None else float(now)
-        if is_unlimited(policy.budget_period):
+        # `is None` 只为给下面 `float(period)` 做类型收窄；口径仍由 is_unlimited 持有
+        period = policy.budget_period
+        if period is None or is_unlimited(period):
             return
         if policy.budget_reset_at is None:
             # 该账号从未设定过重置点——直接消费累积不做惰性（无法计算下一次
@@ -228,7 +251,7 @@ class LimitGuard:
         if now < policy.budget_reset_at:
             return
         # 到期 → 消费清零 + 重置点推进一个 period
-        new_reset_at = float(policy.budget_reset_at) + float(policy.budget_period)
+        new_reset_at = float(policy.budget_reset_at) + float(period)
         policy.budget_consumed = 0
         policy.budget_reset_at = new_reset_at
         if store is not None and user_id is not None:
@@ -246,7 +269,7 @@ class LimitGuard:
         `limit` None/0 视为无限制——不记账，直接 True。计数器下限 0
         （多次多余 release 不会下探为负导致下一次 acquire 溢出）。
         """
-        if is_unlimited(limit):
+        if is_unlimited(limit) or limit is None:
             return True
         with self._lock:
             cur = self._concurrency.get(user_id, 0)
@@ -285,7 +308,7 @@ class LimitGuard:
         `test_rpm_window_rollover_lets_new_window_pass` 中跨窗应在新窗口
         重新 3 次放行。
         """
-        if is_unlimited(limit):
+        if is_unlimited(limit) or limit is None:
             return
         now = self._mono() if now is None else float(now)
         with self._lock:
@@ -337,7 +360,7 @@ class LimitGuard:
         对短 prompt（est 四舍五入到 0）连发多次本应限流，实际全部通过。
         """
         now = self._mono() if now is None else float(now)
-        if is_unlimited(limit):
+        if is_unlimited(limit) or limit is None:
             # 无限额时无需记账 pending：add_tpm_actual 也不会从此 dict 找 est
             return
         with self._lock:

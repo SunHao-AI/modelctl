@@ -137,7 +137,8 @@ def create_admin_router() -> APIRouter:
         app.include_router(admin_router, prefix="/admin/api")
     """
     router = APIRouter()
-    router.task_manager = TaskManager()  # 运行时附加属性，非 FastAPI 字段
+    # mypy: APIRouter stub 无此运行时属性，setattr 附加单例供各子路由经 app.state 取用
+    setattr(router, "task_manager", TaskManager())  # noqa: B010
 
     for module_name, prefix in _SUBROUTER_MODULES:
         _include_subrouter(router, module_name, prefix)

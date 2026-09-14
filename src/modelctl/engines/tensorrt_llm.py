@@ -73,11 +73,14 @@ class TensorRtLlmAdapter(EngineAdapter):
         cfg = self.profile.engine_config
         # docker 路径先确保镜像就位（大镜像跨境拉取易中途 EOF，需显式 pull + 重试）
         runtime, image = self._resolve_runtime()
-        if runtime == "docker" and not docker_setup.ensure_image(image, on_progress=self._progress_cb):
-            raise RequirementError(
-                f"{self.profile.name}：镜像 {image} 未就位，无法启动容器；"
-                "详见日志中的 docker pull 错误分类与对应处置"
-            )
+        if runtime == "docker":
+            # _resolve_runtime 不变量：runtime 为 'docker' 的前提就是 yaml docker_image 非空
+            assert image is not None
+            if not docker_setup.ensure_image(image, on_progress=self._progress_cb):
+                raise RequirementError(
+                    f"{self.profile.name}：镜像 {image} 未就位，无法启动容器；"
+                    "详见日志中的 docker pull 错误分类与对应处置"
+                )
         engine_dir = Path(str(cfg.get("engine_dir") or "")).expanduser()
         if engine_dir.exists() and any(engine_dir.iterdir()):
             return
@@ -156,6 +159,8 @@ class TensorRtLlmAdapter(EngineAdapter):
         bind_host = str(cfg.get("bind_host", "127.0.0.1"))
 
         if runtime == "docker":
+            # _resolve_runtime 不变量：走到 docker 分支时 docker_image 必非空（mypy 收窄）
+            assert image is not None
             model_local = Path(model).expanduser().resolve()
             engine_local = Path(engine_dir).expanduser().resolve()
             cmd = [

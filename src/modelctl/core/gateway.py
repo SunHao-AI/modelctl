@@ -142,7 +142,8 @@ def _safe_int(value: object, *, default: int = 1, lo: int = 1, hi: int = 10_000_
     try:
         if isinstance(value, bool):
             raise ValueError("bool is not a token count")
-        n = int(value)  # type: ignore[arg-type]
+        # value 为 object：int() 对不支持的类型抛 TypeError（下方已捕获），stub 无 int(object) 重载
+        n = int(value)  # type: ignore[call-overload]
     except (TypeError, ValueError):
         return default
     return max(lo, min(hi, n))
@@ -804,19 +805,21 @@ def resolve_model(
     group_cache：家族解析的 TTL 缓存；None 时每次实探（CLI / 测试等单次调用口径）。
     """
 
-    def _group(name: str) -> GatewayModel | None:
+    def _group(name: str, members: dict[str, list[GatewayModel]]) -> GatewayModel | None:
         return (
-            group_cache.resolve(groups, name)
+            group_cache.resolve(members, name)
             if group_cache is not None
-            else _resolve_group(groups, name)
+            else _resolve_group(members, name)
         )
 
+    # _group 显式接收已收窄为非 None 的 groups：下方 `if groups and ...` 守卫保证
+    # 进入家族解析分支时 groups 必非 None，避免把 Optional 传进非 Optional 形参。
     if groups and body_model and body_model in groups:
-        return _group(body_model)
+        return _group(body_model, groups)
     if body_model and body_model in registry:
         return registry[body_model]
     if groups and default_model and default_model in groups:
-        return _group(default_model)
+        return _group(default_model, groups)
     if default_model and default_model in registry:
         return registry[default_model]
     return None
@@ -1459,7 +1462,9 @@ def create_app(
             try:
                 _data = json.loads(upstream.content)
                 _texts = [
-                    b.get("text") for b in (_data.get("content") or [])
+                    # 过滤条件已排除 falsy 的 text，`or ""` 仅为把 dict.get 的
+                    # `Any | None` 收窄成可 join 的类型（对保留元素恒等，不改语义）
+                    b.get("text") or "" for b in (_data.get("content") or [])
                     if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
                 ]
                 _thinking_len = sum(
@@ -2138,7 +2143,9 @@ def create_app(
 
         admin_router = create_admin_router()
         app.include_router(admin_router, prefix="/admin/api")
-        app.state.task_manager = admin_router.task_manager
+        # task_manager 是 create_admin_router 里 setattr 附加的运行时属性，
+        # APIRouter stub 未声明该属性，故行级忽略 attr-defined。
+        app.state.task_manager = admin_router.task_manager  # type: ignore[attr-defined]
 
         # Task 7：账号自助面板（`/api/account/*`）—— 登录/密钥/用量/会话。
         # 走 Bearer JWT（require_account），非管理面 API_KEY；与 /admin/api 语义独立，

@@ -229,7 +229,8 @@ class EngineAdapter(ABC):
         但容器在 daemon 后台持续运行——此时不能把客户端早退当作早退，否则 600s 超时被
         1 秒中断，必须等待 /health ready。子类（VllmAdapter）覆盖此方法注入路径判定。
         """
-        alive_check = (lambda: self.spawned_proc.poll() is None) if self.spawned_proc else None
+        proc = self.spawned_proc  # 局部绑定：三元守卫无法收窄 lambda 内的属性访问（mypy）
+        alive_check = (lambda: proc.poll() is None) if proc else None
         return wait_health(self.health_url(), timeout, self.upstream_api_key(), alive_check=alive_check)
 
     def backend_dead(self) -> bool:

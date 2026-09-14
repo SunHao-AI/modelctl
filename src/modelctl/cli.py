@@ -36,9 +36,11 @@ import re as _re
 import sys
 import time
 import urllib.request
+from collections.abc import Callable
 from datetime import datetime as _dt_dt
 from datetime import timedelta
 from pathlib import Path
+from typing import Any, cast
 
 from loguru import logger
 
@@ -569,7 +571,7 @@ def _price_rate_text(profile: Profile) -> str:
     if price_in is None and price_out is None:
         return "未配置"
 
-    def _fmt(value: object) -> str:
+    def _fmt(value: Any) -> str:
         try:
             return f"{float(value):g}"
         except (TypeError, ValueError):
@@ -808,7 +810,7 @@ def _cmd_list(args, models_dir: Path | None, caps) -> int:
         if idx > 0:
             print()  # 家族块之间空一行，便于阅读
         members = grouped[group_name]
-        rows = []
+        rows: list[list[Any]] = []
         for p in members:
             state = _instance_state(profile=p)
             rate = "-"
@@ -930,7 +932,8 @@ def _cmd_probe(args, models_dir: Path | None, caps) -> int:
     section("软件环境")
     from modelctl.core.compat import EnvSpec
     env = EnvSpec.from_env()
-    kv("site-packages", env.site_packages or unknown(), KEY_W)
+    # Path 恒为真值：str() 包裹后 or 回退语义与原 f-string 隐式插值输出完全一致
+    kv("site-packages", (str(env.site_packages) if env.site_packages else "") or unknown(), KEY_W)
     kv("已安装包", f"{len(env.packages)} 个", KEY_W)
     kv("nvidia .so", f"{len(env.nvidia_so)} 个", KEY_W)
     if env.libs_resolvable_known:
@@ -1128,7 +1131,8 @@ def _cmd_nginx_snippet(args, models_dir) -> int:
             "nginx 数据面将匿名可访问"
         )
         return 0
-    print(build_client_auth_map(key, [p.api_key for p in profiles]), end="")
+    # api_key 允许为 None：build_client_auth_map 内部本就跳过空值，这里预过滤 None 保持产物不变
+    print(build_client_auth_map(key, [k for k in (p.api_key for p in profiles) if k]), end="")
     return 0
 
 
@@ -1193,6 +1197,9 @@ def _cmd_env_setup_docker(args) -> int:
     limit = getattr(args, "max_concurrent_downloads", None)
 
     # 平台选择渲染器与诊断（本函数内本地导入，避免模块顶层循环依赖）
+    # windows_setup / docker_setup 各有一个同名不同的 Check dataclass，
+    # _print_docker_checks 仅鸭子使用 .ok/.label/.detail，故统一标注为 Any 列表
+    diagnose: Callable[[], list[Any]]
     if target_os == "windows":
         from modelctl.core import windows_setup as _ws
         render = _ws.render_instructions
@@ -1510,8 +1517,13 @@ def _cmd_trtllm_build(args, models_dir: Path | None, caps) -> int:
     for w in adapter.warnings:
         _logger.warning(w)
     # 静态校验
-    adapter.ensure_bin()
-    cmd, env = adapter.build_compile_command()
+    # 上方已硬校验 engine == tensorrt_llm，运行时 adapter 必为 TensorRtLlmAdapter；
+    # ensure_bin / build_compile_command 是该子类的专有方法，基类未声明，故 cast 收窄
+    from modelctl.engines.tensorrt_llm import TensorRtLlmAdapter
+
+    trt = cast(TensorRtLlmAdapter, adapter)
+    trt.ensure_bin()
+    cmd, env = trt.build_compile_command()
     _logger.info(f"[trtllm build] 编译 {args.name}: {' '.join(cmd)}")
     _logger.info("[trtllm build] 同步执行（首次冷编译约 28 分钟，含 --dump_intermediates 时更久）")
     result = subprocess.run(cmd, env=env, capture_output=True, text=True)
@@ -1820,10 +1832,10 @@ def _goal_set_impl(*, profile: str, node_ids: list[str] | None, all_nodes: bool,
                    intent: str, create: bool, gpus: str, env_overlay: dict | None,
                    lan_allow: list[str] | None, target_role: str, dry_run: bool,
                    engine: str = "") -> int:
-    body = {"profile": profile, "node_ids": node_ids, "all_nodes": all_nodes,
-            "intent": intent, "create": bool(create), "gpus": gpus or "",
-            "engine": engine or "",
-            "target_role": target_role, "dry_run": bool(dry_run)}
+    body: dict[str, Any] = {"profile": profile, "node_ids": node_ids, "all_nodes": all_nodes,
+                            "intent": intent, "create": bool(create), "gpus": gpus or "",
+                            "engine": engine or "",
+                            "target_role": target_role, "dry_run": bool(dry_run)}
     if env_overlay:
         body["env_overlay"] = env_overlay
     if lan_allow:

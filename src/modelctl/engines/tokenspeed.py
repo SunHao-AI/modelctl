@@ -109,11 +109,14 @@ class TokenSpeedAdapter(EngineAdapter):
         runtime, image, dual_error = self._resolve_runtime()
         if dual_error:
             raise RequirementError(dual_error)
-        if runtime == "docker" and not docker_setup.ensure_image(image, on_progress=self._progress_cb):
-            raise RequirementError(
-                f"{self.profile.name}：镜像 {image} 未就位，无法启动容器；"
-                "详见日志中的 docker pull 错误分类与对应处置"
-            )
+        if runtime == "docker":
+            # _resolve_runtime 不变量：runtime 为 'docker' 的前提就是 yaml docker_image 非空
+            assert image is not None
+            if not docker_setup.ensure_image(image, on_progress=self._progress_cb):
+                raise RequirementError(
+                    f"{self.profile.name}：镜像 {image} 未就位，无法启动容器；"
+                    "详见日志中的 docker pull 错误分类与对应处置"
+                )
         model = str(cfg.get("model") or "")
         if not (model and Path(model).expanduser().is_dir()):
             if cfg.get("download"):
@@ -138,6 +141,8 @@ class TokenSpeedAdapter(EngineAdapter):
         bind_host = str(cfg.get("bind_host", "127.0.0.1"))
 
         if runtime == "docker":
+            # _resolve_runtime 不变量：走到 docker 分支时 docker_image 必非空（mypy 收窄）
+            assert image is not None
             model_local = Path(model).expanduser().resolve()
             cmd = [
                 "docker", "run", "--rm", "--detach",

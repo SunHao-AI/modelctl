@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+from typing import cast
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from loguru import logger
 
 from modelctl.core.webui.admin_auth import require_auth
+from modelctl.core.webui.admin_tasks import TaskManager
 
 # .env 中需要脱敏的键（值只展示 *** + 末 4 位）。
 # 显式名单 + 语义模式双保险：只列名单必然漏新增键（ACCOUNTS_JWT_SECRET /
@@ -168,7 +170,7 @@ async def build_trtllm(
             },
         )
 
-    tm: object = request.app.state.task_manager
+    tm = cast(TaskManager, request.app.state.task_manager)
     lock = await tm.acquire(name, "build")
     if lock is None:
         return JSONResponse(

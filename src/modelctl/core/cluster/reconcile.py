@@ -413,7 +413,7 @@ def _default_prober(profile: Any) -> dict[str, Any]:
     return {"up": bool(up), "alive": bool(alive), "port": profile.port, "pid": pid, "gpus": gpus, "name": profile.name}
 
 
-def _default_docker_alive(profile: Any) -> bool:
+def _default_docker_alive(profile: Any, caps: Capabilities) -> bool:
     """docker runtime 引擎的容器存在性兜底。
 
     同 stem 多引擎共存（vllm + aphrodite 同指 qwen2.5-1.5b）时，`_identity_of`
@@ -426,18 +426,29 @@ def _default_docker_alive(profile: Any) -> bool:
     保守语义沿用 `docker_container_alive`：docker 不可用一律 True（宁可多走一次
     stopper 让它查已停止的容器，也不能漏杀活着的容器）。非 docker 引擎返回 False
     （stop 分支已经按 `up/alive` 走默认路径，不会走到这里）。
+
+    caps 由构造处绑定（Reconciler._capabilities()：注入优先，否则 30s 缓存 probe）：
+    EngineAdapter 构造签名要求 caps，此前漏传导致 TypeError 被下方 except 吞掉、
+    本兜底**恒返回 False**（docker_fallback 形同虚设）。
     """
     from modelctl.core.process import docker_container_alive
     from modelctl.engines import get_adapter
 
     try:
-        adapter = get_adapter(str(getattr(profile, "engine", "") or ""))(profile)
+        adapter = get_adapter(str(getattr(profile, "engine", "") or ""))(profile, caps)
     except Exception:
         return False
     try:
         if not adapter.is_docker_runtime():
             return False
-        return docker_container_alive(adapter._container_name)
+        # _container_name 是 docker runtime 子类（vllm/tokenspeed/tensorrt_llm）的
+        # 只读 property，基类 EngineAdapter 未声明、mypy 静态不可见；is_docker_runtime()
+        # 为 True 已保证子类实现，getattr 动态读取与直接访问等价（缺属性回退 False，
+        # 与原 except AttributeError 语义一致）。
+        name = getattr(adapter, "_container_name", None)
+        if not name:
+            return False
+        return docker_container_alive(name)
     except Exception:
         return False
 
@@ -541,7 +552,11 @@ class Reconciler:
         self._starter = starter or _default_starter
         self._stopper = stopper or _default_stopper
         self._prober = prober or _default_prober
-        self._docker_alive = docker_alive or _default_docker_alive
+        # 默认实现需要 caps（EngineAdapter 构造签名要求）：经 `_capabilities()` 取——
+        # 构造注入优先，否则 30s 缓存 probe，与 reconcile_once 喂给 _step 的是同一份。
+        self._docker_alive = docker_alive or (
+            lambda prof: _default_docker_alive(prof, self._capabilities())
+        )
         self._caps = caps
         self._lock = threading.RLock()
         # goal_id → {sha, intent, stage, reason, error_class, manual, degrade, path,

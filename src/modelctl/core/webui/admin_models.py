@@ -28,12 +28,14 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import cast
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 
 from modelctl.core.webui.admin_auth import require_auth, require_auth_or_query
+from modelctl.core.webui.admin_tasks import TaskManager
 
 router = APIRouter()
 
@@ -462,7 +464,7 @@ async def start_model(
             return tmp_profile
         profile = tmp_profile
 
-    tm: object = request.app.state.task_manager
+    tm = cast(TaskManager, request.app.state.task_manager)
     lock = await tm.acquire(name, "start")
     if lock is None:
         return JSONResponse(
@@ -595,7 +597,7 @@ async def restart_model(
 
     load_env()
 
-    tm: object = request.app.state.task_manager
+    tm = cast(TaskManager, request.app.state.task_manager)
     lock = await tm.acquire(name, "restart")
     if lock is None:
         return JSONResponse(
@@ -822,17 +824,17 @@ async def _sse_log_stream(name: str):
             if used_json_log and json_log_path is not None:
                 try:
                     if json_log_path.is_file():
-                        cur = await asyncio.to_thread(json_log_path.stat).st_size
+                        cur = (await asyncio.to_thread(json_log_path.stat)).st_size
                         if cur > json_log_pos:
                             raw = await asyncio.to_thread(_read_file_range, json_log_path, json_log_pos, cur)
                             for entry in raw.split("\n"):
                                 entry = entry.rstrip("\x00").strip()
                                 if not entry:
                                     continue
-                                line = _docker_json_line_text(entry)
-                                if line:
-                                    sent_lines.add(line)
-                                    yield f"event: log\ndata: {json.dumps({'line': line}, ensure_ascii=False)}\n\n"
+                                text = _docker_json_line_text(entry)
+                                if text:
+                                    sent_lines.add(text)
+                                    yield f"event: log\ndata: {json.dumps({'line': text}, ensure_ascii=False)}\n\n"
                             if raw.strip():
                                 json_log_pos = cur
                                 last_activity = time.monotonic()
@@ -911,7 +913,7 @@ def docker_core_log_path(name: str) -> Path | None:
     if not (profile.engine_config or {}).get("docker_image"):
         return None
     try:
-        from modelctl.capabilities import probe
+        from modelctl.core.capabilities import probe
         from modelctl.engines import get_adapter
 
         adapter = get_adapter(profile.engine)(profile, probe())
@@ -1031,7 +1033,7 @@ def _read_docker_logs(name: str, tail: int = 200) -> list[str]:
         if not out:
             logger.info(
                 f"[webui] docker logs 空输出（{name}）：cmd={cmd} rc={proc.returncode} "
-                f"stdout={len(proc.stdout or 0)}B stderr={len(proc.stderr or 0)}B "
+                f"stdout={len(proc.stdout or '')}B stderr={len(proc.stderr or '')}B "
                 f"stderr_head={(proc.stderr or '')[:160]!r}"
             )
         return out
@@ -1125,6 +1127,16 @@ async def start_model_ui(
     caps = await asyncio.to_thread(probe)
     adapter = get_adapter(profile.engine)(profile, caps)
     spec = adapter.ui_spec(port=port, host=host)
+    if spec is None:
+        return JSONResponse(
+            status_code=412,
+            content={
+                "error": {
+                    "code": "unsupported_engine",
+                    "message": f"引擎 {profile.engine} 未提供 Web 控制台规格",
+                }
+            },
+        )
 
     instance = f"ui-{profile.name}"
     if is_running(instance):
@@ -1144,7 +1156,8 @@ async def start_model_ui(
         except Exception as exc:
             logger.warning(f"添加 ufw 规则失败（{src} → :{spec['port']}）: {exc}")
 
-    pid, _ = await asyncio.to_thread(start_detached, instance, spec["cmd"], spec["env"])
+    # 解包目标不能复用 `_`（形参 `_: None = Depends(...)` 已把 `_` 定为 None 类型）
+    pid, _proc = await asyncio.to_thread(start_detached, instance, spec["cmd"], spec["env"])
     log = launch_log(instance)
     return {
         "ok": True,
