@@ -11,6 +11,7 @@ inspect 到」这三件事是 CI 结构性盲区。本文件用本地已有镜�
 
 from __future__ import annotations
 
+import os
 import subprocess
 import uuid
 from pathlib import Path
@@ -18,6 +19,10 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("fastapi")
+pytestmark = pytest.mark.skipif(
+    bool(os.environ.get("CI")),
+    reason="CI runner 上的 docker daemon 与镜像属宿主资产，本文件专属本机真跑",
+)
 
 from modelctl.core.webui import admin_models  # noqa: E402
 
@@ -35,15 +40,18 @@ def _daemon_ok() -> bool:
 
 
 def _local_image() -> str | None:
-    """优先 redis:7-alpine（echo 输出干净）；否则取任一本地镜像。"""
+    """只认 redis:7-alpine：它的默认入口能被 `sh -c` 接管，MARKER 必然出现在日志里。
+
+    CI 的 ubuntu runner 自带 docker daemon 与宿主注入的 agent 镜像，`docker images`
+    非空但那些镜像有自定义 entrypoint（吞掉我们的 sh -c），拿来用只会假失败。
+    因此绝不"回退任意本地镜像"，没有 redis:7-alpine 就 skip。
+    """
     try:
         proc = _docker("images", "--format", "{{.Repository}}:{{.Tag}}")
     except (OSError, subprocess.SubprocessError):
         return None
     tags = [t.strip() for t in proc.stdout.splitlines() if ":" in t.strip()]
-    if "redis:7-alpine" in tags:
-        return "redis:7-alpine"
-    return tags[0] if tags else None
+    return "redis:7-alpine" if "redis:7-alpine" in tags else None
 
 
 requires_real_docker = pytest.mark.skipif(not _daemon_ok(), reason="本机 docker daemon 不可用（CI 跳过）")
