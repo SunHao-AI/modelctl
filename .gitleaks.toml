@@ -1,0 +1,17 @@
+# gitleaks 自定义配置：extend 官方默认规则集，仅对下列明确可见的
+# 测试占位值 / 本机文档示例值加白名单（CI secret scan 门禁）。
+# 新增白名单条目时必须确认该值是占位符，绝不能放行真实凭据。
+[extend]
+useDefault = true
+
+[allowlist]
+description = "test placeholders and local-doc example credentials (not real secrets)"
+regexes = [
+  '''perf-jwt-secret-0123456789''',
+  '''e2e_jwt_secret_0123456789''',
+  '''smoke-client-key-abcdef''',
+  '''smoke-admin-key-123456''',
+  '''sk-mctl-abc123''',
+  '''root123456''',
+  '''unsloth:<密码>''',
+]
