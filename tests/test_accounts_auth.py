@@ -32,7 +32,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 from dataclasses import dataclass
 
 import pytest
@@ -46,7 +45,7 @@ class _FakeRequest:
 
 
 @pytest.fixture
-def store(tmp_path) -> "object":
+def store(tmp_path) -> object:
     from modelctl.core.accounts.store import AccountsStore
     s = AccountsStore(tmp_path / "accounts_auth.db")
     s.init_db()
@@ -162,10 +161,7 @@ def test_resolve_account_valid_key_returns_identity(store) -> None:
     #   store.create_key(key_hash=key_hash)
     # 但 _mk_user_with_key 里我写的 key_hash = "hash-of-alice"（无 sha256）
     # → 因此 helper 得接受 key_hash 参数；更新本测试：
-    from modelctl.core.accounts.hashing import hash_api_key
-    from modelctl.core.accounts.store import AccountsStore  # just type
 
-    import time
     real_now = 1000.0
     already_uid = uid
     # 再建一个 Key 用有效 hash

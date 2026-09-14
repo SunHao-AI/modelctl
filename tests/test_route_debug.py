@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import pytest
+
 from modelctl.core.gateway import create_app
 
 

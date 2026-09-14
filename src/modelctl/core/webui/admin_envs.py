@@ -32,6 +32,10 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 
+from modelctl.core.webui.admin_auth import (
+    HTTPAuthorizationCredentials as _HTTPCredentials,
+)
+from modelctl.core.webui.admin_auth import bearer_scheme as _docker_bearer
 from modelctl.core.webui.admin_auth import require_auth, require_auth_or_query
 from modelctl.core.webui.admin_tasks import TaskManager
 
@@ -265,18 +269,13 @@ async def docker_diagnose(
 # 5 端点，必须在 `POST /{target}/setup` 之前注册（`{target}` 会吞精确路径）。
 # ---------------------------------------------------------------------------
 
-# 二次 Depends(bearer_scheme) 让 FastAPI 注入凭据对象，用于派生 user_id
-# （require_auth 用的依赖返回 None，不能直接读 credentials）。
-from modelctl.core.webui.admin_auth import (  # noqa: E402
-    bearer_scheme as _docker_bearer,
-    HTTPAuthorizationCredentials as _HTTPCredentials,
-)
-
 
 @router.post("/docker/install")
 async def docker_install(
     request: Request,
     os_: str = Query(default="", alias="os", description="可省略，body.os 优先"),
+    # 二次 Depends(bearer_scheme) 让 FastAPI 注入凭据对象，用于派生 user_id
+    # （require_auth 用的依赖返回 None，不能直接读 credentials）。
     credentials: _HTTPCredentials = Depends(_docker_bearer),
     _: None = Depends(require_auth),
 ):
@@ -342,8 +341,10 @@ async def docker_install(
     if active_count >= _DOCKER_MAX_ACTIVE_PER_USER:
         return JSONResponse(
             status_code=429,
-            content={"error": {"code": "rate_limited",
-                                "message": f"用户 {user_id} 未完成的 docker install 已达 {active_count} 任务，请稍后再试"}},
+            content={"error": {
+                "code": "rate_limited",
+                "message": f"用户 {user_id} 未完成的 docker install 已达 {active_count} 任务，请稍后再试",
+            }},
         )
 
     # 参数校验必须在任何状态写入之前：create_task + _user_pending.add 之后才返 400
@@ -553,8 +554,8 @@ async def setup_env(
     _: None = Depends(require_auth),
 ):
     """POST /admin/api/envs/{target}/setup — 异步建 venv，返回 202 + task_id。"""
-    from modelctl.core.envs import known_targets
     from modelctl.core.envfile import load_env
+    from modelctl.core.envs import known_targets
 
     load_env()
 

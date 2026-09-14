@@ -5,7 +5,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from modelctl.core.stats import UsageCollector
 
 # vLLM per-request 原生指标 5 个规范键 → vLLM 字段名（Task 4/5 共用）
 VLLM_NATIVE = {
@@ -17,7 +20,7 @@ VLLM_NATIVE = {
 }
 
 
-def _make_collector(tmp_path: Path, **kw) -> "UsageCollector":
+def _make_collector(tmp_path: Path, **kw) -> UsageCollector:
     """构造 on-demand 模式 UsageCollector（poll_interval=999 不轮询）。"""
     from modelctl.core.stats import UsageCollector
     collector = UsageCollector(
@@ -272,8 +275,9 @@ def test_build_target_payload_skips_bench_when_ttft_and_rate_present():
     以跳 bench（native_has_any 任一沟碰）；新 gate 按字段缺口分别受限，有 rate
     缺口仍需 bench（补 rate 不碰 ttft）。所以这个用例同步补上 rate 有值才有
     跳 bench 意义。"""
-    import modelctl.core.stats as S
     from unittest.mock import MagicMock, Mock, patch
+
+    import modelctl.core.stats as S
     fake_collector = MagicMock()
     fake_collector.bench_fallback = True
     fake_collector.get_snapshot.return_value = {
@@ -303,8 +307,9 @@ def test_build_target_payload_skips_bench_when_ttft_and_rate_present():
 
 
 def test_build_target_payload_runs_bench_when_all_zero_and_switch_on():
-    import modelctl.core.stats as S
     from unittest.mock import MagicMock, Mock, patch
+
+    import modelctl.core.stats as S
     fake_collector = MagicMock()
     fake_collector.bench_fallback = True
     fake_collector.get_snapshot.return_value = {
@@ -336,8 +341,9 @@ def test_build_target_payload_runs_bench_when_all_zero_and_switch_on():
 
 
 def test_build_target_payload_skips_bench_when_switch_off():
-    import modelctl.core.stats as S
     from unittest.mock import MagicMock, Mock, patch
+
+    import modelctl.core.stats as S
     fake_collector = MagicMock()
     fake_collector.bench_fallback = False
     fake_collector.get_snapshot.return_value = {
@@ -369,6 +375,7 @@ def test_build_target_payload_skips_bench_when_switch_off():
 
 def test_targets_from_profiles_includes_native_mapping_for_vllm(tmp_path, monkeypatch):
     from unittest.mock import MagicMock, patch
+
     import modelctl.core.stats as S
 
     fake_profile = MagicMock()
@@ -403,6 +410,7 @@ def test_targets_from_profiles_includes_native_mapping_for_vllm(tmp_path, monkey
 
 def test_targets_from_profiles_native_mapping_none_for_unsupported_engine(tmp_path):
     from unittest.mock import MagicMock, patch
+
     import modelctl.core.stats as S
 
     fake_profile = MagicMock()
@@ -437,6 +445,7 @@ def test_targets_from_profiles_native_mapping_none_for_unsupported_engine(tmp_pa
 def test_get_collector_injects_native_mapping(tmp_path, monkeypatch):
     """get_collector 注入 native_mapping 并按 USAGE_BENCH_FALLBACK 计算 bench_fallback。"""
     from unittest.mock import MagicMock
+
     from modelctl.core.gateway import get_collector
 
     monkeypatch.delenv("USAGE_BENCH_FALLBACK", raising=False)
@@ -461,6 +470,7 @@ def test_get_collector_injects_native_mapping(tmp_path, monkeypatch):
 def test_get_collector_injects_none_native_mapping_for_default_engine(tmp_path, monkeypatch):
     """默认引擎原生映射为 None 时，get_collector 注入 None（不影响既有 token 计数链路）。"""
     from unittest.mock import MagicMock
+
     from modelctl.core.gateway import get_collector
 
     monkeypatch.delenv("USAGE_BENCH_FALLBACK", raising=False)
@@ -502,9 +512,9 @@ def test_record_native_metrics_silent_when_invalid(tmp_path):
 def test_token_rate_data_takes_ttft_from_stats_when_native_present(monkeypatch):
     """stats 接口返回原生 ttft_ms 时，_token_rate_data 复用而不主动测速。"""
     import json as _json
-    import urllib.request
-    import modelctl.cli as cli
     from unittest.mock import MagicMock, patch
+
+    import modelctl.cli as cli
 
     body = _json.dumps(
         {"isValid": True, "prompt_rate": 12.0, "predicted_rate": 15.0, "ttft_ms": 123, "model": "q", "unit": "tok"}
@@ -536,9 +546,9 @@ def test_token_rate_data_takes_ttft_from_stats_when_native_present(monkeypatch):
 def test_token_rate_data_skips_bench_when_usage_bench_fallback_false(monkeypatch):
     """USAGE_BENCH_FALLBACK=false 时跳过 bench 兜底，全字段 None。"""
     import json as _json
-    import urllib.request
-    import modelctl.cli as cli
     from unittest.mock import MagicMock, patch
+
+    import modelctl.cli as cli
 
     monkeypatch.setenv("USAGE_BENCH_FALLBACK", "false")
     try:

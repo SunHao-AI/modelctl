@@ -65,7 +65,9 @@ class VllmAdapter(EngineAdapter):
             # docker / nvidia-smi 都在 PATH；硬拦截不降级（检查与指引统一在 core.docker_setup）
             missing = docker_setup.path_level_missing()
             if missing:
-                raise RequirementError(f"docker_image 已配置但 Docker 环境未就绪：{'；'.join(missing)}——{docker_setup.MSG_GUIDE}")
+                raise RequirementError(
+                    f"docker_image 已配置但 Docker 环境未就绪：{'；'.join(missing)}——{docker_setup.MSG_GUIDE}"
+                )
             # 清冲突残留容器（幂等；失败仅 warning + 解码 stderr，不再静默吞）
             # readonly（TUI 预检渲染）：浏览界面不得删容器
             if not readonly:
@@ -94,7 +96,11 @@ class VllmAdapter(EngineAdapter):
                         f'`{py} -c "import vllm; print(vllm.__version__)"`'
                     )
                 elif v < MIN_VLLM_PER_REQUEST:
-                    raise RequirementError(f"enable_per_request_metrics 需 vLLM ≥ {min_v}，" f"当前 {v[0]}.{v[1]}.{v[2]}；" "可升级（uv sync --project envs/vllm --upgrade vllm）或在 yaml 中关闭该项")
+                    raise RequirementError(
+                        f"enable_per_request_metrics 需 vLLM ≥ {min_v}，"
+                        f"当前 {v[0]}.{v[1]}.{v[2]}；"
+                        "可升级（uv sync --project envs/vllm --upgrade vllm）或在 yaml 中关闭该项"
+                    )
         # 共享部分：GPU / TP / VRAM / compat / gpu lock
         try:
             gpus = self.selected_gpus()
@@ -104,7 +110,9 @@ class VllmAdapter(EngineAdapter):
             self.validate_gpu_selection(gpus)
             tp = int(cfg.get("tensor_parallel_size", len(gpus)))
             if tp != len(gpus):
-                raise RequirementError(f"gpu_list 指定了 {len(gpus)} 块 GPU，但 tensor_parallel_size={tp}，二者必须一致")
+                raise RequirementError(
+                    f"gpu_list 指定了 {len(gpus)} 块 GPU，但 tensor_parallel_size={tp}，二者必须一致"
+                )
         else:
             tp = int(cfg.get("tensor_parallel_size", 1))
             if self.caps.gpu_count and tp > self.caps.gpu_count:
@@ -114,7 +122,10 @@ class VllmAdapter(EngineAdapter):
         per_request_on = bool(cfg.get("enable_per_request_metrics"))
         force_on = bool(cfg.get("enable_force_include_usage"))
         if per_request_on and not force_on:
-            self.warnings.append(f"{self.profile.name}：enable_per_request_metrics=true 但 enable_force_include_usage=false，" "流式中间块缺 usage 会使 stats.record_tokens 仅末块入账；建议同时开启")
+            self.warnings.append(
+                f"{self.profile.name}：enable_per_request_metrics=true 但 enable_force_include_usage=false，"
+                "流式中间块缺 usage 会使 stats.record_tokens 仅末块入账；建议同时开启"
+            )
         self.run_compat_checks()  # 预检：软件规则 + 模型 id 特征
         if gpus is not None and not readonly:
             acquire_gpu_lock(self.profile.name, gpus)
@@ -257,7 +268,10 @@ class VllmAdapter(EngineAdapter):
         model_raw = str(cfg.get("model") or "").strip()
         model_local = Path(model_raw).expanduser()
         if not model_local.is_absolute() or not model_local.is_dir():
-            raise RequirementError(f"{self.profile.name}：docker_image 路径下 model 必须为本地绝对路径" f"且目录已存在（当前: {model_raw}——HF id 需先 modelctl start 触发 pre_start 下载）")
+            raise RequirementError(
+                f"{self.profile.name}：docker_image 路径下 model 必须为本地绝对路径"
+                f"且目录已存在（当前: {model_raw}——HF id 需先 modelctl start 触发 pre_start 下载）"
+            )
         model_local = model_local.resolve()
         cmd = (
             [
@@ -494,7 +508,8 @@ class VllmAdapter(EngineAdapter):
         if gpus:
             env.update(self.cuda_visible_devices(gpus))
         env["VIRTUAL_ENV"] = str(envs.VENV_ROOT / "vllm")
-        env["PATH"] = str(envs.engine_bin("vllm", "vllm").parent) + os.pathsep + os.environ.get("PATH", os.environ["PATH"])
+        bin_dir = str(envs.engine_bin("vllm", "vllm").parent)
+        env["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", os.environ["PATH"])
         return env
 
     def wait_ready(self, timeout: float) -> bool:

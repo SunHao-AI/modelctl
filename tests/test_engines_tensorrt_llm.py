@@ -243,7 +243,7 @@ def test_tensorrt_llm_build_compile_command_venv(tmp_path, monkeypatch):
     a.ensure_bin()
     cmd, env = a.build_compile_command()
     assert cmd[0] == "trtllm-build"
-    assert f"--model_dir=/models/Qwen3.8-27B" in cmd
+    assert "--model_dir=/models/Qwen3.8-27B" in cmd
     assert f"--workspace_dir={engine_dir}" in cmd
     assert "--tensor_parallelism_size=4" in cmd
     assert "--quantization=fp8" in cmd
@@ -309,8 +309,8 @@ def test_tensorrt_llm_stop_backend_docker_uses_docker_rm(monkeypatch):
 
 def test_tensorrt_llm_stop_backend_venv_uses_stop_instance(monkeypatch):
     from modelctl.core.capabilities import Capabilities
-    from modelctl.engines import get_adapter
     from modelctl.core.profile import Profile
+    from modelctl.engines import get_adapter
     profile = Profile(name="q2", engine="tensorrt_llm", port=8113, engine_config={"model": "/m"})
     adapter = get_adapter("tensorrt_llm")(profile, Capabilities())
     captured = {}
@@ -324,8 +324,8 @@ def test_tensorrt_llm_stop_backend_venv_uses_stop_instance(monkeypatch):
 
 def test_tensorrt_llm_is_docker_runtime_flag():
     from modelctl.core.capabilities import Capabilities
-    from modelctl.engines import get_adapter
     from modelctl.core.profile import Profile
+    from modelctl.engines import get_adapter
     docker_p = get_adapter("tensorrt_llm")(
         Profile(name="x", engine="tensorrt_llm", port=8112,
                 engine_config={"docker_image": "x", "model": "/m"}), Capabilities())

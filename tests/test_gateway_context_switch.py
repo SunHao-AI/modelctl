@@ -62,7 +62,8 @@ def _rules() -> dict[str, list[ContextSwitchRule]]:
 
 
 def test_estimate_prompt_tokens_str_content():
-    body = {"model": "x", "messages": [{"role": "user", "content": "hello world"}, {"role": "assistant", "content": "hi"}]}
+    body = {"model": "x", "messages": [{"role": "user", "content": "hello world"},
+                                        {"role": "assistant", "content": "hi"}]}
     # 11 + 2 = 13 字符，//4 = 3
     assert estimate_prompt_tokens(body) == 3
 
@@ -160,7 +161,8 @@ def test_proxy_routes_by_context_length():
     app = create_app(reg, default_model=DS, transport=httpx.MockTransport(upstream), context_rules=_rules())
 
     # 短输入（8 字符 → 2 tokens）→ light 变体
-    resp = _run(_post(app, "/v1/chat/completions", json={"model": DS, "messages": [{"role": "user", "content": "hello"}]}))
+    resp = _run(_post(app, "/v1/chat/completions",
+                      json={"model": DS, "messages": [{"role": "user", "content": "hello"}]}))
     assert resp.status_code == 200
     assert captured["body"]["model"] == DS_LIGHT
 

@@ -36,7 +36,6 @@ from modelctl.core.webui.account_auth import (
     require_account,
 )
 
-
 # ---------------------------------------------------------------------------
 # 辅助
 # ---------------------------------------------------------------------------
@@ -141,8 +140,7 @@ def create_account_self_router() -> APIRouter:
                          principal: AccountPrincipal = Depends(require_account)):
         """POST /api/account/keys — 自助签发，**一次性**返回明文。"""
         store = _get_store(request)
-        from modelctl.core.accounts.hashing import (generate_api_key, hash_api_key,
-                                                     key_prefix)
+        from modelctl.core.accounts.hashing import generate_api_key, hash_api_key, key_prefix
 
         name = str(payload.get("name") or "")
         expires_days = payload.get("expires_in_days")
@@ -151,10 +149,10 @@ def create_account_self_router() -> APIRouter:
         if expires_days is not None:
             try:
                 days = float(expires_days)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as exc:
                 raise HTTPException(status_code=400,
                                     detail={"code": "bad_request",
-                                            "message": "expires_in_days 必须为数字"})
+                                            "message": "expires_in_days 必须为数字"}) from exc
             if days > 0:
                 expires_at = now + days * 86400.0
         cred = generate_api_key()
@@ -193,7 +191,7 @@ def create_account_self_router() -> APIRouter:
             store.set_key_status(key_id, status)
         except ValueError as exc:
             raise HTTPException(status_code=400,
-                                detail={"code": "bad_request", "message": str(exc)})
+                                detail={"code": "bad_request", "message": str(exc)}) from exc
         row = store.get_key_by_id(key_id)
         return _key_public(row) if row else {}
 
@@ -224,7 +222,7 @@ def create_account_self_router() -> APIRouter:
             raise
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500,
-                                detail={"code": "internal", "message": str(exc)})
+                                detail={"code": "internal", "message": str(exc)}) from exc
         return {"id": key_id}
 
     # ------------------------------------------------------------------

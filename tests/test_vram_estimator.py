@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from modelctl.core.profile import Profile
 from modelctl.core.vram_estimator import (
@@ -73,7 +72,8 @@ def test_read_model_arch_from_config_json(tmp_path):
 
 
 def test_read_model_arch_head_dim_field_direct(tmp_path):
-    (tmp_path / "config.json").write_text(json.dumps({"num_hidden_layers": 32, "num_key_value_heads": 8, "head_dim": 128}))
+    (tmp_path / "config.json").write_text(json.dumps(
+        {"num_hidden_layers": 32, "num_key_value_heads": 8, "head_dim": 128}))
     assert read_model_arch(tmp_path / "config.json") == {"n_layers": 32, "kv_heads": 8, "head_dim": 128}
 
 
@@ -140,14 +140,16 @@ def test_kv_estimate_reads_local_config(tmp_path):
 
 def test_kv_warnings_over_limit():
     """超限配置应返回 OOM 警告。"""
-    p = _profile(cfg={"model": "Qwen/Qwen3.8-27B", "ctx_size": 262144, "parallel": 4, "gpu_count": 1, "cache_type_v": "fp16"})
+    p = _profile(cfg={"model": "Qwen/Qwen3.8-27B", "ctx_size": 262144, "parallel": 4,
+                      "gpu_count": 1, "cache_type_v": "fp16"})
     warnings = kv_estimate_warnings(p, per_card_limit_mb=48 * 1024)
     assert warnings and "OOM" in warnings[0]
 
 
 def test_kv_warnings_near_limit():
     """接近上限（>90%）时给出提示。"""
-    p = _profile(cfg={"model": "Qwen/Qwen3.8-27B", "ctx_size": 262144, "parallel": 4, "gpu_count": 8, "cache_type_v": "fp16"})
+    p = _profile(cfg={"model": "Qwen/Qwen3.8-27B", "ctx_size": 262144, "parallel": 4,
+                      "gpu_count": 8, "cache_type_v": "fp16"})
     # 128GB×2 / 8 卡 = 32GB/卡，单卡 48GB 的 66% → 无警告
     assert kv_estimate_warnings(p, per_card_limit_mb=48 * 1024) == []
     # 若单卡上限压到 40GB（32GB > 36GB 的 90%？不，32<36）→ 仍无；用更小上限验证

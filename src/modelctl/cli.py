@@ -36,7 +36,8 @@ import re as _re
 import sys
 import time
 import urllib.request
-from datetime import datetime as _dt_dt, timedelta
+from datetime import datetime as _dt_dt
+from datetime import timedelta
 from pathlib import Path
 
 from loguru import logger
@@ -57,8 +58,14 @@ from modelctl.core.envfile import load_env
 from modelctl.core.envs import (
     EngineEnvError,
     known_targets,
+)
+from modelctl.core.envs import (
     remove as envs_remove,
+)
+from modelctl.core.envs import (
     setup as envs_setup,
+)
+from modelctl.core.envs import (
     status as envs_status,
 )
 from modelctl.core.logging import setup_logging
@@ -187,7 +194,8 @@ def build_parser() -> argparse.ArgumentParser:
     # 非交互终端（ssh host 'cmd' / CI / cron）默认仅检测+给指引，--build 强制构建、
     # --no-build 完全跳过自动处理（与现有 gateway venv 自动搭建取向一致）。
     wp.add_argument("--build", action=argparse.BooleanOptionalAction, default=None,
-                    help="start/restart 时自动处理前端环境（缺 Node 装 Node、缺依赖 npm install、缺产物 npm run build）；非交互终端默认关闭")
+                    help="start/restart 时自动处理前端环境（缺 Node 装 Node、缺依赖 npm install、"
+                    "缺产物 npm run build）；非交互终端默认关闭")
     ep = sub.add_parser("env", help="专用虚拟环境管理（vllm / sglang / gateway）+ Docker 系统依赖")
     ep.add_argument("action", choices=["setup", "list", "remove"])
     ep.add_argument(
@@ -597,7 +605,11 @@ def _token_rate_data(profile, caps) -> dict:
     if isinstance(data, dict) and data.get("isValid"):
         prompt_rate = data.get("prompt_rate")
         predicted_rate = data.get("predicted_rate")
-        if isinstance(prompt_rate, (int, float)) and isinstance(predicted_rate, (int, float)) and (prompt_rate > 0 or predicted_rate > 0):
+        if (
+            isinstance(prompt_rate, (int, float))
+            and isinstance(predicted_rate, (int, float))
+            and (prompt_rate > 0 or predicted_rate > 0)
+        ):
             native_ttft = data.get("ttft_ms")
             if isinstance(native_ttft, (int, float)) and native_ttft > 0:
                 ttft_out = int(native_ttft)
@@ -953,7 +965,7 @@ def _cmd_tui(args) -> int:
     """
     from rich.console import Console
 
-    from modelctl.core.tui import TUIState, TuiApp
+    from modelctl.core.tui import TuiApp, TUIState
 
     console = Console()
     app = TuiApp(state=TUIState(), console=console)
@@ -1047,7 +1059,10 @@ def _cmd_all(args, models_dir: Path | None, caps) -> int:
         else:
             logger.info(line)
     if any(r.status == "error" for r in results):
-        logger.info("提示：可执行 `modelctl status` 细查模型状态" "（网关/统计用 `modelctl gateway status` / `modelctl stats status`）")
+        logger.info(
+            "提示：可执行 `modelctl status` 细查模型状态"
+            "（网关/统计用 `modelctl gateway status` / `modelctl stats status`）"
+        )
         return exit_code
     return 0
 
@@ -1061,13 +1076,19 @@ def _cmd_ui_start(args, models_dir: Path | None, caps) -> int:
         return 2
     instance = f"ui-{profile.name}"
     if is_running(instance):
-        logger.info(f"Web 控制台已在运行（{instance}, " f"http://{spec['host']}:{spec['port']}）；重启请先 `modelctl ui stop {args.name}`")
+        logger.info(
+            f"Web 控制台已在运行（{instance}, "
+            f"http://{spec['host']}:{spec['port']}）；重启请先 `modelctl ui stop {args.name}`"
+        )
         return 0
     # ufw 入站白名单：只放行指定来源 IP 直连 UI 端口，避免控制台裸奔
     allow_from = args.allow_from or spec["allow_from"]
     for src in allow_from:
         if not ensure_ufw_allow(src, spec["port"]):
-            logger.warning(f"添加 ufw 规则失败（{src} → :{spec['port']}），请手动执行：" f"ufw allow from {src} to any port {spec['port']} proto tcp")
+            logger.warning(
+                f"添加 ufw 规则失败（{src} → :{spec['port']}），请手动执行："
+                f"ufw allow from {src} to any port {spec['port']} proto tcp"
+            )
     if not allow_from:
         logger.warning(f"未配置 --allow-from / yaml allow_from，端口 {spec['port']} 在局域网无访问限制，注意安全")
     pid, _ = start_detached(instance, spec["cmd"], spec["env"])
@@ -1472,6 +1493,7 @@ def _cmd_trtllm_build(args, models_dir: Path | None, caps) -> int:
     即可 `modelctl start <name>` 启动服务。
     """
     import subprocess
+
     from loguru import logger as _logger
 
     profile = load_profile(args.name, models_dir)
@@ -1491,7 +1513,7 @@ def _cmd_trtllm_build(args, models_dir: Path | None, caps) -> int:
     adapter.ensure_bin()
     cmd, env = adapter.build_compile_command()
     _logger.info(f"[trtllm build] 编译 {args.name}: {' '.join(cmd)}")
-    _logger.info(f"[trtllm build] 同步执行（首次冷编译约 28 分钟，含 --dump_intermediates 时更久）")
+    _logger.info("[trtllm build] 同步执行（首次冷编译约 28 分钟，含 --dump_intermediates 时更久）")
     result = subprocess.run(cmd, env=env, capture_output=True, text=True)
     if result.returncode != 0:
         _logger.error(f"[trtllm build] 编译失败 (exit={result.returncode})：")

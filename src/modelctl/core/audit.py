@@ -118,7 +118,11 @@ class RequestAuditLog:
         if not self._dir.is_dir():
             return []
         return sorted(
-            (p for p in self._dir.iterdir() if p.is_file() and p.name.startswith("modelctl-") and p.name.endswith(".jsonl")),
+            (
+                p
+                for p in self._dir.iterdir()
+                if p.is_file() and p.name.startswith("modelctl-") and p.name.endswith(".jsonl")
+            ),
             key=lambda p: _parse_day_from_name(p.name) or _dt.date.min,
         )
 

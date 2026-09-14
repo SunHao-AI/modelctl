@@ -82,7 +82,6 @@ import threading
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # 辅助
 # ---------------------------------------------------------------------------
@@ -102,8 +101,6 @@ POLICY_FIELDS = [
 @pytest.fixture
 def clock():
     """可推进的 monotonically-increasing 时钟（仅供 RPM/TPM/预算）；1 次 +1s。"""
-    import time
-    import types
 
     class _FakeClock:
         def __init__(self, start: float) -> None:
@@ -122,7 +119,7 @@ def clock():
 
 
 @pytest.fixture
-def guard(clock) -> "object":
+def guard(clock) -> object:
     from modelctl.core.accounts import limits
 
     g = limits.LimitGuard()
@@ -240,7 +237,7 @@ def test_concurrency_release_below_zero_is_clamped(guard) -> None:
 
 
 def test_concurrency_unlimited_passes_always(guard) -> None:
-    for i in range(50):
+    for _ in range(50):
         assert guard.acquire("u", 0) is True
         assert guard.acquire("v", None) is True
 

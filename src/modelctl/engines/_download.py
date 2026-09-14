@@ -21,6 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from loguru import logger
+
 from modelctl.core.deps import ensure_packages
 
 # 顶层可 patch 的引用（方案 D）：测试直接 monkeypatch 本模块属性即可；
@@ -97,12 +98,12 @@ def _friendly_download_error(original: Exception, modelscope_id: str) -> ModelDo
         )
     elif "429" in raw or "rate limit" in low:
         msg = (
-            f"ModelScope 限流（HTTP 429），请 1-2 分钟后重试；"
-            f"或多源回退：在 .env 设 `HF_ENDPOINT=https://hf-mirror.com` 走镜像。"
+            "ModelScope 限流（HTTP 429），请 1-2 分钟后重试；"
+            "或多源回退：在 .env 设 `HF_ENDPOINT=https://hf-mirror.com` 走镜像。"
         )
     elif "proxy" in low or "timeout" in low or "connect" in low:
         msg = (
-            f"网络/代理访问 ModelScope 失败，请检查代理设置或 `HF_ENDPOINT` 镜像。"
+            "网络/代理访问 ModelScope 失败，请检查代理设置或 `HF_ENDPOINT` 镜像。"
         )
     else:
         msg = (

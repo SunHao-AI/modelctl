@@ -40,5 +40,6 @@ def test_upstream_model_vllm_config_or_name():
 
 
 def test_upstream_model_sglang_uses_profile_name():
-    adapter = get_adapter("sglang")(_profile("qwen3.8", "sglang", 8201, {"model": "/raid5/sh/model-hf/Qwen/Qwen3.8-27B"}), Capabilities())
+    adapter = get_adapter("sglang")(
+        _profile("qwen3.8", "sglang", 8201, {"model": "/raid5/sh/model-hf/Qwen/Qwen3.8-27B"}), Capabilities())
     assert adapter.upstream_model_name() == "qwen3.8"  # = profile.name，匹配 --served-model-name

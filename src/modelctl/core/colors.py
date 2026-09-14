@@ -349,7 +349,15 @@ def _parse_color_spec(spec: str) -> Color:
         elif low in _NAMED_BG:
             base = Color(base.name, base.fg, _NAMED_BG[low], base.bold, base.dim, base.italic, base.underline)
         elif low.startswith("bright_"):
-            base = Color(base.name, _NAMED_FG.get(low, base.fg), base.bg, base.bold, base.dim, base.italic, base.underline)
+            base = Color(
+                base.name,
+                _NAMED_FG.get(low, base.fg),
+                base.bg,
+                base.bold,
+                base.dim,
+                base.italic,
+                base.underline,
+            )
         elif low in ("38;5", "256"):
             # 256 色：已在 part 中形如 "38;5;N"
             base = Color(base.name, part, base.bg, base.bold, base.dim, base.italic, base.underline)

@@ -29,7 +29,6 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
-from loguru import logger
 
 from modelctl.core.webui.admin_auth import mask_key, require_auth
 
@@ -146,7 +145,6 @@ async def health(request: Request):
     返回：ok / version / uptime_s / default_model / gateway_port。
     """
     import modelctl as mctl
-
     from modelctl.core.gateway import GATEWAY_PORT
 
     tm = request.app.state.task_manager
@@ -198,8 +196,8 @@ async def overview(request: Request, _: None = Depends(require_auth)):
     """
     from modelctl.core.capabilities import probe
     from modelctl.core.gateway import GATEWAY_PORT
-    from modelctl.core.profile import list_profiles
     from modelctl.core.process import is_running
+    from modelctl.core.profile import list_profiles
     from modelctl.core.stats import USAGE_PORT
     from modelctl.core.webui.admin_models import build_summaries, probe_executor
 
@@ -276,7 +274,6 @@ async def probe_detail(request: Request, _: None = Depends(require_auth)):
     runtime 标出可达来源（venv / docker / null）。
     """
     import modelctl as mctl
-
     from modelctl.core.capabilities import probe
     from modelctl.core.envfile import PROJECT_ROOT
     from modelctl.core.gpu_lock import list_gpu_locks

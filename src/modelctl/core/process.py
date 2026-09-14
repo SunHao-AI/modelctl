@@ -194,7 +194,8 @@ def _write_tee_reconnect(log_path: str, count: int) -> None:
     """在 launch log 里追加一行重连痕迹，方便肉眼/日志排查 tee 断流次数。"""
     try:
         with open(log_path, "ab") as fp:
-            fp.write(f"\n[docker-log-tee] docker logs 断裂，自动重连第 {count} 次...\n".encode("utf-8", errors="replace"))
+            msg = f"\n[docker-log-tee] docker logs 断裂，自动重连第 {count} 次...\n"
+            fp.write(msg.encode("utf-8", errors="replace"))
     except OSError:
         pass
 

@@ -264,7 +264,7 @@ def parse_metrics(text: str, mapping: dict[str, list[str]]) -> dict[str, float]:
         result.setdefault(key, 0.0)
     patterns = _build_patterns(mapping)
     for key, key_patterns in patterns.items():
-        for name, pattern in zip(mapping[key], key_patterns):
+        for name, pattern in zip(mapping[key], key_patterns, strict=True):
             m = pattern.search(text)
             if not m:
                 continue
@@ -814,6 +814,7 @@ class UsageHandler(BaseHTTPRequestHandler):
         无可用成员返回 None（调用方按"未知模型"报错）。
         """
         import urllib.error
+
         from modelctl.core.process import is_running, open_local, pid_file
 
         for t in self.groups.get(model, []):

@@ -54,9 +54,6 @@
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import json
 import time
 import uuid
 
@@ -65,10 +62,11 @@ import pytest
 fastapi = pytest.importorskip("fastapi")
 jwt = pytest.importorskip("jwt")
 
-from modelctl.core.accounts.hashing import hash_api_key, hash_password, key_prefix, generate_api_key  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from modelctl.core.accounts.hashing import generate_api_key, hash_api_key, hash_password, key_prefix  # noqa: E402
 from modelctl.core.accounts.store import AccountsStore  # noqa: E402
 from modelctl.core.gateway import create_app  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
 
 ADMIN_KEY = "sk-mgmt-admin-key-9999"
 JWT_SECRET = "unit-test-jwt-secret-0001"
@@ -458,8 +456,8 @@ def test_self_create_and_list_keys(tmp_path, monkeypatch):
     且用户 A 的 token 访问用户 B 的资源应 404（require_account 用 payload 里的
     user_id 强归属，不依赖 token 携带的具体 key）。"""
     store = _make_store(tmp_path)
-    uid_a = _create_user(store, username="a", password="pa")
-    uid_b = _create_user(store, username="b", password="pb")
+    _create_user(store, username="a", password="pa")
+    _create_user(store, username="b", password="pb")
     app = _mk_app(tmp_path, monkeypatch, accounts_store=store)
     with TestClient(app) as c:
         tok_a = _login_self(c, "a", "pa")

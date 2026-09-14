@@ -29,7 +29,6 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
-from fastapi.responses import JSONResponse
 from loguru import logger
 
 from modelctl.core.webui.admin_auth import require_auth
@@ -98,7 +97,7 @@ def _entry_time(entry: dict) -> _dt.datetime | None:
         v = entry.get(key)
         if isinstance(v, (int, float)):
             try:
-                return _dt.datetime.fromtimestamp(v, tz=_dt.timezone.utc)
+                return _dt.datetime.fromtimestamp(v, tz=_dt.UTC)
             except (ValueError, OSError):
                 return None
         if isinstance(v, str):

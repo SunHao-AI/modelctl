@@ -21,7 +21,6 @@ import pytest
 
 from modelctl.core import docker_setup as ds
 
-
 # ---- path_level_missing ----
 
 
@@ -412,6 +411,7 @@ def test_check_dataclass_keeps_5_fields_match_windows_setup():
     本测试断言 `ds.Check` 字段 ⊆ `ws.Check` 字段（即 `ws.Check` 是超集）。
     """
     from dataclasses import fields
+
     from modelctl.core import windows_setup as ws
 
     ds_fields = {f.name for f in fields(ds.Check)}

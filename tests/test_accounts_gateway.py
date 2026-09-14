@@ -36,7 +36,6 @@ from __future__ import annotations
 import asyncio
 
 import httpx
-import pytest
 
 from modelctl.core.accounts.hashing import hash_api_key
 from modelctl.core.accounts.store import AccountsStore
@@ -464,9 +463,11 @@ def test_enabled_streaming_releases_concurrency(tmp_path, monkeypatch):
 
 def _upstream_sse_raw() -> httpx.Response:
     chunks = [
-        b'data: {"id":"x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"he"}}]}\n\n',
+        b'data: {"id":"x","object":"chat.completion.chunk","choices":'
+        b'[{"index":0,"delta":{"role":"assistant","content":"he"}}]}\n\n',
         b'data: {"id":"x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"llo"}}]}\n\n',
-        b'data: {"id":"x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}\n\n',
+        b'data: {"id":"x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
+        b'"usage":{"prompt_tokens":10,"completion_tokens":5}}\n\n',
         b"data: [DONE]\n\n",
     ]
     buf = b"".join(chunks)

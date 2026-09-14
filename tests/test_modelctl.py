@@ -203,7 +203,8 @@ def test_nginx_snippet_output(tmp_path, monkeypatch, capsys):
 def test_gateway_start_detaches(tmp_path, monkeypatch):
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     called: dict = {}
-    monkeypatch.setattr(cli.all_service, "start_detached", lambda name, cmd, extra_env: called.update(name=name, cmd=cmd) or (123, None))
+    monkeypatch.setattr(cli.all_service, "start_detached",
+                        lambda name, cmd, extra_env: called.update(name=name, cmd=cmd) or (123, None))
     monkeypatch.setattr(cli.all_service, "is_running", lambda name: False)
     rc = cli.main(["gateway", "start"])
     assert rc == 0
@@ -214,7 +215,8 @@ def test_gateway_start_detaches(tmp_path, monkeypatch):
 def test_gateway_stop(tmp_path, monkeypatch):
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     called: dict = {}
-    monkeypatch.setattr(cli.all_service, "stop_instance", lambda name, port, patterns: called.update(name=name, port=port))
+    monkeypatch.setattr(cli.all_service, "stop_instance",
+                        lambda name, port, patterns: called.update(name=name, port=port))
     rc = cli.main(["gateway", "stop"])
     assert rc == 0
     assert called["name"] == "llm-gateway"
@@ -223,7 +225,8 @@ def test_gateway_stop(tmp_path, monkeypatch):
 
 def _write_unsloth_ui_profile(tmp_path) -> None:
     (tmp_path / "u.yaml").write_text(
-        "name: u\nengine: unsloth\nport: 30000\napi_key: k\n" "unsloth:\n  model: m\n  ui:\n    port: 8888\n    allow_from: [192.168.77.202]\n",
+        "name: u\nengine: unsloth\nport: 30000\napi_key: k\n"
+        "unsloth:\n  model: m\n  ui:\n    port: 8888\n    allow_from: [192.168.77.202]\n",
         encoding="utf-8",
     )
 
@@ -232,7 +235,8 @@ def test_ui_start_detaches_and_adds_ufw_rule(tmp_path, monkeypatch):
     _write_unsloth_ui_profile(tmp_path)
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     called: dict = {}
-    monkeypatch.setattr(cli, "start_detached", lambda name, cmd, extra_env: called.update(name=name, cmd=cmd) or (123, None))
+    monkeypatch.setattr(cli, "start_detached",
+                        lambda name, cmd, extra_env: called.update(name=name, cmd=cmd) or (123, None))
     monkeypatch.setattr(cli, "is_running", lambda name: False)
     rules: list = []
     monkeypatch.setattr(cli, "ensure_ufw_allow", lambda src, port: rules.append((src, port)) or True)
@@ -261,7 +265,8 @@ def test_ui_stop(tmp_path, monkeypatch):
     _write_unsloth_ui_profile(tmp_path)
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     called: dict = {}
-    monkeypatch.setattr(cli, "stop_instance", lambda name, port, patterns: called.update(name=name, port=port, patterns=patterns))
+    monkeypatch.setattr(cli, "stop_instance",
+                        lambda name, port, patterns: called.update(name=name, port=port, patterns=patterns))
     monkeypatch.setattr(cli, "is_running", lambda name: True)
     rc = cli.main(["ui", "stop", "u", "--models-dir", str(tmp_path)])
     assert rc == 0
@@ -353,7 +358,8 @@ def test_all_stop_error_exit_1(tmp_path, monkeypatch):
 def test_gateway_restart_dispatch(tmp_path, monkeypatch):
     import modelctl.cli as cli
 
-    monkeypatch.setattr(cli.all_service, "restart_gateway", lambda: cli.all_service.ComponentResult("gateway", "ok", ""))
+    monkeypatch.setattr(cli.all_service, "restart_gateway",
+                        lambda: cli.all_service.ComponentResult("gateway", "ok", ""))
     rc = cli.main(["gateway", "restart"])
     assert rc == 0
 
@@ -361,7 +367,8 @@ def test_gateway_restart_dispatch(tmp_path, monkeypatch):
 def test_stats_status_dispatch(tmp_path, monkeypatch):
     import modelctl.cli as cli
 
-    monkeypatch.setattr(cli.all_service, "status_stats", lambda: cli.all_service.ComponentResult("stats", "ok", "已停止"))
+    monkeypatch.setattr(cli.all_service, "status_stats",
+                        lambda: cli.all_service.ComponentResult("stats", "ok", "已停止"))
     rc = cli.main(["stats", "status"])
     assert rc == 0
 
@@ -372,7 +379,11 @@ def test_benchmark_token_rate_parses_sse(monkeypatch):
 
     import modelctl.cli as cli
 
-    sse = b'data: {"id":"x","choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n' b'data: {"id":"x","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}\n\n' b"data: [DONE]\n\n"
+    sse = (
+        b'data: {"id":"x","choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n'
+        b'data: {"id":"x","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}\n\n'
+        b"data: [DONE]\n\n"
+    )
 
     class _FakeResp:
         def __init__(self, data):
@@ -592,7 +603,8 @@ def test_status_output_shows_benchmark_rates_and_ttft(monkeypatch, capsys):
         "list_profiles",
         lambda models_dir=None: [SimpleNamespace(name="qwen3.8-vllm", engine="vllm", port=8101)],
     )
-    monkeypatch.setattr(cli, "_instance_state", lambda **kw: "运行中")  # 运行中 → 门控放行测速；mock get_adapter 跳过健康检查
+    # 运行中 → 门控放行测速；mock get_adapter 跳过健康检查
+    monkeypatch.setattr(cli, "_instance_state", lambda **kw: "运行中")
     monkeypatch.setattr(
         cli,
         "get_adapter",

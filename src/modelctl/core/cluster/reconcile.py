@@ -127,10 +127,16 @@ def _verify_state_vocabulary() -> None:
 
     occupying = {_STATE_OF_STAGE[s] for s in _OCCUPYING_STAGES}
     if not occupying <= GPU_OCCUPYING_STATES:
-        raise RuntimeError(f"_STATE_OF_STAGE 占卡态 {sorted(occupying - GPU_OCCUPYING_STATES)} " "不在 goals.GPU_OCCUPYING_STATES 词表内（两侧必须同源，裁决1）")
+        raise RuntimeError(
+            f"_STATE_OF_STAGE 占卡态 {sorted(occupying - GPU_OCCUPYING_STATES)} "
+            "不在 goals.GPU_OCCUPYING_STATES 词表内（两侧必须同源，裁决1）"
+        )
     free = {_STATE_OF_STAGE[s] for s in VALID_STAGES} - occupying
     if leaked := free & GPU_OCCUPYING_STATES:
-        raise RuntimeError(f"_STATE_OF_STAGE 非占卡态 {sorted(leaked)} 混入词表：" "会被中心当作握卡永久占用（裁决1）")
+        raise RuntimeError(
+            f"_STATE_OF_STAGE 非占卡态 {sorted(leaked)} 混入词表："
+            "会被中心当作握卡永久占用（裁决1）"
+        )
     _vocabulary_checked = True
 
 
@@ -703,7 +709,14 @@ class Reconciler:
                 continue
             action = str(act.get("action", ""))
             if action == "retry":
-                rec.update({"stage": PENDING_PROFILE_SYNC, "reason": "", "error_class": "", "manual": "", "degrade": 0, "at": now})
+                rec.update({
+                    "stage": PENDING_PROFILE_SYNC,
+                    "reason": "",
+                    "error_class": "",
+                    "manual": "",
+                    "degrade": 0,
+                    "at": now,
+                })
             elif action in ("stop", "restart", "start"):
                 rec["manual"] = action
                 rec["at"] = now
@@ -740,7 +753,15 @@ class Reconciler:
         try:
             prof = _identity_of(load_profile_at(path), str(rec.get("profile", "")))
         except Exception as exc:  # ProfileError / yaml 错误 / 字段非法
-            return {"up": False, "alive": False, "port": None, "pid": None, "gpus": [], "name": str(rec.get("profile", "")), "profile_error": str(exc)}
+            return {
+                "up": False,
+                "alive": False,
+                "port": None,
+                "pid": None,
+                "gpus": [],
+                "name": str(rec.get("profile", "")),
+                "profile_error": str(exc),
+            }
         got = dict(self._prober(prof))
         got["profile"] = prof
         return got
@@ -762,7 +783,11 @@ class Reconciler:
         want = str(rec.get("sha", ""))
         got = profile_sha(text)
         if want and got != want:
-            rec.update({"stage": PENDING_PROFILE_SYNC, "reason": "本地 profile 文件与中心声明不一致（漂移），等待重新下发", "at": now})
+            rec.update({
+                "stage": PENDING_PROFILE_SYNC,
+                "reason": "本地 profile 文件与中心声明不一致（漂移），等待重新下发",
+                "at": now,
+            })
             return
 
         # **必须在写 PROFILE_SYNCED 之前**取上一拍：否则"上一拍是否 READY"永远为假，
@@ -797,7 +822,15 @@ class Reconciler:
                 if out.status == "error":
                     self._fail(rec, out.detail or "停止失败", now)
                     return
-                rec.update({"stage": STOPPED, "reason": "", "error_class": "", "degrade": 0, "pid": None, "gpu": [], "at": now})
+                rec.update({
+                    "stage": STOPPED,
+                    "reason": "",
+                    "error_class": "",
+                    "degrade": 0,
+                    "pid": None,
+                    "gpu": [],
+                    "at": now,
+                })
             else:
                 rec.update({"stage": STOPPED, "reason": "", "error_class": "", "degrade": 0, "at": now})
             # 手动 stop **不清位**：清了下轮按 intent=start 复活（规则 3）
@@ -808,7 +841,16 @@ class Reconciler:
         # ---- 方向为起：已在服务 → READY
         obs = self._observe(rec)
         if obs.get("up"):
-            rec.update({"stage": READY, "reason": "", "error_class": "", "degrade": 0, "port": obs.get("port"), "pid": obs.get("pid"), "gpu": list(obs.get("gpus") or []), "at": now})
+            rec.update({
+                "stage": READY,
+                "reason": "",
+                "error_class": "",
+                "degrade": 0,
+                "port": obs.get("port"),
+                "pid": obs.get("pid"),
+                "gpu": list(obs.get("gpus") or []),
+                "at": now,
+            })
             return
 
         # ---- 上一拍在服务、这一拍不通：进程没了直接终态，进程还在才计数降级
@@ -852,7 +894,16 @@ class Reconciler:
 
         after = self._observe(rec)
         if after.get("up"):
-            rec.update({"stage": READY, "port": after.get("port"), "pid": after.get("pid"), "gpu": list(after.get("gpus") or []), "reason": "", "error_class": "", "degrade": 0, "at": now})
+            rec.update({
+                "stage": READY,
+                "port": after.get("port"),
+                "pid": after.get("pid"),
+                "gpu": list(after.get("gpus") or []),
+                "reason": "",
+                "error_class": "",
+                "degrade": 0,
+                "at": now,
+            })
         else:
             # skipped（已在运行）或起完还没过健康检查：保持 STARTING，下一拍再判
             rec.update({"port": after.get("port"), "pid": after.get("pid"), "at": now})
@@ -936,7 +987,11 @@ class Reconciler:
 
     def _capacity(self, caps: Capabilities) -> dict[str, Any]:
         """capacity 的显存口径是**节点总量**（all/free 都对全部卡求和），非单卡。"""
-        return {"gpu_count": caps.gpu_count, "vram_total_mb": all_vram_total_mb(caps), "vram_free_mb": free_vram_total_mb(caps)}
+        return {
+            "gpu_count": caps.gpu_count,
+            "vram_total_mb": all_vram_total_mb(caps),
+            "vram_free_mb": free_vram_total_mb(caps),
+        }
 
     def _runtimes(self, caps: Capabilities) -> dict[str, dict[str, Any]]:
         """遍历**全部** KNOWN_ENGINES：只报"装过的"会让中心无法区分"没装"与"没探测"，
@@ -1003,7 +1058,14 @@ class Reconciler:
             profiles.setdefault(name, entry)
         for name, entry in self._local.items():
             profiles.setdefault(name, dict(entry))
-        snap = {"revision": state["revision"], "profiles": profiles, "drift": drift, "local_profiles": sorted(set(stems)), "capacity": self._capacity(caps), "runtimes": self._runtimes(caps)}
+        snap = {
+            "revision": state["revision"],
+            "profiles": profiles,
+            "drift": drift,
+            "local_profiles": sorted(set(stems)),
+            "capacity": self._capacity(caps),
+            "runtimes": self._runtimes(caps),
+        }
         # 留一份给 snapshot() 的降级兜底（评审 M-1）；本拍照常返回新构造的 dict
         self._last_snapshot = snap
         return snap

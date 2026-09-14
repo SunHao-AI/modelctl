@@ -89,7 +89,10 @@ def _vllm_torch_abi_check(gpu: GpuSpec, env: EnvSpec, model: ModelSpec | None) -
     return CompatIssue(
         level="block",
         rule_id="vllm_torch_abi",
-        reason=f"vllm 要求 torch{req}，当前已装 {installed}（ABI 不匹配）。" f"建议执行：modelctl env setup vllm 以重建引擎 venv 并对齐依赖。",
+        reason=(
+            f"vllm 要求 torch{req}，当前已装 {installed}（ABI 不匹配）。"
+            f"建议执行：modelctl env setup vllm 以重建引擎 venv 并对齐依赖。"
+        ),
     )
 
 
@@ -182,7 +185,10 @@ def _nvidia_pkg_complete_check(gpu: GpuSpec, env: EnvSpec, model: ModelSpec | No
     return CompatIssue(
         level="block",
         rule_id="nvidia_pkg_complete",
-        reason=(f"检测到 nvidia 依赖包文件缺失（空壳包）：{', '.join(missing[:5])}。" '建议执行：uv pip install --reinstall "nvidia-cudnn-cu13" "nvidia-nccl-cu13" 等对应包。'),
+        reason=(
+            f"检测到 nvidia 依赖包文件缺失（空壳包）：{', '.join(missing[:5])}。"
+            '建议执行：uv pip install --reinstall "nvidia-cudnn-cu13" "nvidia-nccl-cu13" 等对应包。'
+        ),
     )
 
 
@@ -210,7 +216,10 @@ def _cuda_lib_resolvable_check(gpu: GpuSpec, env: EnvSpec, model: ModelSpec | No
     return CompatIssue(
         level="block",
         rule_id="cuda_lib_resolvable",
-        reason=(f"CUDA 运行库无法解析：{', '.join(missing)}。" "请将对应 nvidia 库目录加入 LD_LIBRARY_PATH 或 /etc/ld.so.conf.d/ 后执行 ldconfig。"),
+        reason=(
+            f"CUDA 运行库无法解析：{', '.join(missing)}。"
+            "请将对应 nvidia 库目录加入 LD_LIBRARY_PATH 或 /etc/ld.so.conf.d/ 后执行 ldconfig。"
+        ),
     )
 
 
@@ -233,7 +242,11 @@ def _engine_dep_missing_check(gpu: GpuSpec, env: EnvSpec, model: ModelSpec | Non
     return CompatIssue(
         level="block",
         rule_id="engine_dep_missing",
-        reason="vllm 依赖版本不匹配：" + "；".join(problems) + "。建议执行：modelctl env setup vllm 以重建引擎 venv 并对齐依赖。",
+        reason=(
+            "vllm 依赖版本不匹配："
+            + "；".join(problems)
+            + "。建议执行：modelctl env setup vllm 以重建引擎 venv 并对齐依赖。"
+        ),
     )
 
 

@@ -66,7 +66,7 @@ class Accountant:
 
     def __init__(self, store: Any) -> None:
         self._store = store
-        self._queue: "queue.Queue[dict[str, Any]]" = queue.Queue()
+        self._queue: queue.Queue[dict[str, Any]] = queue.Queue()
         self._stop_evt = threading.Event()
         self._thread: threading.Thread | None = None
 

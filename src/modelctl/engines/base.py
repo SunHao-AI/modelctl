@@ -14,11 +14,10 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import TYPE_CHECKING
-
-import subprocess
 
 from modelctl.core.capabilities import Capabilities
 from modelctl.core.gpu_utils import GPUValidationError, resolve_gpu_list, validate_gpu_selection
@@ -47,7 +46,7 @@ class EngineAdapter(ABC):
         # 不用 os.environ 全局态传递：WebUI 并发任务互写会互相污染 GPU 分配。
         self._gpu_override: list[int] | None = None
 
-    def set_gpu_override(self, gpus: "list[int] | None") -> None:
+    def set_gpu_override(self, gpus: list[int] | None) -> None:
         """注入本次操作的 GPU 选择（WebUI 并发任务用）。None 表示不覆盖。
 
         为什么不用全局环境变量：`os.environ["MODELCTL_GPUS"]` 是进程级共享态，

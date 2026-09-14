@@ -231,7 +231,8 @@ def test_name_auto_derived_without_variant(tmp_path):
 
 def test_name_auto_derived_with_variant(tmp_path):
     """name 缺省 = group-engine-variant（有 variant）。"""
-    d = _write(tmp_path, "group: qwen3.8\nvariant: light\nengine: vllm\nport: 8105\nvllm:\n  model: q\n", name="qwen3.8-light.yaml")
+    d = _write(tmp_path, "group: qwen3.8\nvariant: light\nengine: vllm\n"
+                         "port: 8105\nvllm:\n  model: q\n", name="qwen3.8-light.yaml")
     p = load_profile("qwen3.8-vllm-light", d)
     assert p.name == "qwen3.8-vllm-light"
     assert p.variant == "light"

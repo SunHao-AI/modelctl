@@ -32,9 +32,9 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from loguru import logger
 
@@ -185,7 +185,7 @@ def image_present(image: str) -> bool:
 
 
 def ensure_image(image: str, attempts: int | None = None,
-                 on_progress: "Callable[[str, float | None], None] | None" = None) -> bool:
+                 on_progress: Callable[[str, float | None], None] | None = None) -> bool:
     """确保 docker_image 就位：本地已有即复用，否则流式拉取并按错误类型决定重试。
 
     显式 pull 还有个附带好处：失败原因直接进 modelctl 日志。走 `docker run` 隐式

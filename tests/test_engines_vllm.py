@@ -1088,8 +1088,9 @@ def test_full_vllm_suite_no_regression(tmp_path, monkeypatch):
     monkeypatch.delenv("MODELCTL_GPUS", raising=False)
     monkeypatch.setenv("API_KEY", "test")
     from pathlib import Path
-    from modelctl.core.profile import load_profile
+
     from modelctl.core.capabilities import Capabilities
+    from modelctl.core.profile import load_profile
 
     P = Path(__file__).resolve().parents[1] / "models" / "vllm"
     caps = Capabilities(gpu_count=8, gpu_indices=list(range(8)), compute_capability="8.9", binaries={"vllm": True})
@@ -1238,8 +1239,8 @@ def test_vllm_stop_backend_docker_uses_docker_rm(monkeypatch):
 
 def test_vllm_stop_backend_venv_uses_stop_instance(monkeypatch):
     from modelctl.core.capabilities import Capabilities
-    from modelctl.engines import get_adapter
     from modelctl.core.profile import Profile
+    from modelctl.engines import get_adapter
     profile = Profile(name="q2", engine="vllm", port=8111, engine_config={"model": "/m"})
     adapter = get_adapter("vllm")(profile, Capabilities())
     captured = {}
@@ -1253,8 +1254,8 @@ def test_vllm_stop_backend_venv_uses_stop_instance(monkeypatch):
 
 def test_vllm_is_docker_runtime_flag():
     from modelctl.core.capabilities import Capabilities
-    from modelctl.engines import get_adapter
     from modelctl.core.profile import Profile
+    from modelctl.engines import get_adapter
     docker_p = get_adapter("vllm")(
         Profile(name="q", engine="vllm", port=8110,
                 engine_config={"docker_image": "x", "model": "/m"}), Capabilities())
@@ -1267,8 +1268,8 @@ def test_vllm_is_docker_runtime_flag():
 def test_vllm_container_name_no_double_suffix():
     """profile.name 已以 -vllm 结尾时不再追加 -vllm（避免 qwen2.5-0.5b-vllm-vllm）。"""
     from modelctl.core.capabilities import Capabilities
-    from modelctl.engines import get_adapter
     from modelctl.core.profile import Profile
+    from modelctl.engines import get_adapter
     a = get_adapter("vllm")(
         Profile(name="qwen2.5-0.5b-vllm", engine="vllm", port=8000,
                 engine_config={"docker_image": "x", "model": "/m"}), Capabilities())

@@ -303,7 +303,8 @@ def test_match_progress_unknown_engine_banner_only():
 
 def test_loading_watcher_advances_tracker(tmp_path):
     import time
-    from modelctl.core.startup_progress import LoadingWatcher, StartupTracker, StartupTiming
+
+    from modelctl.core.startup_progress import LoadingWatcher, StartupTiming, StartupTracker
 
     log = tmp_path / "launch-q.log"
     log.write_text("(APIServer) vLLM API server version 0.28.0\n", encoding="utf-8")
@@ -328,6 +329,7 @@ def test_loading_watcher_pct_monotonic(tmp_path):
     # 评审裁决：pct 单调不减由 watcher 自己保证（_last_pct 只升不降）——
     # tail 窗口内出现更小 pct 的行（重复/交错输出）不得回报给 tracker
     import time
+
     from modelctl.core.startup_progress import LoadingWatcher, StartupTiming, StartupTracker
 
     log = tmp_path / "launch-q.log"
@@ -357,6 +359,7 @@ def test_loading_watcher_fallback_label_after_stall(tmp_path):
     # spec §4.2：loading 持续超阈值且零命中 → 兜底文案 + pct=None（条纹动画）。
     # 阈值注入（fallback_sec）系对简报参考实现的最小偏离：否则单测需真等 120s。
     import time
+
     from modelctl.core.startup_progress import LoadingWatcher, StartupTiming, StartupTracker
 
     log = tmp_path / "launch-q.log"
@@ -380,6 +383,7 @@ def test_loading_watcher_full_window_rescan(tmp_path):
     # tail 窗口（400 行）打满后窗口滑动：按行号增量会恒为空而漏掉新行，
     # 必须退化为整体重扫（重复行由 _last_pct 单调过滤，无害）。
     import time
+
     from modelctl.core.startup_progress import LoadingWatcher, StartupTiming, StartupTracker
 
     log = tmp_path / "launch-q.log"
@@ -405,6 +409,7 @@ def test_loading_watcher_full_window_rescan(tmp_path):
 def test_loading_watcher_survives_missing_log_and_stop_idempotent(tmp_path):
     # 容错：日志尚未生成不得终止 watcher；stop() 幂等且 join 有超时，stop 后不再产生事件
     import time
+
     from modelctl.core.startup_progress import LoadingWatcher, StartupTiming, StartupTracker
 
     log = tmp_path / "not-yet.log"  # 故意不存在

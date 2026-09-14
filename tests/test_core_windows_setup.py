@@ -25,14 +25,12 @@ import dataclasses
 import json
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
 from modelctl.core import docker_setup as ds
 from modelctl.core import windows_setup as ws
 from modelctl.core.sse_stage_event import StageEvent
-
 
 # ---- 公共 mock 辅助 ----
 
@@ -485,14 +483,12 @@ def test_post_install_plan_has_five_steps():
 
 def test_stage_event_frozen_dataclass():
     """frozen=True + code/payload 缺省 None + to_sse_dict 去 None 字段。"""
-    frozen = dataclasses.fields(StageEvent)
-    type_ = getattr(frozen, "frozen", None)
     # 检查 frozen=True 通过 replace() 抛 FrozenInstanceError
     with pytest.raises(dataclasses.FrozenInstanceError):
         StageEvent(type="stage", stage="detect_winget", message="m", ts="2026-09-07 10:00:00",
                    )
         ev = StageEvent(type="stage", stage="detect_winget", message="m", ts="t")
-        ev.stage = "x"  # noqa: 仅触发抛错
+        ev.stage = "x"  # 仅触发抛错
     ev = StageEvent(type="stage", stage="done", message="OK", ts="2026-09-07 10:00:00")
     out = ev.to_sse_dict()
     assert out == {"type": "stage", "stage": "done", "message": "OK", "ts": "2026-09-07 10:00:00"}

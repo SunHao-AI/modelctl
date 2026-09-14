@@ -26,10 +26,10 @@ from __future__ import annotations
 import asyncio
 import json
 
-from fastapi import APIRouter, Depends, FastAPI, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from modelctl.core.webui.admin_auth import require_auth, require_auth_or_query
+from modelctl.core.webui.admin_auth import require_auth_or_query
 from modelctl.core.webui.admin_tasks import Task, TaskManager
 
 # 延迟导入的子模块及其前缀（按设计文档 §3.4 命名）。
@@ -95,22 +95,23 @@ async def _sse_task_stream(task: Task):
         for line in task.logs:
             yield f"event: log\ndata: {{\"line\": {json.dumps(line, ensure_ascii=False)}}}\n\n"
         if task.status == "running" or task.status == "queued":
-            yield (
-                f"event: step\ndata: "
-                f"{json.dumps({'step': 0, 'label': task.target, 'status': task.status, 'task_id': task.id}, ensure_ascii=False)}\n\n"
-            )
+            yield "event: step\ndata: " + json.dumps(
+                {'step': 0, 'label': task.target, 'status': task.status, 'task_id': task.id},
+                ensure_ascii=False,
+            ) + "\n\n"
         else:
             # 任务已结束，直接补一条 done 后返回
-            payload = (
-                f"event: done\ndata: "
-                f"{json.dumps({'status': task.status, 'exit_code': task.exit_code, 'task_id': task.id, 'message': task.detail or ''}, ensure_ascii=False)}\n\n"
-            )
+            payload = "event: done\ndata: " + json.dumps(
+                {'status': task.status, 'exit_code': task.exit_code, 'task_id': task.id,
+                 'message': task.detail or ''},
+                ensure_ascii=False,
+            ) + "\n\n"
             yield payload
             return
         while True:
             try:
                 payload = await asyncio.wait_for(q.get(), timeout=10.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 yield "event: heartbeat\ndata: {}\n\n"
                 continue
             yield payload

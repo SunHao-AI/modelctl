@@ -48,7 +48,7 @@ def test_log_tee_supervisor_reconnects_with_tail_zero(tmp_path, monkeypatch):
     """docker logs 断裂且容器仍存活 → 以 `--tail 0` 重连（不重放全量历史）。"""
     log_path = str(tmp_path / "launch-q.log")
     # 容器存活：进循环两次；wait 返回后 aliveness 依次 True（重连）、False（退出）
-    with mock.patch.object(process, "docker_container_alive", side_effect=[True, True, True, False]) as alive, \
+    with mock.patch.object(process, "docker_container_alive", side_effect=[True, True, True, False]), \
          mock.patch.object(process.subprocess, "Popen") as popen, \
          mock.patch.object(process.time, "sleep") as sleep:
         popen.return_value.wait.return_value = 0
@@ -72,7 +72,7 @@ def test_log_tee_supervisor_stops_when_container_dead(tmp_path):
 
 def test_log_tee_supervisor_retries_until_container_dead(tmp_path):
     """docker CLI 抛错（OSError）且容器仍存活 → 退避重连；容器死透才退出。"""
-    with mock.patch.object(process, "docker_container_alive", side_effect=[True, True, True, True, False]) as alive, \
+    with mock.patch.object(process, "docker_container_alive", side_effect=[True, True, True, True, False]), \
          mock.patch.object(process.subprocess, "Popen", side_effect=OSError("docker missing")) as popen, \
          mock.patch.object(process.time, "sleep") as sleep:
         process._log_tee_supervisor("q-vllm", str(tmp_path / "launch-q.log"), retry_sec=0.01)

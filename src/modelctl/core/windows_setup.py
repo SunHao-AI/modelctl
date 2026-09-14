@@ -47,9 +47,9 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from loguru import logger
 
@@ -271,11 +271,11 @@ def render_instructions(
     limit_desc = f"，max-concurrent-downloads={limit}" if limit > 0 else ""
     lines = [
         "# Windows Docker Desktop 一键安装指引（PowerShell，无需管理员）",
-        f"# 阶段 A（自动）：winget 装 Desktop → 合并 %USERPROFILE%\\.docker\\daemon.json",
+        "# 阶段 A（自动）：winget 装 Desktop → 合并 %USERPROFILE%\\.docker\\daemon.json",
         f"#                 （多源：{', '.join(mirrors)}{limit_desc}）",
         "# 阶段 B（手动，5 步）：重启 → 启动 Desktop 勾 WSL2 → Settings→GPU 勾上",
         "#                 → 回 WebUI 点【已就绪，点我验证】",
-        f"# 自动执行：modelctl env setup docker --run --os=windows",
+        "# 自动执行：modelctl env setup docker --run --os=windows",
     ]
     for desc, cmd in install_steps(registry_mirrors, limit):
         lines.append(f"# {desc}")
@@ -410,7 +410,7 @@ def _run_winget_install(tail: list[str], emit_fn: Callable[[StageEvent], None]) 
     except (subprocess.TimeoutExpired, Exception):
         out_any = ""
     if out_any:
-        lines = [l.rstrip() for l in out_any.splitlines() if l.rstrip()]
+        lines = [ln.rstrip() for ln in out_any.splitlines() if ln.rstrip()]
         tail.extend(lines[-50:])
         while len(tail) > 50:
             tail.pop(0)

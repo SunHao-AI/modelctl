@@ -1217,6 +1217,11 @@ def create_app(
             return gate_resp
         # 审计：请求体字节长度（从 body 计算，request.content 在 Starlette 里可能已被消费）
         body_char_len = len(json.dumps(body, ensure_ascii=False, separators=(",", ":")))
+        _msg_blocks = [
+            [b.get("type") for b in (m.get("content") or []) if isinstance(b, dict)]
+            if isinstance(m.get("content"), list) else type(m.get("content")).__name__
+            for m in (body.get("messages") or [])
+        ]
         logger.info(
             f"Anthropic 代理请求 model={body.get('model')!r} stream={body.get('stream')} "
             f"max_tokens={body.get('max_tokens')} tools={'tools' in body} "
@@ -1224,7 +1229,7 @@ def create_app(
             f"thinking={body.get('thinking')!r} reasoning={body.get('reasoning')!r} "
             f"effort={body.get('reasoning_effort')!r} "
             f"top_keys={sorted(body.keys())} "
-            f"msg_blocks={[ [b.get('type') for b in (m.get('content') or []) if isinstance(b, dict)] if isinstance(m.get('content'), list) else type(m.get('content')).__name__ for m in (body.get('messages') or []) ]} "
+            f"msg_blocks={_msg_blocks} "
             f"auth_xkey={'x-api-key' in request.headers} auth={label}"
         )
         target = resolve_model(registry, body.get("model"), default_model, groups, group_cache)
@@ -1358,14 +1363,25 @@ def create_app(
                                         seen_usage = _u
                                 # content_block_delta：text_delta -> 正文，thinking_delta -> 思考
                                 delta = data.get("delta")
-                                if isinstance(delta, dict) and delta.get("type") == "text_delta" and delta.get("text"):
+                                if (
+                                    isinstance(delta, dict)
+                                    and delta.get("type") == "text_delta"
+                                    and delta.get("text")
+                                ):
                                     texts.append(delta["text"])
-                                elif isinstance(delta, dict) and delta.get("type") == "thinking_delta" and delta.get("thinking"):
+                                elif (
+                                    isinstance(delta, dict)
+                                    and delta.get("type") == "thinking_delta"
+                                    and delta.get("thinking")
+                                ):
                                     thinking_len += len(delta["thinking"])
                     finally:
                         if pending:
                             yield pending
-                        logger.info(f"Anthropic 流式响应摘要 content={''.join(texts)[:200]!r} thinking_len={thinking_len}")
+                        logger.info(
+                            f"Anthropic 流式响应摘要 content={''.join(texts)[:200]!r} "
+                            f"thinking_len={thinking_len}"
+                        )
                         _assistant_text = "".join(texts)
                         _p_tokens = int((seen_usage or {}).get("input_tokens") or 0)
                         _c_tokens = int((seen_usage or {}).get("output_tokens") or 0)
@@ -1442,8 +1458,14 @@ def create_app(
             upstream = await client.post(url, json=body, headers=headers)
             try:
                 _data = json.loads(upstream.content)
-                _texts = [b.get("text") for b in (_data.get("content") or []) if isinstance(b, dict) and b.get("type") == "text" and b.get("text")]
-                _thinking_len = sum(len(b.get("thinking") or "") for b in (_data.get("content") or []) if isinstance(b, dict) and b.get("type") == "thinking")
+                _texts = [
+                    b.get("text") for b in (_data.get("content") or [])
+                    if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
+                ]
+                _thinking_len = sum(
+                    len(b.get("thinking") or "") for b in (_data.get("content") or [])
+                    if isinstance(b, dict) and b.get("type") == "thinking"
+                )
                 logger.info(f"Anthropic 非流式响应摘要 content={''.join(_texts)[:200]!r} thinking_len={_thinking_len}")
             except ValueError:
                 pass
@@ -1711,7 +1733,11 @@ def create_app(
             if body.get("stream"):
                 # 审计差分基线：发送前取 snapshot（无副作用；禁止用 get_snapshot 触发 HTTP）
                 _collector = target.collector
-                _snap_before = _collector.snapshot() if _collector is not None and hasattr(_collector, "snapshot") else None
+                _snap_before = (
+                    _collector.snapshot()
+                    if _collector is not None and hasattr(_collector, "snapshot")
+                    else None
+                )
                 req = client.build_request("POST", url, json=body, headers=headers)
                 upstream = await client.send(req, stream=True)  # stream=True：连接保持打开，逐块读 SSE
                 _t_first = time.monotonic()
@@ -1809,7 +1835,9 @@ def create_app(
                                 if delta.get("content"):
                                     collected["content"].append(delta["content"])
                                 if delta.get("reasoning") or delta.get("reasoning_content"):
-                                    collected["reasoning"].append(delta.get("reasoning") or delta.get("reasoning_content"))
+                                    collected["reasoning"].append(
+                                        delta.get("reasoning") or delta.get("reasoning_content")
+                                    )
                                 if delta.get("tool_calls"):
                                     collected["tool_calls"] = True
                                 if delta.get("finish_reason"):
@@ -1825,10 +1853,20 @@ def create_app(
                         if seen_metrics is not None:
                             _record_native_metrics(seen_metrics)
                         # 审计差分终点：aclose 之前取，确保所有 chunk 的 record_tokens 已完成
-                        _snap_after = collector.snapshot() if collector is not None and hasattr(collector, "snapshot") else None
+                        _snap_after = (
+                            collector.snapshot()
+                            if collector is not None and hasattr(collector, "snapshot")
+                            else None
+                        )
                         if _snap_before is not None and _snap_after is not None:
-                            _diff_prompt = max(0, int(round(_snap_after["prompt_total"] - _snap_before["prompt_total"])))
-                            _diff_completion = max(0, int(round(_snap_after["predicted_total"] - _snap_before["predicted_total"])))
+                            _diff_prompt = max(
+                                0,
+                                int(round(_snap_after["prompt_total"] - _snap_before["prompt_total"])),
+                            )
+                            _diff_completion = max(
+                                0,
+                                int(round(_snap_after["predicted_total"] - _snap_before["predicted_total"])),
+                            )
                         else:
                             _diff_prompt = _diff_completion = 0
                         # 审计：写入必须包裹，异常不得中断客户端流（在 aclose 之前记录）
@@ -1911,7 +1949,11 @@ def create_app(
 
                 return StreamingResponse(_sse_stream(), status_code=upstream.status_code, media_type=ctype)
             # 审计差分基线：发送前取 snapshot（无副作用；禁止用 get_snapshot 触发 HTTP）
-            _snap_before = target.collector.snapshot() if target.collector is not None and hasattr(target.collector, "snapshot") else None
+            _snap_before = (
+                target.collector.snapshot()
+                if target.collector is not None and hasattr(target.collector, "snapshot")
+                else None
+            )
             upstream = await client.post(url, json=body, headers=headers)
             _t1 = time.monotonic()
             _up_rid = (upstream.headers.get("x-request-id") or "").strip() or None
@@ -1938,13 +1980,26 @@ def create_app(
                                 except Exception as exc:
                                     logger.warning(f"stats 记录 native metrics 异常（转发不受影响）: {exc}")
                 # 审计差分终点：record_tokens 完成后取；无 usage 时差分即 0（确无 token 可记）
-                _snap_after = target.collector.snapshot() if target.collector is not None and hasattr(target.collector, "snapshot") else None
+                _snap_after = (
+                    target.collector.snapshot()
+                    if target.collector is not None and hasattr(target.collector, "snapshot")
+                    else None
+                )
                 if _snap_before is not None and _snap_after is not None:
-                    _diff_prompt = max(0, int(round(_snap_after["prompt_total"] - _snap_before["prompt_total"])))
-                    _diff_completion = max(0, int(round(_snap_after["predicted_total"] - _snap_before["predicted_total"])))
+                    _diff_prompt = max(
+                        0,
+                        int(round(_snap_after["prompt_total"] - _snap_before["prompt_total"])),
+                    )
+                    _diff_completion = max(
+                        0,
+                        int(round(_snap_after["predicted_total"] - _snap_before["predicted_total"])),
+                    )
                 _msg = ((_ns_data.get("choices") or [{}])[0].get("message")) or {}
                 _ns_assistant = str(_msg.get("content") or "") if _msg else ""
-                logger.info(f"OpenAI 非流式响应摘要 content={str(_msg.get('content'))[:200]!r} " f"tool_calls={bool(_msg.get('tool_calls'))} reasoning={bool(_msg.get('reasoning'))}")
+                logger.info(
+                    f"OpenAI 非流式响应摘要 content={str(_msg.get('content'))[:200]!r} "
+                    f"tool_calls={bool(_msg.get('tool_calls'))} reasoning={bool(_msg.get('reasoning'))}"
+                )
             else:
                 _ns_assistant = ""
             # 审计 + Task 6 settle 共用的本地变量（`_usage_a` 在 try 外须有定义）

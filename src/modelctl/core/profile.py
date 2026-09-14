@@ -49,7 +49,8 @@ class Profile:
     max_output_tokens: int | None = None
     # 网关策略（§1.2 配置化）：
     #   thinking_disabled    : bool   | None  — 强制关闭 thinking（默认 False；None 时由 group 白名单决定）
-    #   reasoning_effort_map : dict     | None  — 自定义 reasoning_effort 枚举映射（None 时回退全局 _REASONING_EFFORT_MAP）
+    #   reasoning_effort_map : dict     | None  — 自定义 reasoning_effort 枚举映射
+    #                            （None 时回退全局 _REASONING_EFFORT_MAP）
     thinking_disabled: bool | None = None
     reasoning_effort_map: dict[str, str] | None = None
     # §1.3 配置化：自定义 per-request 原生指标字段名映射（SGlang/Aphrodite 等
@@ -84,7 +85,11 @@ def _parse_gateway(raw: dict[str, Any], src: str) -> tuple[bool | None, dict[str
             logger.warning(f"{src}：gateway.reasoning_effort_map 必须是 str→str 映射，已忽略 current={rd!r}")
     native: dict[str, str] | None = None
     if isinstance(nm, dict):
-        bad = [k for k, v in nm.items() if not isinstance(k, str) or not isinstance(v, str) or k not in _GATEWAY_NATIVE_KEYS]
+        bad = [
+            k
+            for k, v in nm.items()
+            if not isinstance(k, str) or not isinstance(v, str) or k not in _GATEWAY_NATIVE_KEYS
+        ]
         if not bad:
             native = {k: v for k, v in nm.items()}
         else:

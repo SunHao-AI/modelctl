@@ -40,7 +40,7 @@ def test_ensure_image_streams_progress():
 
 def test_ensure_image_cached_skips_pull():
     with mock.patch.object(docker_setup, "image_present", return_value=True):
-        assert docker_setup.ensure_image("img:tag", on_progress=lambda l, p: None) is True
+        assert docker_setup.ensure_image("img:tag", on_progress=lambda *_: None) is True
 
 
 def test_ensure_image_failure_no_callback_still_works():

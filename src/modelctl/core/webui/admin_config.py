@@ -160,7 +160,12 @@ async def build_trtllm(
     if profile.engine != "tensorrt_llm":
         return JSONResponse(
             status_code=412,
-            content={"error": {"code": "unsupported_engine", "message": f"引擎 {profile.engine} 不支持本端点（仅 tensorrt_llm）"}},
+            content={
+                "error": {
+                    "code": "unsupported_engine",
+                    "message": f"引擎 {profile.engine} 不支持本端点（仅 tensorrt_llm）",
+                }
+            },
         )
 
     tm: object = request.app.state.task_manager

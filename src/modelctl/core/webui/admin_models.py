@@ -282,10 +282,10 @@ async def _do_restart(profile, caps, timeout: float, task, gpus: str | None) -> 
 # 两个列表端点（/admin/api/models 与 /admin/api/overview）在 webui 同一进程内
 # 共用这个 64-worker 池：冷的那一轮 51 个探测真正全部并发（≈ max 单个探测），
 # 热的那一轮直接命中 TTL 缓存（≈0ms）。池是线程安全的、复用线程，单一实例即可。
-_PROBE_EXECUTOR: "ThreadPoolExecutor | None" = None
+_PROBE_EXECUTOR: ThreadPoolExecutor | None = None
 
 
-def probe_executor() -> "ThreadPoolExecutor":
+def probe_executor() -> ThreadPoolExecutor:
     """返回 webui 进程内共享的探测线程池（懒初始化，64 worker）。"""
     global _PROBE_EXECUTOR
     if _PROBE_EXECUTOR is None:
@@ -735,7 +735,6 @@ async def stream_model_log(
     EventSource 无法携带 Authorization header，前端按 ``?key=`` 传 token，
     鉴权依赖 ``require_auth_or_query`` 与 Bearer 同等强度。
     """
-    from modelctl.core.process import launch_log, tail_file
 
     return StreamingResponse(
         _sse_log_stream(name),
@@ -766,7 +765,6 @@ async def _sse_log_stream(name: str):
     完整启动过程；用 ``sent_lines`` set 去重，避免容器持续写日志时 30s 周期性重复推送。
     容器删时兜底命令也会失败（返回 []），自然转入 jsonlog-gone 处理路径。
     """
-    from modelctl.core.all_service import _CONTAINER_ID_LINE
     from modelctl.core.process import launch_log
 
     log_path = launch_log(name)
@@ -800,7 +798,10 @@ async def _sse_log_stream(name: str):
         for line in docker_lines:
             yield f"event: log\ndata: {json.dumps({'line': line}, ensure_ascii=False)}\n\n"
         if not docker_lines and not initial:
-            yield f"event: log\ndata: {json.dumps({'line': '（容器无日志，docker logs 不可用）'}, ensure_ascii=False)}\n\n"
+            yield (
+                "event: log\ndata: "
+                f"{json.dumps({'line': '（容器无日志，docker logs 不可用）'}, ensure_ascii=False)}\n\n"
+            )
     else:
         for line in initial:
             yield f"event: log\ndata: {json.dumps({'line': line}, ensure_ascii=False)}\n\n"
@@ -840,7 +841,7 @@ async def _sse_log_stream(name: str):
                     else:
                         # 文件被 daemon 清掉 / 容器删了：标记本次轮询已经结束，
                         # 前端会收到 heartbeat 感知到 "无新日志"
-                        yield f"event: stopped\ndata: {{\"reason\": \"jsonlog-gone\"}}\n\n"
+                        yield "event: stopped\ndata: {\"reason\": \"jsonlog-gone\"}\n\n"
                         return
                 except OSError:
                     pass
@@ -853,8 +854,8 @@ async def _sse_log_stream(name: str):
             if time.monotonic() - last_silent_fallback >= 30:
                 last_silent_fallback = time.monotonic()
                 # 先把首次初始 dump 的 200 行灌入 sent_lines，避免 docker logs 拉到的行重复推
-                for l in initial:
-                    sent_lines.add(l.strip())
+                for init_line in initial:
+                    sent_lines.add(init_line.strip())
                 new_tail = await asyncio.to_thread(_read_docker_logs, name, 200)
                 emitted = 0
                 for line in new_tail:
@@ -989,8 +990,8 @@ def _docker_log_cmd(name: str, tail: int = 200) -> list[str] | None:
     # 第二来源：launch log 首行（容器推理为空时启用）
     if not container:
         try:
-            from modelctl.core.process import launch_log, tail_file
             from modelctl.core.all_service import _CONTAINER_ID_LINE
+            from modelctl.core.process import launch_log, tail_file
 
             lp = launch_log(name)
             if lp is not None and lp.is_file():
@@ -1016,7 +1017,10 @@ def _read_docker_logs(name: str, tail: int = 200) -> list[str]:
     cmd = _docker_log_cmd(name, tail)
     if not cmd:
         # 命令为空：容器名推理 + 容器名路径都没命中（明确 warn 给用户排查方便）
-        logger.warning(f"[webui] docker logs 命令为空（{name}）—— engine 推理或 launch log 都没命中容器名，SSE 流将默认事件 fallback")
+        logger.warning(
+            f"[webui] docker logs 命令为空（{name}）—— "
+            "engine 推理或 launch log 都没命中容器名，SSE 流将默认事件 fallback"
+        )
         return []
     try:
         import subprocess
@@ -1099,7 +1103,12 @@ async def start_model_ui(
     if profile.engine != "unsloth":
         return JSONResponse(
             status_code=412,
-            content={"error": {"code": "unsupported_engine", "message": f"引擎 {profile.engine} 不支持 Web 管理控制台（仅 unsloth 支持）"}},
+            content={
+                "error": {
+                    "code": "unsupported_engine",
+                    "message": f"引擎 {profile.engine} 不支持 Web 管理控制台（仅 unsloth 支持）",
+                }
+            },
         )
 
     # 可选 body（无 body 时静默跳过）
@@ -1119,7 +1128,11 @@ async def start_model_ui(
 
     instance = f"ui-{profile.name}"
     if is_running(instance):
-        return {"ok": True, "detail": f"Web 控制台已在运行（http://{spec['host']}:{spec['port']}）", "already_running": True}
+        return {
+            "ok": True,
+            "detail": f"Web 控制台已在运行（http://{spec['host']}:{spec['port']}）",
+            "already_running": True,
+        }
 
     # ufw 白名单
     allow_list = allow_from or spec["allow_from"]
@@ -1162,7 +1175,12 @@ async def stop_model_ui(name: str, _: None = Depends(require_auth)):
     if profile.engine != "unsloth":
         return JSONResponse(
             status_code=412,
-            content={"error": {"code": "unsupported_engine", "message": f"引擎 {profile.engine} 不支持 Web 管理控制台（仅 unsloth 支持）"}},
+            content={
+                "error": {
+                    "code": "unsupported_engine",
+                    "message": f"引擎 {profile.engine} 不支持 Web 管理控制台（仅 unsloth 支持）",
+                }
+            },
         )
 
     instance = f"ui-{profile.name}"

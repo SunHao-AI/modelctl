@@ -36,7 +36,9 @@ class TensorRtLlmAdapter(EngineAdapter):
         if runtime == "docker":
             missing = docker_setup.path_level_missing()
             if missing:
-                raise RequirementError(f"docker_image 已配置但 Docker 环境未就绪：{'；'.join(missing)}——{docker_setup.MSG_GUIDE}")
+                raise RequirementError(
+                    f"docker_image 已配置但 Docker 环境未就绪：{'；'.join(missing)}——{docker_setup.MSG_GUIDE}"
+                )
             # 清冲突残留容器（幂等；失败仅 warning + 解码 stderr，不再静默吞）
             # readonly（TUI 预检渲染）：浏览界面不得删容器
             if not readonly:

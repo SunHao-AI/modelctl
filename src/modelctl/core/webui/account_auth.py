@@ -123,14 +123,14 @@ def verify_token(token: str) -> dict[str, Any]:
             options={"require": ["exp", "iat", "user_id"]},
         )
     except _jwt.ExpiredSignatureError:
-        raise _auth_error("token 已过期")
+        raise _auth_error("token 已过期") from None
     except _jwt.InvalidTokenError:
-        raise _auth_error("token 无效")
+        raise _auth_error("token 无效") from None
     # 显式再校一次 user_id：PyJWT `require` 只保证字段存在，不校类型
     try:
         user_id = int(payload["user_id"])
     except (KeyError, TypeError, ValueError):
-        raise _auth_error("token 载荷缺少 user_id")
+        raise _auth_error("token 载荷缺少 user_id") from None
     return {"user_id": user_id,
             "is_admin": bool(payload.get("is_admin", False)),
             "username": str(payload.get("username", ""))}

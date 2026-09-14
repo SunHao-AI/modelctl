@@ -166,7 +166,6 @@ def test_record_failure_isolated_via_oserror(monkeypatch, tmp_path, caplog):
     audit.mkdir(parents=True)
     log = RequestAuditLog(audit)
     import os as _os
-    real_write = _os.write
     real_close = _os.close
     def boom_write(fd, data, *a, **k):
         real_close(fd)  # 释放 fd，避免泄漏
@@ -270,6 +269,7 @@ def test_prune_by_size_zero_disables(tmp_path):
 # ---- 网关接线集成测试（create_app + MockTransport/ASGITransport 样式，同 test_gateway.py） ----
 
 import asyncio  # noqa: E402
+
 import httpx  # noqa: E402
 
 from modelctl.core.audit import _new_audit_log  # noqa: E402
@@ -305,7 +305,7 @@ def _reg_one() -> dict:
 def _first_audit_rec(tmp_path) -> dict:
     files = list((tmp_path / "audit").glob("modelctl-*.jsonl"))
     assert files, "网关未产生审计文件"
-    lines = [l for l in files[0].read_text(encoding="utf-8").splitlines() if l.strip()]
+    lines = [line for line in files[0].read_text(encoding="utf-8").splitlines() if line.strip()]
     return json.loads(lines[-1])
 
 
@@ -567,7 +567,7 @@ def test_cli_audit_query_json_mode(tmp_path, monkeypatch, capsys):
     rc = cli.main(["audit", "--json", "--limit", "5"])
     out = capsys.readouterr().out
     assert rc == 0
-    lines = [l for l in out.strip().splitlines() if l.startswith("{")]
+    lines = [line for line in out.strip().splitlines() if line.startswith("{")]
     assert len(lines) == 1
     parsed = json.loads(lines[0])
     assert parsed["model"] == "qwen3.8-vllm"

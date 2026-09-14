@@ -86,7 +86,8 @@ class _FakeAdapter:
 
     def stop_backend(self) -> None:
         """Task 4 引入的 stop_profile 必填项（默认 venv 路径；docker 子类覆盖为 stop_docker_instance）。"""
-        # 该路径会被 stop_gateway/stop_stats 等 非 model 分支 测试命中（实际走 stop_instance 直接打 all_service.stop_instance）
+        # 该路径会被 stop_gateway/stop_stats 等 非 model 分支 测试命中
+        # （实际走 stop_instance 直接打 all_service.stop_instance）
         # ——  fake adapter 的 stop_backend 无实际副作用，调用无错误即可。
         return None
 
@@ -519,9 +520,9 @@ def test_start_profile_docker_write_pid_false(monkeypatch, tmp_path):
     - patch 目标必须打到 all_service 命名空间（`from modelctl.engines import get_adapter` 在
       导入时已绑定），否则真实 VllmAdapter 跑起来需要 docker / nvidia-smi 都在 PATH。
     """
+    from modelctl.core.all_service import start_profile
     from modelctl.core.capabilities import Capabilities
     from modelctl.core.profile import Profile
-    from modelctl.core.all_service import start_profile
 
     profile = Profile(name="qd", engine="vllm", port=8100,
                       engine_config={"docker_image": "vllm/vllm-openai:test", "model": "/m"})
@@ -534,7 +535,8 @@ def test_start_profile_docker_write_pid_false(monkeypatch, tmp_path):
     fake_adapter.upstream_api_key.return_value = None
     fake_adapter.metrics_mapping.return_value = None
 
-    fake_proc = MagicMock(); fake_proc.pid = 123
+    fake_proc = MagicMock()
+    fake_proc.pid = 123
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     with (
         # patch all_service 命名空间，使 start_profile 内的 get_adapter 走 fake
@@ -558,9 +560,9 @@ def test_start_profile_venv_write_pid_default_true(monkeypatch, tmp_path):
     `fake_start.call_args.kwargs["write_pid"] is True` 会 KeyError。
    GREEN 校验：要么显式传 True、要么走默认（True），两种形态都接受。
     """
+    from modelctl.core.all_service import start_profile
     from modelctl.core.capabilities import Capabilities
     from modelctl.core.profile import Profile
-    from modelctl.core.all_service import start_profile
 
     profile = Profile(name="qv", engine="vllm", port=8101, engine_config={"model": "/m"})
     fake_adapter = MagicMock()
@@ -571,7 +573,8 @@ def test_start_profile_venv_write_pid_default_true(monkeypatch, tmp_path):
     fake_adapter.wait_ready.return_value = True
     fake_adapter.upstream_api_key.return_value = None
     fake_adapter.metrics_mapping.return_value = None
-    fake_proc = MagicMock(); fake_proc.pid = 124
+    fake_proc = MagicMock()
+    fake_proc.pid = 124
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     with (
         # patch all_service 命名空间，使 start_profile 内的 get_adapter 走 fake（避免
@@ -598,7 +601,6 @@ def test_stop_profile_calls_adapter_stop_backend(monkeypatch, tmp_path):
     未被调用 → `fake_adapter.stop_backend.assert_called_once_with()` 失败。
     """
     from modelctl.core.capabilities import Capabilities
-    from modelctl.core.all_service import stop_profile
 
     fake_adapter = MagicMock()
     fake_adapter.profile = _profile()  # engine="llamacpp"：非 ollama 分支
@@ -621,9 +623,8 @@ def test_stop_all_uses_is_running_any(monkeypatch, tmp_path):
     RED 失败点：旧代码 stop_all 走 `is_running(profile.name)`（单参），is_running_any 不被
     调用，seen 列表为空 → 断言失败。
     """
-    from modelctl.core.capabilities import Capabilities
-    from modelctl.core.profile import Profile
     from modelctl.core.all_service import stop_all
+    from modelctl.core.profile import Profile
 
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     profiles = [Profile(name="n1", engine="ollama", port=11434,

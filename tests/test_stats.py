@@ -65,7 +65,8 @@ def test_parse_metrics_vllm_no_rate():
 
 def test_build_payload_with_budget():
     tokens = {"prompt_total": 1_000_000, "predicted_total": 500_000, "prompt_rate": 0.0, "predicted_rate": 0.0}
-    payload = build_usage_payload(tokens, {"price_in": 1.0, "price_out": 2.0, "budget": 100}, start_time=time.time() - 60, now=time.time())
+    payload = build_usage_payload(tokens, {"price_in": 1.0, "price_out": 2.0, "budget": 100},
+                                  start_time=time.time() - 60, now=time.time())
     # 1M 输入 × 1元/M + 0.5M 输出 × 2元/M = 2 元
     assert payload["used"] == 2.0
     assert payload["total"] == 100
@@ -303,7 +304,8 @@ def test_poll_once_prefers_persisted_gateway_totals(tmp_path):
 
     # 第一轮：网关已累计 1000/500；引擎 /metrics 空（恒 0）→ 应以持久化值为准
     _write_json(1000.0, 500.0)
-    with patch("modelctl.core.stats.time.monotonic", return_value=100.0), patch.object(urllib.request, "urlopen", return_value=FakeResp("")):
+    with (patch("modelctl.core.stats.time.monotonic", return_value=100.0),
+          patch.object(urllib.request, "urlopen", return_value=FakeResp(""))):
         collector._poll_once()
     snap = collector.snapshot()
     assert snap["prompt_total"] == 1000.0
@@ -311,7 +313,8 @@ def test_poll_once_prefers_persisted_gateway_totals(tmp_path):
 
     # 第二轮：网关继续累计到 1100/550（时间差 5s）→ 差分速率 20/10 tok/s
     _write_json(1100.0, 550.0)
-    with patch("modelctl.core.stats.time.monotonic", return_value=105.0), patch.object(urllib.request, "urlopen", return_value=FakeResp("")):
+    with (patch("modelctl.core.stats.time.monotonic", return_value=105.0),
+          patch.object(urllib.request, "urlopen", return_value=FakeResp(""))):
         collector._poll_once()
     snap = collector.snapshot()
     assert snap["prompt_total"] == 1100.0
@@ -452,7 +455,9 @@ def test_benchmark_rates_parses_streaming_usage(monkeypatch):
 
     from modelctl.core.stats import benchmark_rates
 
-    sse = 'data: {"id":"1","usage":{"prompt_tokens":4,"completion_tokens":2}}\n' 'data: {"id":"1","usage":{"prompt_tokens":4,"completion_tokens":8}}\n' "data: [DONE]\n"
+    sse = ('data: {"id":"1","usage":{"prompt_tokens":4,"completion_tokens":2}}\n'
+           'data: {"id":"1","usage":{"prompt_tokens":4,"completion_tokens":8}}\n'
+           "data: [DONE]\n")
     # t_start=0.0, t_ttft=0.5, t_end=2.5 → input=4/0.5=8.0, output=8/2.0=4.0, ttft=500ms
     clock = iter([0.0, 0.5, 2.5])
     monkeypatch.setattr("modelctl.core.stats.time.perf_counter", lambda: next(clock))
@@ -510,8 +515,12 @@ def test_usage_collector_prefers_engine_rate_gauge(tmp_path):
         def read(self):
             return self._body
 
-    metrics_text = "prompt_tokens_total 2000\n" "tokens_predicted_total 3000\n" "prompt_tokens_seconds 12.0\n" "predicted_tokens_seconds 42.0\n"
-    with patch("modelctl.core.stats.time.monotonic", return_value=1005.0), patch.object(urllib.request, "urlopen", return_value=FakeResp(metrics_text)):
+    metrics_text = ("prompt_tokens_total 2000\n"
+                    "tokens_predicted_total 3000\n"
+                    "prompt_tokens_seconds 12.0\n"
+                    "predicted_tokens_seconds 42.0\n")
+    with (patch("modelctl.core.stats.time.monotonic", return_value=1005.0),
+          patch.object(urllib.request, "urlopen", return_value=FakeResp(metrics_text))):
         collector._poll_once()
 
     snap = collector.snapshot()
@@ -558,7 +567,8 @@ def test_usage_collector_falls_back_to_window_rate(tmp_path):
             return self._body
 
     metrics_text = "prompt_tokens_total 2000\ntokens_predicted_total 3000\n"  # 无速率 gauge
-    with patch("modelctl.core.stats.time.monotonic", return_value=1005.0), patch.object(urllib.request, "urlopen", return_value=FakeResp(metrics_text)):
+    with (patch("modelctl.core.stats.time.monotonic", return_value=1005.0),
+          patch.object(urllib.request, "urlopen", return_value=FakeResp(metrics_text))):
         collector._poll_once()
 
     snap = collector.snapshot()
@@ -980,6 +990,7 @@ def test_parse_metrics_without_ttft_key_defaults_zero():
 def test_snapshot_keeps_gauge_ttft_when_native_window_empty(monkeypatch, tmp_path):
     """gauge 提供 ttft 而 native 滑窗为空时，snapshot 应保留 gauge 值（不再被归零）。"""
     import urllib.request
+
     from modelctl.core.stats import UsageCollector
 
     text = (
@@ -1041,7 +1052,6 @@ def _mk_bench_ttft_only_collector(tmp_path):
 
 
 def test_bench_ttft_only_env_read_true_false(tmp_path, monkeypatch):
-    import os
     from modelctl.core.stats import UsageCollector
 
     kwargs = dict(
@@ -1060,7 +1070,6 @@ def test_bench_ttft_only_env_read_true_false(tmp_path, monkeypatch):
 
 
 def test_bench_ttft_only_env_unset_defaults_true(tmp_path, monkeypatch):
-    import os
     from modelctl.core.stats import UsageCollector
 
     monkeypatch.delenv("USAGE_BENCH_TTFT_ONLY", raising=False)
@@ -1148,7 +1157,7 @@ def test_no_bench_when_rate_and_ttft_present():
 
     def _boom(*a, **k):
         called["n"] += 1
-        assert False, "benchmark_rates 不应被调"
+        raise AssertionError("benchmark_rates 不应被调")
 
     with patch("modelctl.core.stats.benchmark_rates", side_effect=_boom):
         snap = {
@@ -1275,6 +1284,7 @@ def test_resolve_group_target_returns_first_available_member(monkeypatch):
 def test_resolve_group_target_external_started_healthy(monkeypatch):
     """外部启动（无 PID 文件）+ /health 2xx 也视为可用，参与家族路由。"""
     import urllib.error
+
     import modelctl.core.process as P
 
     vllm = _mk_group_target("qwen3.8-flash-next-vllm", "qwen3.8-flash-next", 0, 8110)
@@ -1310,6 +1320,7 @@ def test_resolve_group_target_external_started_healthy(monkeypatch):
 
 def test_resolve_group_target_no_available_returns_none(monkeypatch):
     import urllib.error
+
     import modelctl.core.process as P
 
     vllm = _mk_group_target("qwen3.8-flash-next-vllm", "qwen3.8-flash-next", 0, 8110)

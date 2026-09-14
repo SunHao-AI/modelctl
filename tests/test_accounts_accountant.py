@@ -53,7 +53,7 @@ import pytest
 
 
 @pytest.fixture
-def store(tmp_path) -> "object":
+def store(tmp_path) -> object:
     from modelctl.core.accounts.store import AccountsStore
     s = AccountsStore(tmp_path / "accounts_accountant.db")
     s.init_db()
@@ -62,7 +62,7 @@ def store(tmp_path) -> "object":
 
 
 @pytest.fixture
-def accountant(store) -> "object":
+def accountant(store) -> object:
     from modelctl.core.accounts.accountant import Accountant
     a = Accountant(store)
     try:

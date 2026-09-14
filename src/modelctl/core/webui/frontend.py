@@ -274,7 +274,9 @@ def manual_hint() -> str:
     """自动处理不可用时的手动兜底指引（非交互 / 无权限 / 非 Linux 场景）。"""
     return (
         "请手动准备前端环境后重试：\n"
-        f"  1) 安装 Node.js >= {NODE_MIN_MAJOR}（如 curl -fsSL https://deb.nodesource.com/setup_{NODE_MAJOR}.x | sudo -E bash - && sudo apt-get install -y nodejs）\n"
+        f"  1) 安装 Node.js >= {NODE_MIN_MAJOR}"
+        f"（如 curl -fsSL https://deb.nodesource.com/setup_{NODE_MAJOR}.x | sudo -E bash - "
+        "&& sudo apt-get install -y nodejs）\n"
         f"  2) cd {web_root()} && npm install\n"
         f"  3) npm run build（产物输出到 {dist_dir()}）\n"
         "  或先用 modelctl webui start --no-build 只启管理 API（浏览器访问根路径会 404）"

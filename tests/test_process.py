@@ -152,7 +152,8 @@ def test_log_excerpt_caps_blocks_and_truncates_long_lines(tmp_path):
     assert excerpt.count("boom-") == 3  # 第 4 处被截断
     long_f = tmp_path / "long.log"
     long_f.write_text("x" * 500 + "\nTraceback (most recent call last):\n", encoding="utf-8")
-    out_line = next(l for l in process.log_excerpt(long_f).splitlines() if "x" * 100 in l or "(截断)" in l)
+    out_line = next(line for line in process.log_excerpt(long_f).splitlines()
+                    if "x" * 100 in line or "(截断)" in line)
     assert "(截断)" in out_line and len(out_line) < 300
 
 

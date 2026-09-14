@@ -20,7 +20,6 @@ from pathlib import Path
 
 import pytest
 
-
 # ---------- accounts_db_path ----------
 
 

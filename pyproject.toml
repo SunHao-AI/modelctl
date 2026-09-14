@@ -79,6 +79,21 @@ select = ["E", "F", "I", "B", "UP"]
 # 仓库标准文件头（CLAUDE.md 规范）逐字包含 coding 行；Python 3 默认 UTF-8，该行冗余但保留
 ignore = ["UP009"]
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI 依赖注入惯用法：Depends()/Header()/Body() 等出现在参数默认值是
+# 官方推荐写法（每个路由都是），不是 B008 想拦的"默认值里做真实工作"。
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Header",
+    "fastapi.Body",
+    "fastapi.Path",
+    "fastapi.Cookie",
+    "fastapi.Form",
+    "fastapi.File",
+    "fastapi.Security",
+]
+
 [tool.mypy]
 python_version = "3.12"
 packages = ["modelctl"]

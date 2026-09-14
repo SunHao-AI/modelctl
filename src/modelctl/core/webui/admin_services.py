@@ -131,10 +131,6 @@ async def service_action(svc: str, action: str, request: Request, _: None = Depe
     svc ∉ {stats, gateway} → 404 not_found；action 非法 → 422 config_error。
     """
     from modelctl.core.all_service import (
-        restart_gateway,
-        restart_stats,
-        start_gateway,
-        start_stats,
         stop_gateway,
         stop_stats,
     )

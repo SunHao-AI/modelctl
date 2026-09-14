@@ -21,9 +21,9 @@ import httpx
 import pytest
 
 from modelctl.core.gateway import (
-    GatewayModel,
     _THINKING_DISABLED_ENGINES,
     _THINKING_DISABLED_GROUPS,
+    GatewayModel,
     build_groups,
     build_registry,
     client_api_key,
@@ -33,7 +33,6 @@ from modelctl.core.gateway import (
     resolve_model,
     verify_client,
 )
-
 
 # /v1* 强制鉴权用的测试客户端 key：置于 autouse fixture 之前（fixture 引用它）
 _CLIENT_KEY = "sk-test-client-key-9f3a"
@@ -154,9 +153,11 @@ def test_proxy_injects_thinking_disable_for_qwen38_vllm():
         captured["body"] = json.loads(request.content)
         return httpx.Response(200, json={"id": "1", "model": captured["body"]["model"]})
 
-    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None, "http://upstream/", group="qwen3.8")}
+    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None,
+                                   "http://upstream/", group="qwen3.8")}
     app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
-    resp = _run(_post(app, "/v1/chat/completions", json={"model": "qwen3.8", "messages": [{"role": "user", "content": "hi"}]}))
+    resp = _run(_post(app, "/v1/chat/completions",
+                      json={"model": "qwen3.8", "messages": [{"role": "user", "content": "hi"}]}))
     assert resp.status_code == 200
     assert captured["body"]["chat_template_kwargs"] == {"enable_thinking": False}
 
@@ -169,9 +170,11 @@ def test_proxy_respects_explicit_chat_template_kwargs():
         captured["body"] = json.loads(request.content)
         return httpx.Response(200, json={"id": "1", "model": captured["body"]["model"]})
 
-    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None, "http://upstream/", group="qwen3.8")}
+    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None,
+                                   "http://upstream/", group="qwen3.8")}
     app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
-    body = {"model": "qwen3.8", "messages": [{"role": "user", "content": "hi"}], "chat_template_kwargs": {"enable_thinking": True}}
+    body = {"model": "qwen3.8", "messages": [{"role": "user", "content": "hi"}],
+            "chat_template_kwargs": {"enable_thinking": True}}
     resp = _run(_post(app, "/v1/chat/completions", json=body))
     assert resp.status_code == 200
     assert captured["body"]["chat_template_kwargs"] == {"enable_thinking": True}
@@ -186,17 +189,21 @@ def test_proxy_no_inject_for_other_groups_or_engines():
         return httpx.Response(200, json={"id": "1", "model": captured["body"]["model"]})
 
     # 其他家族 + vllm：不注入
-    reg = {"ds": GatewayModel("ds-vllm", "vllm", "http://upstream", "ds-vllm", None, "http://upstream/", group="deepseek-v4-flash")}
+    reg = {"ds": GatewayModel("ds-vllm", "vllm", "http://upstream", "ds-vllm", None,
+                              "http://upstream/", group="deepseek-v4-flash")}
     app = create_app(reg, default_model="ds", transport=httpx.MockTransport(upstream))
-    resp = _run(_post(app, "/v1/chat/completions", json={"model": "ds", "messages": [{"role": "user", "content": "hi"}]}))
+    resp = _run(_post(app, "/v1/chat/completions",
+                      json={"model": "ds", "messages": [{"role": "user", "content": "hi"}]}))
     assert resp.status_code == 200
     assert "chat_template_kwargs" not in captured["body"]
 
     # qwen3.8 家族但引擎为 llama.cpp（不识别该字段）：不注入
     captured.clear()
-    reg = {"q3": GatewayModel("q3-llamacpp", "llamacpp", "http://upstream", "q3-llamacpp", None, "http://upstream/", group="qwen3.8")}
+    reg = {"q3": GatewayModel("q3-llamacpp", "llamacpp", "http://upstream", "q3-llamacpp", None,
+                              "http://upstream/", group="qwen3.8")}
     app = create_app(reg, default_model="q3", transport=httpx.MockTransport(upstream))
-    resp = _run(_post(app, "/v1/chat/completions", json={"model": "q3", "messages": [{"role": "user", "content": "hi"}]}))
+    resp = _run(_post(app, "/v1/chat/completions",
+                      json={"model": "q3", "messages": [{"role": "user", "content": "hi"}]}))
     assert resp.status_code == 200
     assert "chat_template_kwargs" not in captured["body"]
 
@@ -239,7 +246,8 @@ def test_anthropic_messages_passthrough():
             },
         )
 
-    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None, "http://upstream/", group="qwen3.8")}
+    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None,
+                                   "http://upstream/", group="qwen3.8")}
     app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
     body = {"model": "qwen3.8", "max_tokens": 100, "messages": [{"role": "user", "content": "hi"}]}
     resp = _run(_post_headers(app, "/v1/messages", json=body,
@@ -260,10 +268,12 @@ def test_anthropic_messages_uses_target_api_key():
         captured["auth"] = request.headers.get("authorization")
         return httpx.Response(
             200,
-            json={"id": "msg_1", "type": "message", "role": "assistant", "content": [{"type": "text", "text": "hi"}], "model": "qwen3.8-vllm"},
+            json={"id": "msg_1", "type": "message", "role": "assistant",
+                  "content": [{"type": "text", "text": "hi"}], "model": "qwen3.8-vllm"},
         )
 
-    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", "fly@@see", "http://upstream/", group="qwen3.8")}
+    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", "fly@@see",
+                                   "http://upstream/", group="qwen3.8")}
     app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
     body = {"model": "qwen3.8", "max_tokens": 100, "messages": [{"role": "user", "content": "hi"}]}
     # 准入凭据走 x-api-key 通道（Anthropic 客户端原生形态）：网关须把它连同
@@ -287,7 +297,8 @@ def test_anthropic_messages_streaming_passthrough():
         )
         return httpx.Response(200, content=sse, headers={"content-type": "text/event-stream"})
 
-    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None, "http://upstream/", group="qwen3.8")}
+    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None,
+                                   "http://upstream/", group="qwen3.8")}
     app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
     body = {"model": "qwen3.8", "stream": True, "messages": [{"role": "user", "content": "hi"}]}
     resp = _run(_post(app, "/v1/messages", json=body))
@@ -299,7 +310,8 @@ def test_anthropic_messages_streaming_passthrough():
 
 
 def test_anthropic_messages_404_unknown_model():
-    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None, "http://upstream/", group="qwen3.8")}
+    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None,
+                                   "http://upstream/", group="qwen3.8")}
     app = create_app(reg, default_model=None, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
     resp = _run(_post(app, "/v1/messages", json={"model": "ghost-model", "messages": []}))
     assert resp.status_code == 404
@@ -311,7 +323,8 @@ def test_anthropic_messages_backend_unreachable_audited(tmp_path):
     def upstream(request):
         raise httpx.ConnectError("connection refused")
 
-    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None, "http://upstream/", group="qwen3.8")}
+    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None,
+                                   "http://upstream/", group="qwen3.8")}
     app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
     resp = _run(_post(app, "/v1/messages", json={"model": "qwen3.8", "messages": []}))
     assert resp.status_code == 502
@@ -328,7 +341,8 @@ def test_reasoning_effort_normalized_openai():
         captured["body"] = json.loads(request.content)
         return httpx.Response(200, json={"id": "1", "model": captured["body"]["model"]})
 
-    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None, "http://upstream/", group="qwen3.8")}
+    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None,
+                                   "http://upstream/", group="qwen3.8")}
     app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
     body = {"model": "qwen3.8", "messages": [{"role": "user", "content": "hi"}], "reasoning_effort": "high"}
     resp = _run(_post(app, "/v1/chat/completions", json=body))
@@ -342,16 +356,22 @@ def test_reasoning_effort_normalized_anthropic():
 
     def upstream(request):
         captured.append(json.loads(request.content))
-        return httpx.Response(200, json={"id": "msg_1", "type": "message", "role": "assistant", "content": [{"type": "text", "text": "hi"}], "model": "qwen3.8-vllm"})
+        return httpx.Response(200, json={"id": "msg_1", "type": "message", "role": "assistant",
+                                         "content": [{"type": "text", "text": "hi"}], "model": "qwen3.8-vllm"})
 
-    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None, "http://upstream/", group="qwen3.8")}
+    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None,
+                                   "http://upstream/", group="qwen3.8")}
     app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
 
-    resp = _run(_post(app, "/v1/messages", json={"model": "qwen3.8", "messages": [{"role": "user", "content": "hi"}], "reasoning_effort": "ultra"}))
+    resp = _run(_post(app, "/v1/messages",
+                      json={"model": "qwen3.8", "messages": [{"role": "user", "content": "hi"}],
+                            "reasoning_effort": "ultra"}))
     assert resp.status_code == 200
     assert captured[-1]["reasoning_effort"] == "xhigh"
 
-    resp = _run(_post(app, "/v1/messages", json={"model": "qwen3.8", "messages": [{"role": "user", "content": "hi"}], "reasoning_effort": "medium"}))
+    resp = _run(_post(app, "/v1/messages",
+                      json={"model": "qwen3.8", "messages": [{"role": "user", "content": "hi"}],
+                            "reasoning_effort": "medium"}))
     assert resp.status_code == 200
     assert captured[-1]["reasoning_effort"] == "medium"  # 支持的值不改变
 
@@ -362,9 +382,11 @@ def test_thinking_effort_normalized_anthropic():
 
     def upstream(request):
         captured.append(json.loads(request.content))
-        return httpx.Response(200, json={"id": "msg_1", "type": "message", "role": "assistant", "content": [{"type": "text", "text": "hi"}], "model": "qwen3.8-vllm"})
+        return httpx.Response(200, json={"id": "msg_1", "type": "message", "role": "assistant",
+                                         "content": [{"type": "text", "text": "hi"}], "model": "qwen3.8-vllm"})
 
-    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None, "http://upstream/", group="qwen3.8")}
+    reg = {"qwen3.8": GatewayModel("qwen3.8-vllm", "vllm", "http://upstream", "qwen3.8-vllm", None,
+                                   "http://upstream/", group="qwen3.8")}
     app = create_app(reg, default_model="qwen3.8", transport=httpx.MockTransport(upstream))
 
     body = {
@@ -1037,7 +1059,8 @@ def test_profile_native_metrics_mapping_partial_override_engine_default(tmp_path
     if not default:
         merged = dict(profile.native_metrics_mapping)
     else:
-        merged = dict(default); merged.update(profile.native_metrics_mapping)
+        merged = dict(default)
+        merged.update(profile.native_metrics_mapping)
     collector = UsageCollector(
         profile.name, "http://127.0.0.1:99999", 0.5, None, tmp_path,
         mode="on-demand", mapping={}, native_mapping=merged,
@@ -1230,7 +1253,8 @@ def test_audit_records_upstream_error_response(tmp_path):
 
 def test_audit_records_model_not_found(tmp_path):
     """model 解析失败（404）也须留痕，且 model 字段保留调用方原始拼写。"""
-    app = create_app({"ds": _make_model()}, default_model=None, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    app = create_app({"ds": _make_model()}, default_model=None,
+                     transport=httpx.MockTransport(lambda r: httpx.Response(200)))
     resp = _run(_post(app, "/v1/chat/completions", json={"model": "typo-model", "messages": []}))
     assert resp.status_code == 404
     rows = _read_audit_records(tmp_path)

@@ -233,8 +233,8 @@ def test_tokenspeed_stop_backend_docker_uses_docker_rm(monkeypatch):
 
 def test_tokenspeed_stop_backend_venv_uses_stop_instance(monkeypatch):
     from modelctl.core.capabilities import Capabilities
-    from modelctl.engines import get_adapter
     from modelctl.core.profile import Profile
+    from modelctl.engines import get_adapter
     profile = Profile(name="q2", engine="tokenspeed", port=8112, engine_config={"model": "/m"})
     adapter = get_adapter("tokenspeed")(profile, Capabilities())
     captured = {}
@@ -248,8 +248,8 @@ def test_tokenspeed_stop_backend_venv_uses_stop_instance(monkeypatch):
 
 def test_tokenspeed_is_docker_runtime_flag():
     from modelctl.core.capabilities import Capabilities
-    from modelctl.engines import get_adapter
     from modelctl.core.profile import Profile
+    from modelctl.engines import get_adapter
     docker_p = get_adapter("tokenspeed")(
         Profile(name="x", engine="tokenspeed", port=8111,
                 engine_config={"docker_image": "x", "model": "/m"}), Capabilities())

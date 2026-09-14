@@ -23,9 +23,10 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 from loguru import logger
 
@@ -131,8 +132,8 @@ def docker_logs_fallback(adapter: Any, excerpt: str) -> str | None:
 
 
 def start_profile(profile: Profile, caps: Capabilities, timeout: float,
-                  on_progress: "Callable[[Any], None] | None" = None,
-                  gpus: "list[int] | None" = None) -> ComponentResult:
+                  on_progress: Callable[[Any], None] | None = None,
+                  gpus: list[int] | None = None) -> ComponentResult:
     """启动单个模型 profile（幂等：已运行返回 skipped）。
 
     check_requirements 失败时抛 RequirementError（配置错误语义，交给调用方/编排处理）。
@@ -324,8 +325,8 @@ def stop_profile(profile: Profile, caps: Capabilities, models_dir: Path | None) 
 
 
 def restart_profile(profile: Profile, caps: Capabilities, timeout: float,
-                    on_progress: "Callable[[Any], None] | None" = None,
-                    gpus: "list[int] | None" = None) -> ComponentResult:
+                    on_progress: Callable[[Any], None] | None = None,
+                    gpus: list[int] | None = None) -> ComponentResult:
     """重启单个模型 profile：运行中先停后启，未运行直接启。
 
     运行态判定改走 `is_running_any(name, profile)`（端口 /health 2xx 优先 + PID 文件机器
@@ -570,7 +571,7 @@ def status_stats() -> ComponentResult:
 
 def start_all(models_dir: Path | None, model_name: str | None = None,
               timeout: float | None = 300,
-              gpus: "list[int] | None" = None) -> list[ComponentResult]:
+              gpus: list[int] | None = None) -> list[ComponentResult]:
     """一键启动：默认模型 → gateway → stats；单组件失败继续后续。
 
     timeout=None（CLI 未显式指定 --timeout）→ 按 profile 运行时自适应（见 default_start_timeout）。
@@ -614,7 +615,7 @@ def stop_all(models_dir: Path | None) -> list[ComponentResult]:
 
 def restart_all(models_dir: Path | None, model_name: str | None = None,
                 timeout: float | None = 300,
-                gpus: "list[int] | None" = None) -> list[ComponentResult]:
+                gpus: list[int] | None = None) -> list[ComponentResult]:
     """一键重启：仅默认模型 + gateway + stats。
 
     timeout=None（CLI 未显式指定 --timeout）→ 按 profile 运行时自适应（见 default_start_timeout）。

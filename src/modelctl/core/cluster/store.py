@@ -618,7 +618,7 @@ class ClusterStore:
                 )
                 self._db().commit()
 
-    def trim_events(self, now: "float | None" = None) -> int:
+    def trim_events(self, now: float | None = None) -> int:
         """删除超过保留窗口的事件，返回删除条数。幂等 DML，不动表结构。"""
         cutoff = (now if now is not None else time.time()) - EVENTS_RETENTION_DAYS * 86400
         with self._lock:

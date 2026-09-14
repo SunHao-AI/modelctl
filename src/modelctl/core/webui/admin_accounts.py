@@ -160,7 +160,7 @@ async def create_account(request: Request, payload: dict,
         if "UNIQUE" in str(exc).upper():
             raise HTTPException(status_code=409,
                                 detail={"code": "conflict",
-                                        "message": f"username {username!r} 已存在"})
+                                        "message": f"username {username!r} 已存在"}) from exc
         raise
     _ = except_e
     row = store.get_user_by_id(uid)
@@ -205,7 +205,7 @@ async def update_account(account_id: int, request: Request, payload: dict,
             store.set_user_status(account_id, status_val, now=now)
         except ValueError as exc:
             raise HTTPException(status_code=400,
-                                detail={"code": "bad_request", "message": str(exc)})
+                                detail={"code": "bad_request", "message": str(exc)}) from exc
     for k in ("display_name", "is_admin", "concurrency_limit", "rpm_limit",
               "tpm_limit", "token_budget", "budget_period",
               "budget_reset_at", "retention_days"):
@@ -273,10 +273,10 @@ async def create_key(account_id: int, request: Request, payload: dict,
     if expires_days is not None:
         try:
             days = float(expires_days)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400,
                                 detail={"code": "bad_request",
-                                        "message": "expires_in_days 必须为数字"})
+                                        "message": "expires_in_days 必须为数字"}) from exc
         if days > 0:
             expires_at = now + days * 86400.0
     cred = generate_api_key()
@@ -317,7 +317,7 @@ async def update_key_status(account_id: int, key_id: int, request: Request,
         store.set_key_status(key_id, status)
     except ValueError as exc:
         raise HTTPException(status_code=400,
-                            detail={"code": "bad_request", "message": str(exc)})
+                            detail={"code": "bad_request", "message": str(exc)}) from exc
     row = store.get_key_by_id(key_id)
     return _key_public(row) if row else {}
 
@@ -354,7 +354,7 @@ async def delete_key(account_id: int, key_id: int, request: Request,
         raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500,
-                            detail={"code": "internal", "message": str(exc)})
+                            detail={"code": "internal", "message": str(exc)}) from exc
     return {"id": key_id}
 
 

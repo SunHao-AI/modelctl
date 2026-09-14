@@ -99,6 +99,6 @@ def test_non_ascii_bearer_key_returns_401_not_500(admin_client):
     头值以 UTF-8 原始字节发送（等价 curl 行为）：httpx 对 str 头值强制 ascii
     编码，会在**客户端**就抛 UnicodeEncodeError，请求根本到不了服务端。
     """
-    raw = "Bearer 测试键".encode("utf-8")
+    raw = "Bearer 测试键".encode()
     r = admin_client.get("/admin/api/config/static", headers=[(b"authorization", raw)])
     assert r.status_code == 401, f"非 ASCII 凭据必须 401，实得 {r.status_code}"

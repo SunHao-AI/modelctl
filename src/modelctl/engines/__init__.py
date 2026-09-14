@@ -14,12 +14,12 @@
 from __future__ import annotations
 
 from modelctl.core.profile import ProfileError
+from modelctl.engines.aphrodite import AphroditeAdapter
 from modelctl.engines.base import EngineAdapter
 from modelctl.engines.llamacpp import LlamaCppAdapter
+from modelctl.engines.lmdeploy import LmdeployAdapter
 from modelctl.engines.ollama import OllamaAdapter
 from modelctl.engines.sglang import SglangAdapter
-from modelctl.engines.aphrodite import AphroditeAdapter
-from modelctl.engines.lmdeploy import LmdeployAdapter
 from modelctl.engines.tensorrt_llm import TensorRtLlmAdapter
 from modelctl.engines.tokenspeed import TokenSpeedAdapter
 from modelctl.engines.unsloth import UnslothAdapter

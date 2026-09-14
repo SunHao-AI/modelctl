@@ -133,7 +133,6 @@ def test_list_envs_docker_env_and_bypass(admin_client):
 
 def test_docker_diagnose_shape(admin_client, monkeypatch):
     """默认 os 按 sys.platform 分支：能用的 diagnose 都返回 dict 5/6 字段 + instructions 字符串。"""
-    import sys as _sys
 
     import modelctl.core.docker_setup as ds
     import modelctl.core.windows_setup as ws
