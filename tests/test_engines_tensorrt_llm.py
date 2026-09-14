@@ -77,6 +77,7 @@ def test_tensorrt_llm_venv_command(tmp_path, monkeypatch):
 
 
 def test_tensorrt_llm_docker_command(tmp_path, monkeypatch):
+    _stub_docker_ready(monkeypatch)
     engine_dir = tmp_path / "engines" / "qwen3.8-tp4-fp8"
     engine_dir.mkdir(parents=True)
     model_dir = tmp_path / "models" / "Qwen3.8-27B"
