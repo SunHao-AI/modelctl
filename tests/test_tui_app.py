@@ -113,8 +113,18 @@ def test_tui_snapshots_stubs_have_ttl():
         assert snap._fetched_at is None
 
 
-def test_keyboard_read_key_block_returns_key_or_none():
-    """Task 1：read_key_block(timeout=0.0) 返回 Key 或 None（真实实现，非 Task 0 占位 Key.Q 断言）。"""
+def test_keyboard_read_key_block_returns_key_or_none(monkeypatch):
+    """Task 1：read_key_block(timeout=0.0) 返回 Key 或 None（真实实现，非 Task 0 占位 Key.Q 断言）。
+
+    pytest 捕获下 sys.stdin 是无 fileno 的 pseudofile；注入假 stdin 让 Unix 分支
+    走「非 TTY + select 立即超时 → None」这条真实生产路径。
+    """
+
+    class _FakeStdin:
+        def fileno(self) -> int:
+            return 0
+
+    monkeypatch.setattr("sys.stdin", _FakeStdin())
     kb = KeyboardInput()
     result = kb.read_key_block(timeout=0.0)
     assert result is None or isinstance(result, Key)

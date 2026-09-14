@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -44,7 +45,16 @@ def test_db_path_absolute_env_value_wins(tmp_path, monkeypatch):
     assert accounts_db_path() == target
 
 
-@pytest.mark.parametrize("raw", ["data/custom_accounts.db", "data\\custom_accounts.db"])
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "data/custom_accounts.db",
+        pytest.param(
+            "data\\custom_accounts.db",
+            marks=pytest.mark.skipif(os.name != "nt", reason="反斜杠仅 Windows 是分隔符"),
+        ),
+    ],
+)
 def test_db_path_relative_resolved_by_project_root(raw, monkeypatch):
     """相对值按 PROJECT_ROOT 解析，绝不跟随 CWD（与其余 *_dir() 同一口径）。"""
     from modelctl.core.envfile import PROJECT_ROOT

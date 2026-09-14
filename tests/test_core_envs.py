@@ -50,10 +50,10 @@ def test_path_constants():
     assert VENV_ROOT == PROJECT_ROOT / ".venvs"
 
 
-def test_engine_bin_windows():
+def test_engine_bin_windows(monkeypatch):
     import modelctl.core.envs as envs
 
-    assert os.name == "nt"
+    monkeypatch.setattr(envs_mod, "_is_windows", lambda: True)
     assert envs.engine_bin("vllm", "vllm") == envs.VENV_ROOT / "vllm" / "Scripts" / "vllm.exe"
 
 
@@ -64,10 +64,10 @@ def test_engine_bin_linux(monkeypatch):
     assert envs.engine_bin("vllm", "vllm") == envs.VENV_ROOT / "vllm" / "bin" / "vllm"
 
 
-def test_engine_python_windows():
+def test_engine_python_windows(monkeypatch):
     import modelctl.core.envs as envs
 
-    assert os.name == "nt"
+    monkeypatch.setattr(envs_mod, "_is_windows", lambda: True)
     assert envs.engine_python("sglang") == envs.VENV_ROOT / "sglang" / "Scripts" / "python.exe"
 
 
@@ -88,8 +88,8 @@ def test_has_env_absent(tmp_path, monkeypatch):
 def test_has_env_present_windows(tmp_path, monkeypatch):
     from modelctl.core.envs import has_env
 
+    monkeypatch.setattr(envs_mod, "_is_windows", lambda: True)
     root = _redirect(tmp_path, monkeypatch)
-    assert os.name == "nt"
     _make_env(root, "vllm", windows=True)
     assert has_env("vllm") is True
 
@@ -106,8 +106,8 @@ def test_has_env_present_linux(tmp_path, monkeypatch):
 def test_ensure_env_returns_root_when_exists(tmp_path, monkeypatch):
     from modelctl.core.envs import ensure_env
 
+    monkeypatch.setattr(envs_mod, "_is_windows", lambda: True)
     root = _redirect(tmp_path, monkeypatch)
-    assert os.name == "nt"
     _make_env(root, "vllm", windows=True)
     assert ensure_env("vllm") == root / "vllm"
 
@@ -249,7 +249,7 @@ def test_remove_unknown_engine_rejected():
 def test_status_reads_version_and_packages_windows(tmp_path, monkeypatch):
     from modelctl.core.envs import status
 
-    assert os.name == "nt"
+    monkeypatch.setattr(envs_mod, "_is_windows", lambda: True)
     root = _redirect(tmp_path, monkeypatch)
     venv = root / "vllm"
     scripts = venv / "Scripts"

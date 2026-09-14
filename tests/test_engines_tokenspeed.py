@@ -40,7 +40,15 @@ def _stub_venv(tmp_path, monkeypatch):
     return bin_dir
 
 
+def _stub_docker_ready(monkeypatch):
+    """CI（ubuntu runner）无 docker/nvidia-smi：check_requirements 的 PATH 检查打桩为就绪。"""
+
+    monkeypatch.setattr("modelctl.core.docker_setup.path_level_missing", lambda: [])
+    monkeypatch.setattr("modelctl.core.process.clear_stale_docker_container", lambda *a, **k: True)
+
+
 def test_tokenspeed_docker_command(tmp_path, monkeypatch):
+    _stub_docker_ready(monkeypatch)
     model_dir = tmp_path / "models" / "Qwen3.5-397B-A17B"
     model_dir.mkdir(parents=True)
     p = _write(
@@ -99,6 +107,7 @@ def test_tokenspeed_docker_command_carries_tz(tmp_path, monkeypatch):
 
 def test_tokenspeed_build_command_uses_string_container_name(tmp_path, monkeypatch):
     """Regression: docker 路径 build_command 的 --name 值必须是 <profile.name>-tokenspeed 字符串 (预存在 bug 修复)。"""
+    _stub_docker_ready(monkeypatch)
     model_dir = tmp_path / "models" / "Qwen3.5-397B-A17B"
     model_dir.mkdir(parents=True)
     p = _write(

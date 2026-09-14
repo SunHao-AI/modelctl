@@ -433,24 +433,31 @@ def test_pre_start_skips_git_cmake_when_binary_exists(tmp_path, monkeypatch):
 
 def test_find_server_returns_platform_exe_name(tmp_path, monkeypatch):
     """Windows：官方预编译包把 llama-server.exe 放在 source 根，find_server 必须命中。"""
+    import stat
+
     from modelctl.engines import llamacpp
 
-    monkeypatch.setattr(llamacpp.os, "name", "nt")
+    def _mkexe(p):
+        p.write_bytes(b"MZ")
+        p.chmod(p.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)  # find_server 校验 X_OK
+
+    # 只 patch 引擎内判定函数：全局改 os.name 会让 pathlib 换用 ntpath、污染 Path 构造
+    monkeypatch.setattr(llamacpp, "_is_nt", lambda: True)
     source = tmp_path / "llama.cpp"
     (source / "build" / "bin").mkdir(parents=True)
     exe = source / "build" / "bin" / "llama-server.exe"
-    exe.write_bytes(b"MZ")
+    _mkexe(exe)
     got = llamacpp.find_server(source)
     assert got == exe
     # 根目录布局（GitHub Release 预编译包）：build 下没有产物时应回落到根目录 exe
     exe.unlink()
     root_exe = source / "llama-server.exe"
-    root_exe.write_bytes(b"MZ")
+    _mkexe(root_exe)
     assert llamacpp.find_server(source) == root_exe
     # POSIX：不应要求 .exe 后缀
-    monkeypatch.setattr(llamacpp.os, "name", "posix")
+    monkeypatch.setattr(llamacpp, "_is_nt", lambda: False)
     plain = source / "llama-server"
-    plain.write_bytes(b"\x7fELF")
+    _mkexe(plain)
     assert llamacpp.find_server(source) == plain
 
 
@@ -461,13 +468,18 @@ def test_pre_start_windows_prebuilt_root_skips_cmake(tmp_path, monkeypatch):
     会落入编译分支，这正是 start llamacpp/... 在 Windows 上失败并被误报为
     "准备环境失败：缺少 cmake" 的根因。
     """
+    import stat
+
     from modelctl.engines import llamacpp
 
-    monkeypatch.setattr(llamacpp.os, "name", "nt")
+    # 只 patch 引擎内判定函数：全局改 os.name 会让 pathlib 换用 ntpath、污染 Path 构造
+    monkeypatch.setattr(llamacpp, "_is_nt", lambda: True)
     (tmp_path / "m.gguf").write_bytes(b"0" * 1024)
     source = tmp_path / "llama.cpp"
     source.mkdir()
-    (source / "llama-server.exe").write_bytes(b"MZ")  # GitHub Release 预编译包布局
+    root_exe = source / "llama-server.exe"
+    root_exe.write_bytes(b"MZ")  # GitHub Release 预编译包布局
+    root_exe.chmod(root_exe.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)  # find_server 校验 X_OK
     (tmp_path / "ds.yaml").write_text(
         f"name: ds\nengine: llamacpp\nport: 18888\nllamacpp:\n"
         f"  model: {tmp_path}/m.gguf\n  gpu_count: 8\n  source_dir: {source}\n",

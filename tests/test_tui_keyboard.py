@@ -216,12 +216,13 @@ def mock_msvcrt(monkeypatch):
     if "msvcrt" not in sys.modules:
         monkeypatch.setitem(sys.modules, "msvcrt", types.ModuleType("msvcrt"))
     mod = sys.modules["msvcrt"]
+    # raising=False：Linux CI 下模块是空 ModuleType，setattr 默认要求属性已存在会直接抛
     if not hasattr(mod, "getwch"):
-        monkeypatch.setattr(mod, "getwch", mock.Mock())
+        monkeypatch.setattr(mod, "getwch", mock.Mock(), raising=False)
     if not hasattr(mod, "getch"):
-        monkeypatch.setattr(mod, "getch", mock.Mock())
+        monkeypatch.setattr(mod, "getch", mock.Mock(), raising=False)
     if not hasattr(mod, "kbhit"):
-        monkeypatch.setattr(mod, "kbhit", mock.Mock())
+        monkeypatch.setattr(mod, "kbhit", mock.Mock(), raising=False)
     # 关键：重绑定到 kbd.msvcrt，覆盖 Linux 下 kbd.msvcrt is None 凝固状态
     monkeypatch.setattr(kbd, "msvcrt", mod)
     # 关键：让 _is_windows() 返 True，否则 _read_windows 进 `if not _is_windows(): return None`

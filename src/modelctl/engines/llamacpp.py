@@ -79,9 +79,14 @@ def _on_off(value: object) -> str:
     return "on" if str(value).strip().lower() in ("on", "true", "1", "yes") else "off"
 
 
+def _is_nt() -> bool:
+    """Windows 判定单独成函数：测试可跨平台 patch（直接改 os.name 会污染 Path 构造）。"""
+    return os.name == "nt"
+
+
 def _server_names() -> list[str]:
     """按平台返回 llama-server 的候选文件名（Windows 预编译包带 .exe 后缀）。"""
-    return ["llama-server.exe", "llama-server"] if os.name == "nt" else ["llama-server"]
+    return ["llama-server.exe", "llama-server"] if _is_nt() else ["llama-server"]
 
 
 def find_server(source: Path) -> Path:

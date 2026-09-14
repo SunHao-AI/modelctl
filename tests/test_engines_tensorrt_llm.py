@@ -39,6 +39,13 @@ def _stub_venv(tmp_path, monkeypatch):
     return bin_dir
 
 
+def _stub_docker_ready(monkeypatch):
+    """CI（ubuntu runner）无 docker/nvidia-smi：check_requirements 的 PATH 检查打桩为就绪。"""
+
+    monkeypatch.setattr("modelctl.core.docker_setup.path_level_missing", lambda: [])
+    monkeypatch.setattr("modelctl.core.process.clear_stale_docker_container", lambda *a, **k: True)
+
+
 def test_tensorrt_llm_venv_command(tmp_path, monkeypatch):
     _stub_venv(tmp_path, monkeypatch)
     engine_dir = tmp_path / "engines" / "qwen3.8-tp4-fp8"
@@ -386,6 +393,7 @@ def test_tensorrt_llm_venv_explicit_bind_host_override(tmp_path, monkeypatch):
 
 
 def test_tensorrt_llm_docker_bind_host_p_binding(tmp_path, monkeypatch):
+    _stub_docker_ready(monkeypatch)
     engine_dir = tmp_path / "engines" / "e"
     engine_dir.mkdir(parents=True)
     model_dir = tmp_path / "models" / "m"
