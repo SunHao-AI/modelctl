@@ -57,7 +57,7 @@ def _snapshot_download(modelscope_id: str, local_dir: str, **_kwargs: object) ->
     global snapshot_download
     if snapshot_download is None:
         ensure_packages("modelscope")
-        import modelscope  # type: ignore[import-untyped]
+        import modelscope  # type: ignore[import-untyped, import-not-found]
         snapshot_download = modelscope.snapshot_download
     assert snapshot_download is not None  # pragma: no cover (assert for mypy)
     snapshot_download(model_id=modelscope_id, local_dir=local_dir, **_kwargs)  # type: ignore[operator]

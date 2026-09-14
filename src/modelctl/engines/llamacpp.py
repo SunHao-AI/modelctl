@@ -145,7 +145,7 @@ def download_gguf(modelscope_id: str, model_root: Path, quant: str, want_dspark:
     logger.info(f"从 ModelScope 下载 {modelscope_id} 的 {quant} 分片（{', '.join(patterns)}）：{destination}")
     try:
         if snapshot_download is None:  # 模块导入时 modelscope 未安装，ensure_modelscope() 之后重导入
-            import modelscope  # type: ignore[import-untyped]
+            import modelscope  # type: ignore[import-untyped, import-not-found]
 
             _snapshot = modelscope.snapshot_download
         else:
